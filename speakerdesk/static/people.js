@@ -5,7 +5,7 @@ async function loadPeople() {
   const state = await api('/api/people');
   people = state.people; voiceAvailable = state.voice_available;
   $('settings-voice-note').textContent = voiceAvailable
-    ? 'Voice suggestions need your confirmation.' : 'Voice recognition is unavailable.';
+    ? 'Voice suggestions need your confirmation.' : state.voice_message;
 }
 function acceptIdentityJob(result) {
   if (selected?.id !== result.id) return;

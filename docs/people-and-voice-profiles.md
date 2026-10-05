@@ -24,18 +24,21 @@ pending voice matches.
 
 ## Voice adapter gate
 
-This patch includes a local backend interface and opt-in storage/matching flow.
-It does **not** include a model extractor, installer, model weights, or measured
-calibration. `create_app()` therefore keeps voice controls unavailable. Adding
-a name or confirming any suggestion never enrolls or refreshes a voice.
+The local ReDimNet2 Core ML extractor, explicit downloader and offline measurement
+harness are implemented. Model bytes, optional runtime installation and measured
+calibration remain pending approval and evaluation. `create_app()` keeps voice
+controls unavailable until a locally reviewed compatible calibration is supplied.
+Adding a name or confirming any suggestion never enrolls or refreshes a voice.
 
 An approved local adapter must implement `LocalVoiceBackend.embed(audio, clip)`
-and return a finite vector plus its independent clean-audio assessment.
+and return a finite vector plus a waveform eligibility result. The current
+extractor screens silence/clipping, not acoustic noise or overlapping voices;
+passage selection and difficult-negative evaluation remain necessary.
 `VoiceModel` pins model ID, revision, artifact SHA-256, dimension and 16 kHz
 input. Different versions or conversions are incompatible spaces. Clip IDs
 are qualified by meeting and track. Enrollment requires explicit consent, a
 confirmed saved person, and at least two distinct finalized, nonoverlapping
-2–10 second clean passages. The adapter can reject noisy clips; a rejected
+2–10 second clean passages. The adapter can reject unusable clips; a rejected
 clip saves no partial profile. Only a normalized centroid and source evidence
 are saved, with a fresh enrollment version and consent timestamp.
 
@@ -49,35 +52,15 @@ confirmation. Confirmation never updates the enrolled centroid. Profile
 replacement, forgetting, a different adapter/calibration, or transcript edits
 invalidate pending voice evidence.
 
-## Candidate and measured plan awaiting approval
+## Pinned artifact and measured plan awaiting approval
 
-The candidate is [ReDimNet2-B6](https://github.com/PalabraAI/redimnet2), whose
-official repository lists MIT licensing and 12.3 million parameters. The
-[aufklarer Core ML conversion](https://huggingface.co/aufklarer/ReDimNet2-B6-CoreML)
-lists MIT licensing, 24.7 MiB compiled float16 weights, 16 kHz mono input,
-96,000 samples (six seconds), a 192-dimensional normalized output, and
-macOS 15 or newer. Its card describes repeating clean 2–6 second clips and
-center-cropping longer clips. These are publisher claims, not measurements
-from this lane. Newer Apple Silicon macOS is an accepted requirement.
-
-Before any model installation or inference, obtain approval for the exact
-community artifact and measured run plan. Inspect the conversion source,
-license and config metadata; pin revision/checksums and a local-only extractor.
-Account for compiled weights, dependency changes, compilation cache, audio
-fixtures and measurement output. Preserve the 40 GB free-space floor and
-wait for CodeStory's resource window to finish. No recordings are uploaded,
-no user voice is enrolled by a benchmark, and no OS permissions are changed.
-
-The proposed measured run uses explicitly approved synthetic/licensed fixtures
-with speakers split between enrollment and held-out meetings, including
-unseen voices, similar voices, mixed microphones/languages, noise and overlap.
-Verify conversion parity, six-second preprocessing, finite normalized outputs,
-warm/cold latency and peak memory on the target Mac. Measure genuine/impostor
-score distributions and false accepts/rejects. Select a threshold and margin
-on a calibration split, then freeze and test on held-out meetings, preserving
-unknown where evidence is insufficient. Report per-condition failure rates,
-not just an equal-error rate. No acceptance target or production threshold is
-claimed until the plan and measured results are accepted.
+See [the integration plan](redimnet2-integration.md) for exact source/license,
+artifact hashes, dependencies, installation and bounded test actions. The current
+artifact totals 30,036,479 bytes; the old 24.7 MiB card figure is stale. Apple
+Silicon macOS 15+ is required. The first gated step is an eight-prediction synthetic
+extraction smoke, after CodeStory releases its resource window. It does not enroll
+People or establish cross-meeting accuracy. Independent calibration/held-out
+meetings and reviewed results are required before enabling recognition.
 
 ## Proof in this patch
 

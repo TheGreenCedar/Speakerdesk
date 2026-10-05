@@ -1,6 +1,6 @@
 """Local voice identity contracts. No model loading, downloading, or network access.
 
-A future approved adapter owns waveform loading, quality checks and embedding.
+The approved local adapter owns waveform loading, quality checks and embedding.
 Nemotron's meeting-local slots/cache are deliberately not an embedding adapter.
 """
 from dataclasses import asdict, dataclass
@@ -65,6 +65,7 @@ class VoiceClip:
 class ClipEmbedding:
     vector: tuple[float, ...]
     clean: bool
+    metrics: dict | None = None
 
 
 class LocalVoiceBackend(Protocol):
@@ -112,7 +113,7 @@ def extract(backend, audio, clips):
     for clip in clips:
         result = backend.embed(audio, clip)
         if result.clean is not True:
-            raise ValueError('A selected passage has noise or overlapping voices. Choose another passage.')
+            raise ValueError('A selected passage is unusable for voice recognition. Choose another clean passage.')
         vectors.append(normalized(result.vector, backend.model.dimension))
     return vectors
 
@@ -126,19 +127,30 @@ def make_profile(model, vectors, clips):
             'clips': [c.payload() for c in clips], 'consent': 'explicit_remember_voice'}
 
 
-def propose_match(model, calibration, vectors, profiles):
-    """Unknown unless every clip passes and the winner is separated from runner-up."""
-    if calibration.model != model or len(vectors) < calibration.minimum_clips:
-        return None
+def rank_matches(model, vectors, profiles):
+    """Shared scoring for runtime decisions and offline calibration."""
     vectors = [normalized(v, model.dimension) for v in vectors]
     ranked = []
     for profile in profiles:
         if profile['model'] != model.payload():
             continue  # Versions/conversions are separate embedding spaces.
         centroid = normalized(profile['centroid'], model.dimension)
-        scores = [sum(a*b for a, b in zip(v, centroid)) for v in vectors]
+        scores = [max(-1., min(1., sum(a*b for a, b in zip(v, centroid)))) for v in vectors]
         ranked.append((sum(scores)/len(scores), min(scores), profile))
     ranked.sort(key=lambda row: row[0], reverse=True)
+    return ranked
+
+
+def propose_match(model, calibration, vectors, profiles):
+    """Unknown unless every clip passes and the winner is separated from runner-up."""
+    if calibration.model != model or len(vectors) < calibration.minimum_clips:
+        return None
+    ranked = rank_matches(model, vectors, profiles)
+    return match_from_ranked(model, calibration, ranked)
+
+
+def match_from_ranked(model, calibration, ranked):
+    """Apply the shared measured acceptance rule to already scored candidates."""
     if not ranked:
         return None
     score, lowest, best = ranked[0]

@@ -116,7 +116,7 @@ def reconcile_assignments(job, document, imported=False):
     job.pop('voice_suggestions', None)  # Text/timing/track edits invalidate clip evidence.
 
 
-def register_people(app, db, get, put, lock, folder, backend=None, calibration=None):
+def register_people(app, db, get, put, lock, folder, backend=None, calibration=None, voice_busy=lambda: False):
     store = PeopleStore(db)
     available = backend is not None and calibration is not None and backend.model == calibration.model
     app.extensions['speakerdesk']['people'] = store
@@ -151,7 +151,8 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
         profiles = {p['person_id']: p for p in store.profiles()}
         people = [dict(p, voice_compatible=bool(available and p['id'] in profiles
                                                and profiles[p['id']]['model'] == backend.model.payload())) for p in store.list()]
-        return jsonify(people=people, voice_available=available)
+        return jsonify(people=people, voice_available=available,
+                       voice_message=app.extensions['speakerdesk'].get('voice_message', 'Voice recognition is unavailable.'))
 
     @app.post('/api/people')
     def people_create():
@@ -220,6 +221,8 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
                 raise ValueError('Choose Remember voice to save a local voice profile.')
             if not available:
                 abort(409, description='Voice recognition is not available in this build. Names can still be saved in People.')
+            if voice_busy():
+                abort(409, description='Finish the active recording or transcription before remembering a voice.')
             job = editing_job(body.get('meeting_id', ''), body, body.get('track_id'))
             assignment = job.get('speaker_assignments', {}).get(body.get('track_id'))
             if not assignment or assignment['person_id'] != pid:
@@ -239,6 +242,8 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
             job = editing_job(jid, body, track)
             if not available:
                 abort(409, description='Voice recognition is not available in this build.')
+            if voice_busy():
+                abort(409, description='Finish the active recording or transcription before checking voices.')
             if job.get('speaker_assignments', {}).get(track):
                 raise ValueError('This speaker already has a confirmed name.')
             clips = clean_clips(job, track, body.get('segment_ids'), calibration.minimum_clips)

@@ -245,8 +245,20 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
         return jsonify(deleted=True)
 
     app.extensions['speakerdesk']={'executor':executor,'data':data}
+    voice_message='Voice recognition needs local model setup and measured calibration.'
+    if voice_backend is None and voice_calibration is None and os.getenv('SPEAKERDESK_VOICE_CONFIG'):
+        try:
+            from voice_coreml import load_approved_runtime
+            voice_backend,voice_calibration=load_approved_runtime(os.environ['SPEAKERDESK_VOICE_CONFIG'])
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            voice_message='Voice recognition is waiting for local setup and calibration review.'
+            app.logger.warning('Voice setup is unavailable: %s',exc)
+    app.extensions['speakerdesk']['voice_message']=voice_message
+    def voice_busy():
+        with db() as conn:
+            return any(json.loads(row['payload'])['status'] in ACTIVE for row in conn.execute('SELECT payload FROM jobs'))
     register_setup(app)
-    register_people(app,db,get,put,lock,folder,voice_backend,voice_calibration)
+    register_people(app,db,get,put,lock,folder,voice_backend,voice_calibration,voice_busy)
     register_meetings(app,get,put,patch,folder,lock,inference_busy)
     return app
 
