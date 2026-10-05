@@ -14,7 +14,7 @@ import wave
 from pathlib import Path
 from flask import abort, jsonify, request
 from pipeline import model_config, preflight
-from transcript import LANGUAGES
+from language_detection import LANGUAGE_CHOICES, LID_CHECKPOINT
 
 RATE = 16000
 BLOCK = 4000
@@ -112,13 +112,13 @@ class MeetingManager:
                 abort(409,description='A meeting is already active.')
             if self.inference_busy():
                 abort(409,description='Wait for queued import inference to finish before starting a meeting.')
-            if language not in LANGUAGES or not isinstance(name,str) or not name.strip() or len(name)>160:
+            if language not in LANGUAGE_CHOICES or not isinstance(name,str) or not name.strip() or len(name)>160:
                 raise ValueError('Enter a meeting title and supported language.')
             if not sources or any(s not in ('microphone','system') for s in sources):
                 raise ValueError('Choose microphone audio, Mac audio, or both.')
             if not self.helper_path().is_file():
                 abort(409,description='Live capture is not included in this build yet. Recording imports remain available.')
-            issues = preflight(model_config())
+            issues = preflight(model_config(), language)
             if issues: abort(409,description='Open Settings to finish local model setup.')
             if shutil.disk_usage(self.folder('')).free < 512*1024**2:
                 abort(409,description='Free at least512MB before recording a meeting.')
@@ -129,9 +129,11 @@ class MeetingManager:
                    'created':time.time(),'duration':0.,'revision':0,'sources':sources,
                    'document':{'schema_version':1,'speakers':{'speaker_0':'Speaker 1'},'segments':[],
                        'provenance':{'kind':'pending_inference','mode':'live_phrase_windows',
+                           'language':language,'language_detector':LID_CHECKPOINT if language=='auto' else None,
                            'models':['nvidia/Nemotron-3-Diarization','CohereLabs/cohere-transcribe-03-2026'],
                            'timing':'NVIDIA speech-region boundaries; Cohere phrase text. No word timestamps.'},
-                       'warnings':['Phrase boundaries may cut words. Overlapping speech needs review.']}}
+                       'warnings':['Phrase boundaries may cut words. Overlapping speech needs review.'] +
+                           (['Automatic language detection leaves uncertain or unsupported speech blank for review; original audio is preserved. Language changes inside a probe may be missed.'] if language=='auto' else [])}}
             try:self.put(job)
             except Exception:
                 dest.rmdir()
@@ -377,7 +379,7 @@ def register_meetings(app, get, put, patch, folder, lock, inference_busy):
         body=request.get_json();sources=body.get('sources')
         if not isinstance(sources,list) or any(not isinstance(s,str) for s in sources) or len(sources)!=len(set(sources)):
             raise ValueError('Select valid meeting audio sources.')
-        return jsonify(manager.start(body.get('name','Meeting'),body.get('language','en'),sources)),201
+        return jsonify(manager.start(body.get('name','Meeting'),body.get('language','auto'),sources)),201
     @app.post('/api/meetings/<jid>/<action>')
     def control_meeting(jid,action):
         if action not in ('pause','resume','stop'):abort(404)

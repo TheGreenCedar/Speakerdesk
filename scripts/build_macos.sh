@@ -18,8 +18,10 @@ if [[ ! -x .venv-package/bin/python ]]; then ./scripts/setup.sh; else
   .venv-package/bin/python - <<'PY'
 import shutil,site
 from pathlib import Path
-shutil.copyfile('packaging/overrides/mlx_audio/vad/models/__init__.py',
-               Path(site.getsitepackages()[0])/'mlx_audio/vad/models/__init__.py')
+for family in ('vad','stt'):
+    relative=f'mlx_audio/{family}/models/__init__.py'
+    shutil.copyfile(Path('packaging/overrides')/relative,
+                   Path(site.getsitepackages()[0])/relative)
 PY
 fi
 uv pip check --python .venv-package/bin/python

@@ -16,8 +16,9 @@ for package in ['mlx','mlx-audio','mlx-speech','huggingface-hub','numpy','scipy'
 hidden=[name for name in collect_submodules('mlx') if all(part.isidentifier() for part in name.split('.'))]
 hidden+=collect_submodules('mlx_audio.vad.models.nemotron_diarization')
 hidden+=collect_submodules('mlx_audio.vad.models.sortformer')
+hidden+=collect_submodules('mlx_audio.stt.models.whisper')
 hidden+=collect_submodules('mlx_speech.models.cohere_asr')
-hidden+=['mlx_speech.generation.cohere_asr','mlx_audio.vad','inference_worker','live_worker','live_meeting','model_setup','app','pipeline','audio','transcript']
+hidden+=['mlx_speech.generation.cohere_asr','mlx_audio.vad','inference_worker','live_worker','live_meeting','model_setup','language_detection','app','pipeline','audio','transcript']
 binary=[(str(metal_distribution.locate_file(f)),str(Path(f).parent))
         for f in metal_distribution.files if str(f).startswith('mlx/') and Path(f).suffix=='.dylib']
 binary+=collect_dynamic_libs('soundfile')

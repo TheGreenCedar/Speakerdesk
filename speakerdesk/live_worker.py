@@ -25,6 +25,7 @@ def run(config):
     from mlx_audio.vad import load
     from mlx_speech.generation.cohere_asr import CohereAsrModel
     from pipeline import speech_crops
+    from language_detection import SpeechTranscriber
 
     mx.set_memory_limit(5 * 1024**3)
     mx.set_cache_limit(256 * 1024**2)
@@ -35,6 +36,7 @@ def run(config):
         diar.set_streaming_config('low')
         state = diar.init_streaming_state()
         asr = CohereAsrModel.from_path(Path(config['cohere_path']))
+        transcriber = SpeechTranscriber(asr, config['language'], config.get('lid_path'))
     emit({'type': 'ready', 'load_seconds': time.perf_counter()-started,
           'diarization_preset': 'low', 'asr': 'phrase_windows',
           'peak_mlx_bytes':mx.get_peak_memory(),
@@ -66,18 +68,16 @@ def run(config):
             if end_sample <= begin_sample:
                 continue
             tick = time.perf_counter()
-            with contextlib.redirect_stdout(sys.stderr):
-                result = asr.transcribe(audio[begin_sample:end_sample], sample_rate=16000,
-                    language=config['language'], max_new_tokens=448)
-            if len(result.tokens) >= 448:
-                raise RuntimeError('A live phrase reached the transcription limit. Audio has been saved.')
             names = region['speakers']
             speaker = names[0] if len(names)==1 else 'overlap_'+'_'.join(s.split('_')[-1] for s in names)
-            if result.text.strip():
-                emit({'type':'segment', 'segment':{'id':uuid.uuid4().hex,
-                    'start':start, 'end':end, 'speaker':speaker,
-                    'text':result.text.strip(), 'timing':'diarized_phrase',
-                    'confidence':None, 'review':len(names)>1 or end-start>=5.99},
+            with contextlib.redirect_stdout(sys.stderr):
+                passages = transcriber.transcribe(audio[begin_sample:end_sample], 16000, tuple(names))
+            for passage in passages:
+                if not passage['text'] and passage['language'] is not None:continue
+                emit({'type':'segment', 'segment':{**passage,'id':uuid.uuid4().hex,
+                    'start':start+passage['start'], 'end':min(end,start+passage['end']), 'speaker':speaker,
+                    'speaker_candidates':names,'timing':'diarized_phrase',
+                    'confidence':None, 'review':passage['review'] or len(names)>1 or end-start>=5.99},
                     'speakers':{speaker:('Speaker '+str(int(names[0].split('_')[-1])+1)
                         if len(names)==1 else 'Overlapping speakers')},
                     'inference_seconds':time.perf_counter()-tick,

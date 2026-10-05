@@ -46,6 +46,9 @@ function renderJobs() {
     $('jobs').append(button);
   }
 }
+function languageReady(mode) {
+  return config.readiness.configured && (mode !== 'auto' || config.readiness.automatic_language);
+}
 function setStatus() {
   $('recording-name').textContent = selected.name;
   $('meeting-date').textContent = new Date(selected.created*1000).toLocaleString(undefined,{weekday:'long',month:'long',day:'numeric',hour:'numeric',minute:'2-digit'});
@@ -54,7 +57,7 @@ function setStatus() {
   $('recording-dot').hidden=!live;
   $('recording-dot').style.fill=selected.status==='paused'?'var(--muted)':'var(--red)';
   $('recording-dot').style.stroke=$('recording-dot').style.fill;
-  $('run').hidden = !!doc?.segments?.length || live; $('run').disabled = busy || !config.readiness.configured;
+  $('run').hidden = !!doc?.segments?.length || live; $('run').disabled = busy || !languageReady(selected.language);
   $('manual').hidden = !!doc || busy || !selected.duration;
   $('delete').disabled = busy;
   $('duration').textContent = selected.duration ? time(selected.duration) : 'Preparing…';
@@ -133,11 +136,13 @@ function renderSegments() {
     nameButton.addEventListener('click', () => openNamePicker(segment.speaker).catch(error => notice(error.message, true)));
     top.append(nameButton);
     if (segment.review) top.append(node('span', 'Review', 'review-tag'));
+    if (segment.language) top.append(node('span', config.languages[segment.language] || segment.language, 'review-tag'));
+    else if (segment.language_detection?.mode === 'auto') top.append(node('span', 'Language needs review · audio retained', 'review-tag'));
     const remove = node('button', undefined, 'remove-segment'); remove.append(icon('x')); remove.setAttribute('aria-label', 'Remove segment');
     remove.addEventListener('click', () => { doc.segments = doc.segments.filter(s => s.id !== segment.id); changed(); renderEditor(); });
     remove.hidden=!!isLive();top.append(remove);
     const text = isLive()?node('p',segment.text,'segment-text'):node('textarea');
-    if(!isLive()){text.value=segment.text;text.rows=2;text.setAttribute('aria-label',`Transcript at ${time(segment.start)}`);
+    if(!isLive()){text.value=segment.text;text.rows=2;text.setAttribute('aria-label',`Transcript at ${time(segment.start)}`);text.placeholder=segment.language_detection?.mode==='auto' && !segment.language?'Language uncertain or unsupported. Play this passage and enter its original words.':'';
       text.addEventListener('input',()=>{segment.text=text.value;text.style.height='auto';text.style.height=`${text.scrollHeight}px`;changed();});}
 
     card.addEventListener('focusin', () => {if(!isLive())showInspector(segment,card);});
@@ -198,13 +203,13 @@ function wire() {
     $('workspace').hidden=true;$('empty').hidden=false;renderJobs();$('meeting-title').focus();
   });
   $('meeting-search').addEventListener('input',renderJobs);
-  $('language').addEventListener('change',()=>{try{localStorage.setItem('speakerdesk.language',$('language').value);}catch{}});
+  $('language').addEventListener('change',()=>{try{localStorage.setItem('speakerdesk.language_mode',$('language').value);}catch{}});
   $('theme').value=speakerdeskTheme.get();
   $('theme').addEventListener('change',()=>speakerdeskTheme.set($('theme').value));
   $('meeting-form').addEventListener('submit',async event=>{
     event.preventDefault();$('start-meeting').disabled=true;
     try {
-      if(!config.readiness.configured){openSettings();throw new Error('Finish setup in Settings before starting your meeting.');}
+      if(!languageReady($('language').value)){openSettings();throw new Error('Finish local model setup in Settings, or choose a language override.');}
       const sources=[];if($('capture-microphone').checked)sources.push('microphone');if($('capture-system').checked)sources.push('system');
       if(!sources.length)throw new Error('Choose an audio source before starting.');
       const job=await api('/api/meetings',{method:'POST',body:JSON.stringify({name:$('meeting-title').value,language:$('language').value,sources})});
@@ -315,8 +320,8 @@ async function init() {
   try {
     config = await api('/api/config');
     Object.entries(config.languages).forEach(([code, name]) => { const option = node('option', name); option.value = code; $('language').append(option); });
-    let previousLanguage='en';try{previousLanguage=localStorage.getItem('speakerdesk.language')||'en';}catch{}
-    $('language').value=config.languages[previousLanguage]?previousLanguage:'en';
+    let previousLanguage='auto';try{previousLanguage=localStorage.getItem('speakerdesk.language_mode')||'auto';}catch{}
+    $('language').value=config.languages[previousLanguage]?previousLanguage:'auto';
     wire(); jobs = await api('/api/jobs'); renderJobs(); setInterval(poll, 1000);
     await refreshMeeting();setInterval(refreshMeeting,500);
     const requested=new URLSearchParams(location.search).get('meeting');
@@ -342,8 +347,8 @@ async function refreshSetup() {
     $('model-status').textContent=state.error || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'Download once, then use offline.');
     $('install-models').hidden=state.ready;
     $('install-models').disabled=busy || !state.supported;
-    $('install-models').textContent=busy?'Downloading…':state.status==='failed'?'Retry download':'Download models · 1.7 GB';
-    if(state.ready && !config.readiness.configured) {
+    $('install-models').textContent=busy?'Downloading…':state.status==='failed'?'Retry download':`Download models · ${(state.total_bytes/1e9).toFixed(1)} GB`;
+    if(state.ready && (!config.readiness.configured || !config.readiness.automatic_language)) {
       config=await api('/api/config');if(selected)setStatus();
     }
   } catch(error) { $('model-status').textContent=error.message; }

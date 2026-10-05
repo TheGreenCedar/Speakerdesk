@@ -17,7 +17,8 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 from audio import normalize
 from pipeline import infer, model_config, preflight, MODELS
-from transcript import LANGUAGES, validate, export
+from language_detection import LANGUAGE_CHOICES, detector_issues
+from transcript import validate, export
 from model_setup import register_setup
 from live_meeting import register_meetings, LIVE
 from people import register_people, reconcile_assignments
@@ -131,7 +132,8 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     @app.get('/api/config')
     def config():
         cfg=model_config();issues=preflight(cfg)
-        return jsonify(languages=LANGUAGES,readiness={'configured':not issues,'issues':issues,
+        return jsonify(languages=LANGUAGE_CHOICES,default_language='auto',readiness={'configured':not issues,'issues':issues,
+            'automatic_language':not detector_issues(cfg['lid_path']),
             'model':MODELS.get(cfg['diar_kind'],('unknown',0))[0],
             'speaker_limit':MODELS.get(cfg['diar_kind'],('',0))[1],
             'device':cfg['device'],'note':'Model execution is checked when inference starts. Configuration is not proof of working inference.'},
@@ -144,9 +146,9 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
 
     @app.post('/api/jobs')
     def upload():
-        files=request.files.getlist('files');language=request.form.get('language','en')
+        files=request.files.getlist('files');language=request.form.get('language','auto')
         if not files or len(files)>16:raise ValueError('Choose 1–16 audio files per batch.')
-        if language not in LANGUAGES:raise ValueError('Select a supported recording language.')
+        if language not in LANGUAGE_CHOICES:raise ValueError('Select a supported recording language.')
         for item in files:
             if Path(item.filename or '').suffix.lower() not in ('.wav','.mp3','.m4a','.flac','.ogg','.aiff','.aif','.mp4','.aac','.webm'):
                 raise ValueError('Supported formats: WAV, MP3, M4A, FLAC, OGG, AIFF, MP4, AAC and WebM.')
@@ -190,7 +192,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             if job.get('document') and job.get('document',{}).get('segments'):abort(409,description='Create another upload to rerun inference without overwriting edits.')
             if app.extensions['speakerdesk']['meetings'].jid:
                 abort(409,description='Finish the active meeting before running import inference.')
-            issues=preflight(model_config())
+            issues=preflight(model_config(), job['language'])
             if issues:abort(409,description=' '.join(issues))
             patch(jid,status='queued',message='Waiting for local inference…');executor.submit(process,jid)
         return jsonify(get(jid)),202
