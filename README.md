@@ -2,7 +2,7 @@
 
 Private meeting transcription and speaker labeling for Apple Silicon Macs, using NVIDIA Nemotron 3 diarization and Cohere Transcribe through MLX. Audio stays on the Mac; the app downloads pinned public model checkpoints during explicit setup. No paid transcription API is required.
 
-The desktop shell uses Tauri, a bundled Python runtime and a Swift microphone/system-audio capture helper. macOS 14 or newer and an Apple Silicon processor are required. Allow roughly 2.3 GB for model setup and additional space for recordings. The models themselves occupy about 1.7 GB. This source repository contains no recordings, model weights, credentials or prebuilt application.
+The desktop shell uses Tauri, a bundled Python runtime and a Swift microphone/system-audio capture helper. macOS 14 or newer and an Apple Silicon processor are required. Allow roughly 2.4 GB for model setup and additional space for recordings. The models themselves occupy about 1.8 GB. This source repository contains no recordings, model weights, credentials or prebuilt application.
 
 ## Interface previews
 

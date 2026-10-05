@@ -180,8 +180,19 @@ class DecoderContractTests(unittest.TestCase):
     def test_real_pinned_decoder_scores_all_languages_with_sot_only_on_cpu(self):
         # Execute the actual dependency's detection function with NumPy operations
         # and deterministic logits, without importing MLX or running a model.
-        source = importlib.metadata.distribution('mlx-audio').locate_file('mlx_audio/stt/models/whisper/decoding.py')
+        source = METADATA/'detect_language.py'
         function = next(n for n in ast.parse(source.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='detect_language')
+        # Lightweight CI has no MLX package. Keep an exact pinned excerpt and
+        # compare it with the actual dependency when that distribution exists.
+        try:
+            installed = importlib.metadata.distribution('mlx-audio').locate_file('mlx_audio/stt/models/whisper/decoding.py')
+        except importlib.metadata.PackageNotFoundError:
+            installed = None
+        if installed is not None:
+            actual = next(n for n in ast.parse(installed.read_text()).body
+                          if isinstance(n,ast.FunctionDef) and n.name=='detect_language')
+            self.assertEqual(ast.dump(function,include_attributes=False),
+                             ast.dump(actual,include_attributes=False))
         program = ast.Module(body=[ast.ImportFrom(module='__future__',names=[ast.alias(name='annotations')],level=0),function],type_ignores=[])
         mx = types.SimpleNamespace(array=np.array, full=np.full, inf=np.inf, float32=np.float32,
             argmax=np.argmax, softmax=lambda x,axis:np.exp(x-np.max(x,axis=axis,keepdims=True))/np.sum(np.exp(x-np.max(x,axis=axis,keepdims=True)),axis=axis,keepdims=True))

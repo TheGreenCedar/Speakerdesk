@@ -88,9 +88,10 @@ describe tests with substituted models, not detector or live inference memory.
 CPU tests execute the real import and live-worker routing with synthetic PCM and
 substituted model outputs. They exercise mixed languages, uncertainty, overlap,
 silence/short speech, hysteresis, per-speaker state, original audio, timing,
-manual override, defaults, editor persistence, and JSON export. The actual pinned
-language-decoding function is also executed with NumPy operations and toy logits,
-checking SOT-only input, all 99 classes, and non-language masking without loading
+manual override, defaults, editor persistence, and JSON export. A verbatim excerpt of the pinned
+language-decoding function is executed with NumPy operations and toy logits,
+with AST equality checked against the installed dependency when available.
+This checks SOT-only input, all 99 classes, and non-language masking without loading
 MLX or any trained model. Deliberate waveform-padding and stale-continuity
 mutations fail their intended assertions in disposable copies.
 
@@ -113,7 +114,8 @@ disk reserve for full/partial/recovery), one language-only detector process,
 then serial integrated smoke tests. Existing MLX worker caps remain 5 GiB and
 256 MiB cache; detector runtime RSS/MLX peak and latency are **unmeasured**.
 OpenAI's generic tiny table estimates ~1 GB VRAM; that is not a measurement of
-this path. Obtain the required source/model approval before executing it.
+this path. Obtain the required source/model approval before executing it. The user approved the exact pinned community conversion
+during the 0.3.0 integration review; coordinated resource availability remains required.
 
 Acoustic acceptance must include labeled English, French, same-speaker switches,
 changes inside a probe, accents, short speech, noise, silence, overlap, and an
