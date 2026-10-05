@@ -116,9 +116,15 @@ abstention results and limits.
 The first development fixture exposed moderate-confidence wrong-language
 routing on accented synthetic English. Raising admission to .90 made that
 case abstain. That development-case rerun does not establish generalization.
-Fresh held-out sentences must be evaluated against the frozen policy in a
-new coordinated native window; preserve failures rather than tune thresholds
-on the held-out sample. Current evidence includes synthetic unsupported speech,
+Fourteen fresh synthetic cases were then evaluated against the frozen policy,
+using new sentences and recordings from the same compact voices. Clean English
+and French routed correctly; unsupported Russian and Swedish, silence, short
+audio and annotated overlap abstained. One accented English passage was still
+confidently admitted as French. Thresholds were not retuned. The detector can
+therefore choose the wrong language even above .90; use a manual language retry
+when the words or language look wrong. The user waived this additional test as
+a release gate; the failure remains a documented limitation. Evidence includes
+synthetic unsupported speech,
 silence, short probes, noise, and annotated overlap. It does not establish
 human accuracy, NVIDIA overlap detection accuracy, or exact switches inside a
 probe. No private audio was uploaded and no real device capture or permission
