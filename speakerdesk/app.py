@@ -16,9 +16,9 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 from audio import normalize
-from pipeline import infer, model_config, preflight, MODELS
+from pipeline import infer, model_config, preflight, MODELS, retry_passage
 from language_detection import LANGUAGE_CHOICES, detector_issues
-from transcript import validate, export
+from transcript import LANGUAGES, validate, export
 from model_setup import register_setup
 from live_meeting import register_meetings, LIVE
 from people import register_people, reconcile_assignments
@@ -100,6 +100,28 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             recognizer.observe(jid)
         except Exception as exc:
             patch(jid,status='failed',message=str(exc) if isinstance(exc,(ValueError,RuntimeError)) else 'Processing failed. Check the inference environment and storage.')
+
+    def process_passage_retry(jid, sid, language, operation, original):
+        candidate = {'id':operation, 'language':language, 'original_text':original['text'],
+                     'start':original['start'], 'end':original['end'], 'speaker':original['speaker'], 'created':time.time()}
+        try:
+            result=retry_passage(folder(jid)/'audio.wav',original['start'],original['end'],language,folder(jid))
+            candidate.update(text=result['text'],review=result['review'],
+                             transcription_review=result.get('transcription_review'))
+        except Exception:
+            app.logger.exception('Local passage retry failed')
+            candidate.update(text='',review=True,error='This passage could not be transcribed. Its audio and existing words are retained.')
+        with lock:
+            job=get(jid)
+            if (job.get('passage_retry') or {}).get('id') != operation:return
+            segment=next((s for s in job['document']['segments'] if s['id']==sid),None)
+            if segment and all(segment[k]==original[k] for k in ('start','end','speaker','text')):
+                # A retry is a candidate. Existing and edited words remain until
+                # the user explicitly chooses this text in the editor.
+                segment['retry_candidate']=candidate
+                job['revision']+=1
+            job.update(status='ready',message='Retry result ready for review. Existing text is unchanged.',passage_retry=None)
+            put(job)
 
     @app.before_request
     def local_access():
@@ -215,6 +237,14 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                 unchanged=bool(prior and not body.get('imported') and all(segment[k]==prior[k] for k in ('speaker','start','end')))
                 segment['voice_eligible']=bool(unchanged and speaker_audio_eligible(prior,prior['speaker']))
                 segment['speaker_candidates']=prior.get('speaker_candidates',[prior['speaker']]) if unchanged else []
+                # A candidate belongs to its saved audio/track. Client edits cannot
+                # retain or manufacture a retry for different source bounds.
+                segment.pop('retry_candidate',None)
+                if unchanged and prior.get('retry_candidate'):
+                    candidate=copy.deepcopy(prior['retry_candidate'])
+                    if segment['text']==candidate.get('text') and segment['text']!=prior['text']:
+                        candidate.update(replaced_text=prior['text'],accepted_at=time.time())
+                    segment['retry_candidate']=candidate
             # Provenance is server-owned. Editing cannot pretend to be fresh inference.
             if body.get('imported'):
                 document={'schema_version':1,'speakers':incoming['speakers'],'segments':incoming['segments'],
@@ -232,6 +262,30 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             job.update(document=document,revision=job['revision']+1,status='ready',message='Saved locally.')
             put(job)
         return jsonify(get(jid))
+
+    @app.post('/api/jobs/<jid>/retry')
+    def retry_segment(jid):
+        body=request.get_json()
+        if not isinstance(body,dict):raise ValueError('Choose a passage and its language.')
+        language=body.get('language')
+        if language not in LANGUAGES:raise ValueError('Choose the language for this passage; Automatic is not a retry override.')
+        with lock:
+            job=get(jid)
+            if job['status'] in ACTIVE or inference_busy() or app.extensions['speakerdesk']['meetings'].jid:
+                abort(409,description='Finish current recording or transcription before retrying a passage.')
+            if body.get('revision') != job['revision']:
+                abort(409,description='This transcript changed. Save or reload before retrying.')
+            segment=next((s for s in (job.get('document') or {}).get('segments',[]) if s['id']==body.get('segment_id')),None)
+            if not segment:abort(404)
+            if segment['end']-segment['start'] > 30:
+                raise ValueError('Choose a passage of at most 30 seconds before retrying.')
+            if not (folder(jid)/'audio.wav').is_file():abort(409,description='This passage needs its original saved audio.')
+            operation=uuid.uuid4().hex
+            job.update(status='processing',message='Retrying this passage locally; existing words are retained.',
+                       passage_retry={'id':operation,'segment_id':segment['id'],'language':language})
+            put(job)
+            executor.submit(process_passage_retry,jid,segment['id'],language,operation,copy.deepcopy(segment))
+        return jsonify(get(jid)),202
 
     @app.get('/api/jobs/<jid>/export/<kind>')
     def download(jid,kind):

@@ -355,7 +355,13 @@ class MeetingManager:
                 if cleanup_failed and terminal['status']=='ready':
                     self.error='Meeting cleanup failed. Check available storage and review the recorded audio.'
                     terminal.update(status='failed',message=self.error)
-                try:self.patch(jid,**terminal,duration=self.duration)
+                try:
+                    job=self.get(jid)
+                    if self.duration>0 and job.get('document'):
+                        from review import retain_unassigned_audio
+                        retain_unassigned_audio(job['document'],self.duration)
+                        job['revision']+=1;self.put(job)
+                    self.patch(jid,**terminal,duration=self.duration)
                 finally:self.jid=None
 
     def close(self):

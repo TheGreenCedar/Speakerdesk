@@ -2,6 +2,7 @@
 import copy
 import json
 import math
+from review import export_text
 
 LANGUAGES = {'en':'English','de':'German','fr':'French','it':'Italian','es':'Spanish',
              'pt':'Portuguese','el':'Greek','nl':'Dutch','pl':'Polish','vi':'Vietnamese',
@@ -59,10 +60,11 @@ def export(document, kind):
     for n, s in enumerate(document['segments'], 1):
         speaker = document['speakers'][s['speaker']]
         # Plain subtitle text avoids VTT/HTML interpretation and cue injection.
-        text = ' '.join(s['text'].split()).replace('-->', '→').replace('<', '‹').replace('>', '›')
+        passage = export_text(s)
+        text = ' '.join(passage.split()).replace('-->', '→').replace('<', '‹').replace('>', '›')
         name = ' '.join(speaker.split()).replace('-->', '→').replace('<', '‹').replace('>', '›')
         if kind == 'txt':
-            lines.append(f'[{timestamp(s["start"])} – {timestamp(s["end"])}] {speaker}: {s["text"]}')
+            lines.append(f'[{timestamp(s["start"])} – {timestamp(s["end"])}] {speaker}: {passage}')
         else:
             sep = ',' if kind == 'srt' else '.'
             lines.extend([str(n), f'{timestamp(s["start"],sep)} --> {timestamp(s["end"],sep)}', f'{name}: {text}', ''])

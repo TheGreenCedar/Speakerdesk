@@ -73,7 +73,6 @@ def run(config):
             with contextlib.redirect_stdout(sys.stderr):
                 passages = transcriber.transcribe(audio[begin_sample:end_sample], 16000, tuple(names))
             for passage in passages:
-                if not passage['text'] and passage['language'] is not None:continue
                 emit({'type':'segment', 'segment':{**passage,'id':uuid.uuid4().hex,
                     'start':start+passage['start'], 'end':min(end,start+passage['end']), 'speaker':speaker,
                     'speaker_candidates':names,'voice_eligible':len(names)==1,'timing':'diarized_phrase',

@@ -131,9 +131,10 @@ class LanguagePolicy:
             decision['language_detection']['reason'] = 'unsupported'
             return decision
         previous = self.current.get(speaker)
-        strong = probability >= .85 and margin >= .30
-        confident = probability >= .75 and margin >= .20
-        continuing = winner == previous and speaker not in self.pending and probability >= .60 and margin >= .15
+        strong = probability >= .95 and margin >= .30
+        confident = probability >= .90 and margin >= .20
+        # A prior language does not rescue weak acoustic evidence. Real compact
+        # TTS probes exposed a moderate-confidence wrong-language admission.
         if confident and previous and winner != previous and not strong:
             candidate, count = self.pending.get(speaker, (None, 0))
             count = count + 1 if candidate == winner else 1
@@ -141,13 +142,13 @@ class LanguagePolicy:
             if count < 2:
                 decision['language_detection']['reason'] = 'change_pending'
                 return decision
-        elif not (confident or continuing):
+        elif not confident:
             self.reset(speaker)
             return decision
         self.pending.pop(speaker, None)
         self.current[speaker] = winner
-        decision.update(language=winner, review=not confident)
-        decision['language_detection']['reason'] = 'detected' if confident else 'continuity'
+        decision.update(language=winner, review=False)
+        decision['language_detection']['reason'] = 'detected'
         return decision
 
 
@@ -198,13 +199,24 @@ class SpeechTranscriber:
         results = []
         for window in windows:
             text = ''
+            transcription_review = None
             if window['language']:
-                result = self.asr.transcribe(audio[window['begin']:window['end_sample']],
-                    sample_rate=sample_rate, language=window['language'], max_new_tokens=448)
-                if len(result.tokens) >= 448:
-                    raise RuntimeError('Cohere reached token limit. Audio has been saved; shorten this speech region.')
-                text = result.text.strip()
+                try:
+                    result = self.asr.transcribe(audio[window['begin']:window['end_sample']],
+                        sample_rate=sample_rate, language=window['language'], max_new_tokens=448)
+                    text = result.text.strip()
+                    if len(result.tokens) >= 448:
+                        transcription_review = {'reason': 'token_limit', 'partial_text': True}
+                    elif not text:
+                        transcription_review = {'reason': 'empty_result', 'partial_text': False}
+                except (RuntimeError, ValueError, OSError):
+                    # Keep earlier successful passages. Hardware/resource guards remain
+                    # outside this per-passage model boundary and stop owned workers.
+                    transcription_review = {'reason': 'transcription_failed', 'partial_text': False}
+            if transcription_review:
+                window['review'] = True
             results.append({'start': window['begin']/sample_rate,
                             'end': window['end_sample']/sample_rate, 'text': text,
-                            **{key: window[key] for key in ('language', 'language_detection', 'review')}})
+                            **{key: window[key] for key in ('language', 'language_detection', 'review')},
+                            **({'transcription_review': transcription_review} if transcription_review else {})})
         return results

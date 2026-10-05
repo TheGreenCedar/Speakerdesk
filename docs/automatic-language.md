@@ -51,9 +51,11 @@ Abstention invalidates prior continuity. JSON retains `language`,
 state; the editor explains blank passages and preserves this metadata through
 save/export/restart. Manual overrides keep the existing full-crop path.
 
-Policy defaults are provisional, **not calibrated accuracy claims**: initial
-admission probability .75 and margin .20; immediate change .85/.30; same-language
-continuity .60/.15 marked for review; minimum .75 seconds and RMS .001. Full
+Policy defaults are provisional, **not calibrated accuracy claims**: admission
+probability .90 and margin .20; immediate change .95/.30; minimum .75 seconds
+and RMS .001. Weak acoustic evidence abstains even after an earlier accepted
+language. These more conservative gates follow the first real compact-voice
+probe, where French-accented synthetic English produced moderate French scores. Full
 99-class softmax probabilities are closed-set scores, not measured probabilities
 of correctness. A weak result following contrary evidence cannot use continuity.
 
@@ -101,29 +103,32 @@ reload, and Automatic restored. No mandatory start-form language selector and
 no browser console errors were observed. No recording or setup button was used.
 This was the source web UI, not a rebuilt native app.
 
-No model weights were downloaded, MLX inference run, new environment installed,
-native build performed, OS permission accepted, real capture started, audio
-uploaded, or Gatekeeper bypassed. Only the three small public metadata files
-were fetched. Near-floor disk headroom prevents weight acquisition now.
+During the combined 0.3.0 integration, the user separately approved the exact
+pinned community conversion and a coordinated native resource window. The
+74,385,959-byte weight was downloaded and checksum verified. Real Whisper
+detection completed on M5 Metal `Device(gpu, 0)`, with peak MLX allocation
+276,688,318 bytes and peak process RSS 163,233,792 bytes in the first detector
+run. The complete NVIDIA/Whisper/Cohere/B6 job returned four original English
+and French sentences and both synthetic identities. See
+[the integration measurements](0.3.0-integration.md) for timings, memory,
+abstention results and limits.
 
-Before acoustic acceptance, coordinate a single-worker window with the parent
-and CodeStory owner, with fresh disk headroom above 40,000,000,000 bytes after
-weight plus partial-download reserve and the voice branch's pending work.
-Request scope: one pinned 74,385,959-byte weight download (allow ~150 MB peak
-disk reserve for full/partial/recovery), one language-only detector process,
-then serial integrated smoke tests. Existing MLX worker caps remain 5 GiB and
-256 MiB cache; detector runtime RSS/MLX peak and latency are **unmeasured**.
-OpenAI's generic tiny table estimates ~1 GB VRAM; that is not a measurement of
-this path. Obtain the required source/model approval before executing it. The user approved the exact pinned community conversion
-during the 0.3.0 integration review; coordinated resource availability remains required.
+The first development fixture exposed moderate-confidence wrong-language
+routing on accented synthetic English. Raising admission to .90 made that
+case abstain. That development-case rerun does not establish generalization.
+Fresh held-out sentences must be evaluated against the frozen policy in a
+new coordinated native window; preserve failures rather than tune thresholds
+on the held-out sample. Current evidence includes synthetic unsupported speech,
+silence, short probes, noise, and annotated overlap. It does not establish
+human accuracy, NVIDIA overlap detection accuracy, or exact switches inside a
+probe. No private audio was uploaded and no real device capture or permission
+prompt was exercised.
 
-Acoustic acceptance must include labeled English, French, same-speaker switches,
-changes inside a probe, accents, short speech, noise, silence, overlap, and an
-unsupported language. Measure abstention, mistaken language routing, end-to-end
-text preservation, latency and peak memory; then calibrate policy thresholds.
-Also verify packaged local loading with Transformers excluded and merge with
-the voice worker's standard B6 model/recognition changes. Real device capture
-and permission prompts remain a separate human-controlled handoff.
+Unresolved/partial passages retain audio and time boundaries, explain the
+reason in the UI and exports, and can be retried with an explicitly chosen
+language. A retry candidate never replaces existing text automatically. Audio
+outside returned speech passages remains visible as possibly silence or missed
+speech. Packaged local loading and signing remain separate acceptance checks.
 
 Overlapping integration files: `model_setup.py`, `live_worker.py`, `app.py`,
 `pipeline.py`, `live_meeting.py`, Settings HTML/JS, and packaging imports.

@@ -76,7 +76,7 @@ class LanguageRoutingTests(unittest.TestCase):
             np.testing.assert_array_equal(call.args[0], pcm[:48000])
 
     def test_hysteresis_abstains_on_first_disputed_window_and_does_not_force_previous_language(self):
-        transcriber = self.transcriber([scores('en'), scores('fr', .8), scores('fr', .8)])
+        transcriber = self.transcriber([scores('en'), scores('fr', .92), scores('fr', .92)])
         pcm = np.full(9*16000, .1, dtype=np.float32)
         passages = transcriber.transcribe(pcm, 16000, ('speaker_0',))
         self.assertEqual([p['language'] for p in passages], ['en', None, 'fr'])
@@ -118,14 +118,21 @@ class LanguageRoutingTests(unittest.TestCase):
         np.testing.assert_array_equal(reconstructed, pcm)
         self.assertTrue(all(len(call.args[0]) <= 96000 for call in transcriber.asr.transcribe.call_args_list))
 
-    def test_language_state_is_separate_for_speakers_and_weak_continuity_is_reviewed(self):
+    def test_language_state_is_separate_for_speakers_and_weak_continuity_abstains(self):
         policy = LanguagePolicy()
         self.assertEqual(policy.decide(scores('en'), ('speaker_0',))['language'], 'en')
-        self.assertEqual(policy.decide(scores('fr', .8), ('speaker_1',))['language'], 'fr')
+        self.assertEqual(policy.decide(scores('fr', .92), ('speaker_1',))['language'], 'fr')
+        self.assertIsNone(policy.decide(scores('fr', .92), ('speaker_0',))['language'])
         continuation = policy.decide(scores('en', .65), ('speaker_0',))
-        self.assertEqual(continuation['language'], 'en')
+        self.assertIsNone(continuation['language'])
         self.assertTrue(continuation['review'])
-        self.assertEqual(policy.decide(scores('fr', .8), ('speaker_0',))['language'], None)
+
+    def test_measured_moderate_language_scores_never_force_asr_even_after_continuity(self):
+        transcriber=self.transcriber([scores('fr'),scores('fr',.793),scores('fr',.855)])
+        passages=transcriber.transcribe(np.full(9*16000,.1,dtype=np.float32),16000,('speaker_0',))
+        self.assertEqual([p['language'] for p in passages],['fr',None,None])
+        self.assertEqual([c.kwargs['language'] for c in transcriber.asr.transcribe.call_args_list],['fr'])
+        self.assertTrue(all(p['review'] and p['text']=='' for p in passages[1:]))
 
     def test_manual_override_bypasses_detector_and_keeps_full_crop(self):
         with patch('language_detection.WhisperLanguageDetector') as detector:
@@ -142,7 +149,7 @@ class LanguageRoutingTests(unittest.TestCase):
             self.assertIsNone(policy.decide(contrary,('speaker_0',))['language'])
             self.assertIsNone(policy.decide(scores('en',.65),('speaker_0',))['language'])
         policy=LanguagePolicy();policy.decide(scores('en'),('speaker_0',))
-        policy.decide(scores('fr',.8),('speaker_0',))
+        policy.decide(scores('fr',.92),('speaker_0',))
         self.assertIsNone(policy.decide(scores('en',.65),('speaker_0',))['language'])
 
     def test_invalid_audio_and_bad_distribution_fail_explicitly(self):
@@ -266,6 +273,7 @@ class WorkerLanguageTests(unittest.TestCase):
     def test_live_worker_emits_auto_subpassages_and_blank_uncertainty_with_original_timeline(self):
         import live_worker
         for probabilities, languages, texts in [([scores('en'),scores('fr')],['en','fr'],['Original English','Français original']),
+                                                ([scores('en'),scores('fr')],['en','fr'],['','']),
                                                 ([scores('en'),scores('ru')],['en',None],['Original English',''])]:
             with self.subTest(languages=languages):
                 class Diarizer:
@@ -281,6 +289,7 @@ class WorkerLanguageTests(unittest.TestCase):
                 lines.append(json.dumps({'type':'stop'}))
                 detector=Mock();detector.detect.side_effect=probabilities
                 asr=cohere_model();output=io.StringIO()
+                if texts==['','']:asr.transcribe.side_effect=lambda audio,**kwargs:types.SimpleNamespace(text='',tokens=[])
                 with patch.dict(sys.modules,model_modules(asr,Diarizer())),patch('inference_worker.check_memory'), \
                      patch('language_detection.WhisperLanguageDetector',return_value=detector), \
                      patch('sys.stdin',io.StringIO('\n'.join(lines)+'\n')),contextlib.redirect_stdout(output):
@@ -290,6 +299,8 @@ class WorkerLanguageTests(unittest.TestCase):
                 self.assertEqual([(s['start'],s['end']) for s in segments],[(0,3),(3,6)])
                 self.assertEqual([s['language'] for s in segments],languages)
                 self.assertEqual([s['text'] for s in segments],texts)
+                if texts==['','']:
+                    self.assertTrue(all(s['review'] and s['transcription_review']['reason']=='empty_result' for s in segments))
                 self.assertTrue(all(s['speaker_candidates']==['speaker_0'] for s in segments))
                 self.assertTrue(all(s['voice_eligible'] for s in segments))
                 job={'id':'auto-live','document':{'provenance':{'kind':'local_inference'},'segments':segments}}
