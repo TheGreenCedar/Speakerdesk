@@ -232,6 +232,37 @@ class MeetingLifecycleTests(unittest.TestCase):
         self.assertEqual(self.job(jid)['duration'], .1)
         self.assertEqual(len(self.samples(jid, 'audio.wav')), 1600)
 
+    def test_file_or_pipe_close_error_releases_meeting_and_preserves_transcript(self):
+        class FailingClose:
+            def __init__(self, handle):self.handle=handle
+            def __getattr__(self, name):return getattr(self.handle,name)
+            def close(self):
+                self.handle.close()
+                raise OSError('Synthetic buffered close failure.')
+
+        original_open=Path.open
+        for target in ('file','pipe'):
+            with self.subTest(target=target):
+                def open_with_failure(path, *args, **kwargs):
+                    handle=original_open(path,*args,**kwargs)
+                    return FailingClose(handle) if target=='file' and path.name=='capture.log' else handle
+                with patch.object(Path,'open',open_with_failure):
+                    jid=self.start(['microphone'])
+                    self.wait_for(lambda:self.job(jid)['status']=='recording')
+                    self.control(jid,'pause')
+                    self.wait_for(lambda:self.job(jid)['status']=='paused')
+                    if target=='pipe':self.manager.capture.stdin=FailingClose(self.manager.capture.stdin)
+                    self.control(jid,'stop')
+                    self.wait_for(lambda:self.manager.jid is None)
+                saved=self.job(jid)
+                self.assertEqual(saved['status'],'failed')
+                self.assertIn('cleanup failed',saved['message'])
+                self.assertEqual(saved['document']['segments'][0]['text'],'Synthetic transport result.')
+                self.assertEqual(len(self.samples(jid,'audio.wav')),1600)
+                self.assertIsNone(self.manager.capture)
+                self.assertIsNone(self.manager.worker)
+                self.assertTrue(all(child.poll() is not None for child in self.children))
+
     def test_source_track_saturates_without_wrapping_pcm_samples(self):
         self.scenario = 'source_clip'
         jid = self.start(['microphone'])

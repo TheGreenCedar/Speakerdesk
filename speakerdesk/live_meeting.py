@@ -323,10 +323,13 @@ class MeetingManager:
         finally:
             stop_event.set()
             transport_closed.set()
+            cleanup_failed = False
+            def close_handle(handle):
+                nonlocal cleanup_failed
+                try:handle.close()
+                except (OSError,ValueError):cleanup_failed=True
             for recording in [wav, *tracks.values()]:
-                if recording:
-                    try:recording.close()
-                    except (OSError,ValueError):pass
+                if recording:close_handle(recording)
             for child in (self.capture,self.worker):
                 if child and child.poll() is None:
                     child.terminate()
@@ -335,15 +338,18 @@ class MeetingManager:
             for thread in threads:
                 thread.join(timeout=3)
             for handle in handles:
-                handle.close()
+                close_handle(handle)
             with self.lock:
                 if self.stop_timer:self.stop_timer.cancel();self.stop_timer=None
                 for child in (self.capture,self.worker):
                     if child:
-                        child.stdin.close();child.stdout.close()
+                        close_handle(child.stdin);close_handle(child.stdout)
                 self.capture=self.worker=None
-                self.patch(jid,**terminal,duration=self.duration)
-                self.jid=None
+                if cleanup_failed and terminal['status']=='ready':
+                    self.error='Meeting cleanup failed. Check available storage and review the recorded audio.'
+                    terminal.update(status='failed',message=self.error)
+                try:self.patch(jid,**terminal,duration=self.duration)
+                finally:self.jid=None
 
     def close(self):
         with self.lock:
