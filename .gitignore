@@ -1,7 +1,7 @@
 .venv*/
 .cache/
-models/
-vendor/
+/models/
+/vendor/
 speakerdesk/data/
 fixtures/
 speakerdesk/fixtures/
