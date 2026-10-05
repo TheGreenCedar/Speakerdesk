@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       signing:
-        description: Ad-hoc CI package or existing-credential notarized candidate
+        description: Ad-hoc candidate; promote this exact artifact through AppleRelease for notarization
         type: choice
-        options: [adhoc, notarized]
+        options: [adhoc]
         default: adhoc
         required: true
 permissions:
@@ -17,92 +17,174 @@ jobs:
   apple:
     runs-on: macos-15
     timeout-minutes: 45
+    env:
+      APPLE_SIGNING_IDENTITY: '-'
+      CI: 'true'
+      SPEAKERDESK_PYTHON: '3.13.15'
+      UV_CACHE_DIR: ${{ github.workspace }}/.cache/uv
+      npm_config_cache: ${{ github.workspace }}/.cache/npm
+      SCCACHE_CACHE_SIZE: 512M
+      SCCACHE_GHA_ENABLED: 'false'
+      CARGO_INCREMENTAL: '0'
+      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          package-manager-cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13.15'
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.97.1
           targets: aarch64-apple-darwin
-      - name: Install uv
-        run: brew install uv
-      - name: Prepare existing Apple credentials
-        if: inputs.signing == 'notarized'
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.12.10'
+          enable-cache: false
+      - name: Install pinned compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
+          disable_annotations: true
+      - name: Configure local compiler cache
+        run: echo "SCCACHE_DIR=$RUNNER_TEMP/speakerdesk-sccache" >> "$GITHUB_ENV"
+      - name: Capture cache compatibility and exact component identities
+        id: identity
+        run: python scripts/ci_cache.py
+      - name: Restore uv cache
+        id: uv
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/uv
+          key: ${{ steps.identity.outputs.uv-key }}
+      - name: Restore cargo cache
+        id: cargo
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.identity.outputs.cargo-key }}
+      - name: Restore npm cache
+        id: npm
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/npm
+          key: ${{ steps.identity.outputs.npm-key }}
+      - name: Restore compiler cache
+        id: compiler
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ${{ runner.temp }}/speakerdesk-sccache
+          key: ${{ steps.identity.outputs.compiler-key }}
+          restore-keys: ${{ steps.identity.outputs.compiler-prefix }}
+      - name: Restore runtime cache
+        id: runtime
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/components/runtime
+          key: ${{ steps.identity.outputs.runtime-key }}
+      - name: Restore capture cache
+        id: capture
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/components/capture
+          key: ${{ steps.identity.outputs.capture-key }}
+      - name: Report cache hit types
         env:
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          UV_HIT: ${{ steps.uv.outputs.cache-hit }}
+          CARGO_HIT: ${{ steps.cargo.outputs.cache-hit }}
+          NPM_HIT: ${{ steps.npm.outputs.cache-hit }}
+          COMPILER_MATCHED: ${{ steps.compiler.outputs.cache-matched-key }}
+          COMPILER_REQUESTED: ${{ steps.compiler.outputs.cache-primary-key }}
+          RUNTIME_HIT: ${{ steps.runtime.outputs.cache-hit }}
+          CAPTURE_HIT: ${{ steps.capture.outputs.cache-hit }}
         run: |
-          set -euo pipefail
-          for name in APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_CONTENT APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
-            [[ -n "${!name:-}" ]] || { echo "Existing credential ${name} is unavailable in Speakerdesk; no replacement key will be created." >&2; exit 1; }
-          done
-          key_path="${RUNNER_TEMP}/speakerdesk-notary.p8"
-          certificate_path="${RUNNER_TEMP}/speakerdesk-developer-id.p12"
-          keychain_path="${RUNNER_TEMP}/speakerdesk-signing.keychain-db"
-          keychain_password="$(openssl rand -hex 32)"
-          echo "::add-mask::${keychain_password}"
-          echo "APPLE_API_KEY_PATH=${key_path}" >> "$GITHUB_ENV"
-          echo "APPLE_CERTIFICATE_PATH=${certificate_path}" >> "$GITHUB_ENV"
-          echo "APPLE_KEYCHAIN_PATH=${keychain_path}" >> "$GITHUB_ENV"
-          umask 077
-          printf '%s' "$APPLE_API_KEY_CONTENT" > "$key_path"
-          printf '%s' "$APPLE_CERTIFICATE" | openssl base64 -d -A -out "$certificate_path"
-          security create-keychain -p "$keychain_password" "$keychain_path"
-          security set-keychain-settings -lut 3600 "$keychain_path"
-          security unlock-keychain -p "$keychain_password" "$keychain_path"
-          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path" >/dev/null
-          existing_keychains=()
-          while IFS= read -r item; do existing_keychains+=("$item"); done < <(security list-keychains -d user | tr -d '"' | sed 's/^[[:space:]]*//')
-          security list-keychains -d user -s "$keychain_path" "${existing_keychains[@]}"
-          security default-keychain -d user -s "$keychain_path"
+          {
+            echo "### Cache restore"
+            echo "- uv exact hit: ${UV_HIT:-false}"
+            echo "- Cargo dependency exact hit: ${CARGO_HIT:-false}"
+            echo "- npm exact hit: ${NPM_HIT:-false}"
+            echo "- compiler requested: $COMPILER_REQUESTED"
+            echo "- compiler matched: ${COMPILER_MATCHED:-miss}"
+            echo "- runtime exact hit: ${RUNTIME_HIT:-false}"
+            echo "- capture exact hit: ${CAPTURE_HIT:-false}"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Build candidate without model weights
         env:
-          APPLE_SIGNING_IDENTITY: ${{ inputs.signing == 'adhoc' && '-' || secrets.APPLE_SIGNING_IDENTITY }}
-          CI: 'true'
-        run: ./scripts/build_macos.sh
-      - name: Notarize and staple candidate
-        if: inputs.signing == 'notarized'
-        env:
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          SPEAKERDESK_RUNTIME_KEY: ${{ steps.identity.outputs.runtime-key }}
+          SPEAKERDESK_CAPTURE_KEY: ${{ steps.identity.outputs.capture-key }}
         run: |
-          set -euo pipefail
-          version="$(.venv-package/bin/python -c 'import json;print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')"
-          dmg="release/Speakerdesk_${version}_AppleSilicon.dmg"
-          xcrun notarytool submit "$dmg" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait --output-format json > "$RUNNER_TEMP/notarization.json"
-          .venv-package/bin/python -c 'import json,sys;sys.exit(0 if json.load(open(sys.argv[1]))["status"]=="Accepted" else 1)' "$RUNNER_TEMP/notarization.json"
-          xcrun stapler staple "$dmg"
-          xcrun stapler validate "$dmg"
-          codesign --verify --strict "$dmg"
-          mount="$RUNNER_TEMP/speakerdesk-assess"
-          mkdir -p "$mount"
-          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
-          trap 'hdiutil detach "$mount" >/dev/null' EXIT
-          codesign --verify --deep --strict "$mount/Speakerdesk.app"
-          spctl --assess --type execute --verbose=2 "$mount/Speakerdesk.app"
-          echo 'SPEAKERDESK_NOTARIZED=1' >> "$GITHUB_ENV"
-      - name: Produce artifact manifest
-        run: .venv-package/bin/python scripts/artifact_manifest.py
+          started=$SECONDS
+          ./scripts/build_macos.sh
+          echo "- Complete candidate build: $((SECONDS - started))s" >> "$GITHUB_STEP_SUMMARY"
+      - name: Finish and report compiler cache
+        run: |
+          sccache --show-stats | tee "$RUNNER_TEMP/sccache-stats.txt"
+          sccache --stop-server
+          cat "$RUNNER_TEMP/sccache-stats.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check cache byte budget
+        id: budget
+        run: python scripts/ci_cache.py size
+      - name: Save trusted uv cache
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.uv.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/uv
+          key: ${{ steps.uv.outputs.cache-primary-key }}
+      - name: Save trusted cargo cache
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.cargo.outputs.cache-primary-key }}
+      - name: Save trusted npm cache
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.npm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/npm
+          key: ${{ steps.npm.outputs.cache-primary-key }}
+      - name: Save trusted compiler cache
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.compiler.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ${{ runner.temp }}/speakerdesk-sccache
+          key: ${{ steps.compiler.outputs.cache-primary-key }}
+      - name: Save trusted runtime cache
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.runtime.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/components/runtime
+          key: ${{ steps.runtime.outputs.cache-primary-key }}
+      - name: Save trusted capture cache
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.capture.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/components/capture
+          key: ${{ steps.capture.outputs.cache-primary-key }}
+      - name: Produce exact-source artifact manifest
+        run: python scripts/artifact_manifest.py
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: Speakerdesk-${{ github.sha }}-${{ inputs.signing }}
+          name: Speakerdesk-${{ github.sha }}-adhoc
           path: release/*
-          retention-days: 7
+          retention-days: 14
           if-no-files-found: error
-      - name: Remove ephemeral credential material
-        if: always()
-        run: |
-          if [[ -n "${APPLE_KEYCHAIN_PATH:-}" ]]; then security delete-keychain "$APPLE_KEYCHAIN_PATH" || true; fi
-          for name in APPLE_API_KEY_PATH APPLE_CERTIFICATE_PATH; do
-            path="${!name:-}"
-            if [[ -n "$path" && "$path" == "$RUNNER_TEMP/"* ]]; then rm -f -- "$path"; fi
-          done

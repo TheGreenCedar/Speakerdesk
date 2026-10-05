@@ -21,6 +21,10 @@ manifest={'schema_version':1,'product':'Speakerdesk','version':version,
           'minimum_os':config['bundle']['macOS']['minimumSystemVersion'],'channel':'candidate','public_ready':False,
           'signing':'developer-id' if notarized else 'adhoc','notarized':notarized,
           'native_meeting_qa':'pending','files':files}
+manifest['producer']={'repository':os.environ['GITHUB_REPOSITORY'],
+                      'workflow_path':'.github/workflows/apple-build.yml',
+                      'run_id':int(os.environ['GITHUB_RUN_ID']),
+                      'run_attempt':int(os.environ['GITHUB_RUN_ATTEMPT'])}
 (directory/'artifact-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 (directory/'SHA256SUMS').write_text(''.join(f'{item["sha256"]}  {item["filename"]}\n' for item in files))
 print(json.dumps(manifest,indent=2))

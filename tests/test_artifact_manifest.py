@@ -19,10 +19,14 @@ class ArtifactManifestTests(unittest.TestCase):
             (root/'desktop/src-tauri/tauri.conf.json').write_text(json.dumps(config))
             blobs={'.dmg':b'Synthetic DMG bytes','.app.zip':b'Synthetic app ZIP bytes'}
             for suffix,data in blobs.items():(root/'release'/('Speakerdesk_0.3.0_AppleSilicon'+suffix)).write_bytes(data)
-            with patch.dict(os.environ,{'GITHUB_SHA':'a'*40,'SPEAKERDESK_NOTARIZED':'0'}):runpy.run_path(str(script))
+            with patch.dict(os.environ,{'GITHUB_SHA':'a'*40,'SPEAKERDESK_NOTARIZED':'0',
+                                        'GITHUB_REPOSITORY':'TheGreenCedar/Speakerdesk',
+                                        'GITHUB_RUN_ID':'12345','GITHUB_RUN_ATTEMPT':'2'}):runpy.run_path(str(script))
             manifest=json.loads((root/'release/artifact-manifest.json').read_text())
             self.assertEqual(manifest['minimum_os'],'15.0');self.assertEqual(manifest['source_commit'],'a'*40)
             self.assertFalse(manifest['notarized']);self.assertFalse(manifest['public_ready'])
+            self.assertEqual(manifest['producer'],{'repository':'TheGreenCedar/Speakerdesk',
+                             'workflow_path':'.github/workflows/apple-build.yml','run_id':12345,'run_attempt':2})
             for entry,(suffix,data) in zip(manifest['files'],blobs.items()):
                 self.assertEqual(entry['bytes'],len(data));self.assertEqual(entry['sha256'],hashlib.sha256(data).hexdigest())
                 self.assertIn(entry['sha256'],(root/'release/SHA256SUMS').read_text())
