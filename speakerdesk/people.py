@@ -114,14 +114,23 @@ def reconcile_assignments(job, document, imported=False):
     job['speaker_assignments'] = {track: value for track, value in assignments.items()
                                   if not imported and document['speakers'].get(track) == value['name']}
     job.pop('voice_suggestions', None)  # Text/timing/track edits invalidate clip evidence.
+    for check in job.get('voice_checks', {}).values():
+        if check['status'] == 'checking':
+            check['status'] = 'cancelled'
 
 
 def register_people(app, db, get, put, lock, folder, backend=None, calibration=None, voice_busy=lambda: False):
     store = PeopleStore(db)
-    available = backend is not None and calibration is not None and backend.model == calibration.model
+    app.extensions['speakerdesk']['voice_runtime'] = (backend, calibration)
     app.extensions['speakerdesk']['people'] = store
 
+    def voice_runtime():
+        backend, calibration = app.extensions['speakerdesk']['voice_runtime']
+        available = backend is not None and calibration is not None and backend.model == calibration.model
+        return backend, calibration, available
+
     def suggestions(job):
+        backend, calibration, available = voice_runtime()
         valid_profiles = {p['version']: p for p in store.profiles()}
         people_names = {p['id']: p['name'] for p in store.list()}
         policy = {'dataset_id': calibration.dataset_id, 'threshold': calibration.threshold,
@@ -148,6 +157,7 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
 
     @app.get('/api/people')
     def people_list():
+        backend, calibration, available = voice_runtime()
         profiles = {p['person_id']: p for p in store.profiles()}
         people = [dict(p, voice_compatible=bool(available and p['id'] in profiles
                                                and profiles[p['id']]['model'] == backend.model.payload())) for p in store.list()]
@@ -205,9 +215,10 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
             job['document']['speakers'][track] = name
             job.setdefault('speaker_assignments', {})[track] = {
                 'person_id': pid, 'meeting_id': jid, 'track_id': track, 'name': name,
-                'confirmed_at': time.time(), 'source': suggestion['kind'] if suggestion else 'manual',
+                'confirmed': True, 'confirmed_at': time.time(), 'source': suggestion['kind'] if suggestion else 'manual',
                 'evidence': {k: suggestion[k] for k in ('evidence', 'match') if k in suggestion} if suggestion else None}
             job['voice_suggestions'] = [s for s in job.get('voice_suggestions', []) if s['track_id'] != track]
+            job.setdefault('voice_checks', {})[track] = {'id': uuid.uuid4().hex, 'status': 'manual'}
             job['revision'] += 1
             put(job)
             return jsonify(job)
@@ -216,6 +227,7 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
     def remember_voice(pid):
         body = request.get_json()
         with lock:
+            backend, calibration, available = voice_runtime()
             store.get(pid)
             if body.get('consent') is not True:
                 raise ValueError('Choose Remember voice to save a local voice profile.')
@@ -225,7 +237,8 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
                 abort(409, description='Finish the active recording or transcription before remembering a voice.')
             job = editing_job(body.get('meeting_id', ''), body, body.get('track_id'))
             assignment = job.get('speaker_assignments', {}).get(body.get('track_id'))
-            if not assignment or assignment['person_id'] != pid:
+            if (not assignment or assignment['person_id'] != pid
+                    or assignment.get('source') == 'automatic_voice' or assignment.get('confirmed') is False):
                 raise ValueError('Confirm this speaker as the person before remembering their voice.')
             clips = clean_clips(job, body['track_id'], body.get('segment_ids'), calibration.minimum_clips)
             audio = folder(job['id'])/'audio.wav'
@@ -239,6 +252,7 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
     def voice_suggestion(jid, track):
         body = request.get_json()
         with lock:
+            backend, calibration, available = voice_runtime()
             job = editing_job(jid, body, track)
             if not available:
                 abort(409, description='Voice recognition is not available in this build.')

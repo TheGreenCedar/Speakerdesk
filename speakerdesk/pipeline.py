@@ -175,7 +175,7 @@ def infer(audio_path, duration, language, folder, progress, config=None):
             speaker='overlap';speakers[speaker]='Overlapping speakers'
         else:speaker=chunk['speakers'][0]
         segments.append({'id':f'seg-{i}','start':chunk['start'],'end':chunk['end'],'speaker':speaker,
-                         'text':text,'speaker_candidates':chunk['speakers'],
+                         'text':text,'speaker_candidates':chunk['speakers'], 'voice_eligible':len(chunk['speakers'])==1,
                          'review':len(chunk['speakers'])>1 or chunk['end']-chunk['start']<0.5,
                          'timing':'audio_crop','confidence':None})
     return {'schema_version':1,'speakers':speakers,'segments':segments,'diarization':turns,

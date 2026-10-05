@@ -21,6 +21,8 @@ from transcript import LANGUAGES, validate, export
 from model_setup import register_setup
 from live_meeting import register_meetings, LIVE
 from people import register_people, reconcile_assignments
+from voice_profiles import speaker_audio_eligible
+from voice_recognition import RecognitionPreference, VoiceRecognition
 
 ROOT=Path(__file__).resolve().parent
 ACTIVE=('preparing','queued','processing')+LIVE
@@ -94,6 +96,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                            lambda message:patch(jid,message=message))
             document=validate(document,job['duration'])
             patch(jid,status='ready',document=document,revision=job['revision']+1,message='Transcript ready. Review names, text and timing.')
+            recognizer.observe(jid)
         except Exception as exc:
             patch(jid,status='failed',message=str(exc) if isinstance(exc,(ValueError,RuntimeError)) else 'Processing failed. Check the inference environment and storage.')
 
@@ -203,6 +206,13 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             if job['status'] in ACTIVE or not job.get('duration'):abort(409,description='Wait for audio preparation and inference to finish.')
             if body.get('revision')!=job['revision']:abort(409,description='This transcript changed in another tab. Reload before saving.')
             incoming=validate(body.get('document'),job['duration'])
+            original={s['id']:s for s in (job.get('document') or {}).get('segments',[])}
+            for segment in incoming['segments']:
+                prior=original.get(segment['id'])
+                # Client edits/imports cannot manufacture server-owned clean-audio evidence.
+                unchanged=bool(prior and not body.get('imported') and all(segment[k]==prior[k] for k in ('speaker','start','end')))
+                segment['voice_eligible']=bool(unchanged and speaker_audio_eligible(prior,prior['speaker']))
+                segment['speaker_candidates']=prior.get('speaker_candidates',[prior['speaker']]) if unchanged else []
             # Provenance is server-owned. Editing cannot pretend to be fresh inference.
             if body.get('imported'):
                 document={'schema_version':1,'speakers':incoming['speakers'],'segments':incoming['segments'],
@@ -245,21 +255,52 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
         return jsonify(deleted=True)
 
     app.extensions['speakerdesk']={'executor':executor,'data':data}
-    voice_message='Voice recognition needs local model setup and measured calibration.'
+    voice_message='Finish local model setup to recognize saved voices.'
     if voice_backend is None and voice_calibration is None and os.getenv('SPEAKERDESK_VOICE_CONFIG'):
         try:
             from voice_coreml import load_approved_runtime
             voice_backend,voice_calibration=load_approved_runtime(os.environ['SPEAKERDESK_VOICE_CONFIG'])
         except (ValueError, OSError, KeyError, TypeError) as exc:
-            voice_message='Voice recognition is waiting for local setup and calibration review.'
+            voice_message='Voice recognition needs local setup.'
             app.logger.warning('Voice setup is unavailable: %s',exc)
     app.extensions['speakerdesk']['voice_message']=voice_message
     def voice_busy():
         with db() as conn:
             return any(json.loads(row['payload'])['status'] in ACTIVE for row in conn.execute('SELECT payload FROM jobs'))
-    register_setup(app)
     register_people(app,db,get,put,lock,folder,voice_backend,voice_calibration,voice_busy)
-    register_meetings(app,get,put,patch,folder,lock,inference_busy)
+    preference=RecognitionPreference(db)
+    recognizer=VoiceRecognition(get,put,folder,lock,lambda:app.extensions['speakerdesk']['voice_runtime'],
+                               app.extensions['speakerdesk']['people'],preference,app.logger)
+    app.extensions['speakerdesk'].update(recognition=recognizer,recognition_preference=preference)
+
+    @app.get('/api/recognition')
+    def recognition_status():return jsonify(enabled=preference.enabled())
+
+    @app.patch('/api/recognition')
+    def recognition_update():
+        with lock:
+            preference.set_enabled(request.get_json().get('enabled'))
+            if not preference.enabled():
+                # Invalidates pending work even when the user quickly turns recognition back on.
+                with db() as conn:jobs=[json.loads(row['payload']) for row in conn.execute('SELECT payload FROM jobs')]
+                for job in jobs:
+                    for check in job.get('voice_checks',{}).values():
+                        if check['status']=='checking':check['status']='cancelled'
+                    put(job)
+        return jsonify(enabled=preference.enabled())
+
+    def activate_voice(model_dir,calibration_path):
+        from voice_coreml import load_approved_runtime
+        runtime=load_approved_runtime(calibration_path,model_dir=model_dir)
+        with lock:
+            app.extensions['speakerdesk']['voice_runtime']=runtime
+            app.extensions['speakerdesk']['voice_message']='Saved voices are recognized once when a new speaker appears. You can correct any name.'
+    register_setup(app,activate_voice)
+    managed_voice=app.extensions['speakerdesk']['voice_setup']
+    if voice_backend is None and managed_voice.released() and managed_voice.supported() and managed_voice.installed():
+        try:activate_voice(managed_voice.root,managed_voice.calibration_path)
+        except (ValueError,OSError,KeyError,TypeError) as exc:app.logger.warning('Managed voice setup is unavailable: %s',exc)
+    register_meetings(app,get,put,patch,folder,lock,inference_busy,recognizer)
     return app
 
 

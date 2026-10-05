@@ -25,7 +25,8 @@ def labelled_groups():
 class CalibrationTests(unittest.TestCase):
     def test_measured_policy_rejects_ambiguous_unknown_and_passes_recurring_speakers(self):
         policy, held = calibrate(MODEL, labelled_groups(), 'cpu-pilot', maximum_far=0., maximum_frr=0.)
-        self.assertAlmostEqual(policy.threshold, .95, places=6); self.assertGreater(policy.margin, .6)
+        self.assertGreater(policy.threshold,.707);self.assertLess(policy.threshold,.95)
+        self.assertGreater(policy.margin,0.);self.assertLess(policy.margin,.6378)
         self.assertEqual((policy.genuine_trials, policy.impostor_trials), (2, 1))
         self.assertEqual((held['false_accepts'], held['false_rejects'], held['wrong_identities']), (0, 0, 0))
         self.assertTrue(held['meets_error_limits'])

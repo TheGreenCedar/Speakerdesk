@@ -129,19 +129,35 @@ def calibrate(model, groups, dataset_id, *, maximum_far, maximum_frr):
             for boundary in (score, math.nextafter(score, math.inf)):
                 if 0 < boundary <= 1:
                     values.add(boundary)
+    # Include interiors of observed score gaps; fitting a boundary exactly to the
+    # weakest positive has no tolerance for a different phrase in the next meeting.
+    for values in (thresholds, margins):
+        ordered = sorted({0., 1., *values})
+        values.update(midpoint for a,b in zip(ordered,ordered[1:]) if a < b and 0 < (midpoint := (a+b)/2) <= 1)
+    unknown_minima = [ranks[g['id']][0][1] for g in calibration if g['speaker_id'] is None]
     if len(thresholds)*len(margins) > 100000:
         raise ValueError('Calibration search exceeds its bounded candidate count; review a smaller pilot first.')
     feasible = []
     for threshold in sorted(thresholds):
         for margin in sorted(margins):
+            # Absolute rejection of pilot unknowns also protects the one-profile case,
+            # where a runner-up margin alone cannot distinguish similar saved voices.
+            if maximum_far == 0 and unknown_minima and threshold <= max(unknown_minima):
+                continue
             provisional = Calibration(model, dataset_id+':calibration', threshold, margin, 1, 1, 0., 0.)
             counts = trial_counts(model, provisional, calibration, profiles, ranks)
             if (counts['false_accept_rate'] <= maximum_far and counts['false_reject_rate'] <= maximum_frr
                     and counts['wrong_identities'] == 0):
-                feasible.append((counts['false_reject_rate'], counts['false_accept_rate'], -threshold, -margin, counts))
+                guards = [threshold-minimum for minimum in unknown_minima]
+                for query in calibration:
+                    best, minimum, profile = ranks[query['id']][0]
+                    if profile['person_id'] == query['speaker_id'] and minimum >= threshold and best-ranks[query['id']][1][0] >= margin:
+                        guards.extend((minimum-threshold, best-ranks[query['id']][1][0]-margin))
+                guard = min(guards) if guards else 0.
+                feasible.append((counts['false_reject_rate'], counts['false_accept_rate'], -guard, -threshold, -margin, counts))
     if not feasible:
         raise ValueError('No observed threshold and margin satisfy the requested calibration limits.')
-    _, _, negative_threshold, negative_margin, counts = min(feasible, key=lambda row: row[:4])
+    _, _, _, negative_threshold, negative_margin, counts = min(feasible, key=lambda row: row[:5])
     policy = Calibration(model, dataset_id+':calibration', -negative_threshold, -negative_margin,
                          counts['genuine_trials'], counts['impostor_trials'],
                          counts['false_accept_rate'], counts['false_reject_rate'])

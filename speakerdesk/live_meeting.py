@@ -81,10 +81,11 @@ class SourceMixer:
 
 
 class MeetingManager:
-    def __init__(self, get, put, patch, folder, lock, inference_busy):
+    def __init__(self, get, put, patch, folder, lock, inference_busy, recognizer=None):
         self.get, self.put, self.patch, self.folder = get, put, patch, folder
         self.lock = lock
         self.inference_busy = inference_busy
+        self.recognizer = recognizer
         self.jid = None
         self.capture = self.worker = None
         self.packets = queue.Queue(maxsize=120)  # At most30s audio; recording itself remains independent.
@@ -215,6 +216,7 @@ class MeetingManager:
                             append_finalized_segment(document,result)
                             document['provenance']['kind']='local_inference'
                             job.update(revision=job['revision']+1);self.put(job)
+                            if self.recognizer:self.recognizer.observe(jid,result['segment']['speaker'])
                         elif result['type']=='progress':self.processed=result['processed_seconds']
                         elif result['type']=='error':fail(result['error']);break
                         elif result['type']=='finished':
@@ -269,6 +271,7 @@ class MeetingManager:
                 track=wave.open(f,'wb');track.setnchannels(1);track.setsampwidth(2);track.setframerate(RATE);tracks[source]=track
             def sink(mixed, separate):
                 wav.writeframes((mixed*32767).astype('<i2').tobytes())
+                audio.flush()  # Finalized voice clips must already be readable by the identity worker.
                 for source,track in tracks.items():track.writeframes((np.clip(separate[source],-1,1)*32767).astype('<i2').tobytes())
                 self.duration=wav.getnframes()/RATE
                 if not failure:
@@ -307,10 +310,12 @@ class MeetingManager:
             packets.put({'type':'stop'},timeout=10)
             if not worker_finished.wait(timeout=60):raise RuntimeError('Transcription took too long to finish. Captured audio has been saved.')
             if failure:raise RuntimeError(failure[0])
-            warnings=self.get(jid)['document']['warnings']
-            if mixer.late_samples:warnings.append(f'{mixer.late_samples/RATE:.2f}s of late source samples were omitted from the mix. Review audio timing.')
-            document=self.get(jid)['document'];document['warnings']=warnings
-            terminal={'status':'ready','message':'Meeting saved on this Mac.','document':document}
+            with self.lock:
+                job=self.get(jid)
+                if mixer.late_samples:job['document']['warnings'].append(f'{mixer.late_samples/RATE:.2f}s of late source samples were omitted from the mix. Review audio timing.')
+                self.put(job)
+            # Keep the latest document; an identity decision may finish during cleanup.
+            terminal={'status':'ready','message':'Meeting saved on this Mac.'}
         except Exception as exc:
             fail(str(exc))
             # The watermark intentionally holds the latest source packets in memory.
@@ -358,6 +363,7 @@ class MeetingManager:
                 if process and process.poll() is None:process.terminate()
             thread=self.thread
         if thread and thread is not threading.current_thread():thread.join(timeout=5)
+        if self.recognizer:self.recognizer.close()
 
 
 def append_finalized_segment(document, result):
@@ -367,8 +373,8 @@ def append_finalized_segment(document, result):
     document['segments'].append(result['segment'])
 
 
-def register_meetings(app, get, put, patch, folder, lock, inference_busy):
-    manager=MeetingManager(get,put,patch,folder,lock,inference_busy)
+def register_meetings(app, get, put, patch, folder, lock, inference_busy, recognizer=None):
+    manager=MeetingManager(get,put,patch,folder,lock,inference_busy,recognizer)
     app.extensions['speakerdesk']['meetings']=manager
     @app.get('/api/meeting')
     def meeting_status():return jsonify(manager.status())

@@ -134,6 +134,23 @@ class MeetingLifecycleTests(unittest.TestCase):
         self.assertFalse((self.root / jid / 'capture-commands.jsonl').exists())
         self.assertFalse((self.root / jid / 'audio.wav').exists())
 
+    def test_live_result_hook_names_the_track_and_finalization_keeps_latest_identity(self):
+        recognizer=self.app.extensions['speakerdesk']['recognition']
+        calls=[]
+        def recognize(jid,track):
+            calls.append((jid,track))
+            job=self.manager.get(jid)
+            self.assertEqual(job['document']['provenance']['kind'],'local_inference')
+            job['document']['speakers'][track]='Priya'
+            self.manager.put(job)
+        with patch.object(recognizer,'observe',side_effect=recognize):
+            jid=self.start(['microphone'])
+            self.wait_for(lambda:self.job(jid)['status']=='recording')
+            self.control(jid,'stop');self.wait_for(lambda:self.manager.jid is None)
+        self.assertEqual(calls,[(jid,'speaker_0')])
+        self.assertEqual(self.job(jid)['document']['speakers']['speaker_0'],'Priya')
+        self.assertEqual(self.job(jid)['status'],'ready')
+
     def test_failed_recording_directory_creation_does_not_strand_the_manager(self):
         try:
             with patch.object(Path, 'mkdir', side_effect=OSError('Synthetic directory failure.')), self.assertLogs(self.app.logger, level='ERROR'):

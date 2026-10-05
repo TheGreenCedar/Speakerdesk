@@ -61,7 +61,9 @@ def measure(args):
                                              maximum_far=args.maximum_far, maximum_frr=args.maximum_frr)
         report['calibration'] = {k: v for k, v in asdict(policy).items() if k != 'model'}
         report['accepted_error_limits'] = {'maximum_far': args.maximum_far, 'maximum_frr': args.maximum_frr}
-        report['limitation'] = 'Observed labelled-fixture error rates; review trial counts and deployment coverage before enabling.'
+        report['approved_for_recognition'] = report['held_out']['meets_error_limits']
+        report['limitation'] = ('Observed labelled-fixture error rates. Synthetic voices are a development pilot, '
+                                'not a population accuracy estimate for human voices, rooms or microphones.')
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     report['peak_rss_bytes'] = rss if sys.platform == 'darwin' else rss*1024
     return report
@@ -135,7 +137,8 @@ def main():
             report = json.loads(args.output.read_text())
             report['run_budget'] = budget
             args.output.write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')
-            print(f'Measured report: {args.output}. Recognition remains disabled pending review.')
+            verdict = 'extraction smoke only' if args.smoke else ('held-out passed' if report['held_out']['meets_error_limits'] else 'held-out failed')
+            print(f'Measured report: {args.output}. {verdict}; no profiles enrolled.')
     except (ValueError, OSError, KeyError, TypeError) as error:
         if owns_output and args.output.exists():
             # The outer supervisor owns only this previously nonexistent report.

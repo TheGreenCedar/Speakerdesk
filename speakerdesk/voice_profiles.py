@@ -85,6 +85,45 @@ def normalized(vector, dimension):
     return [v/norm for v in vector]
 
 
+def eligible_segment(segment, track_id):
+    # A six-second ASR phrase can need text review while its diarized audio is single-speaker.
+    return speaker_audio_eligible(segment, track_id) and 2 <= segment['end']-segment['start'] <= 10
+
+
+def speaker_audio_eligible(segment, track_id):
+    return (segment.get('speaker') == track_id and segment.get('finalized') is not False
+            and not track_id.startswith('overlap')
+            and len(segment.get('speaker_candidates', [track_id])) == 1
+            and segment.get('voice_eligible', not segment.get('review')) is True)
+
+
+def automatic_clips(job, track_id, minimum=2):
+    """Separate 2–10s clips; long import crops contribute nonoverlapping 6s windows."""
+    if (job.get('document') or {}).get('provenance', {}).get('kind') != 'local_inference':
+        return []
+    clips, last_end = [], -1.
+    for segment in job['document']['segments']:
+        if not speaker_audio_eligible(segment, track_id):
+            continue
+        start = max(last_end, segment['start'])
+        while segment['end']-start >= 2:
+            end = min(start+6, segment['end']) if segment['end']-start > 10 else segment['end']
+            clips.append(VoiceClip(job['id'], track_id, segment['id'], start, end))
+            last_end = start = end
+            if len(clips) == minimum:
+                return clips
+    return []
+
+
+def clips_current(job, clips):
+    document = job.get('document') or {}
+    if document.get('provenance', {}).get('kind') != 'local_inference':
+        return False
+    segments = {s['id']: s for s in document['segments']}
+    return all((segment := segments.get(c.segment_id)) and speaker_audio_eligible(segment, c.track_id)
+               and segment['start'] <= c.start < c.end <= segment['end'] for c in clips)
+
+
 def clean_clips(job, track_id, segment_ids, minimum=2):
     document = job.get('document') or {}
     if document.get('provenance', {}).get('kind') != 'local_inference':
@@ -92,16 +131,21 @@ def clean_clips(job, track_id, segment_ids, minimum=2):
     if (not isinstance(segment_ids, list) or not minimum <= len(segment_ids) <= 12
             or any(not isinstance(s, str) for s in segment_ids) or len(set(segment_ids)) != len(segment_ids)):
         raise ValueError(f'Choose {minimum}–12 separate clean passages.')
-    segments = {s['id']: s for s in document['segments']}
+    choices = {}
+    for segment in document['segments']:
+        if not speaker_audio_eligible(segment, track_id):
+            continue
+        start = segment['start']
+        while segment['end']-start >= 2:
+            end = min(start+6, segment['end']) if segment['end']-segment['start'] > 10 else segment['end']
+            sid = segment['id'] if segment['end']-segment['start'] <= 10 else f"{segment['id']}@{math.floor(start*16000)}:{math.floor(end*16000)}"
+            choices[sid] = VoiceClip(job['id'], track_id, segment['id'], start, end)
+            start = end
     clips = []
     for sid in segment_ids:
-        segment = segments.get(sid)
-        if (not segment or segment['speaker'] != track_id or segment.get('finalized') is False
-                or segment.get('review') or track_id.startswith('overlap')
-                or len(segment.get('speaker_candidates', [track_id])) != 1
-                or not 2 <= segment['end']-segment['start'] <= 10):
+        if sid not in choices:
             raise ValueError('Choose clean, finalized passages from one speaker, each 2–10 seconds long.')
-        clips.append(VoiceClip(job['id'], track_id, sid, segment['start'], segment['end']))
+        clips.append(choices[sid])
     clips.sort(key=lambda c: c.start)
     if any(a.end > b.start for a, b in zip(clips, clips[1:])):
         raise ValueError('Choose separate, nonoverlapping passages.')

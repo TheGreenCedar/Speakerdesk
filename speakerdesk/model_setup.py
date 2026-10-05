@@ -1,7 +1,6 @@
 """Pinned public model downloads with progress, resumption and checksum checks."""
 import hashlib
 import os
-import platform
 import shutil
 import ssl
 import threading
@@ -9,9 +8,10 @@ import urllib.request
 import certifi
 from pathlib import Path
 from flask import jsonify
+from voice_setup import VoiceSetup
 
 SPECS=[
-    {'name':'Speaker recognition','repo':'mlx-community/Nemotron-3-Diarization','revision':'59ed2dbfc1346dcea9d423c71306a3a2499c568f',
+    {'name':'Speaker separation','repo':'mlx-community/Nemotron-3-Diarization','revision':'59ed2dbfc1346dcea9d423c71306a3a2499c568f',
      'directory':'nemotron','bytes':198632220,'sha256':'21e8427d1795c9c46c5800f56b16061734ffd0dcadd71d9bcf0b4d6ef7261da5',
      'files':['config.json','model.safetensors','README.md']},
     {'name':'Transcription','repo':'spokedotso/cohere-transcribe-03-2026-mlx-4bit','revision':'064e51eab6db47066cbeaa85e2894b5691bd8d12',
@@ -20,10 +20,17 @@ SPECS=[
 ]
 
 
-def register_setup(app):
+def register_setup(app, activate_voice):
     root=Path(os.getenv('SPEAKERDESK_MODELS',Path(__file__).resolve().parents[1]/'models'))
-    lock=threading.Lock()
+    lock=threading.RLock()
     state={'status':'idle','phase':'','downloaded_bytes':0,'total_bytes':sum(s['bytes'] for s in SPECS),'error':None}
+    voice=VoiceSetup(root,lock,activate_voice,app.logger)
+    state['total_bytes']+=voice.state['total_bytes']
+    app.extensions['speakerdesk']['voice_setup']=voice
+
+    def voice_available():
+        backend,calibration=app.extensions['speakerdesk'].get('voice_runtime',(None,None))
+        return backend is not None and calibration is not None and backend.model==calibration.model
 
     def installed(spec):
         folder=root/spec['directory']
@@ -36,6 +43,7 @@ def register_setup(app):
         try:
             root.mkdir(parents=True,exist_ok=True)
             missing=sum(s['bytes'] for s in SPECS if not installed(s))
+            if not voice.installed():missing+=voice.state['total_bytes']
             if shutil.disk_usage(root).free < missing+512*1024**2:
                 raise RuntimeError('There is not enough free disk space. Free at least 2.3 GB and retry.')
             finished=0
@@ -67,6 +75,9 @@ def register_setup(app):
                             raise RuntimeError('Model verification failed. Retry the download.')
                     partial.replace(dest)
                 finished+=spec['bytes']
+            voice.update(status='downloading',phase='Preparing voice recognition',error=None)
+            voice.download()
+            if voice.state['status']=='failed':raise RuntimeError(voice.state['error'])
             update(status='ready',phase='Ready',downloaded_bytes=state['total_bytes'])
         except Exception as exc:
             update(status='failed',error=str(exc),phase='Setup needs attention')
@@ -75,17 +86,36 @@ def register_setup(app):
     def status():
         with lock:result=state.copy()
         result['models']=[{'name':s['name'],'bytes':s['bytes'],'installed':installed(s)} for s in SPECS]
-        result['ready']=all(m['installed'] for m in result['models'])
-        result['supported']=platform.system()=='Darwin' and platform.machine()=='arm64'
-        if result['ready']:result['status']='ready'
+        result['core_ready']=all(m['installed'] for m in result['models'])
+        result['voice']=voice.status(core_busy=result['status']=='downloading',available=voice_available())
+        result['voice']['enabled']=app.extensions['speakerdesk']['recognition_preference'].enabled()
+        result['models'].append({'name':'Voice recognition','bytes':voice.state['total_bytes'],'installed':result['voice']['installed']})
+        result['ready']=result['core_ready'] and result['voice']['installed'] and result['voice']['available']
+        result['supported']=voice.supported()
+        if result['status']=='downloading' and voice.state['status']=='downloading':
+            result['phase']=voice.state['phase']
+            result['downloaded_bytes']=sum(s['bytes'] for s in SPECS)+voice.state['downloaded_bytes']
+        if result['ready'] and result['status']!='downloading':result['status']='ready'
         return jsonify(result)
 
     @app.post('/api/setup')
     def start():
-        if platform.system()!='Darwin' or platform.machine()!='arm64':
-            return jsonify(error='This version requires an Apple Silicon Mac.'),409
+        if not voice.supported():
+            return jsonify(error='This version requires an Apple Silicon Mac with macOS 15 or later.'),409
         with lock:
+            if voice.state['status']=='downloading':return jsonify(error='Wait for voice setup to finish.'),409
             if state['status']=='downloading':return jsonify(state),202
             state.update(status='downloading',error=None,phase='Preparing download')
         threading.Thread(target=download,daemon=True,name='model-setup').start()
         return jsonify(state),202
+
+    @app.post('/api/setup/voice')
+    def start_voice():
+        if not voice.supported():
+            return jsonify(error='Update Speakerdesk on an Apple Silicon Mac with macOS 15 or later to use voice recognition.'),409
+        with lock:
+            if state['status']=='downloading':return jsonify(error='Wait for meeting model setup to finish.'),409
+            if voice.state['status']=='downloading':return jsonify(voice.state),202
+            voice.state.update(status='downloading',phase='Preparing voice download',error=None)
+        threading.Thread(target=voice.download,daemon=True,name='voice-model-setup').start()
+        return jsonify(voice.state),202

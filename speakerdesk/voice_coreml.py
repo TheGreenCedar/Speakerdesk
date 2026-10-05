@@ -153,26 +153,29 @@ class ReDimNet2CoreML:
                              'input_samples': INPUT_SAMPLES})
 
 
-def load_approved_runtime(config_path):
-    """A locally reviewed measured config enables UX; raw benchmark results cannot."""
+def read_voice_config(config_path):
     path = Path(config_path)
     if path.stat().st_size > 65536:
         raise ValueError('Voice configuration is too large.')
     config = json.loads(path.read_text())
     if not isinstance(config, dict):
         raise ValueError('Voice configuration must be a measured JSON object.')
+    return config
+
+
+def approved_calibration(config, model):
+    """Validate frozen policy and independent held-out evidence before recognition."""
     if config.get('approved_for_recognition') is not True:
-        raise ValueError('Voice recognition is waiting for review of the measured calibration.')
+        raise ValueError('Voice recognition needs a passing measured calibration.')
     if config.get('schema_version') != 1 or config.get('fixture_source') not in ('synthetic', 'consented', 'licensed'):
-        raise ValueError('Voice configuration needs approved labelled fixture provenance.')
-    backend = ReDimNet2CoreML(path.parent/config['model_dir'], config['compute_units'])
-    if config.get('model') != backend.model.payload():
+        raise ValueError('Voice configuration needs labelled fixture provenance.')
+    if config.get('model') != model.payload():
         raise ValueError('Voice calibration belongs to a different model or compute policy.')
     held_out = config.get('held_out', {})
     if not isinstance(held_out, dict) or not isinstance(config.get('calibration'), dict):
         raise ValueError('Voice configuration is missing its measured evaluation results.')
     if held_out.get('meets_error_limits') is not True:
-        raise ValueError('Frozen calibration did not pass the reviewed held-out error limits.')
+        raise ValueError('Frozen calibration did not pass the held-out error limits.')
     for key in ('genuine_trials', 'impostor_trials'):
         if not isinstance(held_out.get(key), int) or held_out[key] < 1:
             raise ValueError('Voice calibration requires independent held-out genuine and impostor trials.')
@@ -182,6 +185,13 @@ def load_approved_runtime(config_path):
             raise ValueError('Voice calibration requires measured held-out error rates.')
     if not held_out.get('dataset_id') or held_out['dataset_id'] == config['calibration'].get('dataset_id'):
         raise ValueError('Use separate calibration and held-out meeting sets.')
-    calibration = Calibration(backend.model, **config['calibration'])
+    return Calibration(model, **config['calibration'])
+
+
+def load_approved_runtime(config_path, *, model_dir=None):
+    """A passing shipped calibration enables recognition; smoke results cannot."""
+    config = read_voice_config(config_path)
+    backend = ReDimNet2CoreML(model_dir or Path(config_path).parent/config.get('model_dir', ''), config.get('compute_units', 'ALL'))
+    calibration = approved_calibration(config, backend.model)
     backend.validate()  # Hash/platform/dependency checks; no Core ML import or prediction.
     return backend, calibration

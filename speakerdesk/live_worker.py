@@ -77,7 +77,8 @@ def run(config):
                 emit({'type':'segment', 'segment':{'id':uuid.uuid4().hex,
                     'start':start, 'end':end, 'speaker':speaker,
                     'text':result.text.strip(), 'timing':'diarized_phrase',
-                    'confidence':None, 'review':len(names)>1 or end-start>=5.99},
+                    'confidence':None, 'review':len(names)>1 or end-start>=5.99,
+                    'speaker_candidates':names, 'voice_eligible':len(names)==1},
                     'speakers':{speaker:('Speaker '+str(int(names[0].split('_')[-1])+1)
                         if len(names)==1 else 'Overlapping speakers')},
                     'inference_seconds':time.perf_counter()-tick,
