@@ -259,7 +259,7 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
             if voice_busy():
                 abort(409, description='Finish the active recording or transcription before checking voices.')
             if job.get('speaker_assignments', {}).get(track):
-                raise ValueError('This speaker already has a confirmed name.')
+                raise ValueError('This speaker already has a name. Choose a name correction to change it.')
             clips = clean_clips(job, track, body.get('segment_ids'), calibration.minimum_clips)
             audio = folder(jid)/'audio.wav'
             if not audio.is_file():

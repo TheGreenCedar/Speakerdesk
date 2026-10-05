@@ -134,14 +134,14 @@ class ReDimNet2CoreML:
                     self._predictor = ct.models.CompiledMLModel(str(self.root/PIN['compiled_model']),
                                                                compute_units=ct.ComputeUnit[self.compute_units])
                 except Exception as exc:
-                    raise ValueError('The local voice runtime could not load the validated model.') from exc
+                    raise ValueError('Voice recognition could not start. Restart Speakerdesk or retry model setup.') from exc
                 load_ms = (time.perf_counter()-started)*1000
             try:
                 started = time.perf_counter()
                 output = self._predictor.predict({'audio': prepared[None, :]})
                 predict_ms = (time.perf_counter()-started)*1000
             except Exception as exc:
-                raise ValueError('Local voice extraction failed. Review the model/runtime measurement report.') from exc
+                raise ValueError('Voice recognition could not use this audio. Try other clean passages or restart Speakerdesk.') from exc
         if not isinstance(output, dict):
             raise ValueError('The voice model returned an invalid prediction.')
         vector = np.asarray(output.get('embedding'))

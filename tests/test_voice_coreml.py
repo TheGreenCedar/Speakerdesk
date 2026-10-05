@@ -77,7 +77,9 @@ class CoreMLBoundaryTests(unittest.TestCase):
             predictor.predict.return_value = bad
             with self.subTest(output=type(bad).__name__), self.assertRaises(ValueError): backend.embed(self.audio, self.clip)
         predictor.predict.side_effect = RuntimeError('native failure')
-        with self.assertRaisesRegex(ValueError, 'extraction failed'): backend.embed(self.audio, self.clip)
+        with self.assertRaises(ValueError) as failure: backend.embed(self.audio, self.clip)
+        self.assertIsInstance(failure.exception.__cause__,RuntimeError)
+        self.assertNotIn('native failure',str(failure.exception))
 
     def test_integrity_detects_same_size_tampering_extra_files_and_symlinks(self):
         config = {'model_type': 'redimnet2-b6-speaker-coreml', 'sample_rate': 16000, 'input_samples': 96000,
