@@ -117,6 +117,7 @@ class VoiceDownloadTests(unittest.TestCase):
 
     def test_pending_release_does_not_claim_download_or_recognition_readiness(self):
         self.manager.released.return_value=False
+        self.manager.supported=Mock(return_value=True)
         state=self.manager.status()
         self.assertFalse(state['released']);self.assertFalse(state['can_download']);self.assertFalse(state['available'])
         self.assertEqual(state['license'],'MIT');self.fetch.assert_not_called();self.activation.assert_not_called()
@@ -217,7 +218,8 @@ class ManagedSetupAPITests(unittest.TestCase):
                     app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
 
     def test_unsupported_platform_refuses_setup_without_requesting_network(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.object(setup.urllib.request,'urlopen') as fetch:
+        with tempfile.TemporaryDirectory() as temporary, patch.object(setup.urllib.request,'urlopen') as fetch, \
+             patch.object(setup,'require_runtime',side_effect=ValueError('CPU fixture unsupported platform')):
             app=create_app(Path(temporary)/'data');client=app.test_client()
             token=re.search(r'name="speakerdesk-token" content="([^"]+)"',client.get('/').get_data(as_text=True))[1]
             try:

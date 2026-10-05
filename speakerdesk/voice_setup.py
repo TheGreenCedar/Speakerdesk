@@ -65,7 +65,7 @@ class VoiceSetup:
         if installed and result['status'] not in ('downloading','failed'):
             result['status'] = 'ready'
         return {**result, 'released': released, 'supported': supported, 'installed': installed,
-                'available': available, 'can_download': supported and not core_busy,
+                'available': available, 'can_download': released and supported and not core_busy,
                 'message': message, 'license': 'MIT', 'name': 'Voice recognition'}
 
     def update(self, **changes):
