@@ -69,6 +69,11 @@ def create_app(data_dir=None):
 
     def folder(jid):return data/jid
 
+    def inference_busy():
+        with db() as conn:
+            return any(json.loads(row['payload'])['status'] in ('queued','processing')
+                       for row in conn.execute('SELECT payload FROM jobs'))
+
     def prepare(jid):
         try:
             job=get(jid)
@@ -148,13 +153,22 @@ def create_app(data_dir=None):
             with db() as conn:active=sum(json.loads(row['payload'])['status'] in ACTIVE for row in conn.execute('SELECT payload FROM jobs'))
             if active+len(files)>16:abort(429,description='The local queue is full. Wait for current jobs to finish.')
             created=[]
-            for item in files:
-                jid=uuid.uuid4().hex;dest=folder(jid);dest.mkdir(mode=0o700)
-                source='source'+Path(item.filename).suffix.lower();item.save(dest/source)
-                job={'id':jid,'name':secure_filename(item.filename) or 'Recording','language':language,
-                     'source_file':source,'status':'preparing','message':'Preparing local audio…',
-                     'duration':None,'created':time.time(),'revision':0,'document':None}
-                put(job);created.append(job);executor.submit(prepare,jid)
+            staged=[]
+            try:
+                for item in files:
+                    jid=uuid.uuid4().hex;dest=folder(jid);dest.mkdir(mode=0o700);staged.append(dest)
+                    source='source'+Path(item.filename).suffix.lower();item.save(dest/source)
+                    created.append({'id':jid,'name':secure_filename(item.filename) or 'Recording','language':language,
+                         'source_file':source,'status':'preparing','message':'Preparing local audio…',
+                         'duration':None,'created':time.time(),'updated':time.time(),'revision':0,'document':None})
+                # Publish the whole batch before any preparation task can consume it.
+                with db() as conn:
+                    conn.executemany('INSERT INTO jobs VALUES (?,?)',
+                                     [(job['id'],json.dumps(job,ensure_ascii=False)) for job in created])
+            except Exception:
+                for dest in staged:shutil.rmtree(dest)
+                raise
+            for job in created:executor.submit(prepare,job['id'])
         return jsonify(created),201
 
     @app.get('/api/jobs/<jid>')
@@ -173,6 +187,8 @@ def create_app(data_dir=None):
             job=get(jid)
             if job['status'] in ACTIVE:abort(409,description='This job is already running.')
             if job.get('document') and job.get('document',{}).get('segments'):abort(409,description='Create another upload to rerun inference without overwriting edits.')
+            if app.extensions['speakerdesk']['meetings'].jid:
+                abort(409,description='Finish the active meeting before running import inference.')
             issues=preflight(model_config())
             if issues:abort(409,description=' '.join(issues))
             patch(jid,status='queued',message='Waiting for local inference…');executor.submit(process,jid)
@@ -224,7 +240,7 @@ def create_app(data_dir=None):
 
     app.extensions['speakerdesk']={'executor':executor,'data':data}
     register_setup(app)
-    register_meetings(app,get,put,patch,folder)
+    register_meetings(app,get,put,patch,folder,lock,inference_busy)
     return app
 
 

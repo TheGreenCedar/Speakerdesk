@@ -43,11 +43,11 @@ class SourceMixer:
         samples = self.np.frombuffer(audio, dtype='<f4')
         if len(samples) > RATE or not self.np.isfinite(samples).all():
             raise ValueError('Invalid capture audio packet.')
-        self.levels[source] = min(1., float(self.np.sqrt(self.np.mean(samples**2)))) if len(samples) else 0.
-        self.last_packet[source] = seconds+len(samples)/RATE
         position = round(seconds*RATE)
         if position > self.cursor + RATE*5:
             raise RuntimeError('Audio capture timing jumped. Recording stopped to preserve its timeline.')
+        self.levels[source] = min(1., float(self.np.sqrt(self.np.mean(samples**2)))) if len(samples) else 0.
+        self.last_packet[source] = max(self.last_packet[source], seconds+len(samples)/RATE)
         offset = 0
         if position < self.cursor:
             offset = min(len(samples), self.cursor-position)
@@ -81,15 +81,18 @@ class SourceMixer:
 
 
 class MeetingManager:
-    def __init__(self, get, put, patch, folder):
+    def __init__(self, get, put, patch, folder, lock, inference_busy):
         self.get, self.put, self.patch, self.folder = get, put, patch, folder
-        self.lock = threading.RLock()
+        self.lock = lock
+        self.inference_busy = inference_busy
         self.jid = None
         self.capture = self.worker = None
         self.packets = queue.Queue(maxsize=120)  # At most30s audio; recording itself remains independent.
         self.stopped = threading.Event()
         self.levels = {}; self.processed = 0.; self.duration = 0.
         self.error = None
+        self.thread = None
+        self.stop_timer = None
 
     def helper_path(self):
         configured = os.getenv('SPEAKERDESK_CAPTURE_HELPER')
@@ -107,6 +110,8 @@ class MeetingManager:
         with self.lock:
             if self.capture or self.worker or (self.jid and self.get(self.jid)['status'] in LIVE):
                 abort(409,description='A meeting is already active.')
+            if self.inference_busy():
+                abort(409,description='Wait for queued import inference to finish before starting a meeting.')
             if language not in LANGUAGES or not isinstance(name,str) or not name.strip() or len(name)>160:
                 raise ValueError('Enter a meeting title and supported language.')
             if not sources or any(s not in ('microphone','system') for s in sources):
@@ -117,9 +122,9 @@ class MeetingManager:
             if issues: abort(409,description='Open Settings to finish local model setup.')
             if shutil.disk_usage(self.folder('')).free < 512*1024**2:
                 abort(409,description='Free at least512MB before recording a meeting.')
-            self.jid = uuid.uuid4().hex
-            self.folder(self.jid).mkdir(mode=0o700)
-            job = {'id':self.jid,'name':name.strip(),'language':language,'kind':'meeting',
+            jid = uuid.uuid4().hex
+            dest = self.folder(jid);dest.mkdir(mode=0o700)
+            job = {'id':jid,'name':name.strip(),'language':language,'kind':'meeting',
                    'source_file':'audio.wav','status':'starting','message':'Starting meeting…',
                    'created':time.time(),'duration':0.,'revision':0,'sources':sources,
                    'document':{'schema_version':1,'speakers':{'speaker_0':'Speaker 1'},'segments':[],
@@ -127,11 +132,15 @@ class MeetingManager:
                            'models':['nvidia/Nemotron-3-Diarization','CohereLabs/cohere-transcribe-03-2026'],
                            'timing':'NVIDIA speech-region boundaries; Cohere phrase text. No word timestamps.'},
                        'warnings':['Phrase boundaries may cut words. Overlapping speech needs review.']}}
-            self.put(job)
+            try:self.put(job)
+            except Exception:
+                dest.rmdir()
+                raise
+            self.jid = jid
             self.duration = self.processed = 0.; self.levels = {}; self.error = None
             self.stopped = threading.Event(); self.packets = queue.Queue(maxsize=120)
-            thread = threading.Thread(target=self._run,args=(self.jid,language,sources),daemon=True)
-            thread.start()
+            self.thread = threading.Thread(target=self._run,args=(self.jid,language,sources),daemon=True)
+            self.thread.start()
             return job
 
     def control(self, jid, action):
@@ -144,13 +153,29 @@ class MeetingManager:
             if not self.capture:
                 if action=='stop': self.stopped.set(); self.patch(jid,status='finishing',message='Stopping…'); return
                 abort(409,description='Wait for recording to start.')
-            self._send(self.capture,{'type':action})
             if action=='stop':
+                self.stopped.set()
                 self.patch(jid,status='finishing',message='Finishing transcript…')
-                capture=self.capture
-                def stop_stalled_capture():
-                    if capture.poll() is None:capture.terminate()
-                timer=threading.Timer(15,stop_stalled_capture);timer.daemon=True;timer.start()
+                self._stop_capture()
+            else:
+                try:self._send(self.capture,{'type':action})
+                except (OSError,ValueError):
+                    self.stopped.set()
+                    self._stop_capture()
+                    abort(409,description='Audio capture stopped. Wait for the saved recording.')
+
+    def _stop_capture(self):
+        """Bound every stop request, including worker errors and a stalled helper."""
+        with self.lock:
+            capture=self.capture
+            if not capture or capture.poll() is not None:return
+            try:self._send(capture,{'type':'stop'})
+            except (OSError,ValueError):pass
+            if self.stop_timer:return
+            def stop_stalled_capture():
+                if capture.poll() is None:capture.terminate()
+            self.stop_timer=threading.Timer(15,stop_stalled_capture)
+            self.stop_timer.daemon=True;self.stop_timer.start()
 
     @staticmethod
     def _send(process, message):
@@ -161,19 +186,24 @@ class MeetingManager:
         handles = []
         threads = []
         worker_finished = threading.Event()
+        transport_closed = threading.Event()
+        worker_stop_sent = threading.Event()
         failure = []
         packets = self.packets
         stop_event = self.stopped
         capture_finished = False
         wav = None
+        mixer = None
         tracks = {}
         dest = self.folder(jid)
+        terminal = {'status':'failed','message':'Meeting stopped before capture began.'}
         def fail(message):
-            failure.append(message)
-            self.stopped.set()
-            if self.capture and self.capture.poll() is None:
-                try:self._send(self.capture,{'type':'stop'})
-                except (OSError,ValueError):pass
+            with self.lock:
+                if not failure:failure.append(message)
+                stop_event.set()
+                self.error=failure[0]
+                terminal.update(status='failed',message=self.error)
+                self._stop_capture()
         def consume_results():
             finished = False
             try:
@@ -187,7 +217,9 @@ class MeetingManager:
                             job.update(revision=job['revision']+1);self.put(job)
                         elif result['type']=='progress':self.processed=result['processed_seconds']
                         elif result['type']=='error':fail(result['error']);break
-                        elif result['type']=='finished':finished=True;break
+                        elif result['type']=='finished':
+                            if not worker_stop_sent.is_set():fail('Live inference finished before recording stopped. Captured audio has been saved.')
+                            finished=True;break
             except Exception:fail('Live transcription stopped unexpectedly. Captured audio has been saved.')
             finally:
                 if not finished and not failure:fail('Live inference exited before completing. Captured audio has been saved.')
@@ -197,8 +229,9 @@ class MeetingManager:
                 while True:
                     try:message=packets.get(timeout=1)
                     except queue.Empty:
-                        if stop_event.is_set():return
+                        if transport_closed.is_set():return
                         continue
+                    if message['type']=='stop':worker_stop_sent.set()
                     self._send(self.worker,message)
                     if message['type']=='stop':return
             except (OSError,ValueError):fail('Live transcription stopped. Captured audio has been saved.')
@@ -209,14 +242,23 @@ class MeetingManager:
                      else [python,str(Path(__file__).with_name('live_worker.py')),json.dumps(cfg)])
             log=(dest/'live-worker.log').open('w');handles.append(log)
             env=dict(os.environ,HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',OMP_NUM_THREADS='2',TOKENIZERS_PARALLELISM='false')
-            self.worker=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,text=True,bufsize=1,env=env)
+            with self.lock:
+                if stop_event.is_set():return
+                self.worker=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,text=True,bufsize=1,env=env)
             # Startup has a bounded wait so a failed worker cannot strand the meeting.
             ready_queue=queue.Queue()
-            threading.Thread(target=lambda:ready_queue.put(self.worker.stdout.readline()),daemon=True).start()
-            try:ready=json.loads(ready_queue.get(timeout=60))
-            except (queue.Empty,ValueError):raise RuntimeError('Local models could not start. Audio capture did not begin.')
+            thread=threading.Thread(target=lambda:ready_queue.put(self.worker.stdout.readline()),daemon=True)
+            thread.start();threads.append(thread)
+            deadline=time.monotonic()+60
+            while True:
+                if stop_event.is_set():return
+                try:line=ready_queue.get(timeout=.1);break
+                except queue.Empty:
+                    if time.monotonic()>=deadline:raise RuntimeError('Local models could not start. Audio capture did not begin.')
+            try:ready=json.loads(line)
+            except ValueError:raise RuntimeError('Local models could not start. Audio capture did not begin.')
             if ready.get('type')!='ready':raise RuntimeError(ready.get('error','Local models could not start.'))
-            if self.stopped.is_set():return
+            if stop_event.is_set():return
             for target in (consume_results,send_audio):
                 thread=threading.Thread(target=target,daemon=True);thread.start();threads.append(thread)
             audio=(dest/'audio.wav').open('w+b');handles.append(audio)
@@ -227,15 +269,18 @@ class MeetingManager:
                 track=wave.open(f,'wb');track.setnchannels(1);track.setsampwidth(2);track.setframerate(RATE);tracks[source]=track
             def sink(mixed, separate):
                 wav.writeframes((mixed*32767).astype('<i2').tobytes())
-                for source,track in tracks.items():track.writeframes((separate[source]*32767).astype('<i2').tobytes())
-                try:self.packets.put_nowait({'type':'audio','pcm':base64.b64encode(mixed.tobytes()).decode()})
-                except queue.Full:raise RuntimeError('Transcription fell30seconds behind. Recording stopped; captured audio has been saved.')
+                for source,track in tracks.items():track.writeframes((np.clip(separate[source],-1,1)*32767).astype('<i2').tobytes())
                 self.duration=wav.getnframes()/RATE
+                if not failure:
+                    try:packets.put_nowait({'type':'audio','pcm':base64.b64encode(mixed.tobytes()).decode()})
+                    except queue.Full:fail('Transcription fell 30 seconds behind. Recording stopped; captured audio has been saved.')
             mixer=SourceMixer(sources,sink)
             capture_log=(dest/'capture.log').open('w');handles.append(capture_log)
-            self.capture=subprocess.Popen([str(self.helper_path())],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-                stderr=capture_log,text=True,bufsize=1)
-            self._send(self.capture,{'type':'start','microphone':'microphone' in sources,'system':'system' in sources})
+            with self.lock:
+                if stop_event.is_set():return
+                self.capture=subprocess.Popen([str(self.helper_path())],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                    stderr=capture_log,text=True,bufsize=1)
+                self._send(self.capture,{'type':'start','microphone':'microphone' in sources,'system':'system' in sources})
             for line in self.capture.stdout:
                 result=json.loads(line);kind=result['type']
                 if kind=='audio':
@@ -246,28 +291,38 @@ class MeetingManager:
                     for handle in handles:handle.flush()
                     if shutil.disk_usage(dest).free < 256*1024**2:raise RuntimeError('Recording stopped because disk space is low. Audio has been saved.')
                 elif kind in ('recording','paused'):
-                    self.patch(jid,status=kind,message='Recording' if kind=='recording' else 'Paused')
+                    with self.lock:
+                        if not stop_event.is_set():
+                            self.patch(jid,status=kind,message='Recording' if kind=='recording' else 'Paused')
                     if kind=='paused':mixer.flush(result['time'],final=True)
                 elif kind=='stopped':
-                    mixer.flush(result['time'],final=True);capture_finished=True;break
+                    mixer.flush(result['time'],final=True);capture_finished=True
                 elif kind=='error':raise RuntimeError(result['error'])
             if not capture_finished or (self.capture.poll() is not None and self.capture.returncode):
                 raise RuntimeError('Audio capture stopped unexpectedly. Captured audio has been saved.')
             self.patch(jid,status='finishing',message='Finishing transcript…',duration=self.duration)
             wav.close()
             for track in tracks.values():track.close()
-            self.packets.put({'type':'stop'},timeout=10)
+            if failure:raise RuntimeError(failure[0])
+            packets.put({'type':'stop'},timeout=10)
             if not worker_finished.wait(timeout=60):raise RuntimeError('Transcription took too long to finish. Captured audio has been saved.')
             if failure:raise RuntimeError(failure[0])
             warnings=self.get(jid)['document']['warnings']
             if mixer.late_samples:warnings.append(f'{mixer.late_samples/RATE:.2f}s of late source samples were omitted from the mix. Review audio timing.')
             document=self.get(jid)['document'];document['warnings']=warnings
-            self.patch(jid,status='ready',message='Meeting saved on this Mac.',document=document,duration=self.duration)
+            terminal={'status':'ready','message':'Meeting saved on this Mac.','document':document}
         except Exception as exc:
-            self.error=str(exc)
-            self.patch(jid,status='failed',message=self.error,duration=self.duration)
+            fail(str(exc))
+            # The watermark intentionally holds the latest source packets in memory.
+            # Preserve that valid tail on protocol/worker errors as well as normal stop.
+            if mixer:
+                try:mixer.flush(max(mixer.last_packet.values()),final=True)
+                except Exception:pass  # Keep the original diagnostic, e.g. a disk write failure.
+            self.error=failure[0]
+            terminal={'status':'failed','message':self.error}
         finally:
             stop_event.set()
+            transport_closed.set()
             for recording in [wav, *tracks.values()]:
                 if recording:
                     try:recording.close()
@@ -282,8 +337,12 @@ class MeetingManager:
             for handle in handles:
                 handle.close()
             with self.lock:
+                if self.stop_timer:self.stop_timer.cancel();self.stop_timer=None
+                for child in (self.capture,self.worker):
+                    if child:
+                        child.stdin.close();child.stdout.close()
                 self.capture=self.worker=None
-                if self.get(jid)['status'] in LIVE:self.patch(jid,status='failed',message='Meeting stopped before capture began.')
+                self.patch(jid,**terminal,duration=self.duration)
                 self.jid=None
 
     def close(self):
@@ -291,10 +350,12 @@ class MeetingManager:
             self.stopped.set()
             for process in (self.capture,self.worker):
                 if process and process.poll() is None:process.terminate()
+            thread=self.thread
+        if thread and thread is not threading.current_thread():thread.join(timeout=5)
 
 
-def register_meetings(app, get, put, patch, folder):
-    manager=MeetingManager(get,put,patch,folder)
+def register_meetings(app, get, put, patch, folder, lock, inference_busy):
+    manager=MeetingManager(get,put,patch,folder,lock,inference_busy)
     app.extensions['speakerdesk']['meetings']=manager
     @app.get('/api/meeting')
     def meeting_status():return jsonify(manager.status())
