@@ -14,7 +14,7 @@ import wave
 from pathlib import Path
 from flask import abort, jsonify, request
 from pipeline import model_config, preflight
-from transcript import LANGUAGES
+from language_detection import LANGUAGE_CHOICES, LID_CHECKPOINT
 
 RATE = 16000
 BLOCK = 4000
@@ -81,10 +81,11 @@ class SourceMixer:
 
 
 class MeetingManager:
-    def __init__(self, get, put, patch, folder, lock, inference_busy):
+    def __init__(self, get, put, patch, folder, lock, inference_busy, recognizer=None):
         self.get, self.put, self.patch, self.folder = get, put, patch, folder
         self.lock = lock
         self.inference_busy = inference_busy
+        self.recognizer = recognizer
         self.jid = None
         self.capture = self.worker = None
         self.packets = queue.Queue(maxsize=120)  # At most30s audio; recording itself remains independent.
@@ -112,13 +113,13 @@ class MeetingManager:
                 abort(409,description='A meeting is already active.')
             if self.inference_busy():
                 abort(409,description='Wait for queued import inference to finish before starting a meeting.')
-            if language not in LANGUAGES or not isinstance(name,str) or not name.strip() or len(name)>160:
+            if language not in LANGUAGE_CHOICES or not isinstance(name,str) or not name.strip() or len(name)>160:
                 raise ValueError('Enter a meeting title and supported language.')
             if not sources or any(s not in ('microphone','system') for s in sources):
                 raise ValueError('Choose microphone audio, Mac audio, or both.')
             if not self.helper_path().is_file():
                 abort(409,description='Live capture is not included in this build yet. Recording imports remain available.')
-            issues = preflight(model_config())
+            issues = preflight(model_config(), language)
             if issues: abort(409,description='Open Settings to finish local model setup.')
             if shutil.disk_usage(self.folder('')).free < 512*1024**2:
                 abort(409,description='Free at least512MB before recording a meeting.')
@@ -129,9 +130,11 @@ class MeetingManager:
                    'created':time.time(),'duration':0.,'revision':0,'sources':sources,
                    'document':{'schema_version':1,'speakers':{'speaker_0':'Speaker 1'},'segments':[],
                        'provenance':{'kind':'pending_inference','mode':'live_phrase_windows',
+                           'language':language,'language_detector':LID_CHECKPOINT if language=='auto' else None,
                            'models':['nvidia/Nemotron-3-Diarization','CohereLabs/cohere-transcribe-03-2026'],
                            'timing':'NVIDIA speech-region boundaries; Cohere phrase text. No word timestamps.'},
-                       'warnings':['Phrase boundaries may cut words. Overlapping speech needs review.']}}
+                       'warnings':['Phrase boundaries may cut words. Overlapping speech needs review.'] +
+                           (['Automatic language detection leaves uncertain or unsupported speech blank for review; original audio is preserved. Language changes inside a probe may be missed.'] if language=='auto' else [])}}
             try:self.put(job)
             except Exception:
                 dest.rmdir()
@@ -215,6 +218,7 @@ class MeetingManager:
                             append_finalized_segment(document,result)
                             document['provenance']['kind']='local_inference'
                             job.update(revision=job['revision']+1);self.put(job)
+                            if self.recognizer:self.recognizer.observe(jid,result['segment']['speaker'])
                         elif result['type']=='progress':self.processed=result['processed_seconds']
                         elif result['type']=='error':fail(result['error']);break
                         elif result['type']=='finished':
@@ -269,6 +273,7 @@ class MeetingManager:
                 track=wave.open(f,'wb');track.setnchannels(1);track.setsampwidth(2);track.setframerate(RATE);tracks[source]=track
             def sink(mixed, separate):
                 wav.writeframes((mixed*32767).astype('<i2').tobytes())
+                audio.flush()  # Finalized voice clips must already be readable by the identity worker.
                 for source,track in tracks.items():track.writeframes((np.clip(separate[source],-1,1)*32767).astype('<i2').tobytes())
                 self.duration=wav.getnframes()/RATE
                 if not failure:
@@ -307,10 +312,12 @@ class MeetingManager:
             packets.put({'type':'stop'},timeout=10)
             if not worker_finished.wait(timeout=60):raise RuntimeError('Transcription took too long to finish. Captured audio has been saved.')
             if failure:raise RuntimeError(failure[0])
-            warnings=self.get(jid)['document']['warnings']
-            if mixer.late_samples:warnings.append(f'{mixer.late_samples/RATE:.2f}s of late source samples were omitted from the mix. Review audio timing.')
-            document=self.get(jid)['document'];document['warnings']=warnings
-            terminal={'status':'ready','message':'Meeting saved on this Mac.','document':document}
+            with self.lock:
+                job=self.get(jid)
+                if mixer.late_samples:job['document']['warnings'].append(f'{mixer.late_samples/RATE:.2f}s of late source samples were omitted from the mix. Review audio timing.')
+                self.put(job)
+            # Keep the latest document; an identity decision may finish during cleanup.
+            terminal={'status':'ready','message':'Meeting saved on this Mac.'}
         except Exception as exc:
             fail(str(exc))
             # The watermark intentionally holds the latest source packets in memory.
@@ -348,7 +355,13 @@ class MeetingManager:
                 if cleanup_failed and terminal['status']=='ready':
                     self.error='Meeting cleanup failed. Check available storage and review the recorded audio.'
                     terminal.update(status='failed',message=self.error)
-                try:self.patch(jid,**terminal,duration=self.duration)
+                try:
+                    job=self.get(jid)
+                    if self.duration>0 and job.get('document'):
+                        from review import retain_unassigned_audio
+                        retain_unassigned_audio(job['document'],self.duration)
+                        job['revision']+=1;self.put(job)
+                    self.patch(jid,**terminal,duration=self.duration)
                 finally:self.jid=None
 
     def close(self):
@@ -358,6 +371,7 @@ class MeetingManager:
                 if process and process.poll() is None:process.terminate()
             thread=self.thread
         if thread and thread is not threading.current_thread():thread.join(timeout=5)
+        if self.recognizer:self.recognizer.close()
 
 
 def append_finalized_segment(document, result):
@@ -367,8 +381,8 @@ def append_finalized_segment(document, result):
     document['segments'].append(result['segment'])
 
 
-def register_meetings(app, get, put, patch, folder, lock, inference_busy):
-    manager=MeetingManager(get,put,patch,folder,lock,inference_busy)
+def register_meetings(app, get, put, patch, folder, lock, inference_busy, recognizer=None):
+    manager=MeetingManager(get,put,patch,folder,lock,inference_busy,recognizer)
     app.extensions['speakerdesk']['meetings']=manager
     @app.get('/api/meeting')
     def meeting_status():return jsonify(manager.status())
@@ -377,7 +391,7 @@ def register_meetings(app, get, put, patch, folder, lock, inference_busy):
         body=request.get_json();sources=body.get('sources')
         if not isinstance(sources,list) or any(not isinstance(s,str) for s in sources) or len(sources)!=len(set(sources)):
             raise ValueError('Select valid meeting audio sources.')
-        return jsonify(manager.start(body.get('name','Meeting'),body.get('language','en'),sources)),201
+        return jsonify(manager.start(body.get('name','Meeting'),body.get('language','auto'),sources)),201
     @app.post('/api/meetings/<jid>/<action>')
     def control_meeting(jid,action):
         if action not in ('pause','resume','stop'):abort(404)

@@ -8,6 +8,9 @@ import sys
 import threading
 from pathlib import Path
 from audio import crop
+from language_detection import detector_issues, LID_CHECKPOINT
+from transcript import LANGUAGES
+from review import retain_unassigned_audio
 
 ROOT = Path(__file__).resolve().parent
 MODELS = {'nemotron': ('nvidia/Nemotron-3-Diarization', 8),
@@ -37,12 +40,13 @@ def model_config():
     models=Path(os.getenv('SPEAKERDESK_MODELS',home/'models'))
     return {'diar_path':os.getenv('DIAR_MODEL_PATH',str(models/'nemotron')),
             'cohere_path':os.getenv('COHERE_MODEL_PATH',str(models/'cohere-speech')),
+            'lid_path':os.getenv('LID_MODEL_PATH',str(models/'whisper-language')),
             'diar_python':os.getenv('DIAR_PYTHON',str(home/'.venv/bin/python')),
             'asr_python':os.getenv('ASR_PYTHON',str(home/'.venv-asr/bin/python')),
             'diar_kind':'nemotron', 'device':'mlx'}
 
 
-def preflight(config):
+def preflight(config, language=None):
     issues=[]
     for name,expected in [('diar_path','nemotron_diarization'),('cohere_path','cohere_asr')]:
         path=Path(config[name])
@@ -57,6 +61,8 @@ def preflight(config):
             issues.append(f'Set {name.upper()} to an inference environment Python executable.')
     if config['device'] != 'mlx':
         issues.append('This Mac setup uses MLX on Apple Silicon.')
+    if language == 'auto':
+        issues.extend(detector_issues(config.get('lid_path', '')))
     return issues
 
 
@@ -142,7 +148,7 @@ def run_worker(python, task, request, folder):
 
 def infer(audio_path, duration, language, folder, progress, config=None):
     config=config or model_config()
-    issues=preflight(config)
+    issues=preflight(config, language)
     if issues:
         raise RuntimeError(' '.join(issues))
     model_id,limit=MODELS[config['diar_kind']]
@@ -150,44 +156,71 @@ def infer(audio_path, duration, language, folder, progress, config=None):
     result=run_worker(config['diar_python'],'diarize',{'model_path':config['diar_path'],
         'model_kind':config['diar_kind'],'audio':str(audio_path),'device':config['device']},folder)
     turns=parse_turns(result['turns'],duration,limit)
-    if not turns:
-        raise RuntimeError('NVIDIA found no speech. No transcript was generated.')
-    chunks=speech_crops(turns)
-    crop_context(chunks,duration)
+    chunks=speech_crops(turns, max_seconds=6 if language == 'auto' else 24.5)
+    crop_context(chunks,duration,padding=0 if language == 'auto' else .22)
     if len(chunks)>10000:
         raise RuntimeError('Too many speaker transitions. Split the recording into smaller files.')
-    progress(f'Transcribing {len(chunks)} speech regions with Cohere…')
+    progress(f'Transcribing {len(chunks)} speech regions with Cohere…' if chunks else 'No speech regions detected. Audio is retained for review.')
     crop_dir=folder/'crops';crop_dir.mkdir(exist_ok=True)
     try:
         for i,chunk in enumerate(chunks):
             path=crop_dir/f'{i}.wav';crop(audio_path,path,chunk['audio_start'],chunk['audio_end']);chunk['audio']=str(path)
         asr=run_worker(config['asr_python'],'transcribe',{'model_path':config['cohere_path'],
-            'chunks':chunks,'language':language,'device':config['device']},folder)
+            'chunks':chunks,'language':language,'lid_path':config.get('lid_path'),
+            'device':config['device']},folder) if chunks else {'regions':[],'metrics':{}}
     finally:
         for path in crop_dir.glob('*.wav'):path.unlink()
         crop_dir.rmdir()
-    if len(asr['texts']) != len(chunks):
+    if len(asr['regions']) != len(chunks):
         raise RuntimeError('Cohere returned an incomplete transcript.')
     speakers={s:f'Speaker {int(s.split("_")[1])+1}' for s in sorted({t['speaker'] for t in turns})}
     segments=[]
-    for i,(chunk,text) in enumerate(zip(chunks,asr['texts'])):
+    for chunk,regions in zip(chunks,asr['regions']):
         if len(chunk['speakers'])>1:
             speaker='overlap';speakers[speaker]='Overlapping speakers'
         else:speaker=chunk['speakers'][0]
-        segments.append({'id':f'seg-{i}','start':chunk['start'],'end':chunk['end'],'speaker':speaker,
-                         'text':text,'speaker_candidates':chunk['speakers'],
-                         'review':len(chunk['speakers'])>1 or chunk['end']-chunk['start']<0.5,
-                         'timing':'audio_crop','confidence':None})
-    return {'schema_version':1,'speakers':speakers,'segments':segments,'diarization':turns,
+        for region in regions:
+            start=max(chunk['start'],chunk['audio_start']+region['start'])
+            end=min(chunk['end'],chunk['audio_start']+region['end'])
+            if end <= start:continue
+            segments.append({**region,'id':f'seg-{len(segments)}','start':start,'end':end,'speaker':speaker,
+                             'speaker_candidates':chunk['speakers'],'voice_eligible':len(chunk['speakers'])==1,
+                             'review':region['review'] or len(chunk['speakers'])>1 or end-start<.5,
+                             'timing':'audio_crop','confidence':None})
+    return retain_unassigned_audio({'schema_version':1,'speakers':speakers,'segments':segments,'diarization':turns,
             'provenance':{'kind':'local_inference','asr_model':'CohereLabs/cohere-transcribe-03-2026',
                           'diarization_model':model_id,'language':language,'device':config['device'],
-                          'timing':'NVIDIA speech regions split into ≤25-second crops; no word alignment',
+                          'language_detector':LID_CHECKPOINT if language=='auto' else None,
+                          'timing':('NVIDIA speech regions with ≤3-second language probes and ≤6-second ASR crops; no word alignment' if language=='auto' else 'NVIDIA speech regions split into ≤25-second crops; no word alignment'),
                           'speaker_limit':limit,
                           'diarization_checkpoint':'mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f',
                           'asr_checkpoint':'spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12',
                           'metrics':{'diarization':result.get('metrics',{}),'asr':asr.get('metrics',{})},
                           'libraries':{'diarization':result.get('versions',{}),'asr':asr.get('versions',{})}},
             'warnings':['Times are speech crop boundaries, not word timestamps. Review subtitle timing.',
-                        'ASR crops include up to 0.22 seconds of neighboring silence to preserve word endings.',
+                        ('Automatic language detection may leave uncertain or unsupported speech blank for review; original audio is preserved. Language changes inside a probe may be missed.' if language=='auto' else 'ASR crops include up to 0.22 seconds of neighboring silence to preserve word endings.'),
                         'Overlapping speech is mixed audio; text cannot be reliably assigned to an individual speaker.',
-                        f'This diarizer supports at most {limit} speakers; excess speakers cannot be reliably detected.']}
+                        f'This diarizer supports at most {limit} speakers; excess speakers cannot be reliably detected.']}, duration)
+
+
+def retry_passage(audio_path, start, end, language, folder, config=None):
+    """One explicitly chosen language/crop; no speaker relabeling or full rerun."""
+    if language not in LANGUAGES or not all(map(math.isfinite, (start,end))) or not 0 <= start < end or end-start > 30:
+        raise ValueError('Choose a supported language and a passage of at most 30 seconds.')
+    config = config or model_config()
+    metadata = json.loads((Path(config['cohere_path'])/'config.json').read_text())
+    if (metadata.get('model_type') != 'cohere_asr'
+            or not (Path(config['cohere_path'])/'model.safetensors').is_file()
+            or not Path(config['asr_python']).is_file() or config['device'] != 'mlx'):
+        raise ValueError('Finish local transcription model setup before retrying this passage.')
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='passage-retry-', dir=folder) as temporary:
+        target = Path(temporary); audio = target/'passage.wav'
+        crop(audio_path,audio,start,end)
+        result = run_worker(config['asr_python'],'transcribe',{'model_path':config['cohere_path'],
+            'chunks':[{'audio':str(audio),'speakers':['manual_retry']}],
+            'language':language,'device':'mlx'},target)
+        regions = result['regions']
+        if len(regions) != 1 or len(regions[0]) != 1:
+            raise RuntimeError('The retry returned an incomplete passage result.')
+        return {**regions[0][0], 'start':start, 'end':end}

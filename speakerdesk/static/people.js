@@ -4,8 +4,6 @@ let people = [], voiceAvailable = false, nameContext = null, identityBusy = fals
 async function loadPeople() {
   const state = await api('/api/people');
   people = state.people; voiceAvailable = state.voice_available;
-  $('settings-voice-note').textContent = voiceAvailable
-    ? 'Voice suggestions need your confirmation.' : 'Voice recognition is unavailable.';
 }
 function acceptIdentityJob(result) {
   if (selected?.id !== result.id) return;
@@ -65,28 +63,36 @@ async function openNamePicker(track) {
   await loadPeople();
   if (selected?.id !== jid || !doc?.speakers[track]) return;
   nameContext = {jid, track, revision: selected.revision};
-  const assigned = selected.speaker_assignments?.[track]?.person_id || '';
+  const assignment=selected.speaker_assignments?.[track];
+  const assigned = assignment?.person_id || '';
+  const confirmed=assigned && assignment.source!=='automatic_voice' && assignment.confirmed!==false;
   personOptions(assigned); $('name-value').value = doc.speakers[track];
   $('name-title').textContent = `Name ${doc.speakers[track]}`;
   $('name-message').textContent = ''; $('voice-consent').checked = false;
   $('voice-clip-list').replaceChildren();
-  for (const segment of doc.segments.filter(s => s.speaker === track && !s.review && s.finalized !== false
+  for (const segment of doc.segments.filter(s => s.speaker === track && (s.voice_eligible ?? !s.review) && s.finalized !== false
       && !track.startsWith('overlap') && (s.speaker_candidates || [track]).length === 1
-      && s.end-s.start >= 2 && s.end-s.start <= 10)) {
-    const label = node('label', undefined, 'voice-clip');
-    const check = node('input'); check.type = 'checkbox'; check.value = segment.id;
-    label.append(check, node('span', `${time(segment.start)}–${time(segment.end)} · ${segment.text}`));
-    $('voice-clip-list').append(label);
+      && s.end-s.start >= 2)) {
+    for(let start=segment.start;segment.end-start>=2;) {
+      const end=segment.end-segment.start>10?Math.min(start+6,segment.end):segment.end;
+      const label = node('label', undefined, 'voice-clip');
+      const check = node('input'); check.type = 'checkbox';
+      check.value=segment.end-segment.start>10?`${segment.id}@${Math.floor(start*16000)}:${Math.floor(end*16000)}`:segment.id;
+      const description=segment.end-segment.start>10?'Audio clip from this speaker’s longer passage':segment.text;
+      label.append(check, node('span', `${time(start)}–${time(end)} · ${description}`));
+      $('voice-clip-list').append(label);start=end;
+    }
   }
   const usable = voiceAvailable && doc.provenance?.kind === 'local_inference';
   $('name-voice-section').hidden = !voiceAvailable;
   $('voice-clips').hidden = !usable;
-  $('voice-consent-label').hidden = !usable || !assigned;
-  $('remember-voice').hidden = !usable || !assigned;
+  $('voice-consent-label').hidden = !usable || !confirmed;
+  $('remember-voice').hidden = !usable || !confirmed;
   $('check-voice').hidden = !usable || !!selected.speaker_assignments?.[track];
   $('voice-note').textContent = !usable ? 'Voice recognition needs finalized local transcription passages.'
-    : assigned ? 'Only the passages you select are used. Saving a voice requires your consent.'
-    : 'Apply a saved person first to remember their voice. A suggestion always needs your confirmation.';
+    : confirmed ? 'Only the passages you select are used. Saving a voice requires your consent.'
+    : assignment?.source==='automatic_voice' ? 'Recognized from a saved voice. Apply the name to confirm it before saving new voice passages.'
+    : 'Apply a saved person first to remember their voice. Uncertain speakers keep their current label.';
   $('name-dialog').showModal(); $('name-value').focus(); $('name-value').select();
 }
 async function refreshIdentitySuggestions() {
@@ -169,7 +175,7 @@ function wirePeople() {
         if (!pid || $('name-person').value !== pid) throw new Error('Apply the saved person before remembering their voice.');
         if (!$('voice-consent').checked) throw new Error('Choose Remember this person’s voice to give consent.');
         await api(`/api/people/${pid}/voice`, {method: 'POST', body: JSON.stringify({...body, meeting_id: context.jid, track_id: context.track, consent: true})});
-        $('name-dialog').close(); notice('Voice saved on this Mac. Future suggestions need confirmation.');
+        $('name-dialog').close(); notice('Voice saved on this Mac for future meetings.');
       } else {
         const result = await api(`/api/jobs/${context.jid}/speakers/${encodeURIComponent(context.track)}/voice-suggestion`, {method: 'POST', body: JSON.stringify(body)});
         $('name-dialog').close(); acceptIdentityJob(result.job);

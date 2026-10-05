@@ -5,10 +5,13 @@ cd "$(dirname "$0")/.."
 export UV_CACHE_DIR="$PWD/.cache/uv"
 uv venv --python 3.13 .venv-package
 uv pip install --python .venv-package/bin/python -r requirements-packaging.lock.txt
+uv pip install --python .venv-package/bin/python --no-deps --require-hashes -r requirements-voice.lock.txt
 .venv-package/bin/python - <<'PY'
 import shutil,site
 from pathlib import Path
-shutil.copyfile('packaging/overrides/mlx_audio/vad/models/__init__.py',
-               Path(site.getsitepackages()[0])/'mlx_audio/vad/models/__init__.py')
+for family in ('vad','stt'):
+    relative=f'mlx_audio/{family}/models/__init__.py'
+    shutil.copyfile(Path('packaging/overrides')/relative,
+                   Path(site.getsitepackages()[0])/relative)
 PY
 echo 'Dependencies installed. Start the app, then use its setup control to download models.'

@@ -16,11 +16,14 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 from audio import normalize
-from pipeline import infer, model_config, preflight, MODELS
+from pipeline import infer, model_config, preflight, MODELS, retry_passage
+from language_detection import LANGUAGE_CHOICES, detector_issues
 from transcript import LANGUAGES, validate, export
 from model_setup import register_setup
 from live_meeting import register_meetings, LIVE
 from people import register_people, reconcile_assignments
+from voice_profiles import speaker_audio_eligible
+from voice_recognition import RecognitionPreference, VoiceRecognition
 
 ROOT=Path(__file__).resolve().parent
 ACTIVE=('preparing','queued','processing')+LIVE
@@ -94,8 +97,31 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                            lambda message:patch(jid,message=message))
             document=validate(document,job['duration'])
             patch(jid,status='ready',document=document,revision=job['revision']+1,message='Transcript ready. Review names, text and timing.')
+            recognizer.observe(jid)
         except Exception as exc:
             patch(jid,status='failed',message=str(exc) if isinstance(exc,(ValueError,RuntimeError)) else 'Processing failed. Check the inference environment and storage.')
+
+    def process_passage_retry(jid, sid, language, operation, original):
+        candidate = {'id':operation, 'language':language, 'original_text':original['text'],
+                     'start':original['start'], 'end':original['end'], 'speaker':original['speaker'], 'created':time.time()}
+        try:
+            result=retry_passage(folder(jid)/'audio.wav',original['start'],original['end'],language,folder(jid))
+            candidate.update(text=result['text'],review=result['review'],
+                             transcription_review=result.get('transcription_review'))
+        except Exception:
+            app.logger.exception('Local passage retry failed')
+            candidate.update(text='',review=True,error='This passage could not be transcribed. Its audio and existing words are retained.')
+        with lock:
+            job=get(jid)
+            if (job.get('passage_retry') or {}).get('id') != operation:return
+            segment=next((s for s in job['document']['segments'] if s['id']==sid),None)
+            if segment and all(segment[k]==original[k] for k in ('start','end','speaker','text')):
+                # A retry is a candidate. Existing and edited words remain until
+                # the user explicitly chooses this text in the editor.
+                segment['retry_candidate']=candidate
+                job['revision']+=1
+            job.update(status='ready',message='Retry result ready for review. Existing text is unchanged.',passage_retry=None)
+            put(job)
 
     @app.before_request
     def local_access():
@@ -131,7 +157,8 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     @app.get('/api/config')
     def config():
         cfg=model_config();issues=preflight(cfg)
-        return jsonify(languages=LANGUAGES,readiness={'configured':not issues,'issues':issues,
+        return jsonify(languages=LANGUAGE_CHOICES,default_language='auto',readiness={'configured':not issues,'issues':issues,
+            'automatic_language':not detector_issues(cfg['lid_path']),
             'model':MODELS.get(cfg['diar_kind'],('unknown',0))[0],
             'speaker_limit':MODELS.get(cfg['diar_kind'],('',0))[1],
             'device':cfg['device'],'note':'Model execution is checked when inference starts. Configuration is not proof of working inference.'},
@@ -144,9 +171,9 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
 
     @app.post('/api/jobs')
     def upload():
-        files=request.files.getlist('files');language=request.form.get('language','en')
+        files=request.files.getlist('files');language=request.form.get('language','auto')
         if not files or len(files)>16:raise ValueError('Choose 1–16 audio files per batch.')
-        if language not in LANGUAGES:raise ValueError('Select a supported recording language.')
+        if language not in LANGUAGE_CHOICES:raise ValueError('Select a supported recording language.')
         for item in files:
             if Path(item.filename or '').suffix.lower() not in ('.wav','.mp3','.m4a','.flac','.ogg','.aiff','.aif','.mp4','.aac','.webm'):
                 raise ValueError('Supported formats: WAV, MP3, M4A, FLAC, OGG, AIFF, MP4, AAC and WebM.')
@@ -190,7 +217,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             if job.get('document') and job.get('document',{}).get('segments'):abort(409,description='Create another upload to rerun inference without overwriting edits.')
             if app.extensions['speakerdesk']['meetings'].jid:
                 abort(409,description='Finish the active meeting before running import inference.')
-            issues=preflight(model_config())
+            issues=preflight(model_config(), job['language'])
             if issues:abort(409,description=' '.join(issues))
             patch(jid,status='queued',message='Waiting for local inference…');executor.submit(process,jid)
         return jsonify(get(jid)),202
@@ -203,6 +230,21 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             if job['status'] in ACTIVE or not job.get('duration'):abort(409,description='Wait for audio preparation and inference to finish.')
             if body.get('revision')!=job['revision']:abort(409,description='This transcript changed in another tab. Reload before saving.')
             incoming=validate(body.get('document'),job['duration'])
+            original={s['id']:s for s in (job.get('document') or {}).get('segments',[])}
+            for segment in incoming['segments']:
+                prior=original.get(segment['id'])
+                # Client edits/imports cannot manufacture server-owned clean-audio evidence.
+                unchanged=bool(prior and not body.get('imported') and all(segment[k]==prior[k] for k in ('speaker','start','end')))
+                segment['voice_eligible']=bool(unchanged and speaker_audio_eligible(prior,prior['speaker']))
+                segment['speaker_candidates']=prior.get('speaker_candidates',[prior['speaker']]) if unchanged else []
+                # A candidate belongs to its saved audio/track. Client edits cannot
+                # retain or manufacture a retry for different source bounds.
+                segment.pop('retry_candidate',None)
+                if unchanged and prior.get('retry_candidate'):
+                    candidate=copy.deepcopy(prior['retry_candidate'])
+                    if segment['text']==candidate.get('text') and segment['text']!=prior['text']:
+                        candidate.update(replaced_text=prior['text'],accepted_at=time.time())
+                    segment['retry_candidate']=candidate
             # Provenance is server-owned. Editing cannot pretend to be fresh inference.
             if body.get('imported'):
                 document={'schema_version':1,'speakers':incoming['speakers'],'segments':incoming['segments'],
@@ -220,6 +262,30 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             job.update(document=document,revision=job['revision']+1,status='ready',message='Saved locally.')
             put(job)
         return jsonify(get(jid))
+
+    @app.post('/api/jobs/<jid>/retry')
+    def retry_segment(jid):
+        body=request.get_json()
+        if not isinstance(body,dict):raise ValueError('Choose a passage and its language.')
+        language=body.get('language')
+        if language not in LANGUAGES:raise ValueError('Choose the language for this passage; Automatic is not a retry override.')
+        with lock:
+            job=get(jid)
+            if job['status'] in ACTIVE or inference_busy() or app.extensions['speakerdesk']['meetings'].jid:
+                abort(409,description='Finish current recording or transcription before retrying a passage.')
+            if body.get('revision') != job['revision']:
+                abort(409,description='This transcript changed. Save or reload before retrying.')
+            segment=next((s for s in (job.get('document') or {}).get('segments',[]) if s['id']==body.get('segment_id')),None)
+            if not segment:abort(404)
+            if segment['end']-segment['start'] > 30:
+                raise ValueError('Choose a passage of at most 30 seconds before retrying.')
+            if not (folder(jid)/'audio.wav').is_file():abort(409,description='This passage needs its original saved audio.')
+            operation=uuid.uuid4().hex
+            job.update(status='processing',message='Retrying this passage locally; existing words are retained.',
+                       passage_retry={'id':operation,'segment_id':segment['id'],'language':language})
+            put(job)
+            executor.submit(process_passage_retry,jid,segment['id'],language,operation,copy.deepcopy(segment))
+        return jsonify(get(jid)),202
 
     @app.get('/api/jobs/<jid>/export/<kind>')
     def download(jid,kind):
@@ -245,9 +311,52 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
         return jsonify(deleted=True)
 
     app.extensions['speakerdesk']={'executor':executor,'data':data}
-    register_setup(app)
-    register_people(app,db,get,put,lock,folder,voice_backend,voice_calibration)
-    register_meetings(app,get,put,patch,folder,lock,inference_busy)
+    voice_message='Finish local model setup to recognize saved voices.'
+    if voice_backend is None and voice_calibration is None and os.getenv('SPEAKERDESK_VOICE_CONFIG'):
+        try:
+            from voice_coreml import load_approved_runtime
+            voice_backend,voice_calibration=load_approved_runtime(os.environ['SPEAKERDESK_VOICE_CONFIG'])
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            voice_message='Voice recognition needs local setup.'
+            app.logger.warning('Voice setup is unavailable: %s',exc)
+    app.extensions['speakerdesk']['voice_message']=voice_message
+    def voice_busy():
+        with db() as conn:
+            return any(json.loads(row['payload'])['status'] in ACTIVE for row in conn.execute('SELECT payload FROM jobs'))
+    register_people(app,db,get,put,lock,folder,voice_backend,voice_calibration,voice_busy)
+    preference=RecognitionPreference(db)
+    recognizer=VoiceRecognition(get,put,folder,lock,lambda:app.extensions['speakerdesk']['voice_runtime'],
+                               app.extensions['speakerdesk']['people'],preference,app.logger)
+    app.extensions['speakerdesk'].update(recognition=recognizer,recognition_preference=preference)
+
+    @app.get('/api/recognition')
+    def recognition_status():return jsonify(enabled=preference.enabled())
+
+    @app.patch('/api/recognition')
+    def recognition_update():
+        with lock:
+            preference.set_enabled(request.get_json().get('enabled'))
+            if not preference.enabled():
+                # Invalidates pending work even when the user quickly turns recognition back on.
+                with db() as conn:jobs=[json.loads(row['payload']) for row in conn.execute('SELECT payload FROM jobs')]
+                for job in jobs:
+                    for check in job.get('voice_checks',{}).values():
+                        if check['status']=='checking':check['status']='cancelled'
+                    put(job)
+        return jsonify(enabled=preference.enabled())
+
+    def activate_voice(model_dir,calibration_path):
+        from voice_coreml import load_approved_runtime
+        runtime=load_approved_runtime(calibration_path,model_dir=model_dir)
+        with lock:
+            app.extensions['speakerdesk']['voice_runtime']=runtime
+            app.extensions['speakerdesk']['voice_message']='Saved voices are recognized once when a new speaker appears. You can correct any name.'
+    register_setup(app,activate_voice)
+    managed_voice=app.extensions['speakerdesk']['voice_setup']
+    if voice_backend is None and managed_voice.released() and managed_voice.supported() and managed_voice.installed():
+        try:activate_voice(managed_voice.root,managed_voice.calibration_path)
+        except (ValueError,OSError,KeyError,TypeError) as exc:app.logger.warning('Managed voice setup is unavailable: %s',exc)
+    register_meetings(app,get,put,patch,folder,lock,inference_busy,recognizer)
     return app
 
 

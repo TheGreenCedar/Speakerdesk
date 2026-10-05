@@ -1,6 +1,7 @@
 """Check tracked payload boundaries, syntax and release version consistency."""
 import ast
 import json
+import plistlib
 import re
 import subprocess
 from pathlib import Path
@@ -11,7 +12,9 @@ required = {'packaging/overrides/mlx_audio/vad/models/__init__.py',
             'packaging/runtime.spec', 'packaging/sidecar.py',
             'packaging/THIRD_PARTY_NOTICES.txt', 'desktop/capture/MeetingCapture.swift',
             'desktop/capture/Info.plist', 'desktop/src-tauri/icons/icon.icns',
-            'desktop/src-tauri/icons/icon.png'}
+            'desktop/src-tauri/icons/icon.png', 'speakerdesk/redimnet2_artifact.json',
+            'speakerdesk/voice_calibration.json', 'speakerdesk/voice_setup.py', 'speakerdesk/voice_recognition.py',
+            'packaging/licenses/redimnet2/LICENSE', 'packaging/licenses/voice-runtime/packages.json'}
 assert required.issubset(set(tracked)), f'Missing packaging source: {sorted(required-set(tracked))}'
 prohibited_prefixes = ('models/', 'vendor/', '.venv', '.cache/', 'speakerdesk/data/',
                        'speakerdesk/fixtures/', 'fixtures/', 'evidence/', 'attachments/',
@@ -31,6 +34,8 @@ for name in filter(None, tracked):
         assert not re.search(r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,}', content), f'Credential-like literal: {name}'
 versions = [json.loads((root/p).read_text())['version'] for p in
             ['desktop/package.json', 'desktop/package-lock.json', 'desktop/src-tauri/tauri.conf.json']]
+capture_info = plistlib.loads((root/'desktop/capture/Info.plist').read_bytes())
+versions.append(capture_info['CFBundleVersion'])
 versions.append(re.search(r'^version = "([^"]+)"', (root/'desktop/src-tauri/Cargo.toml').read_text(), re.M)[1])
 assert len(set(versions)) == 1, f'Version mismatch: {versions}'
 lock = (root/'desktop/src-tauri/Cargo.lock').read_text()

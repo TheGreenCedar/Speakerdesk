@@ -37,22 +37,20 @@ def run(task, request):
         output = {'turns': [f'{s.start} {s.end} speaker_{s.speaker}' for s in result.segments]}
     elif task == 'transcribe':
         from mlx_speech.generation.cohere_asr import CohereAsrModel
+        from language_detection import SpeechTranscriber
         import soundfile as sf
 
         model = CohereAsrModel.from_path(model_path)
+        transcriber = SpeechTranscriber(model, request['language'], request.get('lid_path'))
         loaded = time.perf_counter()
-        texts = []
+        regions = []
         for chunk in request['chunks']:
             check_memory()
             audio, rate = sf.read(chunk['audio'], dtype='float32')
-            result = model.transcribe(audio, sample_rate=rate, language=request['language'],
-                                      max_new_tokens=448)
-            if len(result.tokens) >= 448:
-                raise RuntimeError('Cohere reached token limit; shorten this speech region.')
-            texts.append(result.text.strip())
-            print(f'Transcribed region {len(texts)}/{len(request["chunks"])}', flush=True)
+            regions.append(transcriber.transcribe(audio, rate, tuple(chunk['speakers'])))
+            print(f'Transcribed region {len(regions)}/{len(request["chunks"])}', flush=True)
             mx.clear_cache()
-        output = {'texts': texts}
+        output = {'regions': regions}
     else:
         raise ValueError('Unknown task.')
     mx.synchronize()
@@ -62,6 +60,7 @@ def run(task, request):
                          'peak_mlx_bytes': mx.get_peak_memory(),
                          'peak_process_rss_bytes': resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
     packages = ['mlx', 'mlx-audio' if task == 'diarize' else 'mlx-speech']
+    if task == 'transcribe' and request['language'] == 'auto':packages.append('mlx-audio')
     output['versions'] = {p: importlib.metadata.version(p) for p in packages}
     return output
 

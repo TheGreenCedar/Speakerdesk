@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 
 root=Path(__file__).resolve().parents[1]
-version=json.loads((root/'desktop/src-tauri/tauri.conf.json').read_text())['version']
+config=json.loads((root/'desktop/src-tauri/tauri.conf.json').read_text())
+version=config['version']
 directory=root/'release'
 files=[]
 for suffix in ['.dmg','.app.zip']:
@@ -17,7 +18,7 @@ for suffix in ['.dmg','.app.zip']:
 notarized=os.getenv('SPEAKERDESK_NOTARIZED')=='1'
 manifest={'schema_version':1,'product':'Speakerdesk','version':version,
           'source_commit':os.environ['GITHUB_SHA'],'platform':'macos','architecture':'arm64',
-          'minimum_os':'14.0','channel':'candidate','public_ready':False,
+          'minimum_os':config['bundle']['macOS']['minimumSystemVersion'],'channel':'candidate','public_ready':False,
           'signing':'developer-id' if notarized else 'adhoc','notarized':notarized,
           'native_meeting_qa':'pending','files':files}
 (directory/'artifact-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
