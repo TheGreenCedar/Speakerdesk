@@ -2,7 +2,7 @@
 
 Private meeting transcription and speaker labeling for Apple Silicon Macs, using NVIDIA Nemotron 3 diarization and Cohere Transcribe through MLX. Audio stays on the Mac; the app downloads pinned public model checkpoints during explicit setup. No paid transcription API is required.
 
-The desktop shell uses Tauri, a bundled Python runtime and a Swift microphone/system-audio capture helper. macOS 14 or newer and an Apple Silicon processor are required. Allow roughly 2.4 GB for model setup and additional space for recordings. The models themselves occupy about 1.8 GB. This source repository contains no recordings, model weights, credentials or prebuilt application.
+The desktop shell uses Tauri, a bundled Python runtime and a Swift microphone/system-audio capture helper. macOS 15 or newer and an Apple Silicon processor are required. Allow roughly 2.4 GB for model setup and additional space for recordings. The models themselves occupy about 1.8 GB. This source repository contains no recordings, model weights, credentials or prebuilt application.
 
 ## Interface previews
 
@@ -59,6 +59,6 @@ Local real-model streaming has been exercised on synthetic two-voice speech. CPU
 
 The current build remains a release candidate until notarization, normal first-launch checks and native meeting capture checks succeed. [Download contract](docs/download-contract.md) describes the future stable download handoff.
 
-People saves reusable local names; speaker corrections and confirmed introduction suggestions apply to the current meeting. Voice-profile interfaces are present, but recognition stays unavailable until a local model adapter and measured calibration are approved. No voice is saved by adding a name. See [People and voice profiles](docs/people-and-voice-profiles.md) for storage behavior and the proposed measured plan.
+People saves reusable local names; corrections and confirmed introduction suggestions apply to the current meeting. B6 voice recognition is included in standard local model setup and defaults on, with an off switch in Settings. Each new speaker is checked once after multiple clean clips, and diarization carries the name through the meeting. Uncertain speakers keep their current label. Choose Remember voice explicitly to save a profile; automatic matches never create or update profiles. Native synthetic extraction and an independent scripted-session pilot passed; human meeting accuracy and packaged concurrency remain unmeasured. See [People and voice profiles](docs/people-and-voice-profiles.md) and the [integration and measurement results](docs/redimnet2-integration.md).
 
 Third-party model and dependency terms are included in [packaging/THIRD_PARTY_NOTICES.md](packaging/THIRD_PARTY_NOTICES.md) and the accompanying license files. NVIDIA's checkpoint uses OpenMDW 1.1; Cohere's checkpoint uses Apache 2.0. Model licenses remain applicable when downloading weights separately.

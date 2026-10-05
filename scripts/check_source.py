@@ -12,7 +12,9 @@ required = {'packaging/overrides/mlx_audio/vad/models/__init__.py',
             'packaging/runtime.spec', 'packaging/sidecar.py',
             'packaging/THIRD_PARTY_NOTICES.txt', 'desktop/capture/MeetingCapture.swift',
             'desktop/capture/Info.plist', 'desktop/src-tauri/icons/icon.icns',
-            'desktop/src-tauri/icons/icon.png'}
+            'desktop/src-tauri/icons/icon.png', 'speakerdesk/redimnet2_artifact.json',
+            'speakerdesk/voice_calibration.json', 'speakerdesk/voice_setup.py', 'speakerdesk/voice_recognition.py',
+            'packaging/licenses/redimnet2/LICENSE', 'packaging/licenses/voice-runtime/packages.json'}
 assert required.issubset(set(tracked)), f'Missing packaging source: {sorted(required-set(tracked))}'
 prohibited_prefixes = ('models/', 'vendor/', '.venv', '.cache/', 'speakerdesk/data/',
                        'speakerdesk/fixtures/', 'fixtures/', 'evidence/', 'attachments/',

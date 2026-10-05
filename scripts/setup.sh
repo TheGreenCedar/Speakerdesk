@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 export UV_CACHE_DIR="$PWD/.cache/uv"
 uv venv --python 3.13 .venv-package
 uv pip install --python .venv-package/bin/python -r requirements-packaging.lock.txt
+uv pip install --python .venv-package/bin/python --no-deps --require-hashes -r requirements-voice.lock.txt
 .venv-package/bin/python - <<'PY'
 import shutil,site
 from pathlib import Path

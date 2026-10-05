@@ -76,7 +76,7 @@ def run(config):
                 if not passage['text'] and passage['language'] is not None:continue
                 emit({'type':'segment', 'segment':{**passage,'id':uuid.uuid4().hex,
                     'start':start+passage['start'], 'end':min(end,start+passage['end']), 'speaker':speaker,
-                    'speaker_candidates':names,'timing':'diarized_phrase',
+                    'speaker_candidates':names,'voice_eligible':len(names)==1,'timing':'diarized_phrase',
                     'confidence':None, 'review':passage['review'] or len(names)>1 or end-start>=5.99},
                     'speakers':{speaker:('Speaker '+str(int(names[0].split('_')[-1])+1)
                         if len(names)==1 else 'Overlapping speakers')},

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "approved_for_recognition": true,
+  "fixture_source": "synthetic",
+  "model": {
+    "model_id": "aufklarer/ReDimNet2-B6-CoreML",
+    "revision": "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:ALL",
+    "artifact_sha256": "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+    "dimension": 192,
+    "sample_rate": 16000
+  },
+  "compute_units": "ALL",
+  "dataset_id": "macos-compact-tts-development-v1",
+  "mode": "calibration",
+  "fixture_manifest_sha256": "4a6eb0102d420587fba74fa0047db89f0ec17dcaeb75da79eb1c6144562d44a7",
+  "calibration": {
+    "dataset_id": "macos-compact-tts-development-v1:calibration",
+    "threshold": 0.7264125328398843,
+    "margin": 0.10003429964182987,
+    "genuine_trials": 8,
+    "impostor_trials": 4,
+    "false_accept_rate": 0.0,
+    "false_reject_rate": 0.0,
+    "minimum_clips": 2
+  },
+  "held_out": {
+    "genuine_trials": 8,
+    "impostor_trials": 8,
+    "false_accepts": 0,
+    "false_rejects": 0,
+    "wrong_identities": 0,
+    "false_accept_rate": 0.0,
+    "false_reject_rate": 0.0,
+    "dataset_id": "macos-compact-tts-development-v1:held-out",
+    "meets_error_limits": true
+  },
+  "accepted_error_limits": {
+    "maximum_far": 0.0,
+    "maximum_frr": 0.25
+  },
+  "limitation": "Observed labelled-fixture error rates. Synthetic voices are a development pilot, not a population accuracy estimate for human voices, rooms or microphones.",
+  "measurement_report_sha256": "048c7163a8ad353b0a5aa2b79933deba603f4ecfdcd60dde09485f9b1937811c",
+  "measurement_summary": {
+    "clips": 72,
+    "seconds": 12.23747020913288,
+    "peak_rss_bytes": 214630400,
+    "known_voices": 4,
+    "unknown_voices": 4,
+    "unseen_held_out_voices": 2,
+    "first_load_ms": 2160.131041891873,
+    "warm_predict_median_ms": 130.83420787006617
+  }
+}

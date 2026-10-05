@@ -27,6 +27,7 @@ from app import create_app
 from language_detection import LanguagePolicy, SpeechTranscriber, WhisperLanguageDetector, language_tokens, detector_issues
 from pipeline import infer, preflight
 from transcript import validate, export
+from voice_profiles import automatic_clips
 
 METADATA = ROOT/'tests/metadata/whisper-tiny'
 
@@ -253,6 +254,9 @@ class WorkerLanguageTests(unittest.TestCase):
                 document=validate(infer(audio,6,'auto',folder,lambda message:None,cfg),6)
             self.assertEqual([(s['start'],s['end'],s['language'],s['text']) for s in document['segments']],
                              [(0,3,'en','Original English'),(3,6,'fr','Français original')])
+            self.assertTrue(all(segment['voice_eligible'] for segment in document['segments']))
+            clips=automatic_clips({'id':'auto-import','document':document},'speaker_0')
+            self.assertEqual([(c.start,c.end) for c in clips],[(0,3),(3,6)])
             self.assertEqual(document['provenance']['language'],'auto')
             self.assertIn('whisper-tiny',document['provenance']['language_detector'])
             self.assertEqual(audio.read_bytes(),original)
@@ -287,12 +291,44 @@ class WorkerLanguageTests(unittest.TestCase):
                 self.assertEqual([s['language'] for s in segments],languages)
                 self.assertEqual([s['text'] for s in segments],texts)
                 self.assertTrue(all(s['speaker_candidates']==['speaker_0'] for s in segments))
+                self.assertTrue(all(s['voice_eligible'] for s in segments))
+                job={'id':'auto-live','document':{'provenance':{'kind':'local_inference'},'segments':segments}}
+                clips=automatic_clips(job,'speaker_0')
+                self.assertEqual([(c.start,c.end) for c in clips],[(0,3),(3,6)])
                 self.assertEqual(events[-1]['type'],'finished')
                 self.assertEqual(events[-1]['duration'],6)
                 if languages[-1] is None:
                     self.assertTrue(segments[-1]['review'])
                     self.assertEqual(segments[-1]['language_detection']['reason'],'unsupported')
                     self.assertEqual(asr.transcribe.call_count,1)
+
+
+    def test_auto_overlap_stays_blank_and_cannot_supply_voice_enrollment_clips(self):
+        import inference_worker
+        with tempfile.TemporaryDirectory() as temporary:
+            folder=Path(temporary);audio=folder/'audio.wav'
+            with wave.open(str(audio),'wb') as wav:
+                wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(16000)
+                wav.writeframes(np.full(6*16000,3276,dtype='<i2').tobytes())
+            original=audio.read_bytes()
+            model=folder/'cohere';model.mkdir();(model/'model.safetensors').touch()
+            asr=cohere_model();detector=Mock()
+            def worker(python,task,request,destination):
+                if task=='diarize':return {'turns':['0 6 speaker_0','0 6 speaker_1']}
+                return inference_worker.run(task,request)
+            config={'diar_path':'unused','cohere_path':str(model),'lid_path':'local-approved',
+                    'diar_python':sys.executable,'asr_python':sys.executable,'diar_kind':'nemotron','device':'mlx'}
+            with patch.dict(sys.modules,model_modules(asr)),patch('inference_worker.check_memory'), \
+                 patch('language_detection.WhisperLanguageDetector',return_value=detector), \
+                 patch('pipeline.preflight',return_value=[]),patch('pipeline.run_worker',side_effect=worker):
+                document=validate(infer(audio,6,'auto',folder,lambda message:None,config),6)
+            self.assertEqual([(s['start'],s['end']) for s in document['segments']],[(0,3),(3,6)])
+            self.assertTrue(all(s['text']=='' and s['review'] and not s['voice_eligible'] for s in document['segments']))
+            self.assertTrue(all(s['language_detection']['reason']=='overlapping_speech' for s in document['segments']))
+            self.assertEqual(automatic_clips({'id':'overlap','document':document},'speaker_0'),[])
+            self.assertEqual(automatic_clips({'id':'overlap','document':document},'overlap'),[])
+            detector.detect.assert_not_called();asr.transcribe.assert_not_called()
+            self.assertEqual(audio.read_bytes(),original)
 
 
 class LanguageAppTests(unittest.TestCase):
@@ -346,9 +382,9 @@ class LanguageAppTests(unittest.TestCase):
             app=create_app(self.root/'repair-test')
             try:
                 client=app.test_client()
-                self.assertFalse(client.get('/api/setup').json['ready'])
+                self.assertFalse(client.get('/api/setup').json['core_ready'])
                 weights.write_bytes(b'yes')
-                self.assertTrue(client.get('/api/setup').json['ready'])
+                self.assertTrue(client.get('/api/setup').json['core_ready'])
                 weights.write_bytes(b'bad')
                 self.assertFalse(client.get('/api/setup').json['models'][0]['installed'])
             finally:
@@ -369,7 +405,8 @@ class LanguageAppTests(unittest.TestCase):
         document['segments'][0]['text']='Edited original words'
         saved=self.client.put(f'/api/jobs/{jid}/transcript',headers=self.headers,json={'revision':1,'document':document})
         self.assertEqual(saved.status_code,200)
-        self.assertEqual(saved.json['document']['segments'][1],document['segments'][1])
+        expected={**document['segments'][1],'voice_eligible':False,'speaker_candidates':['speaker_0']}
+        self.assertEqual(saved.json['document']['segments'][1],expected)
         exported=self.client.get(f'/api/jobs/{jid}/export/json').json
         self.assertEqual(exported['segments'][1]['language_detection']['reason'],'uncertain')
         self.assertEqual((folder/'audio.wav').read_bytes(),b'retained audio')

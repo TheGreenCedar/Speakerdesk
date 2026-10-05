@@ -1,0 +1,43 @@
+{
+  "model_id": "aufklarer/ReDimNet2-B6-CoreML",
+  "revision": "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab",
+  "compiled_model": "ReDimNet2B6.mlmodelc",
+  "artifact_revision": "frontend-fp32-v1",
+  "source_revision": "2a8d15f65b1dfb5d73fede2f11ee42bcccca3035",
+  "checkpoint_sha256": "e0a7d340a92f798720d1208949aa6a6bd0cddcb0ba7d4cec33596a17a484e6a2",
+  "files": {
+    "LICENSE": {
+      "sha256": "3d5a4bf9936a7d09dd770588c0d7cb116fc16916a0310d71fb1fff5d64562101",
+      "size": 1067
+    },
+    "README.md": {
+      "sha256": "d799fb856ad8d9c04f34579c999ccac4d5f5abc56630fc70fd790ef3af76f1bd",
+      "size": 3701
+    },
+    "ReDimNet2B6.mlmodelc/analytics/coremldata.bin": {
+      "sha256": "05fe3e096940a0a13f1a4f2382108872e4a5c448cc552cefcfdebee93f096322",
+      "size": 243
+    },
+    "ReDimNet2B6.mlmodelc/coremldata.bin": {
+      "sha256": "8b23b5a85f79b16a5798121193254e18b43096264c63afdbed90911a64ba1294",
+      "size": 518
+    },
+    "ReDimNet2B6.mlmodelc/model.mil": {
+      "sha256": "8b138359651f98bcd876eab2377ed9a5ddaf5f726745775ce1670ac5103fc79d",
+      "size": 504071
+    },
+    "ReDimNet2B6.mlmodelc/weights/weight.bin": {
+      "sha256": "780eb60151995b33d6a967deac32b9fe22ebd119e8288417f6d51ac7b856bcfc",
+      "size": 29519872
+    },
+    "config.json": {
+      "sha256": "7c4e9a6afcd5322f5bf6e5c7d2ec1d555221504c87fdaed3bc50fa197628c630",
+      "size": 6310
+    },
+    "checksums.json": {
+      "sha256": "17da021f7611f9ae6455e124e6c2af3be970c6a4898e6804a1a1165262b34ba6",
+      "size": 697
+    }
+  },
+  "total_bytes": 30036479
+}

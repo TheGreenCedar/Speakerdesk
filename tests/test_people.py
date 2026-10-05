@@ -226,6 +226,13 @@ class PeopleTests(unittest.TestCase):
             self.close_app(disabled)
         self.assertEqual(self.backend.calls, [])
 
+    def test_active_transcription_prevents_voice_loading_or_profile_changes(self):
+        pid = self.person(); self.assertEqual(self.assign(pid).status_code, 200)
+        self.seed('b'*32, status='processing')
+        self.assertEqual(self.enroll(pid).status_code, 409)
+        self.assertEqual(self.backend.calls, [])
+        self.assertEqual(self.app.extensions['speakerdesk']['people'].profiles(), [])
+
     def test_voice_match_only_proposes_and_confirmation_does_not_update_profile(self):
         pid = self.person(); self.assign(pid); self.enroll(pid)
         store = self.app.extensions['speakerdesk']['people']

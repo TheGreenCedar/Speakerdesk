@@ -11,6 +11,8 @@ Speakerdesk uses local NVIDIA speaker diarization and Cohere transcription model
 - Flask 3.1.3: BSD-3-Clause. Python 3.13.14: PSF license. NumPy, SciPy, SoundFile/libsndfile, Hugging Face Hub, tokenizers and supporting Python dependencies are included under their accompanying terms.
 - Tauri 2.12.1 and Rust dependencies: applicable MIT/Apache/BSD and other terms are retained below. Full lockfile versions are in the accompanying source project.
 - Lucide icons 0.577: ISC, https://lucide.dev . The app icon and interface icons use this library.
+- ReDimNet2-B6 voice recognition: MIT, Palabra.ai, https://github.com/PalabraAI/redimnet2 . Community Core ML artifact aufklarer/ReDimNet2-B6-CoreML is pinned to 112dd8f4f836abdf8a420e66a5e2885cf8ec64ab. Model weights are downloaded separately through Settings; its license is retained in packaging/licenses/redimnet2/LICENSE. See docs/redimnet2-integration.md for measured behavior and calibration evidence and limits.
+- The desktop build bundles Core ML Tools 9.0 and pinned supporting Python packages; end users only download model data through Settings. Their exact wheel license files and versions are retained under packaging/licenses/voice-runtime and in the exported notice text. Model installation is separate from explicit voice enrollment.
 
 The synthetic fixture was made with macOS built-in speech voices for this project. Its transcript labels the original supplied sample as scripted; real-model acceptance independently transcribes that sample audio.
 

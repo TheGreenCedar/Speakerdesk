@@ -23,7 +23,7 @@
       "binaries/speakerdesk-runtime"
     ],
     "macOS": {
-      "minimumSystemVersion": "14.0",
+      "minimumSystemVersion": "15.0",
       "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist"
     },

@@ -1,90 +1,27 @@
 # People and speaker identity
 
-People saves local names with stable person IDs. A meeting's diarizer track and
-each transcript segment have separate IDs. The same `speaker_0` in a later
-meeting starts unknown; Nemotron slots and cache never supply cross-meeting
-identity. Selecting a saved person confirms a name for the current meeting.
-Ordinary name corrections do not rename People or update voice profiles.
+People stores reusable local names and stable person IDs. Each meeting has separate diarizer track IDs, and each transcript passage has a segment ID. Nemotron slots and cache identify tracks within the current meeting; they never supply cross-meeting identity.
 
-Finalized local transcript passages can suggest an explicit introduction such
-as “I'm Priya” with its quote and speech-region time. Addressed names such as
-“Priya, what do you think?”, quoted/reported speech, overlap, pending text and
-lowercase uncertain names remain unknown. These conservative English rules
-produce proposals only. They do not create a person or infer an identity
-without confirmation; there is no LLM call.
+Voice recognition defaults on and can be turned off in Settings. The pinned B6 model is included in standard local model setup. A new unknown track collects at least two separate clean audio clips, then the local extractor checks compatible saved voice profiles once. A passing measured score and runner-up margin apply the saved person's name to that meeting track. The result is carried forward by diarization; later phrases do not repeatedly embed audio. Failed, ambiguous, incompatible or insufficient evidence leaves the track unknown. Long import crops can contribute separate six-second windows without changing the transcript.
 
-SQLite adds `people` and `voice_profiles` tables alongside existing jobs.
-Confirmed assignments and their evidence belong to the job and are server
-owned. Project JSON exports include confirmation evidence but never embeddings.
-Imported projects cannot claim confirmed identities. Existing meetings need no
-migration or reenrollment. Renaming a saved person preserves meeting name
-snapshots. Forget voice deletes the stored centroid and enrollment evidence;
-names, original recordings and transcript text remain. It also invalidates
-pending voice matches.
+Automatic assignments are labelled Recognized and retain model, policy, profile version, clip time and meeting/track/segment provenance. They are explicitly unconfirmed. Choose the speaker name to correct or confirm it. User corrections win over pending work and apply to the current meeting; they never rename People or update a saved voice. A forgotten/replaced profile, changed selected passage, disabled preference or changed runtime invalidates a pending result. Existing transcript names are retained when recognition is turned off or a voice is forgotten.
 
-## Voice adapter gate
+Finalized local transcript text can suggest an explicit introduction such as “I'm Priya,” with its quote and speech-region time. Addressed names such as “Priya, what do you think?”, quoted/reported speech, overlap, pending text and lowercase uncertain names produce no introduction proposal. These conservative English rules require confirmation and use no LLM. A conflicting explicit introduction keeps an automatic voice decision unknown.
 
-This patch includes a local backend interface and opt-in storage/matching flow.
-It does **not** include a model extractor, installer, model weights, or measured
-calibration. `create_app()` therefore keeps voice controls unavailable. Adding
-a name or confirming any suggestion never enrolls or refreshes a voice.
+## Explicit enrollment
 
-An approved local adapter must implement `LocalVoiceBackend.embed(audio, clip)`
-and return a finite vector plus its independent clean-audio assessment.
-`VoiceModel` pins model ID, revision, artifact SHA-256, dimension and 16 kHz
-input. Different versions or conversions are incompatible spaces. Clip IDs
-are qualified by meeting and track. Enrollment requires explicit consent, a
-confirmed saved person, and at least two distinct finalized, nonoverlapping
-2–10 second clean passages. The adapter can reject noisy clips; a rejected
-clip saves no partial profile. Only a normalized centroid and source evidence
-are saved, with a fresh enrollment version and consent timestamp.
+Adding a name, downloading models, recognizing a voice or confirming a name never enrolls or refreshes a voice. Remember voice requires explicit consent, a confirmed saved person, and at least two selected finalized, nonoverlapping 2–10 second passages. Long import passages offer separate six-second audio windows for selection. An automatically assigned name must be explicitly confirmed first. Enrollment and manual voice checks wait until active recording/transcription ends. Rejected audio saves no partial profile.
 
-`Calibration` requires a named measured dataset, threshold, winner margin,
-genuine/impostor trial counts, false accept/reject rates and a minimum of two
-clips. No numeric production policy is guessed. Every clean query clip must
-pass the threshold, and the mean winner must clear the runner-up margin.
-Low scores, ambiguity, insufficient evidence or incompatible profiles return
-unknown. Proposals carry model/calibration/clip evidence and require a separate
-confirmation. Confirmation never updates the enrolled centroid. Profile
-replacement, forgetting, a different adapter/calibration, or transcript edits
-invalidate pending voice evidence.
+Only the normalized centroid and enrollment evidence are stored in SQLite, with an exact model identity, fresh profile version and consent timestamp. No extra audio copy is made, and no audio is uploaded. Forget voice removes the centroid and enrollment evidence; names, source recordings and transcript text remain. Renaming People preserves existing meeting name snapshots. JSON transcript exports contain assignment provenance, never embeddings. Imported projects cannot manufacture server-owned identities or clean-audio evidence.
 
-## Candidate and measured plan awaiting approval
+## Model and policy contracts
 
-The candidate is [ReDimNet2-B6](https://github.com/PalabraAI/redimnet2), whose
-official repository lists MIT licensing and 12.3 million parameters. The
-[aufklarer Core ML conversion](https://huggingface.co/aufklarer/ReDimNet2-B6-CoreML)
-lists MIT licensing, 24.7 MiB compiled float16 weights, 16 kHz mono input,
-96,000 samples (six seconds), a 192-dimensional normalized output, and
-macOS 15 or newer. Its card describes repeating clean 2–6 second clips and
-center-cropping longer clips. These are publisher claims, not measurements
-from this lane. Newer Apple Silicon macOS is an accepted requirement.
+`VoiceModel` pins model ID, revision, artifact digest, dimension, preprocessing and compute policy. Different conversions or versions are separate embedding spaces. `Calibration` records a measured dataset, score threshold, winner margin, genuine/impostor counts and observed error rates. Every query clip must pass the threshold, and the mean winner must clear the runner-up margin. No numeric policy is guessed. A passing frozen held-out evaluation enables the shipped policy without a separate user configuration or approval step; extraction smoke alone cannot enable it.
 
-Before any model installation or inference, obtain approval for the exact
-community artifact and measured run plan. Inspect the conversion source,
-license and config metadata; pin revision/checksums and a local-only extractor.
-Account for compiled weights, dependency changes, compilation cache, audio
-fixtures and measurement output. Preserve the 40 GB free-space floor and
-wait for CodeStory's resource window to finish. No recordings are uploaded,
-no user voice is enrolled by a benchmark, and no OS permissions are changed.
+The extractor screens silence and saturation. It does not independently classify room noise, overlap or speaker changes. Single-speaker diarization evidence is required. Six-second phrase boundaries can need text review while the audio remains eligible; overlapping/ambiguous tracks stay excluded. The current live worker keeps stable track IDs for the meeting. A future diarizer reset must create a new logical track rather than reuse and relabel a historical track.
 
-The proposed measured run uses explicitly approved synthetic/licensed fixtures
-with speakers split between enrollment and held-out meetings, including
-unseen voices, similar voices, mixed microphones/languages, noise and overlap.
-Verify conversion parity, six-second preprocessing, finite normalized outputs,
-warm/cold latency and peak memory on the target Mac. Measure genuine/impostor
-score distributions and false accepts/rejects. Select a threshold and margin
-on a calibration split, then freeze and test on held-out meetings, preserving
-unknown where evidence is insufficient. Report per-condition failure rates,
-not just an equal-error rate. No acceptance target or production threshold is
-claimed until the plan and measured results are accepted.
+See [the model integration and measurement evidence](redimnet2-integration.md) for the artifact, license, resource budget and measured limits. Synthetic fixtures exercise different scripted sessions and unseen voices; they do not establish human cross-meeting accuracy across microphones or rooms.
 
-## Proof in this patch
+## Verification
 
-CPU tests use synthetic vectors and temporary SQLite databases. They cover
-persistence across app restarts/meetings, token enforcement, name-only defaults,
-intro/address negatives, stale evidence, explicit enrollment, clean-clip gates,
-model compatibility, unknown/ambiguity, confirmation without profile mutation,
-forgetting without transcript loss, server-owned import/export provenance and
-live name preservation. They do not prove real voice recognition quality,
-Core ML conversion behavior, native capture or packaged model parity.
+CPU tests cover persistence, default-on/off controls, one check per track, new-meeting slot reuse, unknown fallback, long import windows, introduction/address negatives, source-owned clip eligibility, correction/forget/toggle races, explicit enrollment, model compatibility, import/export provenance and live finalization. A negative control removing the unknown-track cache caused twelve extractions instead of two; restoring the cache passed. The shipped policy passed eight held-out genuine and eight unknown synthetic trials with no errors; native smoke and resource results are recorded separately. Packaged runtime behavior and recognition running alongside real capture/transcription remain unverified in this source-only integration.

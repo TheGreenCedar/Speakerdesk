@@ -1,6 +1,6 @@
 """Local voice identity contracts. No model loading, downloading, or network access.
 
-A future approved adapter owns waveform loading, quality checks and embedding.
+The approved local adapter owns waveform loading, quality checks and embedding.
 Nemotron's meeting-local slots/cache are deliberately not an embedding adapter.
 """
 from dataclasses import asdict, dataclass
@@ -65,6 +65,7 @@ class VoiceClip:
 class ClipEmbedding:
     vector: tuple[float, ...]
     clean: bool
+    metrics: dict | None = None
 
 
 class LocalVoiceBackend(Protocol):
@@ -84,6 +85,45 @@ def normalized(vector, dimension):
     return [v/norm for v in vector]
 
 
+def eligible_segment(segment, track_id):
+    # A six-second ASR phrase can need text review while its diarized audio is single-speaker.
+    return speaker_audio_eligible(segment, track_id) and 2 <= segment['end']-segment['start'] <= 10
+
+
+def speaker_audio_eligible(segment, track_id):
+    return (segment.get('speaker') == track_id and segment.get('finalized') is not False
+            and not track_id.startswith('overlap')
+            and len(segment.get('speaker_candidates', [track_id])) == 1
+            and segment.get('voice_eligible', not segment.get('review')) is True)
+
+
+def automatic_clips(job, track_id, minimum=2):
+    """Separate 2–10s clips; long import crops contribute nonoverlapping 6s windows."""
+    if (job.get('document') or {}).get('provenance', {}).get('kind') != 'local_inference':
+        return []
+    clips, last_end = [], -1.
+    for segment in job['document']['segments']:
+        if not speaker_audio_eligible(segment, track_id):
+            continue
+        start = max(last_end, segment['start'])
+        while segment['end']-start >= 2:
+            end = min(start+6, segment['end']) if segment['end']-start > 10 else segment['end']
+            clips.append(VoiceClip(job['id'], track_id, segment['id'], start, end))
+            last_end = start = end
+            if len(clips) == minimum:
+                return clips
+    return []
+
+
+def clips_current(job, clips):
+    document = job.get('document') or {}
+    if document.get('provenance', {}).get('kind') != 'local_inference':
+        return False
+    segments = {s['id']: s for s in document['segments']}
+    return all((segment := segments.get(c.segment_id)) and speaker_audio_eligible(segment, c.track_id)
+               and segment['start'] <= c.start < c.end <= segment['end'] for c in clips)
+
+
 def clean_clips(job, track_id, segment_ids, minimum=2):
     document = job.get('document') or {}
     if document.get('provenance', {}).get('kind') != 'local_inference':
@@ -91,16 +131,21 @@ def clean_clips(job, track_id, segment_ids, minimum=2):
     if (not isinstance(segment_ids, list) or not minimum <= len(segment_ids) <= 12
             or any(not isinstance(s, str) for s in segment_ids) or len(set(segment_ids)) != len(segment_ids)):
         raise ValueError(f'Choose {minimum}–12 separate clean passages.')
-    segments = {s['id']: s for s in document['segments']}
+    choices = {}
+    for segment in document['segments']:
+        if not speaker_audio_eligible(segment, track_id):
+            continue
+        start = segment['start']
+        while segment['end']-start >= 2:
+            end = min(start+6, segment['end']) if segment['end']-segment['start'] > 10 else segment['end']
+            sid = segment['id'] if segment['end']-segment['start'] <= 10 else f"{segment['id']}@{math.floor(start*16000)}:{math.floor(end*16000)}"
+            choices[sid] = VoiceClip(job['id'], track_id, segment['id'], start, end)
+            start = end
     clips = []
     for sid in segment_ids:
-        segment = segments.get(sid)
-        if (not segment or segment['speaker'] != track_id or segment.get('finalized') is False
-                or segment.get('review') or track_id.startswith('overlap')
-                or len(segment.get('speaker_candidates', [track_id])) != 1
-                or not 2 <= segment['end']-segment['start'] <= 10):
+        if sid not in choices:
             raise ValueError('Choose clean, finalized passages from one speaker, each 2–10 seconds long.')
-        clips.append(VoiceClip(job['id'], track_id, sid, segment['start'], segment['end']))
+        clips.append(choices[sid])
     clips.sort(key=lambda c: c.start)
     if any(a.end > b.start for a, b in zip(clips, clips[1:])):
         raise ValueError('Choose separate, nonoverlapping passages.')
@@ -112,7 +157,7 @@ def extract(backend, audio, clips):
     for clip in clips:
         result = backend.embed(audio, clip)
         if result.clean is not True:
-            raise ValueError('A selected passage has noise or overlapping voices. Choose another passage.')
+            raise ValueError('A selected passage is unusable for voice recognition. Choose another clean passage.')
         vectors.append(normalized(result.vector, backend.model.dimension))
     return vectors
 
@@ -126,19 +171,30 @@ def make_profile(model, vectors, clips):
             'clips': [c.payload() for c in clips], 'consent': 'explicit_remember_voice'}
 
 
-def propose_match(model, calibration, vectors, profiles):
-    """Unknown unless every clip passes and the winner is separated from runner-up."""
-    if calibration.model != model or len(vectors) < calibration.minimum_clips:
-        return None
+def rank_matches(model, vectors, profiles):
+    """Shared scoring for runtime decisions and offline calibration."""
     vectors = [normalized(v, model.dimension) for v in vectors]
     ranked = []
     for profile in profiles:
         if profile['model'] != model.payload():
             continue  # Versions/conversions are separate embedding spaces.
         centroid = normalized(profile['centroid'], model.dimension)
-        scores = [sum(a*b for a, b in zip(v, centroid)) for v in vectors]
+        scores = [max(-1., min(1., sum(a*b for a, b in zip(v, centroid)))) for v in vectors]
         ranked.append((sum(scores)/len(scores), min(scores), profile))
     ranked.sort(key=lambda row: row[0], reverse=True)
+    return ranked
+
+
+def propose_match(model, calibration, vectors, profiles):
+    """Unknown unless every clip passes and the winner is separated from runner-up."""
+    if calibration.model != model or len(vectors) < calibration.minimum_clips:
+        return None
+    ranked = rank_matches(model, vectors, profiles)
+    return match_from_ranked(model, calibration, ranked)
+
+
+def match_from_ranked(model, calibration, ranked):
+    """Apply the shared measured acceptance rule to already scored candidates."""
     if not ranked:
         return None
     score, lowest, best = ranked[0]

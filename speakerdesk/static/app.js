@@ -135,6 +135,9 @@ function renderSegments() {
     nameButton.setAttribute('aria-label', `Name ${doc.speakers[segment.speaker]}`); nameButton.title = 'Choose speaker name';
     nameButton.addEventListener('click', () => openNamePicker(segment.speaker).catch(error => notice(error.message, true)));
     top.append(nameButton);
+    if(selected.speaker_assignments?.[segment.speaker]?.source==='automatic_voice') {
+      const recognized=node('span','Recognized','review-tag');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';top.append(recognized);
+    }
     if (segment.review) top.append(node('span', 'Review', 'review-tag'));
     if (segment.language) top.append(node('span', config.languages[segment.language] || segment.language, 'review-tag'));
     else if (segment.language_detection?.mode === 'auto') top.append(node('span', 'Language needs review · audio retained', 'review-tag'));
@@ -244,6 +247,12 @@ function wire() {
     try { await api('/api/setup',{method:'POST'}); await refreshSetup(); }
     catch(error) { $('model-status').textContent=error.message; }
   });
+  $('recognize-voices').addEventListener('change',async event => {
+    const control=event.target;control.disabled=true;
+    try { await api('/api/recognition',{method:'PATCH',body:JSON.stringify({enabled:control.checked})}); }
+    catch(error) { control.checked=!control.checked;notice(error.message,true); }
+    finally { control.disabled=false;await refreshSetup(); }
+  });
   $('run').addEventListener('click', async () => { try { selected = await api(`/api/jobs/${selected.id}/run`, {method: 'POST'}); setStatus(); } catch (e) { notice(e.message, true); } });
   $('manual').addEventListener('click', manual);
   $('save').addEventListener('click', () => save().catch(e => notice(e.message, true)));
@@ -339,16 +348,21 @@ async function refreshSetup() {
     const state=await api('/api/setup');
     const list=$('model-list');list.replaceChildren();
     state.models.forEach(model => {
-      const item=node('div',undefined,'model-item'); item.append(node('strong',model.name),node('span',model.installed?'Installed':`${(model.bytes/1e9).toFixed(2)} GB`));list.append(item);
+      const size=model.bytes<1e8?`${Math.round(model.bytes/1e6)} MB`:`${(model.bytes/1e9).toFixed(2)} GB`;
+      const item=node('div',undefined,'model-item'); item.append(node('strong',model.name),node('span',model.installed?'Installed':size));list.append(item);
     });
     const busy=state.status==='downloading';
     $('model-progress').hidden=!busy;
     $('model-progress').value=100*state.downloaded_bytes/state.total_bytes;
     $('model-status').textContent=state.error || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'Download once, then use offline.');
     $('install-models').hidden=state.ready;
-    $('install-models').disabled=busy || !state.supported;
-    $('install-models').textContent=busy?'Downloading…':state.status==='failed'?'Retry download':`Download models · ${(state.total_bytes/1e9).toFixed(1)} GB`;
-    if(state.ready && (!config.readiness.configured || !config.readiness.automatic_language)) {
+    const voice=state.voice,voiceBusy=voice.status==='downloading';
+    $('install-models').disabled=busy || voiceBusy || !state.supported;
+    $('install-models').textContent=busy?'Downloading…':state.status==='failed'?'Resume download':`Download models · ${(state.total_bytes/1e9).toFixed(2)} GB`;
+    if(voiceAvailable!==voice.available) await loadPeople();
+    $('settings-voice-note').textContent=voice.enabled?voice.message:'Recognition is off. Saved names and voices stay on this Mac.';
+    if(document.activeElement!==$('recognize-voices')) $('recognize-voices').checked=voice.enabled;
+    if(state.core_ready && (!config.readiness.configured || !config.readiness.automatic_language)) {
       config=await api('/api/config');if(selected)setStatus();
     }
   } catch(error) { $('model-status').textContent=error.message; }

@@ -8,13 +8,14 @@ export SPEAKERDESK_SIGNING_IDENTITY="$APPLE_SIGNING_IDENTITY"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$task_root/.cache/uv}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 export RUSTC_WRAPPER=
-export MACOSX_DEPLOYMENT_TARGET=14.0
+export MACOSX_DEPLOYMENT_TARGET=15.0
 export PYINSTALLER_CONFIG_DIR="$task_root/.cache/pyinstaller"
 native_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 export CARGO_TARGET_DIR="${SPEAKERDESK_NATIVE_TARGET_DIR:-$native_root/speakerdesk-native-target}"
 mkdir -p "$CARGO_TARGET_DIR" .cache release
 if [[ ! -x .venv-package/bin/python ]]; then ./scripts/setup.sh; else
   uv pip install --python .venv-package/bin/python -r requirements-packaging.lock.txt
+  uv pip install --python .venv-package/bin/python --no-deps --require-hashes -r requirements-voice.lock.txt
   .venv-package/bin/python - <<'PY'
 import shutil,site
 from pathlib import Path
@@ -29,7 +30,7 @@ uv pip check --python .venv-package/bin/python
 .venv-package/bin/python -m unittest discover -s tests -v
 package_version="$(.venv-package/bin/python -c 'import json;print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')"
 .venv-package/bin/python -m PyInstaller --noconfirm --clean --workpath .cache/pyinstaller-build --distpath desktop/src-tauri/binaries packaging/runtime.spec
-xcrun swiftc -O -j 1 -num-threads 1 -target arm64-apple-macos14.0 -module-cache-path "$task_root/.cache/swift-capture" desktop/capture/MeetingCapture.swift -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker desktop/capture/Info.plist -o desktop/capture/speakerdesk-capture
+xcrun swiftc -O -j 1 -num-threads 1 -target arm64-apple-macos15.0 -module-cache-path "$task_root/.cache/swift-capture" desktop/capture/MeetingCapture.swift -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker desktop/capture/Info.plist -o desktop/capture/speakerdesk-capture
 sign_args=(--force --options runtime --entitlements desktop/src-tauri/Entitlements.plist --sign "$APPLE_SIGNING_IDENTITY")
 if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then sign_args+=(--timestamp); fi
 codesign "${sign_args[@]}" desktop/capture/speakerdesk-capture
