@@ -20,12 +20,13 @@ from pipeline import infer, model_config, preflight, MODELS
 from transcript import LANGUAGES, validate, export
 from model_setup import register_setup
 from live_meeting import register_meetings, LIVE
+from people import register_people, reconcile_assignments
 
 ROOT=Path(__file__).resolve().parent
 ACTIVE=('preparing','queued','processing')+LIVE
 
 
-def create_app(data_dir=None):
+def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     app=Flask(__name__)
     app.config.update(MAX_CONTENT_LENGTH=256*1024*1024, TRUSTED_HOSTS=['localhost','127.0.0.1','[::1]'])
     data=Path(data_dir or os.getenv('SPEAKERDESK_DATA',ROOT/'data')).resolve()
@@ -215,7 +216,9 @@ def create_app(data_dir=None):
                           'provenance':{'kind':'manual','timing':'User supplied recording times'},
                           'warnings':['This transcript contains manually entered or imported text and timing.']}
             document['edited_at']=time.time()
-            patch(jid,document=document,revision=job['revision']+1,status='ready',message='Saved locally.')
+            reconcile_assignments(job, document, imported=bool(body.get('imported')))
+            job.update(document=document,revision=job['revision']+1,status='ready',message='Saved locally.')
+            put(job)
         return jsonify(get(jid))
 
     @app.get('/api/jobs/<jid>/export/<kind>')
@@ -223,7 +226,10 @@ def create_app(data_dir=None):
         if kind not in ('txt','srt','vtt','json'):abort(404)
         job=get(jid)
         if not job.get('document'):abort(409,description='Create a transcript before exporting.')
-        content,mimetype=export(job['document'],kind)
+        document=copy.deepcopy(job['document'])
+        if kind=='json' and job.get('speaker_assignments'):
+            document['speaker_assignments']=job['speaker_assignments']
+        content,mimetype=export(document,kind)
         response=app.response_class(content,content_type=mimetype)
         filename=f'{Path(job["name"]).stem}.{kind}'
         response.headers['Content-Disposition']=f'attachment; filename="{secure_filename(filename) or "transcript."+kind}"'
@@ -240,6 +246,7 @@ def create_app(data_dir=None):
 
     app.extensions['speakerdesk']={'executor':executor,'data':data}
     register_setup(app)
+    register_people(app,db,get,put,lock,folder,voice_backend,voice_calibration)
     register_meetings(app,get,put,patch,folder,lock,inference_busy)
     return app
 

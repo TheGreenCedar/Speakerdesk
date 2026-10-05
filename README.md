@@ -31,4 +31,6 @@ Local real-model streaming has been exercised on synthetic two-voice speech. CPU
 
 The current build remains a release candidate until notarization, normal first-launch checks and native meeting capture checks succeed. [Download contract](docs/download-contract.md) describes the future stable download handoff.
 
+People saves reusable local names; speaker corrections and confirmed introduction suggestions apply to the current meeting. Voice-profile interfaces are present, but recognition stays unavailable until a local model adapter and measured calibration are approved. No voice is saved by adding a name. See [People and voice profiles](docs/people-and-voice-profiles.md) for storage behavior and the proposed measured plan.
+
 Third-party model and dependency terms are included in [packaging/THIRD_PARTY_NOTICES.md](packaging/THIRD_PARTY_NOTICES.md) and the accompanying license files. NVIDIA's checkpoint uses OpenMDW 1.1; Cohere's checkpoint uses Apache 2.0. Model licenses remain applicable when downloading weights separately.

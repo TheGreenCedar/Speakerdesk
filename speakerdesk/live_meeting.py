@@ -212,7 +212,7 @@ class MeetingManager:
                     with self.lock:
                         if result['type']=='segment':
                             job=self.get(jid);document=job['document']
-                            document['speakers'].update(result['speakers']);document['segments'].append(result['segment'])
+                            append_finalized_segment(document,result)
                             document['provenance']['kind']='local_inference'
                             job.update(revision=job['revision']+1);self.put(job)
                         elif result['type']=='progress':self.processed=result['processed_seconds']
@@ -352,6 +352,13 @@ class MeetingManager:
                 if process and process.poll() is None:process.terminate()
             thread=self.thread
         if thread and thread is not threading.current_thread():thread.join(timeout=5)
+
+
+def append_finalized_segment(document, result):
+    # The diarizer owns meeting tracks; confirmed/custom names belong to the user.
+    for track, name in result['speakers'].items():
+        document['speakers'].setdefault(track, name)
+    document['segments'].append(result['segment'])
 
 
 def register_meetings(app, get, put, patch, folder, lock, inference_busy):
