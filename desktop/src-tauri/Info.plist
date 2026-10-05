@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Speakerdesk records your microphone when you start a meeting so it can save and transcribe your conversation on this Mac.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Speakerdesk captures Mac audio when you start a meeting so voices from your meeting app can be saved and transcribed on this Mac. Screen images are not saved.</string>
+</dict>
+</plist>

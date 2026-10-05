@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Speakerdesk",
+  "version": "0.2.0",
+  "identifier": "com.speakerdesk.desktop",
+  "build": {
+    "frontendDist": "../frontend"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self'; script-src 'self'",
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "externalBin": [
+      "binaries/speakerdesk-runtime"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist"
+    },
+    "shortDescription": "Private transcription and speaker labeling",
+    "category": "Productivity",
+    "icon": [
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "resources": {
+      "../capture/speakerdesk-capture": "speakerdesk-capture"
+    }
+  }
+}

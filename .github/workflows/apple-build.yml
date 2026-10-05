@@ -1,0 +1,108 @@
+name: Apple package
+on:
+  workflow_dispatch:
+    inputs:
+      signing:
+        description: Ad-hoc CI package or existing-credential notarized candidate
+        type: choice
+        options: [adhoc, notarized]
+        default: adhoc
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: speakerdesk-apple-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  apple:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.97.1
+          targets: aarch64-apple-darwin
+      - name: Install uv
+        run: brew install uv
+      - name: Prepare existing Apple credentials
+        if: inputs.signing == 'notarized'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_CONTENT APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            [[ -n "${!name:-}" ]] || { echo "Existing credential ${name} is unavailable in Speakerdesk; no replacement key will be created." >&2; exit 1; }
+          done
+          key_path="${RUNNER_TEMP}/speakerdesk-notary.p8"
+          certificate_path="${RUNNER_TEMP}/speakerdesk-developer-id.p12"
+          keychain_path="${RUNNER_TEMP}/speakerdesk-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::${keychain_password}"
+          echo "APPLE_API_KEY_PATH=${key_path}" >> "$GITHUB_ENV"
+          echo "APPLE_CERTIFICATE_PATH=${certificate_path}" >> "$GITHUB_ENV"
+          echo "APPLE_KEYCHAIN_PATH=${keychain_path}" >> "$GITHUB_ENV"
+          umask 077
+          printf '%s' "$APPLE_API_KEY_CONTENT" > "$key_path"
+          printf '%s' "$APPLE_CERTIFICATE" | openssl base64 -d -A -out "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 3600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path" >/dev/null
+          existing_keychains=()
+          while IFS= read -r item; do existing_keychains+=("$item"); done < <(security list-keychains -d user | tr -d '"' | sed 's/^[[:space:]]*//')
+          security list-keychains -d user -s "$keychain_path" "${existing_keychains[@]}"
+          security default-keychain -d user -s "$keychain_path"
+      - name: Build candidate without model weights
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ inputs.signing == 'adhoc' && '-' || secrets.APPLE_SIGNING_IDENTITY }}
+          CI: 'true'
+        run: ./scripts/build_macos.sh
+      - name: Notarize and staple candidate
+        if: inputs.signing == 'notarized'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          version="$(.venv-package/bin/python -c 'import json;print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')"
+          dmg="release/Speakerdesk_${version}_AppleSilicon.dmg"
+          xcrun notarytool submit "$dmg" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait --output-format json > "$RUNNER_TEMP/notarization.json"
+          .venv-package/bin/python -c 'import json,sys;sys.exit(0 if json.load(open(sys.argv[1]))["status"]=="Accepted" else 1)' "$RUNNER_TEMP/notarization.json"
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          codesign --verify --strict "$dmg"
+          mount="$RUNNER_TEMP/speakerdesk-assess"
+          mkdir -p "$mount"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
+          trap 'hdiutil detach "$mount" >/dev/null' EXIT
+          codesign --verify --deep --strict "$mount/Speakerdesk.app"
+          spctl --assess --type execute --verbose=2 "$mount/Speakerdesk.app"
+          echo 'SPEAKERDESK_NOTARIZED=1' >> "$GITHUB_ENV"
+      - name: Produce artifact manifest
+        run: .venv-package/bin/python scripts/artifact_manifest.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Speakerdesk-${{ github.sha }}-${{ inputs.signing }}
+          path: release/*
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove ephemeral credential material
+        if: always()
+        run: |
+          if [[ -n "${APPLE_KEYCHAIN_PATH:-}" ]]; then security delete-keychain "$APPLE_KEYCHAIN_PATH" || true; fi
+          for name in APPLE_API_KEY_PATH APPLE_CERTIFICATE_PATH; do
+            path="${!name:-}"
+            if [[ -n "$path" && "$path" == "$RUNNER_TEMP/"* ]]; then rm -f -- "$path"; fi
+          done
