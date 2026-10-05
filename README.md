@@ -4,6 +4,34 @@ Private meeting transcription and speaker labeling for Apple Silicon Macs, using
 
 The desktop shell uses Tauri, a bundled Python runtime and a Swift microphone/system-audio capture helper. macOS 14 or newer and an Apple Silicon processor are required. Allow roughly 2.3 GB for model setup and additional space for recordings. The models themselves occupy about 1.7 GB. This source repository contains no recordings, model weights, credentials or prebuilt application.
 
+## Interface previews
+
+These previews use invented names and transcript text with silent fixture audio. Native capture and model inference were not run for these screenshots. Meeting and name-picker images follow your GitHub light or dark appearance.
+
+### Meeting
+
+Review speaker names, edit passages and export the transcript.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/meeting-dark.jpg">
+  <img alt="Speakerdesk meeting transcript with Priya and an unnamed second speaker, editable passages and playback controls" src="docs/screenshots/meeting-light.jpg">
+</picture>
+
+### People
+
+Save names for future meetings.
+
+![People dialog with a saved Priya name and controls to add or rename a person](docs/screenshots/people-light.jpg)
+
+### Name picker
+
+Choose a saved person or apply a name to this meeting.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/name-picker-dark.jpg">
+  <img alt="Name picker with Priya selected from saved people and an Apply name button" src="docs/screenshots/name-picker-light.jpg">
+</picture>
+
 ## Development
 
 Install Node.js 24, Rust 1.97.1, `uv`, and Apple command line tools. Then run:
