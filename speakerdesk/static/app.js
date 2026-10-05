@@ -327,7 +327,7 @@ async function init() {
     lucide.createIcons();
   } catch (e) { notice(e.message, true); }
 }
-function openSettings() { $('setup').hidden=false;$('setup-toggle').setAttribute('aria-expanded','true');document.querySelector('main').inert=true;document.querySelector('.sidebar').inert=true;$('settings-close').focus(); }
+function openSettings() { $('setup').hidden=false;$('setup-toggle').setAttribute('aria-expanded','true');document.querySelector('main').inert=true;document.querySelector('.sidebar').inert=true;$('settings-close').focus();loadPeople().catch(error=>notice(error.message,true)); }
 function closeSettings() { $('setup').hidden=true;document.querySelector('main').inert=false;document.querySelector('.sidebar').inert=false;$('setup-toggle').setAttribute('aria-expanded','false'); $('setup-toggle').focus(); }
 async function refreshSetup() {
   try {

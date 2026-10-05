@@ -4,6 +4,8 @@ let people = [], voiceAvailable = false, nameContext = null, identityBusy = fals
 async function loadPeople() {
   const state = await api('/api/people');
   people = state.people; voiceAvailable = state.voice_available;
+  $('settings-voice-note').textContent = voiceAvailable
+    ? 'Voice suggestions need your confirmation.' : 'Voice recognition is unavailable.';
 }
 function acceptIdentityJob(result) {
   if (selected?.id !== result.id) return;
@@ -24,15 +26,14 @@ function renderPeople() {
     const input = node('input'); input.value = person.name; input.maxLength = 100; input.required = true;
     input.setAttribute('aria-label', `Saved name for ${person.name}`);
     const saveName = node('button', 'Save name', 'quiet'); saveName.type = 'submit';
-    const status = node('span', person.voice_saved
-      ? voiceAvailable && !person.voice_compatible ? 'Save this voice again to use recognition' : 'Voice saved on this Mac'
-      : 'Name only', 'settings-note');
-    form.append(input, saveName, status);
+    form.append(input, saveName);
+    if (person.voice_saved) form.append(node('span', voiceAvailable && !person.voice_compatible
+      ? 'Save this voice again to use recognition' : 'Voice saved on this Mac', 'settings-note'));
     form.addEventListener('submit', async event => {
       event.preventDefault(); saveName.disabled = true;
       try {
         await api(`/api/people/${person.id}`, {method: 'PATCH', body: JSON.stringify({name: input.value})});
-        await loadPeople(); renderPeople(); $('people-message').textContent = 'Saved name updated. Existing meeting names are unchanged.';
+        await loadPeople(); renderPeople(); $('people-message').textContent = 'Name saved.';
       } catch (error) { $('people-message').textContent = error.message; }
       finally { saveName.disabled = false; }
     });
@@ -78,12 +79,12 @@ async function openNamePicker(track) {
     $('voice-clip-list').append(label);
   }
   const usable = voiceAvailable && doc.provenance?.kind === 'local_inference';
+  $('name-voice-section').hidden = !voiceAvailable;
   $('voice-clips').hidden = !usable;
   $('voice-consent-label').hidden = !usable || !assigned;
   $('remember-voice').hidden = !usable || !assigned;
   $('check-voice').hidden = !usable || !!selected.speaker_assignments?.[track];
-  $('voice-note').textContent = !voiceAvailable ? 'Voice recognition is not available in this build.'
-    : !usable ? 'Voice recognition needs finalized local transcription passages.'
+  $('voice-note').textContent = !usable ? 'Voice recognition needs finalized local transcription passages.'
     : assigned ? 'Only the passages you select are used. Saving a voice requires your consent.'
     : 'Apply a saved person first to remember their voice. A suggestion always needs your confirmation.';
   $('name-dialog').showModal(); $('name-value').focus(); $('name-value').select();
@@ -131,7 +132,7 @@ function wirePeople() {
     event.preventDefault(); const button = event.submitter; button.disabled = true;
     try {
       await api('/api/people', {method: 'POST', body: JSON.stringify({name: $('person-name').value})});
-      $('person-name').value = ''; await loadPeople(); renderPeople(); $('people-message').textContent = 'Name saved. No voice was saved.';
+      $('person-name').value = ''; await loadPeople(); renderPeople(); $('people-message').textContent = 'Name saved.';
     } catch (error) { $('people-message').textContent = error.message; }
     finally { button.disabled = false; }
   });
@@ -144,7 +145,7 @@ function wirePeople() {
     $('name-add-person').disabled = true;
     try {
       const person = await api('/api/people', {method: 'POST', body: JSON.stringify({name: $('name-value').value})});
-      await loadPeople(); personOptions(person.id); $('name-message').textContent = 'Name added to People. Apply it to this meeting when ready. No voice was saved.';
+      await loadPeople(); personOptions(person.id); $('name-message').textContent = 'Name saved. Apply it to this meeting when ready.';
     } catch (error) { $('name-message').textContent = error.message; }
     finally { $('name-add-person').disabled = false; }
   });
