@@ -117,7 +117,8 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             timer = ticker; ticker.resume()
             emit(["type":"recording","microphone":microphone,"system":system])
         } catch {
-            await stop(); throw error
+            // Failed startup must emit an error, without a successful stop acknowledgement.
+            await stop(emitStopped: false); throw error
         }
     }
     func pause() async throws {
@@ -137,7 +138,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if micEnabled { try engine.start() }
         emit(["type":"recording","time":elapsed()])
     }
-    func stop() async {
+    func stop(emitStopped: Bool = true) async {
         guard stateLock.withLock({ active }) else { return }
         timer?.cancel(); timer = nil
         if let stream { try? await stream.stopCapture() }
@@ -145,7 +146,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         audioQueue.sync {}
         let duration = elapsed()
         stateLock.withLock { active = false }; stream = nil; converters.removeAll()
-        emit(["type":"stopped","time":duration])
+        if emitStopped { emit(["type":"stopped","time":duration]) }
     }
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, sampleBuffer.isValid,

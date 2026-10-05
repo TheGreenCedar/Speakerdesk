@@ -69,6 +69,7 @@ function setStatus() {
   $('listening').hidden=!live || !!doc?.segments?.length;
 }
 async function select(jid) {
+  if (identityBusy) { notice('Wait for the name change to finish before switching meetings.'); return; }
   if (saving) { notice('Wait for this save to finish before switching recordings.'); return; }
   if (dirty && !confirm('Discard unsaved edits and open another recording?')) return;
   const generation = ++selectionGeneration;
@@ -105,6 +106,7 @@ function renderEditor() {
   $('timing-note').textContent = doc.provenance?.timing || 'User supplied segment boundaries.';
   $('warnings').textContent = (doc.warnings || []).join(' '); $('warnings').hidden = !doc.warnings?.length;
   renderSegments();
+  refreshIdentitySuggestions();
 }
 function renderSegments() {
   const pane=$('transcript-pane'), previousScroll=pane.scrollTop;
@@ -126,6 +128,10 @@ function renderSegments() {
     seek.disabled=!!isLive();
     speaker.addEventListener('change', () => { segment.speaker = speaker.value; segment.review = true; changed(); });
     top.append(speaker, seek);
+    const nameButton = node('button', undefined, 'name-speaker'); nameButton.append(icon('user-round-pen'));
+    nameButton.setAttribute('aria-label', `Name ${doc.speakers[segment.speaker]}`); nameButton.title = 'Choose speaker name';
+    nameButton.addEventListener('click', () => openNamePicker(segment.speaker).catch(error => notice(error.message, true)));
+    top.append(nameButton);
     if (segment.review) top.append(node('span', 'Review', 'review-tag'));
     const remove = node('button', undefined, 'remove-segment'); remove.append(icon('x')); remove.setAttribute('aria-label', 'Remove segment');
     remove.addEventListener('click', () => { doc.segments = doc.segments.filter(s => s.id !== segment.id); changed(); renderEditor(); });
@@ -184,6 +190,7 @@ function manual() {
   changed(); setStatus(); renderEditor();
 }
 function wire() {
+  wirePeople();
   $('new-meeting').addEventListener('click', () => {
     if(meeting && liveStatuses.includes(meeting.status)){select(meeting.id).catch(e=>notice(e.message,true));return;}
     if(dirty && !confirm('Discard unsaved transcript edits?'))return;
@@ -290,10 +297,10 @@ async function poll() {
   if (polling) return; polling = true;
   try {
     jobs = await api('/api/jobs'); renderJobs();
-    if (selected && !dirty && !saving) {
+    if (selected && !dirty && !saving && !identityBusy) {
       const generation = selectionGeneration, jid = selected.id;
       const next = await api(`/api/jobs/${jid}`);
-      if (generation !== selectionGeneration || selected?.id !== jid || dirty || saving) return;
+      if (generation !== selectionGeneration || selected?.id !== jid || dirty || saving || identityBusy || next.revision < selected.revision) return;
       const changedAudio = !selected.duration && next.duration;
       const finished = next.status !== selected.status && !['preparing','queued','processing',...liveStatuses].includes(next.status);
       if (next.revision !== selected.revision) { doc = next.document ? structuredClone(next.document) : null; selected = next; renderEditor(); }
@@ -320,7 +327,7 @@ async function init() {
     lucide.createIcons();
   } catch (e) { notice(e.message, true); }
 }
-function openSettings() { $('setup').hidden=false;$('setup-toggle').setAttribute('aria-expanded','true');document.querySelector('main').inert=true;document.querySelector('.sidebar').inert=true;$('settings-close').focus(); }
+function openSettings() { $('setup').hidden=false;$('setup-toggle').setAttribute('aria-expanded','true');document.querySelector('main').inert=true;document.querySelector('.sidebar').inert=true;$('settings-close').focus();loadPeople().catch(error=>notice(error.message,true)); }
 function closeSettings() { $('setup').hidden=true;document.querySelector('main').inert=false;document.querySelector('.sidebar').inert=false;$('setup-toggle').setAttribute('aria-expanded','false'); $('setup-toggle').focus(); }
 async function refreshSetup() {
   try {
