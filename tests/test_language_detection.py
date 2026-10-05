@@ -256,6 +256,7 @@ class WorkerLanguageTests(unittest.TestCase):
             cfg={'diar_path':'unused','cohere_path':str(model),'lid_path':'local-approved',
                  'diar_python':sys.executable,'asr_python':sys.executable,'diar_kind':'nemotron','device':'mlx'}
             with patch.dict(sys.modules,model_modules(asr)), patch('inference_worker.check_memory'), \
+                 patch('inference_worker.importlib.metadata.version',return_value='cpu-model-boundary'), \
                  patch('language_detection.WhisperLanguageDetector',return_value=detector), \
                  patch('pipeline.preflight',return_value=[]),patch('pipeline.run_worker',side_effect=worker):
                 document=validate(infer(audio,6,'auto',folder,lambda message:None,cfg),6)
@@ -330,6 +331,7 @@ class WorkerLanguageTests(unittest.TestCase):
             config={'diar_path':'unused','cohere_path':str(model),'lid_path':'local-approved',
                     'diar_python':sys.executable,'asr_python':sys.executable,'diar_kind':'nemotron','device':'mlx'}
             with patch.dict(sys.modules,model_modules(asr)),patch('inference_worker.check_memory'), \
+                 patch('inference_worker.importlib.metadata.version',return_value='cpu-model-boundary'), \
                  patch('language_detection.WhisperLanguageDetector',return_value=detector), \
                  patch('pipeline.preflight',return_value=[]),patch('pipeline.run_worker',side_effect=worker):
                 document=validate(infer(audio,6,'auto',folder,lambda message:None,config),6)
