@@ -2,10 +2,10 @@
 from speech_admission import INPUT_POLICY, SILERO_SPEC
 
 RATE = 16000
-CAP = 24 * RATE
+CAP = 18 * RATE
 MIN_CORE = 6 * RATE
 MIN_GAP = 2048
-POLICY = 'current_silero_negative_gap_bounded24_v1'
+POLICY = 'current_silero_negative_gap_bounded18_v1'
 
 
 def plan(row, admission):
