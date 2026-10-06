@@ -291,7 +291,7 @@ class Engine:
         prefix_context=None
         if (carry and len(carry['passages'])==1 and carry['passages'][0].get('text','').strip()
                 and not carry['passages'][0].get('transcription_review')):
-            events=[e for e in language_probe_events(carry['passages'][0]) if e['reason']=='detected'
+            events=[e for e in language_probe_events(carry['passages'][0],round(carry['start']*RATE)) if e['reason']=='detected'
                 and e['language'] and e['end_sample']<=round(start*RATE)]
             if events:
                 event=max(events,key=lambda e:e['end_sample'])
@@ -420,10 +420,11 @@ class Engine:
             # same-origin audio only after a contiguous clean same-owner region
             # (or its unassigned tail), within admitted context and this epoch.
             prefix_start=None
+            def clean_owner(owners):return len(owners)==1 and owners[0]!='unknown_mixed' and not owners[0].startswith('overlap')
             if end-start<.5 and len(names)<=1:
-                if len(names)==1 and region['start']<start:prefix_start=region['start']
+                if clean_owner(names) and region['start']<start:prefix_start=region['start']
                 elif (previous_region is not None and abs(previous_region['end']-region['start'])<1e-6
-                      and len(previous_region['speakers'])==1
+                      and clean_owner(previous_region['speakers'])
                       and (not names or names==previous_region['speakers'])):prefix_start=previous_region['start']
             if prefix_start is not None:
                 produced=self.transcribe_owned(start,end,{'language':request['language'],'epoch':request['language_epoch']},names,

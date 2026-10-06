@@ -72,7 +72,8 @@ class RefinementTailContextTests(unittest.TestCase):
         class Models:
             def __init__(self):
                 self.asr=Mock();self.asr.transcribe.return_value=types.SimpleNamespace(text='Earlier words.',tokens=[1])
-            def set_language_context(self,context,start):self.context=context;self.start=start
+            def set_language_context(self,context,start):
+                self.context=context;self.start=start;self.contexts=getattr(self,'contexts',[])+[(context,start)]
             def transcribe(self,pcm,language,names,overlap=False):
                 return SpeechTranscriber(self.asr,language,detector=Detector(),context=self.context).transcribe(
                     pcm,RATE,tuple(names),start_sample=self.start,max_asr_seconds=24.5)
@@ -82,6 +83,7 @@ class RefinementTailContextTests(unittest.TestCase):
         self.assertEqual(models.asr.transcribe.call_count,2)
         self.assertEqual([len(c.args[0]) for c in models.asr.transcribe.call_args_list],[3*RATE,round(3.2*RATE)])
         self.assertEqual(row['context_evidence']['prefix_end_sample'],4*RATE)
+        self.assertEqual(models.contexts[-1],({'language':'en','end_sample':4*RATE},RATE))
     def test_real_speaker_switch_does_not_borrow_previous_speaker_words(self):
         self.models.batch_turns.return_value=[{'start':0,'end':4.74,'speaker':'speaker_0'},
             {'start':4.74,'end':self.end,'speaker':'speaker_1'}]
@@ -90,6 +92,15 @@ class RefinementTailContextTests(unittest.TestCase):
         tail=self.engine.refine(request)['candidates'][-1]
         self.assertEqual(tail['text'],'Blue.');self.assertEqual(tail['speaker_candidates'],['speaker_1'])
         self.assertEqual(self.models.transcribe.call_count,2)
+    def test_unmapped_activity_never_authorizes_tail_prefix_erasure(self):
+        for straddling in (False,True):
+            with self.subTest(straddling=straddling):
+                self.models.reset_mock();request=self.request(4.74);request['references']=[]
+                self.models.batch_turns.return_value=[{'start':0,'end':3.241125 if straddling else 3,'speaker':'speaker_7'}]
+                self.response(['Blue.'])
+                tail=self.engine.refine(request)['candidates'][-1]
+                self.assertEqual(tail['text'],'Blue.');self.assertNotIn('context_evidence',tail)
+                self.assertEqual(self.models.transcribe.call_count,1)
     def test_successful_empty_asr_finishes_blank_inspection_without_erasing_words(self):
         candidate={'start':0,'end':1,'speaker':'unassigned','text':'','review':True,
                    'acoustic_evidence':{'source':'whisper_sot','no_speech_probability':.88},
