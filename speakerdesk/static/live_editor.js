@@ -10,7 +10,7 @@ const passageWidthObserver=new ResizeObserver(()=>{
   const pane=$('transcript-pane'),host=$('segments');
   const anchor=Array.from(host.children).find(card=>card.getBoundingClientRect().bottom>pane.getBoundingClientRect().top);
   const before=anchor?.getBoundingClientRect().top;
-  $('segments').querySelectorAll('textarea').forEach(fitPassageText);
+  fitPassageTexts($('segments').querySelectorAll('textarea'));
   if(isLive() && followingLive && !host.contains(document.activeElement))pane.scrollTop=pane.scrollHeight;
   else if(anchor?.isConnected)pane.scrollTop+=anchor.getBoundingClientRect().top-before;
 });
@@ -72,8 +72,8 @@ function liveCard(segment) {
     passageDrafts.set(segment.id,{text:text.value,revision:prior?.revision ?? segment.machine_revision ?? 0,segment:structuredClone(segment)});
     card.classList.add('has-draft');
     const comparisonCopy=card.querySelector('.local-correction-copy');
-    comparisonCopy.value=text.value;fitPassageText(comparisonCopy);
-    renderPassageSaveState(card);text.style.height='auto';text.style.height=`${text.scrollHeight}px`;
+    comparisonCopy.value=text.value;
+    renderPassageSaveState(card);fitPassageTexts([comparisonCopy,text]);
   });
   text.addEventListener('focus',()=>{followingLive=false;renderFollowLive();});
   const keep=node('button','Keep my correction','quiet'),recover=node('button','Recover my correction','quiet');
@@ -145,8 +145,9 @@ function liveCard(segment) {
 function renderLiveSegments() {
   const pane=$('transcript-pane'),host=$('segments'),scroll=pane.scrollTop;
   const focused=host.contains(document.activeElement);
-  const anchor=Array.from(host.children).find(card=>card.dataset.start && card.getBoundingClientRect().bottom>pane.getBoundingClientRect().top);
-  const anchorTime=anchor?Number(anchor.dataset.start):null,offset=anchor?anchor.getBoundingClientRect().top-pane.getBoundingClientRect().top:0;
+  const follow=isLive() && followingLive && !focused,paneTop=pane.getBoundingClientRect().top;
+  const anchor=follow?null:Array.from(host.children).find(card=>card.dataset.start && card.getBoundingClientRect().bottom>paneTop);
+  const anchorTime=anchor?Number(anchor.dataset.start):null,offset=anchor?anchor.getBoundingClientRect().top-paneTop:0;
   const existing=new Map(Array.from(host.children).map(card=>[card.dataset.segmentId,card]));
   const query=$('search').value.toLowerCase();let cursor=host.firstChild,pending=0,visible=0;
   const rows=doc.segments.slice();
@@ -163,11 +164,14 @@ function renderLiveSegments() {
       if(card){if(cursor===card)cursor=next;card.replaceWith(next);}card=next;
     }
     retained.add(card);visible++;
-    card.dataset.speaker=segment.speaker;
-    const name=card.querySelector('.name-speaker');name.textContent=doc.speakers[segment.speaker];
-    name.setAttribute('aria-label',`Name or remember voice for ${doc.speakers[segment.speaker]}`);
     if(card!==cursor)host.insertBefore(card,cursor);cursor=card.nextSibling;
     const draft=passageDrafts.get(segment.id);
+    const uiSignature=JSON.stringify([signature,draft?.text,draft?.revision,recoverablePassageDrafts.has(segment.id),isPassageSaving(segment.id)]);
+    if(card.dataset.uiSignature===uiSignature)continue;
+    card.dataset.uiSignature=uiSignature;
+    if(card.dataset.speaker!==segment.speaker)card.dataset.speaker=segment.speaker;
+    const name=card.querySelector('.name-speaker');
+    if(name.textContent!==doc.speakers[segment.speaker]){name.textContent=doc.speakers[segment.speaker];name.setAttribute('aria-label',`Name or remember voice for ${doc.speakers[segment.speaker]}`);}
     card.classList.toggle('has-draft',!!draft);
     card.classList.toggle('has-new-words',!!draft && draft.revision!==segment.machine_revision);
     card.classList.toggle('has-recoverable-draft',recoverablePassageDrafts.has(segment.id));
@@ -184,17 +188,18 @@ function renderLiveSegments() {
   for(const child of Array.from(host.children))if(!retained.has(child))child.remove();
   renderRetainedAudioReview();
   groupConsecutivePassages(host);
-  for(const card of host.children) {
-    for(const text of card.querySelectorAll('textarea'))if(text.readOnly || !card.contains(document.activeElement))fitPassageText(text);
-  }
+  const texts=[];
+  for(const card of host.children)for(const text of card.querySelectorAll('textarea'))if(text.readOnly || !card.contains(document.activeElement))texts.push(text);
+  fitPassageTexts(texts);
   $('pending-phrases').hidden=!pending;$('pending-phrases').textContent=pending?'Listening…':'';
   $('listening').hidden=visible>0 || pending>0 || !isLive();
   renderSearchResults(visible,query);
   $('no-results').hidden=visible>0 || !query;
-  if(isLive() && followingLive && !focused)pane.scrollTop=pane.scrollHeight;
+  if(follow)pane.scrollTop=pane.scrollHeight;
   else if(anchorTime!==null) {
     const next=Array.from(host.children).find(card=>Number(card.dataset.start)<=anchorTime && Number(card.dataset.end)>anchorTime) || host.querySelector(`[data-segment-id="${anchor.dataset.segmentId}"]`);
     pane.scrollTop=next?scroll+next.getBoundingClientRect().top-pane.getBoundingClientRect().top-offset:scroll;
   }else pane.scrollTop=scroll;
   renderRefinementStatus();
+  refreshPlaybackCards();
 }

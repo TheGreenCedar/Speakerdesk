@@ -298,7 +298,7 @@ class SpeechTranscriber:
             if len(decisions)>1:
                 detection=copy.deepcopy(detection);detection['probes']=decisions
                 window['language_detection']=detection
-            text='';transcription_review=None
+            text='';raw_text=None;transcription_review=None
             if window.get('audio_state')=='insufficient_acoustic_context':
                 transcription_review={'reason':'insufficient_acoustic_context','partial_text':False,
                                       'valid_feature_frames':(window['end_sample']-window['begin'])//160}
@@ -308,7 +308,8 @@ class SpeechTranscriber:
                 try:
                     result=self.asr.transcribe(audio[window['begin']:window['end_sample']],
                         sample_rate=sample_rate,language=window['language'],max_new_tokens=448)
-                    text=result.text.strip()
+                    raw_text=result.text
+                    text=raw_text.strip()
                     if len(result.tokens)>=448:
                         transcription_review={'reason':'token_limit','partial_text':True}
                     elif not text:
@@ -330,6 +331,7 @@ class SpeechTranscriber:
                         elif self.context and self.context['language']!=language:self.context=None
             if transcription_review or len(speaker)>1:window['review']=True
             results.append({'start':window['begin']/sample_rate,'end':window['end_sample']/sample_rate,'text':text,
+                            **({'cohere_raw_text':raw_text} if raw_text is not None else {}),
                             **{key:window[key] for key in ('language','language_detection','review')},
                             **({'audio_state':window['audio_state']} if 'audio_state' in window else {}),
                             **({'acoustic_evidence':window['acoustic_evidence']} if 'acoustic_evidence' in window else {}),

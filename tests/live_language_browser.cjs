@@ -48,19 +48,20 @@ async function run() {
     await page.locator('#live-language').selectOption('fr');
     assert.equal((await patch).status(), 200);
     await expect(page.locator('#live-language')).toBeEnabled();
-    await expect(page.locator('#live-language-status')).toHaveText('From 00:00.10 · Queued');
+    await expect(page.locator('#live-language-status')).toHaveText('From 00:00.10 · Queued · Changes also set the default');
     releasePoll(); await polling;
     await page.unroute('**/api/meeting');
     await expect(page.locator('#live-language')).toHaveValue('fr');
     checks.push('Late status response cannot restore a superseded language revision.');
     await expect(page.locator('#notice')).toContainText('Earlier words keep their language.');
-    assert.equal(await page.locator('#language').inputValue(), 'auto');
+    assert.equal(await page.locator('#language').inputValue(), 'fr');
+    assert.equal((await (await context.request.get(`${url}/api/config`)).json()).default_language, 'fr');
     assert.equal(await page.evaluate(() => localStorage.getItem('speakerdesk.language_mode')), null);
-    checks.push('Live override leaves the Automatic Settings default and stored preference unchanged.');
+    checks.push('Live selection becomes the server-persisted Settings default without local storage authority.');
     await page.screenshot({ path: path.join(evidence, 'live-language-queued-light.png') });
 
     fs.writeFileSync(path.join(folder, 'language-release'), '');
-    await expect(page.locator('#live-language-status')).toHaveText('From 00:00.10');
+    await expect(page.locator('#live-language-status')).toHaveText('From 00:00.10 · Changes also set the default');
     await page.locator('#pause-meeting').click();
     await expect(page.locator('#pause-meeting')).toHaveText('Pause');
     await expect(page.locator('#live-language')).toBeEnabled();

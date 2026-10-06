@@ -207,8 +207,14 @@ class Engine:
         self.config=config;self.models=models;self.emit=emit;self.inbox=inbox;self.path=Path(config['audio_path'])
         self.received=0;self.processed=0.;self.turns=[];self.cursor=0.;self.last_decode=0.
         self.timeline=[{'start_sample':0,'language':config['language'],'epoch':config.get('language_epoch',0)}]
-        self.document={'speakers':{},'segments':[]};self.capture_finished=False;self.fast_sequence=0
+        if config.get('language_history'):
+            self.timeline=copy.deepcopy(config['language_history'])
+        self.document={'speakers':{},'segments':[]};self.capture_finished=False;self.fast_sequence=config.get('fast_sequence',0)
         self.carry=None;self.language_observations=[]
+        self.canonical=None
+        if config.get('canonical_utterances'):
+            from canonical_runtime import CanonicalRuntime
+            self.canonical=CanonicalRuntime(self)
     def language_at(self,sample):
         return next(x for x in reversed(self.timeline) if x['start_sample']<=sample)
     def decode(self,pcm,language,names,start,epoch,*,overlap=False,context_seed=None,observations=None,prefix_context=None):
@@ -339,6 +345,7 @@ class Engine:
         return self.decorate([{'start':0,'end':end-start,'text':'','language':None,'review':True,
                               'transcription_review':{'reason':'refinement_incomplete'}}],start,end,names,config['epoch'])
     def commit(self,final=False):
+        if self.canonical:return self.canonical.commit(final)
         while True:
             before=self.cursor;self._commit_once(final)
             if self.cursor==before or self.cursor>=min(self.received/RATE,self.processed):break
@@ -420,6 +427,7 @@ class Engine:
         finally:
             if hasattr(self.models,'end_refinement'):self.models.end_refinement()
     def _refine(self,request):
+        if self.canonical and request.get('canonical'):return self.canonical.refine(request)
         window=request['window'];a=window['context_start_sample'];b=window['context_end_sample']
         if self.inbox.cancelled_request(request):return {'type':'refinement_result',**{k:request[k] for k in ('operation_id','language_epoch','window')},'cancelled':True}
         pcm=read_audio(self.path,a,b)
@@ -495,6 +503,7 @@ class Engine:
                     raise ValueError('Pause flush must follow its exact captured audio endpoint.')
             if kind=='stop':
                 output,self.processed=self.models.feed(np.empty(0,dtype='float32'),final=True);self.turns.extend(output)
+                self.capture_finished=True
             self.commit(final=True)
             self.emit({'type':'progress','processed_seconds':self.processed,'received_seconds':self.received/RATE,'flush':True,**self.models.metrics()})
             if kind=='flush' and 'request_id' in message:
@@ -503,7 +512,10 @@ class Engine:
                 self.emit({'type':'flush_ack','request_id':message['request_id'],'received_sample':self.received,
                     'available_sample':min(self.received,round(self.processed*RATE)),
                     'speech_observed_sample':min(self.received,speech_sample),'fast_sequence':self.fast_sequence})
-            if kind=='stop':self.capture_finished=True;self.emit({'type':'capture_finished','duration':self.received/RATE})
+            if kind=='stop':
+                self.capture_finished=True
+                self.emit({'type':'capture_finished','duration':self.received/RATE,
+                    **({'canonical_observed_sample':self.canonical.book.cursor} if self.canonical else {})})
         elif kind=='language':
             generation=message.get('generation',message.get('language_epoch'))
             boundary=message.get('start_sample',message.get('apply_from_sample'))
@@ -525,7 +537,8 @@ def run(config,emit):
     with contextlib.redirect_stdout(sys.stderr):models=Models(config)
     inbox=Inbox();inbox.latest_epoch=config.get('language_epoch',0);inbox.historical=bool(config.get('refinement_only'))
     engine=Engine(config,models,emit,inbox)
-    emit({'type':'ready','two_pass':True,'asr':'growing_phrase_with_rolling_refinement',**models.metrics()})
+    emit({'type':'ready','two_pass':True,'canonical_utterances':bool(engine.canonical),
+          'asr':'canonical_vad_utterances' if engine.canonical else 'growing_phrase_with_rolling_refinement',**models.metrics()})
     def read():
         try:
             for line in sys.stdin:inbox.push(json.loads(line))

@@ -21,6 +21,13 @@ class RecordingInput:
 
 sys.stdin=RecordingInput()
 live_refinement.Models=CPUModels
+if config.get('test_canonical_peer'):
+    from test_canonical_runtime import Peer
+    live_refinement.Models=lambda cfg:Peer()
+else:
+    # Retain the explicit legacy rolling-window regression contracts. The new
+    # canonical peer lane below exercises the production activation separately.
+    config['canonical_utterances']=False
 if config.get('test_pause_lag'):
     class LaggedCPUModels(CPUModels):
         def feed(self,audio,final=False):

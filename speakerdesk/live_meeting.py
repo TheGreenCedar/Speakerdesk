@@ -311,6 +311,9 @@ class MeetingManager:
                         elif result['type']=='provisional_revision':
                             self.refinement.provisional(jid,result)
                             if self.recognizer:self.recognizer.observe(jid)
+                        elif result['type']=='canonical_revision':
+                            self.refinement.canonical(jid,result)
+                            if self.recognizer:self.recognizer.observe(jid)
                         elif result['type']=='language_registered':
                             job=self.get(jid)
                             epoch=next((e for e in job['language_history'] if e['generation']==result.get('generation')),None)
@@ -324,7 +327,7 @@ class MeetingManager:
                             job.setdefault('boundary_candidates',{})[key]=result;self.put(job)
                         elif result['type']=='capture_finished':
                             if not worker_stop_sent.is_set():fail('Capture finalization arrived before Stop. Audio is preserved.')
-                            self.refinement.capture_done(jid)
+                            self.refinement.capture_done(jid,observed_sample=result.get('canonical_observed_sample'))
                         elif result['type']=='progress':
                             self.processed=result['processed_seconds'];self.refinement.schedule(jid,force=bool(result.get('flush')))
                         elif result['type']=='flush_ack':self.acknowledge_pause_flush(jid,result)
@@ -350,7 +353,8 @@ class MeetingManager:
                     if message['type']=='shutdown' or (message['type']=='stop' and not self.two_pass):return
             except (OSError,ValueError):fail('Live transcription stopped. Captured audio has been saved.')
         try:
-            cfg=model_config();cfg.update(language=language,language_epoch=0,audio_path=str(dest/'audio.wav'))
+            cfg=model_config();cfg.update(language=language,language_epoch=0,audio_path=str(dest/'audio.wav'),
+                                         job_id=jid,canonical_utterances=True)
             python=os.getenv('SPEAKERDESK_LIVE_PYTHON',str(Path(__file__).resolve().parents[1]/'.venv-package/bin/python'))
             command=([sys.executable,'--live-worker',json.dumps(cfg)] if getattr(sys,'frozen',False)
                      else [python,str(Path(__file__).with_name('live_worker.py')),json.dumps(cfg)])
@@ -372,7 +376,11 @@ class MeetingManager:
             try:ready=json.loads(line)
             except ValueError:raise RuntimeError('Local models could not start. Audio capture did not begin.')
             if ready.get('type')!='ready':raise RuntimeError(ready.get('error','Local models could not start.'))
-            self.two_pass=bool(ready.get('two_pass'));self.refinement.ready(jid,self.two_pass)
+            self.two_pass=bool(ready.get('two_pass'))
+            if ready.get('canonical_utterances'):
+                with self.lock:
+                    job=self.get(jid);job['canonical_utterances']=True;self.put(job)
+            self.refinement.ready(jid,self.two_pass)
             if stop_event.is_set():return
             for target in (consume_results,send_audio):
                 thread=threading.Thread(target=target,daemon=True);thread.start();threads.append(thread)
@@ -539,7 +547,9 @@ class MeetingManager:
         dest=self.folder(jid);process=None;timer=None;log=None;sender=None;closed=threading.Event()
         try:
             job=self.get(jid);cfg=model_config();cfg.update(language=job['language'],language_epoch=job.get('language_epoch',0),
-                audio_path=str(dest/'audio.wav'),refinement_only=True)
+                audio_path=str(dest/'audio.wav'),refinement_only=True,job_id=jid,
+                canonical_utterances=bool(job.get('canonical_utterances')),language_history=job.get('language_history'),
+                fast_sequence=job.get('last_fast_sequence',0))
             python=os.getenv('SPEAKERDESK_LIVE_PYTHON',str(Path(__file__).resolve().parents[1]/'.venv-package/bin/python'))
             command=([sys.executable,'--live-worker',json.dumps(cfg)] if getattr(sys,'frozen',False)
                      else [python,str(Path(__file__).with_name('live_worker.py')),json.dumps(cfg)])
@@ -565,7 +575,7 @@ class MeetingManager:
             sender=threading.Thread(target=send,daemon=True);sender.start()
             for line in process.stdout:
                 result=json.loads(line)
-                if result['type']=='capture_finished':self.refinement.capture_done(jid)
+                if result['type']=='capture_finished':self.refinement.capture_done(jid,observed_sample=result.get('canonical_observed_sample'))
                 elif result['type']=='refinement_result':self.refinement.result(jid,result)
                 elif result['type']=='finished':break
                 elif result['type']=='error':raise RuntimeError(result.get('error','Saved refinement failed.'))
