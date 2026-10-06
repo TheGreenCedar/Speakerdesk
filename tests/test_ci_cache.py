@@ -65,6 +65,27 @@ class IdentityTests(unittest.TestCase):
                 for key in baseline:
                     self.assertNotEqual(baseline[key], current[key])
 
+    def test_release_version_preserves_compiler_compatibility(self):
+        manifest = self.root / 'desktop/src-tauri/Cargo.toml'
+        manifest.write_text('[package]\nname = "speakerdesk"\nversion = "0.3.0"\n')
+        baseline = keys(self.root, self.paths, self.tools)
+        manifest.write_text('[package]\nname = "speakerdesk"\nversion = "0.4.0"\n')
+        current = keys(self.root, self.paths, self.tools)
+        self.assertEqual(baseline['compiler-prefix'], current['compiler-prefix'])
+        self.assertNotEqual(baseline['compiler-key'], current['compiler-key'])
+
+    def test_lock_changes_preserve_download_prefixes_but_change_exact_keys(self):
+        baseline = keys(self.root, self.paths, self.tools)
+        for path, name in [('requirements-packaging.lock.txt', 'uv'),
+                           ('desktop/src-tauri/Cargo.lock', 'cargo'),
+                           ('desktop/package-lock.json', 'npm')]:
+            with self.subTest(cache=name):
+                (self.root / path).write_text('changed lock')
+                current = keys(self.root, self.paths, self.tools)
+                self.assertEqual(baseline[name + '-prefix'], current[name + '-prefix'])
+                self.assertNotEqual(baseline[name + '-key'], current[name + '-key'])
+                (self.root / path).write_text('original')
+
     def test_symlink_input_is_rejected(self):
         path = self.root / 'speakerdesk/app.py'
         path.unlink()

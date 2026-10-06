@@ -64,6 +64,7 @@ jobs:
           path: |
             .cache/uv
           key: ${{ steps.identity.outputs.uv-key }}
+          restore-keys: ${{ steps.identity.outputs.uv-prefix }}
       - name: Restore cargo cache
         id: cargo
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -72,6 +73,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: ${{ steps.identity.outputs.cargo-key }}
+          restore-keys: ${{ steps.identity.outputs.cargo-prefix }}
       - name: Restore npm cache
         id: npm
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -79,6 +81,7 @@ jobs:
           path: |
             .cache/npm
           key: ${{ steps.identity.outputs.npm-key }}
+          restore-keys: ${{ steps.identity.outputs.npm-prefix }}
       - name: Restore compiler cache
         id: compiler
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -104,8 +107,11 @@ jobs:
       - name: Report cache hit types
         env:
           UV_HIT: ${{ steps.uv.outputs.cache-hit }}
+          UV_MATCHED: ${{ steps.uv.outputs.cache-matched-key }}
           CARGO_HIT: ${{ steps.cargo.outputs.cache-hit }}
+          CARGO_MATCHED: ${{ steps.cargo.outputs.cache-matched-key }}
           NPM_HIT: ${{ steps.npm.outputs.cache-hit }}
+          NPM_MATCHED: ${{ steps.npm.outputs.cache-matched-key }}
           COMPILER_MATCHED: ${{ steps.compiler.outputs.cache-matched-key }}
           COMPILER_REQUESTED: ${{ steps.compiler.outputs.cache-primary-key }}
           RUNTIME_HIT: ${{ steps.runtime.outputs.cache-hit }}
@@ -114,8 +120,11 @@ jobs:
           {
             echo "### Cache restore"
             echo "- uv exact hit: ${UV_HIT:-false}"
+            echo "- uv matched: ${UV_MATCHED:-miss}"
             echo "- Cargo dependency exact hit: ${CARGO_HIT:-false}"
+            echo "- Cargo dependency matched: ${CARGO_MATCHED:-miss}"
             echo "- npm exact hit: ${NPM_HIT:-false}"
+            echo "- npm matched: ${NPM_MATCHED:-miss}"
             echo "- compiler requested: $COMPILER_REQUESTED"
             echo "- compiler matched: ${COMPILER_MATCHED:-miss}"
             echo "- runtime exact hit: ${RUNTIME_HIT:-false}"
