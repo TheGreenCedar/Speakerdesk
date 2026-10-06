@@ -138,5 +138,21 @@
   .segment-actions{opacity:1}.details-toggle{display:inline-flex}
 }
 @media(min-width:901px){.transcript-search input{width:150px}}
-.speaker-continuation .segment-top>select{position:static;width:auto;height:auto;clip-path:none;visibility:hidden}
-.speaker-continuation:hover .segment-top>select,.speaker-continuation:focus-within .segment-top>select{visibility:visible}
+/* Keep a continuous reading column. Passage timing occupies its own grid cell,
+   so controls never cover words or reserve a metadata band on every row. */
+.segment{padding:6px 0}.speaker-continuation{padding-top:2px;padding-bottom:4px}
+.segment-body{display:grid;grid-template-columns:72px minmax(0,1fr);column-gap:8px;align-items:start}
+.segment-body>:not(.seek):not(.rolling-time){grid-column:2;min-width:0}
+.segment-body>.seek,.segment-body>.rolling-time{grid-column:1;grid-row:1;min-height:28px;min-width:0;padding:0;display:flex;align-items:center;font-size:12px;line-height:1.45;font-variant-numeric:tabular-nums}
+.segment-body>.seek{justify-content:flex-start;gap:4px}.segment-body>.seek svg{width:12px;height:12px}
+.segment-top,.speaker-continuation .segment-top{min-height:28px;margin:0 0 2px}
+.segment-top select,.segment-top .name-speaker,.review-action,.rolling-actions button{min-height:28px}
+.speaker-continuation .segment-top>select{position:static;width:auto;height:auto;clip-path:none;visibility:visible}
+.speaker-continuation:not(:focus-within):not(.passage-exception) .segment-top{display:none}
+.speaker-continuation:not(:focus-within) .segment-top>.name-speaker,
+.speaker-continuation:not(:focus-within) .segment-top>select,
+.speaker-continuation:not(:focus-within) .routine-state{display:none}
+@media(max-width:900px){
+  .segment-body{grid-template-columns:60px minmax(0,1fr);column-gap:6px}
+  .segment-actions{flex-wrap:wrap}
+}

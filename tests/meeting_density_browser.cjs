@@ -21,8 +21,15 @@ async function main() {
     const targets=await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     ws=new WebSocket(targets.find(t=>t.type==='page').webSocketDebuggerUrl);
     await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=reject;});
-    let id=0;const pending=new Map(),errors=[];
-    ws.onmessage=event=>{const m=JSON.parse(event.data);if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text);
+    let id=0;const pending=new Map(),errors=[],dialogs=[];
+    ws.onmessage=event=>{const m=JSON.parse(event.data);
+      if(m.method==='Page.javascriptDialogOpening'){
+        dialogs.push(m.params.message);
+        const replacement=m.params.type==='confirm' && m.params.message==='Replace the transcript of Rolling context · synthetic CPU fixture with meeting.json?';
+        if(!replacement)errors.push(`Unexpected dialog: ${m.params.message}`);
+        send('Page.handleJavaScriptDialog',{accept:replacement}).catch(error=>errors.push(error.message));
+      }
+      if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text);
       if(pending.has(m.id)){const [resolve,reject]=pending.get(m.id);pending.delete(m.id);m.error?reject(new Error(m.error.message)):resolve(m.result);}};
     const send=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;pending.set(key,[resolve,reject]);ws.send(JSON.stringify({id:key,method,params}));});
     const evaluate=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});
@@ -76,10 +83,20 @@ async function main() {
       await screenshot(`${mode}-hour-${state}-1280x800.png`);
     }
     if(mode!=='before'){
+      assert.equal(measurements.recording.fontSize,'16px');assert.equal(measurements.ready.fontSize,'16px');
+      assert(measurements.recording.fullyReadablePassages>=8,'Live laptop density must retain the baseline eight readable passages.');
+      assert(measurements.ready.fullyReadablePassages>=7,'Saved laptop density must retain the baseline seven readable passages.');
+      checks.push('Matched live and saved laptop fixtures retain baseline reading density without reducing the16px transcript font.');
       assert.equal(measurements.ready.defaultVisiblePassageLanguageControls,0);
       assert.equal(await evaluate("document.querySelectorAll('.speaker-continuation').length"),240);
       assert.equal(await evaluate("new Set([...document.querySelectorAll('.segment')].map(el=>el.dataset.segmentId)).size"),360);
       checks.push('Hour transcript groups consecutive speakers visually while preserving all 360 distinct segment IDs.');
+      assert.equal(await evaluate("[...document.querySelectorAll('.segment-top>select')].filter(el=>el.checkVisibility()).length"),120);
+      await evaluate("document.querySelector('[data-segment-id=hour-1] textarea').focus()");
+      assert.equal(await evaluate("document.querySelector('[data-segment-id=hour-1] .segment-top>select').checkVisibility()"),true);
+      assert.equal(await evaluate("(()=>{const card=document.querySelector('[data-segment-id=hour-1]'),seek=card.querySelector('.seek').getBoundingClientRect(),text=card.querySelector('textarea').getBoundingClientRect();return seek.height>=28 && seek.right<=text.left && card.querySelector('select').getBoundingClientRect().height>=28})()"),true);
+      await evaluate("document.activeElement.blur();$('inspector').hidden=true");
+      checks.push('One speaker header per consecutive turn; focusing a continuation reveals its own28px speaker control and keeps playback beside the words.');
       await evaluate("document.querySelector('.passage-repair').open=true");
       assert.equal(await evaluate("document.querySelector('.passage-repair select').getClientRects().length>0"),true);
       checks.push('Per-passage language retry is available only after opening contextual repair.');
@@ -118,6 +135,8 @@ async function main() {
       assert.equal(hourWithUnassignedGaps.internalRows,720);assert.equal(hourWithUnassignedGaps.speechCards,360);
       assert.equal(hourWithUnassignedGaps.blankTranscriptCards,0);assert.equal(hourWithUnassignedGaps.retainedReviewRanges,360);
       assert.equal(hourWithUnassignedGaps.reviewCollapsed,true);assert.equal(hourWithUnassignedGaps.blankNameControls,0);
+      assert(hourWithUnassignedGaps.fullyReadablePassages>=6,'720-row laptop fixture must retain six readable speech passages.');
+      assert(hourWithUnassignedGaps.scrollHeight<=25003,'Hour fixture must fit the original dense layout scroll budget.');
       await screenshot('after-hour-720rows-unassigned-gaps-1280x720.png');
       await evaluate(`(()=>{window.hourDraft=document.querySelector('[data-segment-id=speech-0] textarea');hourDraft.focus();hourDraft.value='My retained meeting correction';hourDraft.dispatchEvent(new Event('input',{bubbles:true}));
         doc.segments[0].text='';doc.segments[0].machine_revision=2;renderLiveSegments();})()`);
@@ -172,6 +191,7 @@ async function main() {
         const transfer=new DataTransfer();transfer.items.add(new File([JSON.stringify(incoming)],'meeting.json',{type:'application/json'}));
         $('import').files=transfer.files;$('import').dispatchEvent(new Event('change',{bubbles:true}));})()`);
       await wait("!saving && $('notice').textContent==='Imported and saved locally.'");
+      assert.deepEqual(dialogs,['Replace the transcript of Rolling context · synthetic CPU fixture with meeting.json?']);
       assert.equal(await evaluate("doc.segments[0].text"),'Imported transcript words remain intact.');
       assert.equal(await evaluate("doc.provenance.kind"),'imported');
       assert.equal(await evaluate("document.querySelector('[data-segment-id=imported-passage] textarea').value"),'Imported transcript words remain intact.');

@@ -49,12 +49,15 @@ function liveCard(segment) {
   const identity=node('button',doc.speakers[segment.speaker],'name-speaker');
   identity.title='Name this speaker or remember their voice';identity.setAttribute('aria-label',`Name or remember voice for ${doc.speakers[segment.speaker]}`);
   identity.addEventListener('click',()=>openNamePicker(segment.speaker).catch(e=>notice(e.message,true)));
-  const timing=node('span',`${passageTime(segment.start)}–${passageTime(segment.end)}`,'rolling-time');
+  const timing=node('span',time(segment.start),'rolling-time');
+  timing.title=`${passageTime(segment.start)}–${passageTime(segment.end)}`;
+  timing.setAttribute('aria-label',`Passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);
   const state=segment.refinement_state || 'provisional';
   const reviewed=segment.review_resolution==='words_reviewed' && segment.text.trim();
   const badge=node('span',reviewed?'Words reviewed':({provisional:'Provisional',refined:'Refined',unresolved:'Needs review',edited:'Edited'})[state] || state,'refinement-badge');
+  badge.classList.toggle('routine-state',!reviewed && ['provisional','refined'].includes(state));
   badge.title=state==='provisional'?'Words may change with more context.':passageReviewReason(segment);
-  top.append(timing,identity);if(state!=='provisional' || reviewed)top.append(badge);body.append(top);
+  body.append(timing);top.append(identity);if(state!=='provisional' || reviewed)top.append(badge);body.append(top);
   const draft=passageDrafts.get(segment.id),text=node('textarea');
   text.rows=1;text.value=draft?.text ?? segment.text;
   if(!text.value.trim() && recoverablePassageDrafts.has(segment.id))text.placeholder='Latest words are empty. Your correction is available to recover.';

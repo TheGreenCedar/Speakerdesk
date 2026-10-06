@@ -262,16 +262,16 @@ function renderSegments() {
     const avatar=node('span',`S${index+1}`,'speaker-avatar');avatar.setAttribute('aria-hidden','true');avatar.dataset.color=index%8;
     const body=node('div',undefined,'segment-body');
     const top = node('div', undefined, 'segment-top');
-    const seek = node('button', undefined, 'seek'); seek.append(icon('play'),node('span',passageTime(segment.start))); seek.setAttribute('aria-label', `Play passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);seek.title='Play this passage';
+    const seek = node('button', undefined, 'seek'); seek.append(icon('play'),node('span',time(segment.start))); seek.setAttribute('aria-label', `Play passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);seek.title=`Play passage ${passageTime(segment.start)}–${passageTime(segment.end)}`;
     seek.addEventListener('click', () => { passageEnd=segment.end; $('player').currentTime = segment.start; $('player').play().catch(e => notice(e.message, true)); });
     const speaker = node('select'); speakerOptions(speaker, segment.speaker); speaker.setAttribute('aria-label', 'Segment speaker');
     speaker.disabled=!!isLive();
     seek.disabled=!!isLive();
     speaker.title='Change who spoke this passage';
     speaker.addEventListener('change', () => { segment.speaker = speaker.value; segment.review = true; changed(); renderSegments(); });
-    top.append(seek, speaker);
+    body.append(seek);top.append(speaker);
     if(selected.speaker_assignments?.[segment.speaker]?.source==='automatic_voice') {
-      const recognized=node('span','Recognized','review-tag');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';top.append(recognized);
+      const recognized=node('span','Recognized','review-tag routine-state');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';top.append(recognized);
     }
     if (segment.review && !markReviewable(segment)) {
       const review=node('span','Needs review','review-tag');
@@ -439,6 +439,7 @@ function groupConsecutivePassages(host) {
   for(const card of host.children) {
     const continuation=previous && previous.dataset.speaker===card.dataset.speaker;
     card.classList.toggle('speaker-continuation',!!continuation);
+    card.classList.toggle('passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
     previous=card;
   }
 }
