@@ -156,7 +156,21 @@ class Models:
         self.speech_live=self.speech.session(archive=FrameArchive(
             Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'))
         self.speech_historical=None
-        self.language_context=None;self.transcription_start_sample=0
+        self.language_context=None;self.transcription_start_sample=0;self.coarse_aligner=None
+    def align_canonical(self,request,text,*,language):
+        # No implicit download or non-English calibration extrapolation. The
+        # existing null/review path remains when the optional provider is absent.
+        if language!='en' or not self.config.get('alignment_path'):return None
+        self.check_memory()
+        try:
+            if self.coarse_aligner is None:
+                from coarse_alignment import CoarseAlignment
+                self.coarse_aligner=CoarseAlignment(self.config['alignment_path'])
+            return self.coarse_aligner.align(read_audio(self.config['audio_path'],
+                request['start_sample'],request['end_sample']),text,
+                start_sample=request['start_sample'],language=language)
+        except (ImportError,OSError,ValueError,RuntimeError):
+            return None
     def set_language_context(self,context,start_sample):
         self.language_context=copy.deepcopy(context);self.transcription_start_sample=start_sample
     def transcribe(self,audio,language,names,overlap=False):

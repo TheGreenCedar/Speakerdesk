@@ -86,7 +86,7 @@ class CanonicalRuntime:
                 if complete and text.strip() and hasattr(e.models,'align_canonical'):
                     # Provider must independently enforce its approved clock/score
                     # policy and return the exact raw-text/revision-bound result.
-                    alignment=e.models.align_canonical(request,text)
+                    alignment=e.models.align_canonical(request,text,language=passages[0].get('language'))
                 parts.append({'request':request,'text':text,'complete':complete,'alignment':alignment,
                               'passages':passages})
             self.book.apply_decode_parts(row['id'],parts,stage=stage)
