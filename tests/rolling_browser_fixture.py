@@ -74,7 +74,10 @@ def main():
                  'transcription_review':{'reason':'insufficient_acoustic_context'}},
                 {'id':'quiet-positive','start':5,'end':7,'speaker':'speaker_0','text':'Quiet but intelligible speech remains visible.','language':'en','refinement_state':'refined',
                  'language_detection':{'mode':'auto','reason':'best_effort'}},
-                {'id':'short-positive','start':7,'end':7.25,'speaker':'speaker_0','text':'Yes.','language':'en','refinement_state':'refined'}]
+                {'id':'short-positive','start':7,'end':7.25,'speaker':'speaker_0','text':'Yes.','language':'en','refinement_state':'refined'},
+                {'id':'brief-positive','start':8,'end':8.1,'speaker':'speaker_0','text':'Brief words stay visible.','language':'en','refinement_state':'refined','review':True,
+                 'language_detection':{'mode':'auto','reason':'recent_context'},
+                 'transcription_review':{'reason':'short_acoustic_context','partial_text':False}}]
             job.update(status='ready',duration=10,refinement_status='complete',revision=job['revision']+1)
             manager.put(job);manager.jid=None
             return jsonify(ok=True)

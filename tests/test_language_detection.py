@@ -146,8 +146,8 @@ class LanguageRoutingTests(unittest.TestCase):
             row=transcriber.transcribe(pcm,16000,('speaker_0','speaker_1'))[0]
             self.assertEqual((row['start'],row['end'],row['language']),(0,len(pcm)/16000,'fr'))
             if len(pcm)<3200:
-                self.assertEqual(row['text'],'')
-                self.assertEqual(row['transcription_review']['candidate_text'],'Français original')
+                self.assertEqual(row['text'],'Français original')
+                self.assertNotIn('candidate_text',row['transcription_review'])
                 self.assertTrue(row['review'])
             else:self.assertEqual(row['text'],'Français original')
             np.testing.assert_array_equal(transcriber.asr.transcribe.call_args.args[0],pcm)
