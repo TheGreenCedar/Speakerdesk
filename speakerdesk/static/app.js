@@ -65,7 +65,7 @@ function setStatus() {
   $('recording-dot').style.stroke=$('recording-dot').style.fill;
   $('run').hidden = !!doc?.segments?.length || live; $('run').disabled = busy || !languageReady(selected.language);
   $('manual').hidden = !!doc || busy || !selected.duration;
-  $('delete').disabled = busy;
+  $('delete').disabled = busy || !!selected.inference_owned;
   $('duration').textContent = selected.duration ? time(selected.duration) : 'Preparing…';
   $('segment-count').textContent = doc && !live ? `${doc.segments.length} passages` : '';
   $('save').hidden = !doc || live; $('search').disabled = !doc;

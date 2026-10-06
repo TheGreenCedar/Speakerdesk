@@ -497,8 +497,9 @@ class MeetingManager:
                 env=dict(os.environ,HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',OMP_NUM_THREADS='2',TOKENIZERS_PARALLELISM='false'))
             with self.lock:self.worker=process
             def expire():
-                self.refinement.pause(jid,final=True)
-                if process.poll() is None:process.terminate()
+                try:self.refinement.pause(jid,final=True)
+                finally:
+                    if process.poll() is None:process.terminate()
             timer=threading.Timer(60,expire);timer.daemon=True;timer.start()
             ready=json.loads(process.stdout.readline())
             if ready.get('type')!='ready' or not ready.get('two_pass'):raise RuntimeError('Saved refinement worker could not start.')
@@ -521,23 +522,26 @@ class MeetingManager:
             with self.lock:
                 job=self.get(jid);job.update(refinement_status='paused',refinement_error='Refinement paused. Previous words and saved audio are retained.');self.put(job)
         finally:
-            closed.set()
-            if timer:timer.cancel()
-            if process and process.poll() is None:
-                process.terminate()
-                try:process.wait(timeout=3)
-                except subprocess.TimeoutExpired:process.kill();process.wait(timeout=3)
-            if sender:sender.join(timeout=3)
-            if process:
-                for stream in (process.stdin,process.stdout):
-                    try:stream.close()
-                    except (OSError,ValueError):pass
-            if log:log.close()
-            with self.lock:
-                job=self.get(jid)
-                if job.get('refinement_status') not in ('complete','unresolved'):job['refinement_status']='paused'
-                job['message']='Meeting saved on this Mac.';self.put(job)
-                self.worker=None;self.jid=None;self.refining_saved=False
+            try:
+                closed.set()
+                if timer:timer.cancel()
+                if process and process.poll() is None:
+                    process.terminate()
+                    try:process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:process.kill();process.wait(timeout=3)
+                if sender:sender.join(timeout=3)
+                if process:
+                    for stream in (process.stdin,process.stdout):
+                        try:stream.close()
+                        except (OSError,ValueError):pass
+                if log:log.close()
+                with self.lock:
+                    job=self.get(jid)
+                    if job.get('refinement_status') not in ('complete','unresolved'):job['refinement_status']='paused'
+                    job['message']='Meeting saved on this Mac.';self.put(job)
+            finally:
+                with self.lock:
+                    self.worker=None;self.jid=None;self.refining_saved=False
 
 
 def append_finalized_segment(document, result):

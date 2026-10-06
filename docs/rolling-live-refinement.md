@@ -146,7 +146,7 @@ in place; explicit audio-anchor scroll compensation handles merged rows.
 
 ## Validation and release boundary
 
-The full integrated CPU suite passes: **160 tests in 20.299 seconds**. It exercises
+The full integrated CPU suite passes: **165 tests in 20.061 seconds**. It exercises
 production scheduling, the resident engine and real JSONL/pipes/SQLite/WAV with
 explicit synthetic model substitutes. New cases include a through-word six-second
 cut, sentence punctuation, genuine repetition, lexical code switching, 80 seconds
@@ -155,10 +155,11 @@ conservative slot mapping, saved-prefix edits, stale operations, failed retries,
 placeholder recovery and restart without capture. Existing import, language,
 voice eligibility, enrollment and error-cleanup regressions also pass.
 
-Nine installed headless Chrome checks pass with zero page errors on the production
+Ten installed headless Chrome checks pass with zero page errors on the production
 HTML/JS/API and an explicitly synthetic fixture. They cover compact pending rows,
 focused drafts, stale-save rejection, protected saved edits, confirmed names,
-scroll preservation, refinement controls and the live language/default boundary.
+scroll preservation, refinement controls, the live language/default boundary and
+delete protection while a saved refinement owns the meeting.
 The enrollment lane's browser flow also passes after integration, including
 bounded preview, consent reset and actionable empty-clip reasons.
 

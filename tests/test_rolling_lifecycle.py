@@ -1,11 +1,13 @@
 """Real resident JSONL, pipes, WAV/SQLite and recovery; CPU models only."""
 import json
+import threading
 from pathlib import Path
 import subprocess
 import sys
 import unittest
 from unittest.mock import patch
 from support.meeting_harness import MeetingHarness, PROTOCOL
+from test_live_refinement import wav_file
 
 
 class RollingLifecycleTests(MeetingHarness,unittest.TestCase):
@@ -42,6 +44,24 @@ class RollingLifecycleTests(MeetingHarness,unittest.TestCase):
         self.assertEqual((self.root/jid/'audio.wav').read_bytes(),original)
     def change_language(self,jid,language,revision):
         return self.client.patch(f'/api/meetings/{jid}/language',headers=self.headers,json={'language':language,'language_revision':revision})
+    def test_saved_refinement_blocks_deletion_until_worker_releases_ownership(self):
+        jid='d'*32;(self.root/jid).mkdir();wav_file(self.root/jid/'audio.wav',1)
+        self.manager.put({'id':jid,'name':'Saved','kind':'meeting','status':'ready','language':'en','duration':1,'revision':0,
+            'document':{'speakers':{},'segments':[],'provenance':{'kind':'local_inference'}}})
+        entered=threading.Event();release=threading.Event();original=self.manager._run_saved_refinement
+        def held_worker(job_id):
+            entered.set();release.wait(timeout=5);original(job_id)
+        with patch.object(self.manager,'_run_saved_refinement',side_effect=held_worker):
+            try:
+                response=self.client.post(f'/api/jobs/{jid}/refinement/resume',headers=self.headers)
+                self.assertEqual(response.status_code,202,response.json);self.assertTrue(entered.wait(timeout=2))
+                self.assertEqual(self.job(jid)['status'],'ready');self.assertTrue(self.job(jid)['inference_owned'])
+                self.assertEqual(self.client.delete(f'/api/jobs/{jid}',headers=self.headers).status_code,409)
+                self.assertTrue((self.root/jid/'audio.wav').is_file())
+            finally:release.set()
+            self.wait_for(lambda:self.manager.jid is None)
+        self.assertFalse(self.job(jid)['inference_owned'])
+        self.assertEqual(self.client.delete(f'/api/jobs/{jid}',headers=self.headers).status_code,200)
     def test_burst_backlog_final_core_revisions_history_and_explicit_saved_audio_resume(self):
         self.scenario='backlog';jid=self.start(['microphone'])
         self.wait_for(lambda:(self.root/jid/'capture-burst-finished').exists())

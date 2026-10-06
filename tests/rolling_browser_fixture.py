@@ -38,6 +38,11 @@ def main():
         def reset():
             manager.put(copy.deepcopy(initial));manager.active_language='en';manager.active_epoch=0
             return jsonify(ok=True)
+        @app.post('/fixture/saved-owned')
+        def saved_owned():
+            job=manager.get(jid);job.update(status='ready',refinement_status='refining');manager.put(job)
+            manager.jid=jid if request.get_json().get('owned') else None
+            return jsonify(ok=True)
         app.view_functions['config']=lambda:jsonify(languages=LANGUAGE_CHOICES,default_language='auto',readiness={'configured':True,'automatic_language':True},decoder='CPU fixture')
         app.view_functions['status']=lambda:jsonify(models=[],status='ready',ready=True,core_ready=True,supported=True,total_bytes=1,downloaded_bytes=1,error=None,
             voice={'status':'ready','available':False,'enabled':False,'message':'CPU UI fixture'})

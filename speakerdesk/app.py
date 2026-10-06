@@ -206,7 +206,9 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
 
     @app.get('/api/jobs/<jid>')
     def job_detail(jid):
-        job=get(jid)
+        with lock:
+            job=get(jid)
+            job['inference_owned']=app.extensions['speakerdesk']['meetings'].jid==jid
         for key in ('rolling_sources','refinement_history','fast_history','fast_previous_revision','boundary_candidate','boundary_candidates','rolling_inflight','fast_retained_candidate'):job.pop(key,None)
         return jsonify(job)
 
@@ -349,7 +351,8 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     def delete(jid):
         with lock:
             job=get(jid)
-            if job['status'] in ACTIVE:abort(409,description='Wait for this job to finish before deleting it.')
+            if job['status'] in ACTIVE or app.extensions['speakerdesk']['meetings'].jid==jid:
+                abort(409,description='Wait for this job to finish before deleting it.')
             shutil.rmtree(folder(jid))
             with db() as conn:conn.execute('DELETE FROM jobs WHERE id=?',(jid,))
         return jsonify(deleted=True)

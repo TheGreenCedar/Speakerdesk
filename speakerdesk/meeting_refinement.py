@@ -81,11 +81,22 @@ class RefinementController:
             job=self.manager.get(jid);self.initialize(job)
             sequence=result.get('fast_sequence',0)
             if sequence and sequence<=job.get('last_fast_sequence',0):return
-            if result['language_epoch']!=job['language_epoch']:
-                # Historical captured epochs may append, but cannot replace newer rows.
-                if result.get('expected'):return
-            for row in result['candidates']:validate_language_segment(row,job['language_history'])
+            epoch=next((x for x in job['language_history'] if x['epoch']==result['language_epoch']),None)
+            if epoch is None:raise ValueError('Fast output has an unknown language epoch.')
+            index=job['language_history'].index(epoch);window=result['window']
+            if (window['start_sample']<epoch['start_sample'] or
+                    (index+1<len(job['language_history']) and window['end_sample']>job['language_history'][index+1]['start_sample'])):
+                raise ValueError('Fast output crosses its captured language boundary.')
+            for row in result['candidates']:
+                if row.get('language_generation')!=epoch['generation'] or row.get('language_epoch')!=epoch['epoch']:
+                    raise ValueError('Fast output does not match its captured language epoch.')
+                validate_language_segment(row,job['language_history'])
             candidates,expected=prepare_fast_candidates(job,result)
+            # An old epoch can finish its same-origin phrase after the setting
+            # changes. It cannot authorize replacing rows from another epoch.
+            expected={sid:version for sid,version in expected.items()
+                      if any(s['id']==sid and s.get('language_epoch')==epoch['epoch']
+                             for s in job['document']['segments'])}
             merged=reconcile_window(job['document'],result['window'],expected,candidates,result.get('speakers'))
             job['duration']=max(job.get('duration',0),self.manager.duration)
             document=validate(merged['document'],job['duration'])

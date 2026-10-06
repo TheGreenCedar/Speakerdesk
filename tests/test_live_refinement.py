@@ -1,5 +1,6 @@
 """Production engine/host contracts with explicit synthetic CPU model outputs."""
 import copy
+import io
 import re
 import sys
 import tempfile
@@ -205,6 +206,50 @@ class HostTests(unittest.TestCase):
         self.assertTrue(self.manager.worker_controls.empty())
         with patch('meeting_refinement.time.monotonic',return_value=108):self.manager.refinement.schedule(self.jid)
         self.assertEqual(self.manager.worker_controls.get_nowait()['window']['end_sample'],8*RATE)
+
+    def test_delayed_historical_phrase_can_finish_before_its_language_boundary(self):
+        self.provisional(6,'Please review the secs')
+        job=self.manager.get(self.jid)
+        job.update(language='fr',language_epoch=1,language_revision=1)
+        job['language_history'].append({'epoch':1,'generation':1,'language':'fr','start_sample':12*RATE})
+        job['document']['segments'].append({'id':'newer','start':12,'end':15,'text':'Nouveaux mots',
+            'speaker':'speaker_0','language':'fr','language_epoch':1,'language_generation':1,'language_mode':'fr'})
+        self.manager.put(job)
+        self.provisional(12,'Please review the section together. Yes yes.',2)
+        rows=self.manager.get(self.jid)['document']['segments']
+        self.assertEqual([s['text'] for s in rows],['Please review the section together. Yes yes.','Nouveaux mots'])
+        self.assertEqual([(s['start'],s['end'],s['language']) for s in rows],[(0,12,'en'),(12,15,'fr')])
+        before=copy.deepcopy(rows)
+        with self.assertRaisesRegex(ValueError,'language boundary'):
+            self.provisional(15,'Old language must not cross this boundary',3)
+        self.assertEqual(self.manager.get(self.jid)['document']['segments'],before)
+
+    def test_historical_phrase_preserves_saved_prefix_and_admits_its_tail(self):
+        self.provisional(6,'Please review the secs');job=self.manager.get(self.jid);row=job['document']['segments'][0]
+        response=self.client.patch(f'/api/jobs/{self.jid}/segments/{row["id"]}',headers=self.headers,
+            json={'segment_revision':row['machine_revision'],'changes':{'text':'My saved correction'}})
+        self.assertEqual(response.status_code,200)
+        job=self.manager.get(self.jid);job.update(language='fr',language_epoch=1,language_revision=1)
+        job['language_history'].append({'epoch':1,'generation':1,'language':'fr','start_sample':12*RATE});self.manager.put(job)
+        self.provisional(12,'Please review the section together. Yes yes.',2)
+        rows=self.manager.get(self.jid)['document']['segments']
+        self.assertEqual([s['text'] for s in rows],['My saved correction','together. Yes yes.'])
+        self.assertEqual([(s['start'],s['end']) for s in rows],[(0,6),(6,12)])
+
+    def test_missing_saved_job_still_releases_worker_ownership(self):
+        self.manager.jid=self.jid;self.manager.refining_saved=True
+        with patch.object(self.manager,'get',side_effect=RuntimeError('CPU missing job')):
+            with self.assertRaisesRegex(RuntimeError,'missing job'):self.manager._run_saved_refinement(self.jid)
+        self.assertIsNone(self.manager.jid);self.assertIsNone(self.manager.worker);self.assertFalse(self.manager.refining_saved)
+
+    def test_failed_saved_status_write_still_releases_worker_ownership(self):
+        (self.root/self.jid).mkdir();self.manager.jid=self.jid;self.manager.refining_saved=True
+        process=Mock();process.poll.return_value=1
+        process.stdin=io.StringIO();process.stdout=io.StringIO('{"type":"error"}\n')
+        with patch('live_meeting.subprocess.Popen',return_value=process),patch.object(self.manager,'put',side_effect=OSError('CPU disk failure')):
+            with self.assertRaisesRegex(OSError,'disk failure'):self.manager._run_saved_refinement(self.jid)
+        self.assertIsNone(self.manager.jid);self.assertIsNone(self.manager.worker);self.assertFalse(self.manager.refining_saved)
+        self.assertTrue(process.stdin.closed);self.assertTrue(process.stdout.closed)
 
 
 if __name__=='__main__':unittest.main()

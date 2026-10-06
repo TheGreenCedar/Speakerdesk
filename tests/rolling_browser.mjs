@@ -100,9 +100,15 @@ try {
   await evaluate('speakerdeskTheme.set("light");$("transcript-pane").scrollTop=0');
   await screenshot('rolling-context-light.png');
   await evaluate('speakerdeskTheme.set("dark")');await screenshot('rolling-context-dark.png');
+  await evaluate('api("/fixture/saved-owned",{method:"POST",body:JSON.stringify({owned:true})}).then(()=>poll())');
+  await wait('selected.status === "ready" && selected.inference_owned');
+  assert.equal(await evaluate('$("delete").disabled'),true);
+  await evaluate('api("/fixture/saved-owned",{method:"POST",body:JSON.stringify({owned:false})}).then(()=>poll())');
+  await wait('selected.status === "ready" && !selected.inference_owned');
+  assert.equal(await evaluate('$("delete").disabled'),false);
   assert.deepEqual(errors,[]);
-  await writeFile(join(output,'browser-report.json'),JSON.stringify({kind:'synthetic_cpu_fixture',checks:['collapsed_pending_rows','compact_provisional_states','focused_unsaved_draft_survives_merge','stale_row_save_rejected','saved_edit_protected_from_late_pass','confirmed_name_retained','audio_anchor_scroll_survives_merge','pause_resume_refinement','live_language_boundary_separate_from_default'],page_errors:errors},null,2));
-  console.log('Passed 9 rolling UI checks with zero page errors. Production assets/API and synthetic CPU outputs; no capture or native model accuracy claim.');
+  await writeFile(join(output,'browser-report.json'),JSON.stringify({kind:'synthetic_cpu_fixture',checks:['collapsed_pending_rows','compact_provisional_states','focused_unsaved_draft_survives_merge','stale_row_save_rejected','saved_edit_protected_from_late_pass','confirmed_name_retained','audio_anchor_scroll_survives_merge','pause_resume_refinement','live_language_boundary_separate_from_default','saved_refinement_ownership_disables_delete'],page_errors:errors},null,2));
+  console.log('Passed 10 rolling UI checks with zero page errors. Production assets/API and synthetic CPU outputs; no capture or native model accuracy claim.');
 
 } finally {
   ws?.close();browser.kill('SIGTERM');
