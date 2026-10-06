@@ -134,6 +134,26 @@ class PassageRetryAPITests(unittest.TestCase):
                 worker.assert_not_called()
         (self.root/self.jid/'audio.wav').unlink();self.assertEqual(self.post().status_code,409)
 
+    def test_oversized_retry_rejects_before_scheduling_or_changing_job(self):
+        for seconds in (24.5000625,25.,30.):
+            with self.subTest(seconds=seconds):
+                job=copy.deepcopy(self.original);job['duration']=40.
+                job['document']['segments'][0]['end']=seconds
+                job['document']['segments'][1].update(start=31.,end=34.)
+                self.ext['recognition'].put(job)
+                before=self.job()
+                with patch.object(self.ext['executor'],'submit') as schedule:
+                    response=self.post()
+                    self.assertEqual(response.status_code,400)
+                    self.assertIn('24.5 seconds',response.json['error'])
+                    schedule.assert_not_called()
+                self.assertEqual(self.job(),before)
+        job=copy.deepcopy(job);job['document']['segments'][0]['end']=24.5
+        self.ext['recognition'].put(job)
+        with patch.object(self.ext['executor'],'submit') as schedule:
+            self.assertEqual(self.post().status_code,202)
+            schedule.assert_called_once()
+
     def test_retry_candidate_is_persisted_without_replacing_user_or_neighbor_text(self):
         started=threading.Event();release=threading.Event()
         def compute(*args):

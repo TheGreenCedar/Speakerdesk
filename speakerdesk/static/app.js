@@ -362,7 +362,9 @@ function appendPassageRepair(body,segment,reason) {
     language.value=segment.language || '';
     const retry=node('button','Retry passage locally');
     const busy=['preparing','processing','queued'].includes(selected.status);
-    retry.disabled=busy || segment.end-segment.start>30;language.disabled=busy;
+    const tooLong=segment.end-segment.start>24.5;
+    retry.disabled=busy || tooLong;language.disabled=busy;
+    if(tooLong)retry.title='Choose a passage of at most 24.5 seconds before retrying.';
     retry.addEventListener('click',async()=>{
       try {
         await flushSave();

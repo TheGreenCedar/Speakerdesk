@@ -352,8 +352,8 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                 abort(409,description='This transcript changed. Save or reload before retrying.')
             segment=next((s for s in (job.get('document') or {}).get('segments',[]) if s['id']==body.get('segment_id')),None)
             if not segment:abort(404)
-            if segment['end']-segment['start'] > 30:
-                raise ValueError('Choose a passage of at most 30 seconds before retrying.')
+            if segment['end']-segment['start'] > 24.5:
+                raise ValueError('Choose a passage of at most 24.5 seconds before retrying.')
             if not (folder(jid)/'audio.wav').is_file():abort(409,description='This passage needs its original saved audio.')
             operation=uuid.uuid4().hex
             job.update(status='processing',message='Retrying this passage locally; existing words are retained.',
