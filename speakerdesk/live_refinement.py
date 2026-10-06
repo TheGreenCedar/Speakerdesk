@@ -302,8 +302,10 @@ class Engine:
             result={**passages[0],'start':0,'end':end-start,'text':split[1]}
             if not split[1]:result.update(audio_state='context_no_new_words',review=False)
             elif end-start<.2:
-                result.update(text='',review=True,audio_state='insufficient_acoustic_context',
-                              transcription_review={'reason':'short_acoustic_context','partial_text':False,'candidate_text':split[1]})
+                # Complete same-origin decodes corroborate the new suffix.
+                # Keep these words visible even when the interval is brief.
+                result.update(review=True,audio_state='short_acoustic_context',
+                              transcription_review={'reason':'short_acoustic_context','partial_text':False})
             return self.decorate([result],start,end,names,config['epoch'])
         self.emit({'type':'boundary_candidate','start':begin,'end':end,'language_epoch':config['epoch'],'candidates':passages})
         return self.decorate([{'start':0,'end':end-start,'text':'','language':None,'review':True,

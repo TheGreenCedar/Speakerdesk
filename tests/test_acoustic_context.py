@@ -35,7 +35,7 @@ class AcousticTests(unittest.TestCase):
     def test_valid_short_candidate_is_recoverable_and_truncation_is_preserved(self):
         for tokens in (1,448):
             asr=self.model('Okay.',tokens)
-            row=SpeechTranscriber(asr,'en').transcribe(np.ones(658),RATE,('speaker_0',))[0]
+            row=SpeechTranscriber(asr,'en',detector=Evidence()).transcribe(np.ones(658),RATE,('speaker_0',))[0]
             asr.transcribe.assert_called_once()
             self.assertEqual(row['text'],'');self.assertEqual(row['transcription_review']['candidate_text'],'Okay.')
             self.assertEqual(row['transcription_review']['partial_text'],tokens==448)
@@ -60,6 +60,18 @@ class AcousticTests(unittest.TestCase):
     def test_independent_acoustic_warning_does_not_gate_named_speech_or_language(self):
         row=SpeechTranscriber(self.model('Real words'),'auto',detector=Evidence()).transcribe(np.ones(RATE),RATE,('speaker_0',))[0]
         self.assertEqual(row['text'],'Real words');self.assertEqual(row['language'],'en')
+    def test_brief_intelligible_words_remain_visible_without_independent_no_speech_evidence(self):
+        for detector in (None,type('SpeechEvidence',(Evidence,),{'no_speech_probability':lambda self,audio:.1})()):
+            row=SpeechTranscriber(self.model('Yes.'),'en',detector=detector).transcribe(np.ones(1600),RATE,('speaker_0',))[0]
+            self.assertEqual(row['text'],'Yes.');self.assertTrue(row['review'])
+            self.assertNotIn('candidate_text',row['transcription_review'])
+            self.assertIn('Yes.',export({'speakers':{'speaker_0':'One'},'segments':[{**row,'speaker':'speaker_0'}]},'txt')[0])
+    def test_language_abstention_and_prior_context_do_not_hide_brief_words(self):
+        detector=Mock();detector.detect.return_value={'en':.6,'fr':.4}
+        row=SpeechTranscriber(self.model('Yes.'),'auto',detector=detector,
+            context={'language':'en','end_sample':0}).transcribe(np.ones(1600)*.00001,RATE,(),start_sample=0)[0]
+        self.assertEqual(row['text'],'Yes.');self.assertEqual(row['language_detection']['reason'],'recent_context')
+        self.assertNotIn('candidate_text',row['transcription_review'])
 
 class ContextTests(unittest.TestCase):
     def setUp(self):
@@ -86,6 +98,11 @@ class ContextTests(unittest.TestCase):
         self.results(['yes.','yes. yes.'])
         row=self.engine.transcribe_owned(4,4.3,self.config,['speaker_0'])[0]
         self.assertEqual(row['text'],'yes.')
+    def test_same_origin_corroborated_brief_suffix_remains_visible(self):
+        self.results(['Earlier words.','Earlier words. Yes.'])
+        row=self.engine.transcribe_owned(4,4.1,self.config,['speaker_0'])[0]
+        self.assertEqual(row['text'],'Yes.');self.assertTrue(row['review'])
+        self.assertNotIn('candidate_text',row['transcription_review']);self.assertFalse(row['voice_eligible'])
     def test_truncated_prefix_cannot_establish_no_new_words(self):
         self.results(['Earlier words.','Earlier words.'],partial=True)
         row=self.engine.transcribe_owned(4,4.041125,self.config,['speaker_0'])[0]

@@ -39,7 +39,7 @@ async function main() {
     const source={head:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),sha256:{}};
     for(const file of files)source.sha256[file]=createHash('sha256').update(await readFile(file)).digest('hex');
     await evaluate("(async()=>{await api('/fixture/candidate-review',{method:'POST'});await poll();await refreshMeeting();polling=true;meetingPoll=true;notice('')})()");
-    assert.equal(await evaluate("document.querySelectorAll('#segments .segment').length"),2);
+    assert.equal(await evaluate("document.querySelectorAll('#segments .segment').length"),3);
     assert.equal(await evaluate("document.querySelector('#segments [data-segment-id=candidate-tail]')===null"),true);
     assert.equal(await evaluate("document.querySelector('#segments [data-segment-id=candidate-no-speech]')===null"),true);
     assert.equal(await evaluate("$('retained-audio-review').hidden"),false);
@@ -59,14 +59,17 @@ async function main() {
       const result=await evaluate(`fetch('/api/jobs/'+selected.id+'/export/${kind}').then(response=>response.text())`);
       assert.equal(result.includes('Unconfirmed tail words'),false);assert.equal(result.includes('without a detected speaker'),false);
       assert.equal(result.includes('Quiet but intelligible speech remains visible.'),true);assert.equal(result.includes('Yes.'),true);
+      assert.equal(result.includes('Brief words stay visible.'),true);
     }
     const project=await evaluate("fetch('/api/jobs/'+selected.id+'/export/json').then(response=>response.json())");
-    assert.equal(project.segments.length,5);
+    assert.equal(project.segments.length,6);
     for(const row of candidateUI)assert.equal(project.segments.find(s=>s.id===row.id).transcription_review.candidate_text,row.value);
     assert.equal(project.segments.find(s=>s.id==='candidate-tail').text,'');
-    checks.push('Real text/SRT/VTT exports omit unconfirmed candidates but retain positive quiet and250ms short speech; JSON retains all five internal rows and exact candidate metadata.');
+    checks.push('Real text/SRT/VTT exports omit acoustic candidates but retain quiet,250ms and100ms reviewed/context-fallback speech; JSON retains all six rows and exact candidate metadata.');
     assert.equal(await evaluate("document.querySelector('[data-segment-id=quiet-positive] textarea').value"),'Quiet but intelligible speech remains visible.');
     assert.equal(await evaluate("document.querySelector('[data-segment-id=short-positive] textarea').value"),'Yes.');
+    assert.equal(await evaluate("document.querySelector('[data-segment-id=brief-positive] textarea').value"),'Brief words stay visible.');
+    assert.equal(await evaluate("document.querySelector('#retained-audio-review [data-segment-id=brief-positive]')===null"),true);
     assert.equal(await evaluate("document.querySelector('#retained-audio-review [data-segment-id=guarded-fragment] textarea[aria-label=\"Unconfirmed model words\"]')===null"),true);
     checks.push('Positive quiet/short words remain editable reading passages; a guarded fragment without a model candidate does not fabricate a candidate control.');
     assert.deepEqual(errors,[]);

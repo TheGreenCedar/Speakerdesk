@@ -71,7 +71,7 @@ Actual offline NVIDIA/Cohere/Whisper GPU checks recovered quiet and short speech
 and verified the real meeting API's English/French language epoch boundary.
 They also exposed hallucinated words on tiny nonzero tails, prompting the
 additional acoustic-context correction below. The enlarged CPU suite passes
-214 tests. Packaged Save/Cancel/retry requires the final signed candidate; the
+217 tests. Packaged Save/Cancel/retry requires the final signed candidate; the
 ad-hoc test sidecar cannot load embedded Python under existing hardened runtime
 protections. No platform or signer policy is relaxed for this check.
 
@@ -89,8 +89,12 @@ the same language epoch. Complete prefix and extended decodes from the **same
 origin** establish a lexical suffix; uncertain comparisons retain the full
 candidate. This does not align individual words or remove moving-window repeats.
 
-An isolated sub-200ms decode remains an unconfirmed, copyable candidate in audio
-review and JSON rather than becoming primary transcript text or enrollment audio.
+An isolated sub-200ms decode becomes a copyable secondary candidate only when
+separate acoustic evidence also warns of no speech. Without that evidence, or
+when complete same-origin context corroborates new words, intelligible short
+words stay visible with an ASR review note. Language abstention, recent-context
+fallback, quietness and speaker uncertainty alone do not hide recovered words.
+Unverified short audio remains ineligible for voice enrollment.
 The existing optional Whisper head supplies its separate unmasked SOT no-speech
 score. Only missing-speaker audio with a finite score at least .95 receives the
 same conservative candidate treatment. That score, and the short/context duration

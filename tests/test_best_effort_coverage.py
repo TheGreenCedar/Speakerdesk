@@ -53,8 +53,8 @@ class CoverageTests(unittest.TestCase):
         self.engine.received=round(.1*RATE);self.engine.processed=.1
         self.engine.commit(final=True)
         row=self.engine.document['segments'][0]
-        self.assertEqual((row['text'],row['speaker'],row['speaker_candidates']),('','unassigned',[]))
-        self.assertEqual(row['transcription_review']['candidate_text'],'en retained words')
+        self.assertEqual((row['text'],row['speaker'],row['speaker_candidates']),('en retained words','unassigned',[]))
+        self.assertEqual(row['transcription_review']['reason'],'short_acoustic_context')
         self.assertFalse(row['voice_eligible']);self.assertEqual(self.engine.cursor,.1)
     def test_successful_prior_language_reaches_abstaining_asr_across_calls_and_unknown_overlap(self):
         self.decode(0)

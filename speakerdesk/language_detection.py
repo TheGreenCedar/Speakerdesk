@@ -210,9 +210,10 @@ class SpeechTranscriber:
                     decision={'language':None,'review':True,
                               'language_detection':{'mode':'auto','reason':'needs_language','detector_error':True}}
             probability=None
-            if not speaker and len(pcm)>=3200 and np.any(pcm):
-                # Only audio with no diarized speaker may use this independent
-                # acoustic warning. Language confidence never blanks speech.
+            if len(pcm)>=320 and (not speaker or len(pcm)<3200) and np.any(pcm):
+                # Independent acoustic evidence can warn about a brief tail,
+                # or audio with no diarized speaker. Duration and language
+                # confidence alone never remove recovered words.
                 if self.detector is None and self.detector_path and not detector_issues(self.detector_path):
                     try:self.detector=WhisperLanguageDetector(self.detector_path)
                     except (RuntimeError,ValueError,OSError):pass
@@ -262,9 +263,10 @@ class SpeechTranscriber:
                         transcription_review={'reason':'token_limit','partial_text':True}
                     elif not text:
                         transcription_review={'reason':'empty_result','partial_text':False}
-                    if text and window['end_sample']-window['begin']<3200:
-                        # Isolated sub-200ms output is an unconfirmed candidate,
-                        # not a confidently committed word from a noise tail.
+                    short=window['end_sample']-window['begin']<3200
+                    if text and short and window.get('acoustic_suspect'):
+                        # A short fragment AND separate no-speech evidence
+                        # support demotion; a plausible short word stays visible.
                         transcription_review={'reason':'short_acoustic_context','partial_text':len(result.tokens)>=448,
                                               'candidate_text':text,'candidate_tokens':len(result.tokens),
                                               'decoder_reason':'token_limit' if len(result.tokens)>=448 else None}
@@ -274,6 +276,10 @@ class SpeechTranscriber:
                                               'candidate_text':text,'candidate_tokens':len(result.tokens),
                                               'decoder_reason':'token_limit' if len(result.tokens)>=448 else None}
                         text='';window['audio_state']='possible_non_speech'
+                    elif text and short:
+                        transcription_review={'reason':'short_acoustic_context','partial_text':len(result.tokens)>=448,
+                                              'decoder_reason':'token_limit' if len(result.tokens)>=448 else None}
+                        window['audio_state']='short_acoustic_context'
                 except (RuntimeError,ValueError,OSError):
                     transcription_review={'reason':'transcription_failed','partial_text':False}
             if automatic and detection['reason']=='detected' and text and not transcription_review:
