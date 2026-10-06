@@ -13,6 +13,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from live_refinement import Engine,Inbox
 from speech_admission import SpeechFrames
 from app import create_app
+from meeting_refinement import activity_references
+from live_refinement import align_tracks
 RATE=16000
 
 class Peer:
@@ -134,5 +136,19 @@ class CanonicalTests(unittest.TestCase):
         result=self.engine.refine(request);self.assertTrue(result['cancelled'])
         self.assertEqual(self.engine.canonical.book.rows[row['id']],original)
         self.assertIn('Candidate arriving after cancellation',self.engine.canonical.archive.path.read_text())
+    def test_batch_speaker_mapping_uses_independent_sample_ledger_and_gaps(self):
+        row={'canonical_utterance_id':'one','start_sample':0,'end_sample':32000,'audio_revision':2,
+            'start':0.,'end':2.,'speaker_candidates':['speaker_0','speaker_1'],
+            'speaker_activity':{'audio_revision':2,'regions':[
+                {'start_sample':0,'end_sample':12800,'speakers':['speaker_0']},
+                {'start_sample':12800,'end_sample':16000,'speakers':[]},
+                {'start_sample':16000,'end_sample':32000,'speakers':['speaker_1']}]}}
+        refs=activity_references([row],4000,30000)
+        self.assertEqual(refs,[{'start':.25,'end':.8,'speaker_candidates':['speaker_0']},
+            {'start':.8,'end':1.,'speaker_candidates':[]},{'start':1.,'end':1.875,'speaker_candidates':['speaker_1']}])
+        batch=[{'start':.25,'end':.8,'speaker':'speaker_7'},{'start':1.,'end':1.875,'speaker':'speaker_8'}]
+        self.assertEqual(align_tracks(batch,refs),{'speaker_7':'speaker_0','speaker_8':'speaker_1'})
+        row['speaker_activity']['audio_revision']=1
+        self.assertEqual(activity_references([row],0,32000),[])
 
 if __name__=='__main__':unittest.main()

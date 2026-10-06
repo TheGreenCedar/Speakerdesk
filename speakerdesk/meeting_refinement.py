@@ -11,6 +11,24 @@ def activity_references(sources, start_sample, end_sample):
     """Raw activity only; an ASR envelope does not claim its internal gaps."""
     references=[]
     for row in sources:
+        if row.get('canonical_utterance_id'):
+            activity=row.get('speaker_activity') or {}
+            parts=activity.get('regions',[])
+            cursor=row.get('start_sample');valid=(type(cursor) is int
+                and type(activity.get('audio_revision')) is int
+                and activity['audio_revision']==row.get('audio_revision') and isinstance(parts,list))
+            for part in parts if isinstance(parts,list) else []:
+                a,b=part.get('start_sample'),part.get('end_sample');names=part.get('speakers')
+                if (type(a) is not int or type(b) is not int or a!=cursor or not a<b
+                        or not isinstance(names,list) or any(not isinstance(name,str) or not name for name in names)
+                        or len(names)!=len(set(names))):valid=False;break
+                cursor=b
+            if not valid or cursor!=row.get('end_sample'):continue
+            for part in parts:
+                a=max(part['start_sample'],row['start_sample'],start_sample)
+                b=min(part['end_sample'],row['end_sample'],end_sample)
+                if a<b:references.append({'start':a/RATE,'end':b/RATE,'speaker_candidates':list(part['speakers'])})
+            continue
         parts=row.get('activity_regions')
         if parts:
             for part in parts:
