@@ -126,15 +126,40 @@ class CanonicalRuntime:
         # Timing never changes language routing or supplies a transcript. Auto
         # requires the actual current confident decision, not a recent guess.
         detection=passage.get('language_detection') or {}
-        if (passage.get('language')!='en' or passage.get('language_review',passage.get('review'))
-                or passage.get('transcription_review')
-                or detection.get('reason') not in ('detected','override')):
+        if passage.get('language')!='en' or passage.get('transcription_review'):
             return None
-        if any(probe.get('language')!='en' or probe.get('review') or
-               probe.get('decision',{}).get('reason') not in ('detected','override')
-               for probe in detection.get('probes',[])):
+        probes=detection.get('probes')
+        if probes:
+            regions=[];cursor=request['start_sample']
+            for probe in probes:
+                a,b=probe.get('start_sample'),probe.get('end_sample')
+                if type(a) is not int or type(b) is not int or not cursor==a<b<=request['end_sample']:
+                    return None
+                cursor=b
+                if (probe.get('language')=='en' and not probe.get('review')
+                        and probe.get('decision',{}).get('reason') in ('detected','override')):
+                    if regions and regions[-1][1]==a:regions[-1][1]=b
+                    else:regions.append([a,b])
+            if cursor!=request['end_sample']:return None
+        elif (not passage.get('language_review',passage.get('review'))
+              and detection.get('reason') in ('detected','override')):
+            regions=[[request['start_sample'],request['end_sample']]]
+        else:
+            regions=[]
+        if not regions:
             return None
-        return self.engine.models.align_canonical(request,text,language='en')
+        result=self.engine.models.align_canonical(request,text,language='en')
+        if not isinstance(result,dict):return None
+        result=copy.deepcopy(result);result['reading_english_regions']=regions
+        # Align unchanged whole core text, but trust no envelope in its weak or
+        # context-routed language slots. Merge confident contiguous probes so
+        # a language detector's feed grid cannot create artificial word gaps.
+        for word in result.get('words',[]):
+            a,b=word.get('start_sample'),word.get('end_sample')
+            if not (type(a) is int and type(b) is int and
+                    any(x<=a-4000<b+4000<=y for x,y in regions)):
+                word.update(status='unresolved_language',start_sample=None,end_sample=None)
+        return result
 
     def decode_long_parts(self,row,stage,requests,*,aligned):
         from live_refinement import read_audio

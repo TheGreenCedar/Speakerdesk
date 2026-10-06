@@ -181,9 +181,12 @@ class ReadingTurnTests(unittest.TestCase):
             asr=SimpleNamespace(transcribe=lambda audio,**kw:(asr_calls.append(len(audio)) or
                 SimpleNamespace(text=case.peer.text,tokens=[1])))
             detector=SimpleNamespace(detect=lambda pcm:{'en':.99,'fr':.01})
+            case.peer.routing_start=0
+            case.peer.set_language_context=lambda context,start:setattr(case.peer,'routing_start',start)
             def transcribe(audio,language,names,overlap=False):
                 return SpeechTranscriber(asr,'auto',detector=detector,speech_evidence=SpeechEvidencePeer()).transcribe(
-                    np.asarray(audio),16000,tuple(names),max_asr_seconds=24.5,allow_overlap=True)
+                    np.asarray(audio),16000,tuple(names),max_asr_seconds=24.5,allow_overlap=True,
+                    start_sample=case.peer.routing_start)
             def align(request,text,**kw):
                 timing_calls.append((request,text,kw))
                 words=[{'text':m.group(),'start_char':m.start(),'end_char':m.end(),'status':'aligned',
@@ -207,6 +210,25 @@ class ReadingTurnTests(unittest.TestCase):
             self.assertEqual(row['speaker'],'multiple_speakers')
             self.assertTrue(row['review'])
         finally:case.tearDown()
+
+    def test_one_weak_probe_does_not_erase_confident_english_words_or_promote_weak_words(self):
+        from canonical_runtime import CanonicalRuntime
+        from types import SimpleNamespace
+        text='clear weak clear';words=[{'text':m.group(),'start_char':m.start(),'end_char':m.end(),
+            'status':'aligned','start_sample':a,'end_sample':a+320} for m,a in
+            zip(re.finditer(r'\S+',text),(16000,64000,112000))]
+        result={'words':words};calls=[]
+        runtime=object.__new__(CanonicalRuntime)
+        runtime.engine=SimpleNamespace(models=SimpleNamespace(align_canonical=lambda *args,**kw:calls.append(args) or result))
+        passage={'language':'en','review':True,'language_review':True,'language_detection':{'reason':'recent_context','probes':[
+            {'start_sample':0,'end_sample':48000,'language':'en','review':False,'decision':{'reason':'detected'}},
+            {'start_sample':48000,'end_sample':96000,'language':'en','review':True,'decision':{'reason':'recent_context'}},
+            {'start_sample':96000,'end_sample':144000,'language':'en','review':False,'decision':{'reason':'detected'}}]}}
+        projected=runtime.align_reading({'start_sample':0,'end_sample':144000},text,passage)
+        self.assertEqual(len(calls),1)
+        self.assertEqual([w['start_sample'] for w in projected['words']],[16000,None,112000])
+        self.assertEqual(result['words'][1]['start_sample'],64000)
+        self.assertEqual(projected['reading_english_regions'],[[0,48000],[96000,144000]])
 
 
 if __name__=='__main__':unittest.main()
