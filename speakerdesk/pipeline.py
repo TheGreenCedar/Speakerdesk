@@ -108,6 +108,54 @@ def speech_crops(turns, max_seconds=24.5, *, coverage=None):
     return chunks
 
 
+TURN_GAP_SECONDS = .65
+
+
+def activity_slice(regions,start,end):
+    return [{**part,'start':max(start,part['start']),'end':min(end,part['end']),
+             'speakers':list(part['speakers'])}
+            for part in regions if part['start']<end and part['end']>start]
+
+
+def decode_regions(turns, max_seconds=24.5, *, coverage=None):
+    """Continuous ASR envelopes; activity boundaries are not word boundaries.
+
+    Bridge only an internal brief gap flanked by the same single speaker.
+    Keep the original activity ledger: a bridged envelope is not clean voice
+    enrollment evidence. Real switches, long pauses and ownership edges remain.
+    """
+    import copy
+    regions=speech_crops(turns,max_seconds=100000,coverage=coverage)
+    envelopes=[];index=0
+    while index<len(regions):
+        region=copy.deepcopy(regions[index]);index+=1
+        owner=region['speakers'];ledger=[copy.deepcopy(region)]
+        while index+1<len(regions):
+            middle,following=regions[index:index+2]
+            # A brief overlapping activation may share context only when the
+            # SAME clean speaker resumes. A -> A+B -> B is a real turn boundary.
+            compatible=(not middle['speakers'] or
+                        (len(middle['speakers'])>1 and set(owner)<=set(middle['speakers'])))
+            if (len(owner)!=1 or not compatible or following['speakers']!=owner
+                    or middle['end']-middle['start']>TURN_GAP_SECONDS
+                    or abs(middle['start']-region['end'])>1e-6
+                    or abs(following['start']-middle['end'])>1e-6):break
+            ledger.extend(copy.deepcopy([middle,following]));region['end']=following['end']
+            region['speakers']=sorted(set(region['speakers'])|set(middle['speakers']));index+=2
+        if len(ledger)>1:region['activity_regions']=ledger
+        envelopes.append(region)
+    if max_seconds is None:return envelopes
+    chunks=[]
+    for region in envelopes:
+        start=region['start']
+        while start<region['end']-1e-6:
+            end=min(start+max_seconds,region['end']);chunk={**region,'start':start,'end':end}
+            if 'activity_regions' in region:
+                chunk['activity_regions']=activity_slice(region['activity_regions'],start,end)
+            chunks.append(chunk);start=end
+    return chunks
+
+
 def crop_context(chunks,duration,padding=0.22):
     """Pad into adjacent silence only, never across another speech region."""
     for i,chunk in enumerate(chunks):
@@ -159,7 +207,7 @@ def infer(audio_path, duration, language, folder, progress, config=None):
     result=run_worker(config['diar_python'],'diarize',{'model_path':config['diar_path'],
         'model_kind':config['diar_kind'],'audio':str(audio_path),'device':config['device']},folder)
     turns=parse_turns(result['turns'],duration,limit)
-    chunks=speech_crops(turns, max_seconds=6 if language == 'auto' else 24.5,coverage=(0.,duration))
+    chunks=decode_regions(turns, max_seconds=18,coverage=(0.,duration))
     crop_context(chunks,duration,padding=0 if language == 'auto' else .22)
     if len(chunks)>10000:
         raise RuntimeError('Too many speaker transitions. Split the recording into smaller files.')
@@ -188,7 +236,8 @@ def infer(audio_path, duration, language, folder, progress, config=None):
             end=min(chunk['end'],chunk['audio_start']+region['end'])
             if end <= start:continue
             segments.append({**region,'id':f'seg-{len(segments)}','start':start,'end':end,'speaker':speaker,
-                             'speaker_candidates':chunk['speakers'],'voice_eligible':len(chunk['speakers'])==1 and not region.get('audio_state'),
+                             'speaker_candidates':chunk['speakers'],'voice_eligible':len(chunk['speakers'])==1 and not region.get('audio_state') and not chunk.get('activity_regions'),
+                             **({'activity_regions':activity_slice(chunk['activity_regions'],start,end)} if chunk.get('activity_regions') else {}),
                              'review':region['review'] or len(chunk['speakers'])!=1 or end-start<.5,
                              'timing':'audio_crop','confidence':None})
     return retain_unassigned_audio({'schema_version':1,'speakers':speakers,'segments':segments,'diarization':turns,

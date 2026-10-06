@@ -1,0 +1,255 @@
+{
+  "schema_version": 1,
+  "suite": "speakerdesk-core-v1",
+  "sample_rate": 16000,
+  "required_groups": [
+    "silence",
+    "background_noise",
+    "quiet_speech",
+    "brief_speech",
+    "genuine_thanks",
+    "sentence_continuity",
+    "overlap",
+    "language_fallback",
+    "protected_corrections"
+  ],
+  "cases": [
+    {
+      "id": "silence-zero",
+      "partition": "tuning",
+      "groups": [
+        "silence"
+      ],
+      "language": "auto",
+      "parts": [
+        {
+          "kind": "zero",
+          "seconds": 8
+        }
+      ],
+      "expect": {
+        "no_words": true
+      }
+    },
+    {
+      "id": "noise-stationary",
+      "partition": "tuning",
+      "groups": [
+        "background_noise"
+      ],
+      "language": "auto",
+      "parts": [
+        {
+          "kind": "noise",
+          "seconds": 8,
+          "seed": 8301,
+          "pcm_rms": 2
+        }
+      ],
+      "expect": {
+        "no_words": true
+      }
+    },
+    {
+      "id": "noise-colored-holdout",
+      "partition": "holdout",
+      "groups": [
+        "silence",
+        "background_noise"
+      ],
+      "language": "en",
+      "parts": [
+        {
+          "kind": "noise",
+          "seconds": 8,
+          "seed": 19677,
+          "pcm_rms": 3,
+          "smoothing": 0.82
+        }
+      ],
+      "expect": {
+        "no_words": true
+      }
+    },
+    {
+      "id": "quiet-speech",
+      "partition": "tuning",
+      "groups": [
+        "quiet_speech"
+      ],
+      "language": "auto",
+      "parts": [
+        {
+          "kind": "speech",
+          "voice": "com.apple.voice.super-compact.en-US.Samantha",
+          "text": "The green notebook has eleven pages. Keep it beside the window.",
+          "gain": 0.004
+        }
+      ],
+      "expect": {
+        "terms": [
+          "green",
+          "notebook",
+          "eleven",
+          "pages",
+          "window"
+        ]
+      }
+    },
+    {
+      "id": "brief-speech",
+      "partition": "tuning",
+      "groups": [
+        "brief_speech"
+      ],
+      "language": "en",
+      "parts": [
+        {
+          "kind": "speech",
+          "voice": "com.apple.voice.super-compact.en-US.Samantha",
+          "text": "Yes.",
+          "gain": 0.02
+        }
+      ],
+      "expect": {
+        "terms": [
+          "yes"
+        ]
+      }
+    },
+    {
+      "id": "genuine-thanks",
+      "partition": "tuning",
+      "groups": [
+        "genuine_thanks"
+      ],
+      "language": "auto",
+      "parts": [
+        {
+          "kind": "speech",
+          "voice": "com.apple.voice.super-compact.en-US.Samantha",
+          "text": "Thank you. Thank you. The folder is ready."
+        }
+      ],
+      "expect": {
+        "terms": [
+          "folder",
+          "ready"
+        ],
+        "minimum_thank_you_count": 2
+      }
+    },
+    {
+      "id": "sentence-continuity",
+      "partition": "tuning",
+      "groups": [
+        "sentence_continuity"
+      ],
+      "language": "auto",
+      "parts": [
+        {
+          "kind": "speech",
+          "voice": "com.apple.voice.super-compact.en-US.Samantha",
+          "text": "So tell me, how are you going to be fixing transcription?"
+        }
+      ],
+      "expect": {
+        "terms": [
+          "tell",
+          "fixing",
+          "transcription"
+        ],
+        "maximum_word_rows": 1
+      }
+    },
+    {
+      "id": "overlapping-voices",
+      "partition": "tuning",
+      "groups": [
+        "overlap"
+      ],
+      "language": "en",
+      "parts": [
+        {
+          "kind": "overlap",
+          "left": {
+            "kind": "speech",
+            "voice": "com.apple.voice.super-compact.en-US.Samantha",
+            "text": "The first speaker is talking about the blue folder."
+          },
+          "right": {
+            "kind": "speech",
+            "voice": "com.apple.voice.super-compact.fr-FR.Thomas",
+            "text": "The second speaker is talking about the red notebook."
+          },
+          "right_offset_seconds": 1
+        }
+      ],
+      "expect": {
+        "mixed_evidence": true,
+        "no_clean_voice_for_mixed": true
+      }
+    },
+    {
+      "id": "language-fallback",
+      "partition": "tuning",
+      "groups": [
+        "language_fallback"
+      ],
+      "language": "auto",
+      "parts": [
+        {
+          "kind": "speech",
+          "voice": "com.apple.voice.super-compact.en-US.Samantha",
+          "text": "We will discuss the original meeting notes in English."
+        },
+        {
+          "kind": "zero",
+          "seconds": 0.3
+        },
+        {
+          "kind": "speech",
+          "voice": "com.apple.voice.super-compact.fr-FR.Thomas",
+          "text": "Please keep the words in their original language."
+        }
+      ],
+      "expect": {
+        "terms": [
+          "original",
+          "language"
+        ],
+        "language": "en",
+        "recent_context": true
+      }
+    },
+    {
+      "id": "protected-correction",
+      "partition": "tuning",
+      "groups": [
+        "protected_corrections"
+      ],
+      "language": "en",
+      "correction": "This exact correction must survive the accuracy pass.",
+      "parts": [
+        {
+          "kind": "speech",
+          "voice": "com.apple.voice.super-compact.en-US.Samantha",
+          "text": "Please keep the original words in the first passage on this computer."
+        },
+        {
+          "kind": "zero",
+          "seconds": 1.2
+        },
+        {
+          "kind": "speech",
+          "voice": "com.apple.voice.super-compact.en-US.Samantha",
+          "text": "We will discuss the folder and the notebook together after lunch."
+        }
+      ],
+      "expect": {
+        "protected_correction": true
+      },
+      "hold_after_part": 1
+    }
+  ]
+}

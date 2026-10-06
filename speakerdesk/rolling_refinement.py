@@ -37,7 +37,7 @@ def intersects(first, second):
 def uncovered_samples(segment, candidates):
     """Exact candidate coverage gaps; no tolerance or word alignment."""
     a,b=bounds(segment);cursor=a;gaps=[]
-    for start,end in sorted(bounds(s) for s in candidates if s['text'].strip() and not s.get('transcription_review')):
+    for start,end in sorted(bounds(s) for s in candidates if successful_coverage(s)):
         if end<=cursor or start>=b:continue
         if start>cursor:gaps.append({'start_sample':cursor,'end_sample':min(start,b)})
         cursor=max(cursor,min(end,b))
@@ -140,6 +140,42 @@ def segment_version(segment):
     return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
 
 
+def successful_non_speech(row):
+    """Independent successful audio admission, never empty/failed ASR alone."""
+    if row.get('text','').strip() or row.get('transcription_review'):return False
+    state=row.get('audio_state');evidence=row.get('acoustic_evidence') or {}
+    if state=='digital_silence':return True
+    if state=='constant_signal':
+        return evidence.get('source')=='pcm_constant' and type(evidence.get('sample_count')) is int and evidence['sample_count']>=320 and isinstance(evidence.get('constant_value'),(int,float)) and math.isfinite(evidence['constant_value'])
+    if state=='model_non_speech':
+        value=evidence.get('no_speech_probability')
+        return evidence.get('source')=='whisper_sot' and isinstance(value,(int,float)) and math.isfinite(value) and .95<=value<=1
+    return False
+
+def successful_coverage(row):
+    return (bool(row.get('text','').strip()) or successful_non_speech(row) or successful_context_empty(row)) and not row.get('transcription_review')
+
+def successful_context_empty(row):
+    """Two complete same-origin decodes establish no additional owned words.
+
+    This is lexical continuity, not a claim of physically silent audio.
+    """
+    if row.get('text','').strip() or row.get('transcription_review') or row.get('audio_state')!='context_no_new_words':return False
+    evidence=row.get('context_evidence') or {};start,end=bounds(row)
+    if (evidence.get('source')!='same_origin_prefix' or evidence.get('prefix_complete') is not True
+            or evidence.get('extended_complete') is not True or type(evidence.get('start_sample')) is not int
+            or not 0<=evidence['start_sample']<start or evidence.get('prefix_end_sample')!=start
+            or evidence.get('end_sample')!=end):return False
+    reference,extended=evidence.get('reference_text'),evidence.get('extended_text')
+    if not isinstance(reference,str) or not isinstance(extended,str):return False
+    split=split_same_origin(reference,extended)
+    return split is not None and not split[1]
+
+def completed_empty_recognition(row):
+    """Successful empty ASR can finish a blank row; it cannot erase old words."""
+    review=row.get('transcription_review') or {}
+    return not row.get('text','').strip() and review.get('reason')=='empty_result' and review.get('partial_text') is False
+
 def reconcile_window(document, window, expected, candidates, speakers=None):
     """Return a new document plus the previous window revision, without mutating inputs.
 
@@ -167,8 +203,7 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
                or not owned[0] <= bounds(s)[0] < bounds(s)[1] <= owned[1]]
     # A failed/blank/incomplete candidate does not discard previous usable words.
     def covers(old, replacements):
-        replacements = [s for s in replacements if intersects(bounds(s),bounds(old)) and s['text'].strip()
-                        and not s.get('transcription_review')]
+        replacements = [s for s in replacements if intersects(bounds(s),bounds(old)) and successful_coverage(s)]
         intervals = sorted(bounds(s) for s in replacements)
         cursor = bounds(old)[0]
         for start,end in intervals:
@@ -199,9 +234,9 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
         if sid in used or (not old and sid in old_ids):raise ValueError('Refinement ID collision.')
         fast = window.get('kind') == 'fast_tail'
         candidate.update(id=sid,machine_revision=(old.get('machine_revision',0)+1 if old else 1),
-                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if (candidate['text'].strip() or candidate.get('audio_state')=='digital_silence') and not candidate.get('transcription_review') else 'unresolved'),
+                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if successful_coverage(candidate) or completed_empty_recognition(candidate) else 'unresolved'),
                          refinement_window=window['id'],finalized=bool(candidate.get('finalized')) if fast else True)
-        candidate['audio_anchor'] = (copy.deepcopy(old.get('audio_anchor')) if old and old.get('audio_anchor')
+        candidate['audio_anchor'] = (copy.deepcopy(old.get('audio_anchor')) if old and bounds(old)==bounds(candidate) and old.get('audio_anchor')
                                      else {'start_sample':bounds(candidate)[0],'end_sample':bounds(candidate)[1]})
         output['segments'].append(candidate);used.add(sid)
     for key,name in (speakers or {}).items():output['speakers'].setdefault(key,name)
@@ -210,6 +245,16 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
             'protected_ids':sorted(blocked_ids),'changed':output!=document,
             'coverage_gaps':{s['id']:uncovered_samples(s,proposed) for s in blocked}}
 
+
+SINGLE_CARDINAL_WORDS = dict(zip(
+    'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(),
+    range(20)))
+SINGLE_CARDINAL_WORDS.update(dict(zip('twenty thirty forty fifty sixty seventy eighty ninety'.split(),range(20,100,10))))
+FRACTION_DENOMINATORS = frozenset(
+    'half halves quarter quarters second third fourth fifth sixth seventh eighth ninth tenth '
+    'eleventh twelfth thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth '
+    'twentieth thirtieth fortieth fiftieth sixtieth seventieth eightieth ninetieth hundredth '
+    'thousandth millionth'.split())
 
 def split_same_origin(previous_text, extended_text):
     """Split a growing decode by matching its SAME audio-origin text prefix.
@@ -225,15 +270,53 @@ def split_same_origin(previous_text, extended_text):
     if not previous or not extended:return None
     old = [m.group().casefold() for m in previous]
     new = [m.group().casefold() for m in extended]
+    def cardinal(token):
+        if token in SINGLE_CARDINAL_WORDS:return SINGLE_CARDINAL_WORDS[token]
+        # Leading-zero identifiers and non-ASCII/compound number forms retain
+        # literal spelling. This is not a general numeric text normalizer.
+        if len(token)<=2 and re.fullmatch(r'0|[1-9][0-9]*',token) and int(token) in SINGLE_CARDINAL_WORDS.values():return int(token)
+        return None
+    def isolated(matches,index,text):
+        match=matches[index];before=text[:match.start()];after=text[match.end():]
+        if before and before[-1] in '.+-−–—/:':return False
+        if after and after[0] in '+-−–—/:':return False
+        if len(after)>1 and after[0] in '.,' and after[1].isalnum():return False
+        token=match.group().casefold()
+        following=matches[index+1].group().casefold() if index+1<len(matches) else None
+        preceding=matches[index-1].group().casefold() if index else None
+        if following in ('/','+','-','−','–','—',':') or preceding in ('/','+','-','−','–','—',':'):return False
+        # Do not split a changed compound value into a prefix plus a new word.
+        if following in ('point','hundred','thousand','dozen','score','gross') or (following and re.fullmatch(r'[a-z]+illion',following)):return False
+        def denominator(token):
+            return token in FRACTION_DENOMINATORS or token.removesuffix('s') in FRACTION_DENOMINATORS
+        if following and denominator(following):return False
+        if following=='and' and index+2<len(matches):
+            fraction_index=index+2
+            fraction=matches[fraction_index].group().casefold()
+            if fraction in ('a','an') or cardinal(fraction) is not None:
+                fraction_index+=1
+            if fraction_index<len(matches) and denominator(matches[fraction_index].group().casefold()):return False
+        value=cardinal(token)
+        if value in range(20,100,10) and cardinal(following or '') in range(1,10):return False
+        if value in range(1,10) and cardinal(preceding or '') in range(20,100,10):return False
+        return True
+    def equivalent(index):
+        if old[index]==new[index]:return True
+        first,second=cardinal(old[index]),cardinal(new[index])
+        return (first is not None and first==second and old[index].isascii() and new[index].isascii()
+                and old[index].isdigit()!=new[index].isdigit()
+                and isolated(previous,index,previous_text) and isolated(extended,index,extended_text))
     lexical=next((i for i in range(len(old)-1,-1,-1) if re.search(r'\w',old[i])),None)
     if lexical is None:return None
     punctuation=old[lexical+1:];old=old[:lexical+1]
     same = 0
-    while same < min(len(old),len(new)) and old[same] == new[same]:same += 1
+    while same < min(len(old),len(new)) and equivalent(same):same += 1
     cut = same
     if same < len(old):
         # Only the unfinished last lexical token may be expanded/corrected.
         if (same != len(old)-1 or same >= len(new)
+                or old[same] in SINGLE_CARDINAL_WORDS or new[same] in SINGLE_CARDINAL_WORDS
+                or any(c.isdigit() for c in old[same]+new[same])
                 or len(old[same]) < 3 or old[same][:3] != new[same][:3]
                 or difflib.SequenceMatcher(None,old[same],new[same]).ratio() < .5):return None
         cut += 1

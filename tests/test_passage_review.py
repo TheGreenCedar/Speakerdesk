@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import wave
 
 import numpy as np
+from pcm_peer import varying_pcm
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
 from language_detection import SpeechTranscriber
@@ -31,7 +32,7 @@ class PassageReviewTests(unittest.TestCase):
                 detector=Mock();detector.detect.side_effect=[{'en':.99,'fr':.01},{'fr':.99,'en':.01},{'en':.99,'fr':.01}]
                 with patch('language_detection.WhisperLanguageDetector',return_value=detector):
                     transcriber=SpeechTranscriber(asr,'auto','cpu-fixture')
-                rows=transcriber.transcribe(np.full(9*16000,.1,dtype=np.float32),16000,('speaker_0',))
+                rows=transcriber.transcribe(varying_pcm(9*16000,.1,dtype=np.float32),16000,('speaker_0',))
                 self.assertEqual([(r['start'],r['end']) for r in rows],[(0,3),(3,6),(6,9)])
                 self.assertEqual([r['text'] for r in rows],['Reliable first passage',text,'Reliable last passage'])
                 self.assertEqual(rows[1]['transcription_review']['reason'],reason)

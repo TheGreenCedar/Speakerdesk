@@ -114,7 +114,11 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(ambiguous[0]['reason'],'insufficient_margin')
     def test_micro_overlap_is_one_shared_phrase_without_erasing_voice_candidates(self):
         turns=[{'start':0,'end':10,'speaker':'speaker_0'},{'start':4,'end':4.1,'speaker':'speaker_1'}]
-        self.assertEqual(context_regions(turns),[{'start':0,'end':10,'speakers':['speaker_0','speaker_1']}])
+        regions=context_regions(turns)
+        self.assertEqual([{k:r[k] for k in ('start','end','speakers')} for r in regions],
+                         [{'start':0,'end':10,'speakers':['speaker_0','speaker_1']}])
+        self.assertEqual([part['speakers'] for part in regions[0]['activity_regions']],
+                         [['speaker_0'],['speaker_0','speaker_1'],['speaker_0']])
         self.engine.received=10*RATE;self.engine.processed=10;self.engine.turns=turns;self.engine.commit(final=True)
         rows=self.engine.document['segments'];self.assertEqual(len(rows),1)
         self.assertFalse(rows[0]['voice_eligible']);self.assertTrue(rows[0]['review'])

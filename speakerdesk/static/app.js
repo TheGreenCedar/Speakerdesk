@@ -185,8 +185,8 @@ async function saveBeforeLeaving() {
   catch (error) { return confirm(`Your latest edits couldn’t be saved (${error.message}). Discard them?`); }
 }
 function passageCountLabel() {
-  const shown = doc.segments.filter(showTranscriptPassage), flagged = shown.filter(segment => segment.review).length;
-  return `${shown.length} passage${shown.length === 1 ? '' : 's'}${flagged ? ` · ${flagged} to review` : ''}`;
+  const shown = doc.segments.filter(showTranscriptPassage);
+  return `${shown.length} passage${shown.length === 1 ? '' : 's'}`;
 }
 function renderFollowLive() {
   $('follow-live').hidden = !isLive() || followingLive;
@@ -273,37 +273,22 @@ function renderSegments() {
     if(selected.speaker_assignments?.[segment.speaker]?.source==='automatic_voice') {
       const recognized=node('span','Recognized','review-tag routine-state');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';top.append(recognized);
     }
-    if (segment.review && !markReviewable(segment)) {
-      const review=node('span','Needs review','review-tag');
-      review.title=passageReviewReason(segment) || 'Speaker uncertain. Choose the speaker for this passage.';
-      top.append(review);
-    } else if (segment.review) {
-      const review=node('button','Needs review','review-tag review-action');review.type='button';
-      review.title='Play the passage to check the words, then click to mark them reviewed.';
-      review.setAttribute('aria-label',`Mark passage at ${passageTime(segment.start)} as reviewed`);
-      review.addEventListener('click',()=>{segment.review_resolution='words_reviewed';segment.review=false;changed();renderSegments();setStatus();});
-      top.append(review);
-    }
-    if (!segment.language && segment.language_detection?.mode === 'auto') top.append(node('span', 'Language needs review', 'review-tag'));
     const actions=node('div',undefined,'segment-actions');
     const repairToggle=node('button',undefined,'segment-action repair-toggle');repairToggle.type='button';
     repairToggle.append(icon('wrench'),node('span','Repair'));repairToggle.title='Retry this passage in another language';
     repairToggle.setAttribute('aria-label',`Repair passage at ${passageTime(segment.start)}`);repairToggle.setAttribute('aria-expanded','false');
     const remove = node('button', undefined, 'segment-action remove-segment'); remove.type='button'; remove.append(icon('trash-2')); remove.setAttribute('aria-label', `Remove passage at ${passageTime(segment.start)}`); remove.title='Remove passage (you can undo)';
     remove.addEventListener('click', () => removePassage(segment));
-    const details=node('button',undefined,'segment-action details-toggle');details.type='button';details.append(icon('sliders-horizontal'));
+    const details=node('button',undefined,'segment-action passage-details-toggle');details.type='button';details.append(icon('sliders-horizontal'),node('span','Details'));
     details.setAttribute('aria-label',`Timing and details for passage at ${passageTime(segment.start)}`);details.title='Timing & details';
     details.addEventListener('click',()=>{showInspector(segment,card,true);$('segment-details').querySelector('input')?.focus();});
     actions.append(details,repairToggle,remove);actions.hidden=!!isLive();top.append(actions);
     const text = isLive()?node('p',segment.text,'segment-text'):node('textarea');
-    if(!isLive()){text.value=segment.text;text.rows=2;text.setAttribute('aria-label',`Transcript at ${time(segment.start)}`);text.placeholder=segment.language_detection?.mode==='auto' && !segment.language?'Language uncertain or unsupported. Play this passage and enter its original words.':'';
+    if(!isLive()){text.value=segment.text;text.rows=2;text.setAttribute('aria-label',`Transcript at ${time(segment.start)}`);text.placeholder='Enter transcript words';
       text.addEventListener('input',()=>{segment.text=text.value;text.style.height='auto';text.style.height=`${text.scrollHeight}px`;changed();});}
 
-    card.addEventListener('focusin', event => {if(!isLive() && !event.target.closest('.segment-actions, .review-action'))showInspector(segment,card);});
     body.append(top,text);
     const reason=passageReviewReason(segment);
-    if(reason)body.append(node('p',`${passageTime(segment.start)}–${passageTime(segment.end)} · ${reason}. Play this passage to review it.`, 'passage-review'));
-    appendUncoveredAudio(body,segment);
     appendPassageRepair(body,segment,reason);
     const repair=body.querySelector(':scope > .passage-repair');
     if(repair){repair.classList.add('inline-repair');
@@ -403,6 +388,19 @@ function passageReviewReason(segment) {
   if(segment.language_detection?.mode==='auto' && !segment.language)return reviewReasons[segment.language_detection.reason] || reviewReasons.uncertain;
   return segment.text.trim() ? '' : reviewReasons.empty_result;
 }
+function appendPassageEvidence(host,segment) {
+  const reason=passageReviewReason(segment);
+  if(reason)host.append(node('p',reason,'passage-review'));
+  appendUncoveredAudio(host,segment);
+  const evidence=node('details',undefined,'passage-evidence');evidence.append(node('summary','Inference evidence'));
+  const metadata={};
+  for(const key of ['review','review_resolution','refinement_state','language','language_detection','confidence','speaker_candidates','voice_eligible','audio_state','transcription_review','audio_anchor','timing','provenance','refinement_window','machine_revision']) {
+    if(segment[key]!==undefined)metadata[key]=segment[key];
+  }
+  if(doc.provenance)metadata.recording_provenance=doc.provenance;
+  const text=node('pre',JSON.stringify(metadata,null,2));text.style.whiteSpace='pre-wrap';text.style.overflowWrap='anywhere';
+  evidence.append(text);host.append(evidence);
+}
 function showTranscriptPassage(segment) {
   return !!segment.text.trim() || passageDrafts.has(segment.id) || !!recoverablePassageDrafts.get(segment.id)?.text.trim() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
 }
@@ -413,7 +411,7 @@ function renderRetainedAudioReview() {
     (segment.transcription_review?.reason || ['unsupported','uncertain','change_pending','needs_language','insufficient_speech'].includes(segment.language_detection?.reason) ||
      (segment.refinement_state==='unresolved' && segment.language_detection?.reason!=='silence')));
   host.hidden=!rows.length;host.replaceChildren();if(!rows.length)return;
-  host.append(node('summary',`${rows.length} retained audio ${rows.length===1?'range needs':'ranges need'} review`));
+  host.append(node('summary','Audio details'));
   const list=node('div',undefined,'retained-audio-list');
   for(const segment of rows) {
     const row=node('div',undefined,'retained-audio-range');row.dataset.segmentId=segment.id;
@@ -462,7 +460,15 @@ function showInspector(segment,card,force=false) {
     input.addEventListener('change',() => { segment[key]=Number(input.value);segment.timing='user_edited';hint.textContent=passageTime(segment[key]);changed(); });
     field.append(input,hint);details.append(field);
   }
-  if(segment.review) details.append(node('p','Check this passage against the recording.','inspector-note'));
+  appendPassageEvidence(details,segment);
+  if(segment.review && markReviewable(segment)) {
+    const reviewed=node('button','Mark words reviewed','text-button review-action');
+    reviewed.addEventListener('click',()=>{
+      segment.review_resolution='words_reviewed';segment.review=false;changed();renderSegments();setStatus();
+      const currentCard=document.querySelector(`#segments [data-segment-id="${CSS.escape(segment.id)}"]`);
+      if(currentCard)showInspector(segment,currentCard,true);
+    });details.append(reviewed);
+  }
 }
 async function save({quiet = false} = {}) {
   if (!dirty) return;

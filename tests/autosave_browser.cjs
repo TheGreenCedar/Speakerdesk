@@ -64,10 +64,10 @@ async function main() {
     await evaluate(`(async()=>{doc.segments[0].transcription_review={reason:'token_limit'};doc.segments[0].review=true;changed();await flushSave();renderSegments();})()`);
     const txt=()=>evaluate(`(async()=>(await fetch('/api/jobs/${A}/export/txt')).text())()`);
     assert.match(await txt(),/Needs review/);
-    await evaluate(`document.querySelector('#segments .review-action').click()`);
+    await evaluate(`document.querySelector('#segments .passage-details-toggle').click();document.querySelector('#segment-details .review-action').click()`);
     await evaluate('flushSave()');
     assert.doesNotMatch(await txt(),/Needs review/);
-    checks.push('Marking a passage reviewed clears the export warning, not just the badge.');
+    checks.push('Mark words reviewed in the explicit inspector clears the actual export warning.');
 
     await evaluate(`(()=>{window.confirm=()=>false;edit('kept after cancel');document.querySelector('#delete').click();})()`);
     await delay(2500);
@@ -75,6 +75,7 @@ async function main() {
     checks.push('Cancelling Delete keeps autosave scheduled.');
 
     assert.deepEqual(errors,[]);
+    await writeFile(join(output,'autosave-browser-report.json'),JSON.stringify({fixture:'Synthetic CPU fixture; no devices/models',checks,pageErrors:errors},null,2));
     console.log(JSON.stringify({checks,pageErrors:errors},null,2));
   }finally{
     ws?.close();browser.kill('SIGTERM');await new Promise(resolve=>{if(browser.exitCode!==null)resolve();else{browser.once('exit',resolve);setTimeout(()=>{browser.kill('SIGKILL');resolve();},2000).unref();}});

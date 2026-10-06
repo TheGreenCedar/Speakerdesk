@@ -5,6 +5,7 @@ speech is attempted with recent context or a marked best-effort language.
 Unsupported speech and genuine ASR failures retain audio for review.
 """
 import hashlib
+import copy
 import json
 import math
 import re
@@ -14,6 +15,22 @@ from types import SimpleNamespace
 from transcript import LANGUAGES
 
 LANGUAGE_CHOICES = {'auto': 'Automatic', **LANGUAGES}
+
+
+def language_probe_events(row, origin_sample=0):
+    """Replay actual probe chronology; an aggregate warning is not an event."""
+    detection=row.get('language_detection') or {}
+    start=origin_sample+round(row['start']*16000);end=origin_sample+round(row['end']*16000)
+    probes=detection.get('probes')
+    if not probes:
+        return [{'start_sample':start,'end_sample':end,'reason':detection.get('reason'),'language':row.get('language')}]
+    events=[]
+    for probe in probes:
+        a,b=probe.get('start_sample'),probe.get('end_sample')
+        if type(a) is not int or type(b) is not int or not start<=a<b<=end:continue
+        events.append({'start_sample':a,'end_sample':b,'reason':probe.get('decision',{}).get('reason'),
+                       'language':probe.get('language')})
+    return sorted(events,key=lambda event:event['end_sample'])
 LID_SPEC = {
     'name': 'Automatic language detection',
     'repo': 'mlx-community/whisper-tiny-asr-fp16',
@@ -189,6 +206,19 @@ class SpeechTranscriber:
         probes=[]
         for begin,end in zip(edges,edges[1:]):
             pcm=audio[begin:end]
+            probability=None
+            if len(pcm)>=320 and np.any(pcm) and not np.all(pcm==pcm[0]):
+                # Names and manual language select ownership/routing, not speech.
+                # Use the existing independent SOT evidence before Cohere for
+                # every route. Failure/unavailability never authorizes erasure.
+                if self.detector is None and self.detector_path and not detector_issues(self.detector_path):
+                    try:self.detector=WhisperLanguageDetector(self.detector_path)
+                    except (RuntimeError,ValueError,OSError):pass
+                method=getattr(type(self.detector),'no_speech_probability',None)
+                if callable(method):
+                    try:probability=method(self.detector,pcm)
+                    except (RuntimeError,ValueError,OSError):pass
+                if not isinstance(probability,(int,float)) or not math.isfinite(probability) or not 0<=probability<=1:probability=None
             if not len(pcm) or not np.any(pcm):
                 decision={'language':None if automatic else self.language,'review':True,
                           'language_detection':{'mode':'auto' if automatic else 'manual','reason':'insufficient_speech'},
@@ -200,6 +230,17 @@ class SpeechTranscriber:
                 decision={'language':None if automatic else self.language,'review':True,
                           'language_detection':{'mode':'auto' if automatic else 'manual','reason':'insufficient_speech'},
                           'audio_state':'insufficient_acoustic_context'}
+            elif np.all(pcm==pcm[0]):
+                # A constant PCM signal has no changing acoustic information at
+                # any amplitude. This is not a loudness cutoff for quiet speech.
+                decision={'language':None if automatic else self.language,'review':True,
+                          'language_detection':{'mode':'auto' if automatic else 'manual','reason':'insufficient_speech'},
+                          'audio_state':'constant_signal',
+                          'acoustic_evidence':{'source':'pcm_constant','sample_count':len(pcm),'constant_value':float(pcm[0])}}
+            elif probability is not None and probability>=.95:
+                decision={'language':None if automatic else self.language,'review':True,
+                          'language_detection':{'mode':'auto' if automatic else 'manual','reason':'insufficient_speech'},
+                          'audio_state':'model_non_speech'}
             elif not automatic:
                 decision={'language':self.language,'review':False,
                           'language_detection':{'mode':'manual','reason':'override'}}
@@ -209,21 +250,8 @@ class SpeechTranscriber:
                 except (RuntimeError,ValueError,OSError):
                     decision={'language':None,'review':True,
                               'language_detection':{'mode':'auto','reason':'needs_language','detector_error':True}}
-            probability=None
-            if len(pcm)>=320 and (not speaker or len(pcm)<3200) and np.any(pcm):
-                # Independent acoustic evidence can warn about a brief tail,
-                # or audio with no diarized speaker. Duration and language
-                # confidence alone never remove recovered words.
-                if self.detector is None and self.detector_path and not detector_issues(self.detector_path):
-                    try:self.detector=WhisperLanguageDetector(self.detector_path)
-                    except (RuntimeError,ValueError,OSError):pass
-                method=getattr(type(self.detector),'no_speech_probability',None)
-                if callable(method):
-                    try:probability=method(self.detector,pcm)
-                    except (RuntimeError,ValueError,OSError):pass
-                if isinstance(probability,(int,float)) and math.isfinite(probability) and 0<=probability<=1:
-                    decision['acoustic_evidence']={'no_speech_probability':probability,'source':'whisper_sot'}
-                    decision['acoustic_suspect']=probability>=.95
+            if probability is not None:
+                decision['acoustic_evidence']={'no_speech_probability':probability,'source':'whisper_sot'}
             probes.append({'begin':int(begin),'end_sample':int(end),**decision})
         results=[]
         index=0
@@ -242,14 +270,33 @@ class SpeechTranscriber:
                 if context:
                     window['language']=context['language']
                     detection.update(reason='recent_context',context_end_sample=context['end_sample'])
-            # Join adjacent confident windows while preserving whole audio crops.
-            while (not window['review'] and index<len(probes) and not probes[index]['review']
-                   and not window.get('acoustic_suspect') and not probes[index].get('acoustic_suspect')
-                   and probes[index]['language']==window['language']
-                   and probes[index]['end_sample']-window['begin']<=max_asr_seconds*sample_rate):
-                following=probes[index];index+=1;window['end_sample']=following['end_sample']
+            # Language probes are evidence, not sentence boundaries. Compatible
+            # weak/context-routed probes share continuous ASR audio, while every
+            # original decision and uncertainty remains available as provenance.
+            decisions=[{'start_sample':start_sample+window['begin'],
+                        'end_sample':start_sample+window['end_sample'],
+                        'language':window['language'],'decision':copy.deepcopy(detection),'review':window['review']}]
+            while index<len(probes):
+                following=probes[index];next_detection=following['language_detection']
+                if automatic and next_detection['reason'] in ('best_effort','needs_language'):
+                    context=self.recent_context(start_sample+following['begin'])
+                    if context:
+                        following['language']=context['language']
+                        next_detection.update(reason='recent_context',context_end_sample=context['end_sample'])
+                if (not window['language'] or following['language']!=window['language']
+                        or window.get('audio_state') or following.get('audio_state')
+                        or detection['reason']=='unsupported' or next_detection['reason']=='unsupported'
+                        or following['end_sample']-window['begin']>max_asr_seconds*sample_rate):break
+                decisions.append({'start_sample':start_sample+following['begin'],
+                                  'end_sample':start_sample+following['end_sample'],
+                                  'language':following['language'],'decision':copy.deepcopy(next_detection),'review':following['review']})
+                index+=1;window['end_sample']=following['end_sample']
+                window['review']=window['review'] or following['review']
                 if following['language_detection'].get('probability',1)<detection.get('probability',1):
                     detection=following['language_detection'];window['language_detection']=detection
+            if len(decisions)>1:
+                detection=copy.deepcopy(detection);detection['probes']=decisions
+                window['language_detection']=detection
             text='';transcription_review=None
             if window.get('audio_state')=='insufficient_acoustic_context':
                 transcription_review={'reason':'insufficient_acoustic_context','partial_text':False,
@@ -264,26 +311,20 @@ class SpeechTranscriber:
                     elif not text:
                         transcription_review={'reason':'empty_result','partial_text':False}
                     short=window['end_sample']-window['begin']<3200
-                    if text and short and window.get('acoustic_suspect'):
-                        # A short fragment AND separate no-speech evidence
-                        # support demotion; a plausible short word stays visible.
-                        transcription_review={'reason':'short_acoustic_context','partial_text':len(result.tokens)>=448,
-                                              'candidate_text':text,'candidate_tokens':len(result.tokens),
-                                              'decoder_reason':'token_limit' if len(result.tokens)>=448 else None}
-                        text='';window['audio_state']='insufficient_acoustic_context'
-                    elif text and window.get('acoustic_suspect'):
-                        transcription_review={'reason':'possible_non_speech','partial_text':len(result.tokens)>=448,
-                                              'candidate_text':text,'candidate_tokens':len(result.tokens),
-                                              'decoder_reason':'token_limit' if len(result.tokens)>=448 else None}
-                        text='';window['audio_state']='possible_non_speech'
-                    elif text and short:
+                    if text and short:
                         transcription_review={'reason':'short_acoustic_context','partial_text':len(result.tokens)>=448,
                                               'decoder_reason':'token_limit' if len(result.tokens)>=448 else None}
                         window['audio_state']='short_acoustic_context'
                 except (RuntimeError,ValueError,OSError):
                     transcription_review={'reason':'transcription_failed','partial_text':False}
-            if automatic and detection['reason']=='detected' and text and not transcription_review:
-                self.context={'language':window['language'],'end_sample':start_sample+window['end_sample']}
+            if automatic:
+                for event in decisions:
+                    reason=event['decision']['reason'];language=event['language']
+                    if reason=='unsupported':self.context=None
+                    elif reason=='detected':
+                        if text and not transcription_review:
+                            self.context={'language':language,'end_sample':event['end_sample']}
+                        elif self.context and self.context['language']!=language:self.context=None
             if transcription_review or len(speaker)>1:window['review']=True
             results.append({'start':window['begin']/sample_rate,'end':window['end_sample']/sample_rate,'text':text,
                             **{key:window[key] for key in ('language','language_detection','review')},

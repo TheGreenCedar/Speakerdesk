@@ -13,7 +13,8 @@ import threading
 import time
 import wave
 
-from pipeline import speech_crops
+from pipeline import decode_regions, activity_slice, TURN_GAP_SECONDS
+from language_detection import language_probe_events
 from rolling_refinement import RATE, anchor_id, bounds, reconcile_window, segment_version, split_same_origin
 
 
@@ -117,6 +118,11 @@ def coalesce_blanks(rows):
     for row in rows:
         reason=(row.get('language_detection') or {}).get('reason')
         if (result and not row['text'].strip() and not result[-1]['text'].strip()
+                and not row.get('context_evidence') and not result[-1].get('context_evidence')
+                and not row.get('acoustic_evidence') and not result[-1].get('acoustic_evidence')
+                and not row.get('activity_regions') and not result[-1].get('activity_regions')
+                and not (row.get('language_detection') or {}).get('probes')
+                and not (result[-1].get('language_detection') or {}).get('probes')
                 and row['speaker']==result[-1]['speaker'] and abs(row['start']-result[-1]['end'])<.02
                 and row.get('language_epoch')==result[-1].get('language_epoch')
                 and row.get('language')==result[-1].get('language')
@@ -129,26 +135,7 @@ def coalesce_blanks(rows):
 
 
 def context_regions(turns,max_seconds=None,*,coverage=None):
-    """Group brief activity changes for ASR, retaining every speaker candidate.
-
-    This does not classify an activation as false or separate mixed voices.
-    A grouped mixed region stays ineligible for clean voice enrollment.
-    """
-    grouped=[]
-    for region in speech_crops(turns,max_seconds=100000,coverage=coverage):
-        if (grouped and region['start']-grouped[-1]['end']<=.20
-                and bool(region['speakers'])==bool(grouped[-1]['speakers'])
-                and (region['end']-region['start']<1.5 or grouped[-1]['end']-grouped[-1]['start']<1.5
-                     or len(region['speakers'])>1 or len(grouped[-1]['speakers'])>1)):
-            grouped[-1]['end']=region['end'];grouped[-1]['speakers']=sorted(set(grouped[-1]['speakers'])|set(region['speakers']))
-        else:grouped.append(copy.deepcopy(region))
-    if max_seconds is None:return grouped
-    result=[]
-    for region in grouped:
-        start=region['start']
-        while start<region['end']:
-            end=min(region['end'],start+max_seconds);result.append({**region,'start':start,'end':end});start=end
-    return result
+    return decode_regions(turns,max_seconds,coverage=coverage)
 
 
 class Models:
@@ -206,7 +193,7 @@ class Engine:
         self.carry=None;self.language_observations=[]
     def language_at(self,sample):
         return next(x for x in reversed(self.timeline) if x['start_sample']<=sample)
-    def decode(self,pcm,language,names,start,epoch,*,overlap=False,context_seed=None,observations=None):
+    def decode(self,pcm,language,names,start,epoch,*,overlap=False,context_seed=None,observations=None,prefix_context=None):
         """Seed each decode only with successful preceding speech in this epoch.
 
         Historical refinement must never inherit the resident worker's future
@@ -219,22 +206,27 @@ class Engine:
             candidates.append({**context_seed,'epoch':epoch})
         context=max(candidates,key=lambda x:x['end_sample']) if candidates else None
         if context and (not context.get('language') or not 0<=sample-context['end_sample']<=60*RATE):context=None
+        # A separately successful prefix from THIS same-origin waveform is
+        # available only to subsequent probes at/after its original endpoint.
+        # recent_context still rejects it for earlier probes; no future audio
+        # observation or weak aggregate label is promoted to confident context.
+        if prefix_context and sample<=prefix_context['end_sample']<=sample+len(pcm):context=prefix_context
         if hasattr(self.models,'set_language_context'):
             self.models.set_language_context({k:context[k] for k in ('language','end_sample')} if context else None,sample)
         passages=self.models.transcribe(pcm,language,names,overlap=overlap)
         for passage in passages:
-            detection=passage.get('language_detection') or {}
-            if language=='auto' and detection.get('reason') in ('detected','unsupported'):
+            for event in language_probe_events(passage,sample) if language=='auto' else []:
+                if event['reason'] not in ('detected','unsupported'):continue
                 successful=passage.get('text','').strip() and not passage.get('transcription_review')
                 prior=[x for x in history if x['epoch']==epoch
-                    and x['end_sample']<=sample+round(passage['start']*RATE)]
+                    and x['end_sample']<=event['start_sample']]
                 if context:prior.append(context)
                 recent=max(prior,key=lambda x:x['end_sample']) if prior else None
-                if (not successful and detection['reason']=='detected' and recent
-                        and recent.get('language')==passage.get('language')):
+                if (not successful and event['reason']=='detected' and recent
+                        and recent.get('language')==event['language']):
                     continue
-                observation={'epoch':epoch,'end_sample':sample+round(passage['end']*RATE),
-                    'language':passage.get('language') if successful else None}
+                observation={'epoch':epoch,'end_sample':event['end_sample'],
+                    'language':event['language'] if successful and event['reason']=='detected' else None}
                 history[:]=[x for x in history
                     if (x['epoch'],x['end_sample'])!=(epoch,observation['end_sample'])]
                 history.append(observation)
@@ -257,6 +249,8 @@ class Engine:
         self.fast_sequence+=1
         for row in rows:
             mode=self.language_at(round(row['start']*RATE))
+            if row.get('activity_regions'):
+                row['activity_regions']=activity_slice(row['activity_regions'],row['start'],row['end'])
             row.update(source_start=row['start'],source_end=row['end'],fast_origin_sample=round(start*RATE),
                        language_generation=mode['epoch'],language_mode=mode['language'])
             if not row.get('language') and mode['language']!='auto':row['language']=mode['language']
@@ -271,28 +265,39 @@ class Engine:
                    'speakers':speakers,'fast_sequence':self.fast_sequence,
                    'language_epoch':rows[0]['language_epoch'] if rows else self.language_at(win['start_sample'])['epoch']})
         self.document['segments']=[s for s in self.document['segments'] if s['end']>=end-60]
-    def transcribe_owned(self,start,end,config,names):
+    def transcribe_owned(self,start,end,config,names,*,context_min_start=None,observations=None,context_seed=None,use_carry=True,epoch_start_sample=None):
         """Carry left audio across a forced cap; discard only a verified prefix.
 
         Reference and extended decodes have the same audio origin. Matching is
         lexical, never a moving suffix dedup or an assertion of word timestamps.
         """
-        carry=self.carry if self.carry and self.carry['end']==start and self.carry['epoch']==config['epoch'] else None
+        carry=self.carry if use_carry and self.carry and self.carry['end']==start and self.carry['epoch']==config['epoch'] else None
         if carry is None and end-start<.5:
             # Reuse causal waveform context within this language epoch, with
             # SAME-origin prefix comparison; never moving-window suffix dedup.
-            epoch_start=next(x['start_sample']/RATE for x in self.timeline if x['epoch']==config['epoch'])
-            context_start=max(epoch_start,start-3)
+            epoch_start=(epoch_start_sample/RATE if epoch_start_sample is not None else
+                next((x['start_sample']/RATE for x in self.timeline if x['epoch']==config['epoch']),start))
+            context_start=max(epoch_start,start-3,context_min_start if context_min_start is not None else epoch_start)
             if start-context_start>=.5:
                 prefix=read_audio(self.path,round(context_start*RATE),round(start*RATE))
-                reference=self.decode(prefix,config['language'],names,context_start,config['epoch'],overlap=len(names)>1)
+                reference=self.decode(prefix,config['language'],names,context_start,config['epoch'],overlap=len(names)>1,
+                    observations=observations,context_seed=context_seed)
                 carry={'start':context_start,'end':start,'epoch':config['epoch'],'passages':reference}
         begin=carry['start'] if carry else start
         pcm=read_audio(self.path,round(begin*RATE),round(end*RATE))
         if carry and not pcm[round((start-begin)*RATE):].any():
             # A proven empty right-hand crop has no lexical prefix to align.
             pcm=pcm[round((start-begin)*RATE):];begin=start;carry=None
-        passages=self.decode(pcm,config['language'],names,begin,config['epoch'],overlap=len(names)>1)
+        prefix_context=None
+        if (carry and len(carry['passages'])==1 and carry['passages'][0].get('text','').strip()
+                and not carry['passages'][0].get('transcription_review')):
+            events=[e for e in language_probe_events(carry['passages'][0],round(carry['start']*RATE)) if e['reason']=='detected'
+                and e['language'] and e['end_sample']<=round(start*RATE)]
+            if events:
+                event=max(events,key=lambda e:e['end_sample'])
+                prefix_context={'language':event['language'],'end_sample':event['end_sample']}
+        passages=self.decode(pcm,config['language'],names,begin,config['epoch'],overlap=len(names)>1,
+            observations=observations,context_seed=context_seed,prefix_context=prefix_context)
         if not carry:return self.decorate(passages,start,end,names,config['epoch'])
         reference=carry['passages']
         split=split_same_origin(reference[0]['text'],passages[0]['text']) if (len(reference)==len(passages)==1
@@ -300,7 +305,12 @@ class Engine:
             and not reference[0].get('transcription_review') and not passages[0].get('transcription_review')) else None
         if split:
             result={**passages[0],'start':0,'end':end-start,'text':split[1]}
-            if not split[1]:result.update(audio_state='context_no_new_words',review=False)
+            if not split[1]:
+                result.update(audio_state='context_no_new_words',review=False,
+                    context_evidence={'source':'same_origin_prefix','start_sample':round(begin*RATE),
+                        'prefix_end_sample':round(start*RATE),'end_sample':round(end*RATE),
+                        'reference_text':reference[0]['text'],'extended_text':passages[0]['text'],
+                        'prefix_complete':True,'extended_complete':True})
             elif end-start<.2:
                 # Complete same-origin decodes corroborate the new suffix.
                 # Keep these words visible even when the interval is brief.
@@ -323,7 +333,7 @@ class Engine:
             config=self.language_at(round(start*RATE))
             switches=[x['start_sample']/RATE for x in self.timeline if start<x['start_sample']/RATE<=limit]
             if switches:limit=min(limit,min(switches))
-            settled=final or limit<available-.35 or bool(switches)
+            settled=final or limit<available-TURN_GAP_SECONDS or bool(switches)
             end=min(limit,start+18)
             if round(end*RATE)<=round(start*RATE):
                 if settled:self.cursor=end
@@ -331,7 +341,7 @@ class Engine:
             if settled and end==self.last_decode:
                 previous=[copy.deepcopy(s) for s in self.document['segments'] if start<=s['start']<s['end']<=end]
                 if previous:
-                    for row in previous:row.update(finalized=True,voice_eligible=len(region['speakers'])==1 and not row.get('audio_state'))
+                    for row in previous:row.update(finalized=True,voice_eligible=len(region['speakers'])==1 and not row.get('audio_state') and not region.get('activity_regions'))
                     self.publish(start,end,previous,region['speakers']);self.cursor=end;continue
             if not settled and end-start<6:break
             context_ready=end>=start+18 and available>=end+3
@@ -341,17 +351,33 @@ class Engine:
             decode_end=min(limit,end+3) if end>=start+18 and (settled or available>=end+3) else end
             names=region['speakers']
             rows=self.transcribe_owned(start,decode_end,config,names)
-            for row in rows:row.update(finalized=settled,voice_eligible=settled and len(names)==1 and not row.get('audio_state'))
+            for row in rows:
+                row.update(finalized=settled,voice_eligible=settled and len(names)==1 and not row.get('audio_state') and not region.get('activity_regions'))
+                if region.get('activity_regions'):row['activity_regions']=copy.deepcopy(region['activity_regions'])
             if decode_end>end:
-                if rows and all(s.get('audio_state')=='digital_silence' for s in rows):
-                    self.publish(start,decode_end,rows,names);self.cursor=end;self.last_decode=end;self.carry=None
+                from rolling_refinement import successful_non_speech
+                if rows and all(successful_non_speech(s) for s in rows):
+                    # Blank audio needs no word alignment. Keep ownership within
+                    # this core; contextual observation bounds remain explicit.
+                    owned=[]
+                    for row in rows:
+                        if row['start']>=end:continue
+                        observation={'start_sample':round(row['start']*RATE),'end_sample':round(row['end']*RATE)}
+                        row=copy.deepcopy(row);row['end']=min(row['end'],end)
+                        row['source_end']=min(row.get('source_end',row['end']),end)
+                        row.setdefault('acoustic_evidence',{})['observation_bounds']=observation
+                        if row.get('activity_regions'):
+                            row['activity_regions']=[{**part,'start':max(part['start'],row['start']),'end':min(part['end'],row['end'])}
+                                for part in row['activity_regions'] if part['start']<row['end'] and part['end']>row['start']]
+                        owned.append(row)
+                    self.publish(start,end,owned,names);self.cursor=end;self.last_decode=end;self.carry=None
                     continue
                 previous=[s for s in self.document['segments'] if s['start']>=start and s['end']<=end]
                 if not previous:
                     previous=self.transcribe_owned(start,end,config,names)
                 split=split_same_origin(previous[0]['text'],rows[0]['text']) if len(previous)==len(rows)==1 and previous[0].get('language')==rows[0].get('language') else None
                 if split:
-                    prefix=copy.deepcopy(rows[0]);prefix.update(end=end,text=split[0],finalized=True,voice_eligible=len(names)==1 and not prefix.get('audio_state'))
+                    prefix=copy.deepcopy(rows[0]);prefix.update(end=end,text=split[0],finalized=True,voice_eligible=len(names)==1 and not prefix.get('audio_state') and not region.get('activity_regions'))
                     tail=copy.deepcopy(rows[0]);tail.update(start=end,text=split[1],finalized=False,voice_eligible=False)
                     rows=[prefix,tail]
                 else:
@@ -381,20 +407,42 @@ class Engine:
         mapping=align_tracks(absolute,request['references'],diagnostics=diagnostics);mapped=[]
         for t in absolute:
             t['speaker']=mapping.get(t['speaker'],'unknown_mixed');mapped.append(t)
-        rows=[];speakers={};context_history=[]
-        for region in context_regions(mapped,max_seconds=18,coverage=(window['start_sample']/RATE,window['end_sample']/RATE)):
+        rows=[];speakers={};context_history=[];previous_region=None
+        epoch_start=request.get('language_start_sample',next((x['start_sample'] for x in self.timeline
+            if x['epoch']==request['language_epoch']),window['start_sample']))
+        for region in context_regions(mapped,max_seconds=18,coverage=(max(a,epoch_start)/RATE,window['end_sample']/RATE)):
             if self.inbox.cancelled_request(request):return {'type':'refinement_result',**{k:request[k] for k in ('operation_id','language_epoch','window')},'cancelled':True}
             start=max(region['start'],window['start_sample']/RATE);end=min(region['end'],window['end_sample']/RATE)
-            if end<=start:continue
+            if end<=start:
+                previous_region=region;continue
             names=region['speakers'];piece=pcm[round(start*RATE)-a:round(end*RATE)-a]
-            passages=self.decode(piece,request['language'],names,start,request['language_epoch'],overlap=True,
-                context_seed=request.get('language_context'),observations=context_history)
-            produced=self.decorate(passages,start,end,names,request['language_epoch'],True)
+            # A terminal activity hole is not a word boundary. Reuse bounded
+            # same-origin audio only after a contiguous clean same-owner region
+            # (or its unassigned tail), within admitted context and this epoch.
+            prefix_start=None
+            def clean_owner(owners):return len(owners)==1 and owners[0]!='unknown_mixed' and not owners[0].startswith('overlap')
+            if end-start<.5 and len(names)<=1:
+                if clean_owner(names) and region['start']<start:prefix_start=region['start']
+                elif (previous_region is not None and abs(previous_region['end']-region['start'])<1e-6
+                      and clean_owner(previous_region['speakers'])
+                      and (not names or names==previous_region['speakers'])):prefix_start=previous_region['start']
+            if prefix_start is not None:
+                produced=self.transcribe_owned(start,end,{'language':request['language'],'epoch':request['language_epoch']},names,
+                    context_min_start=max(a/RATE,epoch_start/RATE,prefix_start),
+                    observations=context_history,context_seed=request.get('language_context'),use_carry=False,
+                    epoch_start_sample=epoch_start)
+                for row in produced:row['finalized']=True
+            else:
+                passages=self.decode(piece,request['language'],names,start,request['language_epoch'],overlap=True,
+                    context_seed=request.get('language_context'),observations=context_history)
+                produced=self.decorate(passages,start,end,names,request['language_epoch'],True)
             for row in produced:
                 row['language_mode']=request['language']
+                if region.get('activity_regions'):row.update(activity_regions=activity_slice(region['activity_regions'],row['start'],row['end']),voice_eligible=False)
                 if 'unknown_mixed' in names:row.update(speaker='overlap_unknown',voice_eligible=False,review=True,speaker_candidates=[])
                 speakers[row['speaker']]=('Unknown speaker' if row['speaker']=='unassigned' else 'Mixed audio' if row['speaker'].startswith('overlap') else 'Speaker '+str(int(row['speaker'].split('_')[-1])+1))
             rows.extend(produced)
+            previous_region=region
         result={'type':'refinement_result','operation_id':request['operation_id'],'language_epoch':request['language_epoch'],
                 'window':window,'candidates':coalesce_blanks(rows),'speakers':speakers}
         if diagnostics is not None:result['track_mapping']={'raw_batch_turns':raw_turns,'references':copy.deepcopy(request['references']),
@@ -409,10 +457,7 @@ class Engine:
             if stamp['epoch']!=self.timeline[-1]['epoch']:self.timeline.append(stamp)
             pcm=read_audio(self.path,message['start_sample'],message['end_sample'])
             output,self.processed=self.models.feed(pcm);self.received=message['end_sample']
-            for turn in output:
-                previous=next((t for t in reversed(self.turns) if t['speaker']==turn['speaker']),None)
-                if previous and turn['start']-previous['end']<=.20:previous['end']=max(previous['end'],turn['end'])
-                else:self.turns.append(turn)
+            self.turns.extend(output)
             self.commit()
             self.emit({'type':'progress','processed_seconds':self.processed,'received_seconds':self.received/RATE,**self.models.metrics()})
         elif kind in ('flush','stop'):

@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
+from pcm_peer import varying_pcm
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
@@ -164,7 +165,7 @@ class LiveLanguageWorkerTests(unittest.TestCase):
         return events,asr
 
     def audio(self,value=.1,count=16000):
-        return {'type':'audio','pcm':base64.b64encode(np.full(count,value,dtype='<f4').tobytes()).decode()}
+        return {'type':'audio','pcm':base64.b64encode(varying_pcm(count,value,dtype='<f4').tobytes()).decode()}
 
     def test_uncommitted_phrase_is_split_at_control_boundary_and_never_relabelled(self):
         messages=[self.audio() for _ in range(2)]
@@ -174,8 +175,8 @@ class LiveLanguageWorkerTests(unittest.TestCase):
         segments=[e['segment'] for e in events if e['type']=='segment']
         self.assertEqual([(s['start'],s['end'],s['language_generation'],s['language']) for s in segments],[(0,2,0,'en'),(2,6,1,'fr')])
         self.assertEqual([c.kwargs['language'] for c in asr.transcribe.call_args_list],['en','fr'])
-        np.testing.assert_allclose(asr.transcribe.call_args_list[0].args[0],np.full(32000,.1,dtype=np.float32),atol=1/32767)
-        np.testing.assert_allclose(asr.transcribe.call_args_list[1].args[0],np.full(64000,.2,dtype=np.float32),atol=1/32767)
+        np.testing.assert_allclose(asr.transcribe.call_args_list[0].args[0],varying_pcm(32000,.1,dtype=np.float32),atol=1/32767)
+        np.testing.assert_allclose(asr.transcribe.call_args_list[1].args[0],varying_pcm(64000,.2,dtype=np.float32),atol=1/32767)
 
     def test_rapid_zero_length_epochs_do_not_duplicate_audio_or_generate_wrong_language(self):
         messages=[self.audio()]
@@ -191,7 +192,7 @@ class LiveLanguageWorkerTests(unittest.TestCase):
         detector=Mock();detector.detect.side_effect=[scores('en'),scores('fr',.92)]
         with patch('language_detection.WhisperLanguageDetector',return_value=detector) as load:
             transcriber=SpeechTranscriber(cohere_model(),'auto','local-approved')
-            pcm=np.full(16000,.1,dtype=np.float32)
+            pcm=varying_pcm(16000,.1,dtype=np.float32)
             self.assertEqual(transcriber.transcribe(pcm,16000,('speaker_0',))[0]['language'],'en')
             transcriber.set_language('fr')
             self.assertEqual(transcriber.transcribe(pcm,16000,('speaker_0',))[0]['language'],'fr')
