@@ -4,6 +4,7 @@ const token = document.querySelector('meta[name="speakerdesk-token"]').content;
 let config, jobs = [], selected = null, doc = null, dirty = false, polling = false, saving = false, editGeneration = 0, selectionGeneration = 0;
 let meeting = null, followingLive = true, passageEnd = null, retrying = false;
 let changingLiveLanguage = false;
+let pendingExport = null;
 const liveStatuses = ['starting','recording','paused','finishing'];
 const isLive = () => selected && liveStatuses.includes(selected.status);
 const colors = ['#729e87','#7796b4','#b49877','#a184ad','#799da2','#ba8590','#99a36e','#867eae'];
@@ -26,6 +27,49 @@ function notice(text, error = false) {
   $('notice').textContent = text; $('notice').hidden = !text;
   $('notice').className = error ? 'error' : '';
   if (text && !error) setTimeout(() => { if ($('notice').textContent === text) $('notice').hidden = true; }, 4500);
+}
+function renderExportState() {
+  document.querySelectorAll('[data-export]').forEach(button=>{button.disabled=!!pendingExport;});
+  const notices=document.querySelector('a[href="/api/notices"]');
+  if(notices){notices.setAttribute('aria-disabled',String(!!pendingExport));notices.setAttribute('aria-busy',String(!!pendingExport));}
+  document.querySelector('.export-menu').setAttribute('aria-busy',String(!!pendingExport));
+}
+function finishExport(operation) {
+  if(pendingExport!==operation)return;
+  pendingExport=null;renderExportState();
+}
+window.speakerdeskExportStatus=(nonce,phase)=>{
+  const operation=pendingExport;
+  if(!operation?.native || !/^[0-9a-f]{32}$/.test(nonce) || operation.nonce!==nonce)return false;
+  const messages={downloading:'Preparing export…',choosing:'Choose where to save the export.',writing:'Saving export…',saved:'Export saved.',cancelled:'Export cancelled.',failed:'Export could not be saved. Try again.'};
+  if(!Object.hasOwn(messages,phase))return false;
+  notice(messages[phase],phase==='failed');
+  if(['saved','cancelled','failed'].includes(phase))finishExport(operation);
+  return true;
+};
+async function downloadExport(kind=null) {
+  if(pendingExport)return;
+  const snapshot={id:selected?.id,name:selected?.name,generation:selectionGeneration};
+  if(kind && (!['txt','srt','vtt','json'].includes(kind) || !/^[0-9a-f]{32}$/.test(snapshot.id || '')))throw new Error('Choose a saved meeting to export.');
+  const operation={nonce:crypto.randomUUID().replaceAll('-',''),native:window.speakerdeskNativeExport===true};
+  pendingExport=operation;renderExportState();
+  try {
+    const checkMeeting=()=>{
+      if(kind && (selected?.id!==snapshot.id || selectionGeneration!==snapshot.generation))throw new Error('The selected meeting changed. Choose Export again.');
+      if(kind && (dirty || hasPassageDrafts()))throw new Error('Save or discard your latest edits before exporting.');
+    };
+    if(kind){if(hasPassageDrafts())throw new Error('Save or discard passage drafts before exporting.');await save();checkMeeting();}
+    if(pendingExport!==operation)return;
+    const path=kind?`/api/jobs/${snapshot.id}/export/${kind}`:'/api/notices';
+    const url=new URL(path,location.origin);url.searchParams.set('download',operation.nonce);
+    const response=await fetch(url,{method:'HEAD',headers:{'X-Speakerdesk-Token':token},cache:'no-store',redirect:'error'});
+    if(!response.ok)throw new Error(response.status===413?'This export is too large to save. Try another format.':'This export is unavailable. Try again.');
+    checkMeeting();if(pendingExport!==operation)return;
+    const link=node('a');link.href=url.href;link.download=kind?`${snapshot.name.replace(/\.[^.]+$/, '')}.${kind}`:'Speakerdesk-third-party-notices.txt';
+    document.body.append(link);
+    try{link.click();}finally{link.remove();}
+    if(!operation.native)finishExport(operation);
+  }catch(error){finishExport(operation);throw error;}
 }
 function changed() { editGeneration++; dirty = true; $('save').disabled = saving; $('save').textContent = saving ? 'Saving…' : 'Save changes'; }
 function time(seconds) {
@@ -77,14 +121,16 @@ function setStatus() {
   $('follow-live').hidden=!live;
   $('listening').hidden=!live || !!doc?.segments?.length;
   renderLiveLanguage();
+  renderExportState();
   renderRefinementStatus();
 }
 async function select(jid) {
+  if(hasPendingPassageSaves()){notice('Wait for the passage save to finish before switching meetings.');return;}
   if(retrying){notice('Wait for the passage retry to start before switching recordings.');return;}
   if (identityBusy) { notice('Wait for the name change to finish before switching meetings.'); return; }
   if (saving) { notice('Wait for this save to finish before switching recordings.'); return; }
   if ((dirty || hasPassageDrafts()) && !confirm('Discard unsaved edits and open another recording?')) return;
-  passageDrafts.clear();$('segments').replaceChildren();
+  passageDrafts.clear();recoverablePassageDrafts.clear();$('segments').replaceChildren();
   const generation = ++selectionGeneration;
   const result = await api(`/api/jobs/${jid}`);
   if (generation !== selectionGeneration) return;
@@ -124,7 +170,7 @@ function renderEditor() {
   updateNameControls();
 }
 function renderSegments() {
-  if(isLive() || hasPassageDrafts() || ['waiting','refining'].includes(selected.refinement_status)){renderLiveSegments();return;}
+  if(isLive() || hasPassageDrafts() || hasRecoverablePassageDrafts() || ['waiting','refining'].includes(selected.refinement_status)){renderLiveSegments();return;}
   $('pending-phrases').hidden=true;
   const pane=$('transcript-pane'), previousScroll=pane.scrollTop;
   $('segments').replaceChildren();
@@ -260,7 +306,7 @@ function passageReviewReason(segment) {
   return segment.text.trim() ? '' : reviewReasons.empty_result;
 }
 function showTranscriptPassage(segment) {
-  return !!segment.text.trim() || passageDrafts.has(segment.id) || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
+  return !!segment.text.trim() || passageDrafts.has(segment.id) || !!recoverablePassageDrafts.get(segment.id)?.text.trim() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
 }
 function renderRetainedAudioReview() {
   const host=$('retained-audio-review'),open=host.open;
@@ -342,9 +388,10 @@ function manual() {
 function wire() {
   wirePeople();
   $('new-meeting').addEventListener('click', () => {
+    if(hasPendingPassageSaves()){notice('Wait for the passage save to finish before starting another meeting.');return;}
     if(meeting && liveStatuses.includes(meeting.status)){select(meeting.id).catch(e=>notice(e.message,true));return;}
     if((dirty || hasPassageDrafts()) && !confirm('Discard unsaved transcript edits?'))return;
-    passageDrafts.clear();selected=doc=null;dirty=false;selectionGeneration++;$('player').pause();$('player').removeAttribute('src');
+    passageDrafts.clear();recoverablePassageDrafts.clear();selected=doc=null;dirty=false;selectionGeneration++;$('player').pause();$('player').removeAttribute('src');
     $('workspace').hidden=true;$('empty').hidden=false;renderJobs();$('meeting-title').focus();
   });
   $('refinement-toggle').addEventListener('click',toggleRefinement);
@@ -420,6 +467,7 @@ function wire() {
   $('add-speaker').addEventListener('click', () => { const id = `speaker_${crypto.randomUUID().slice(0,8)}`; doc.speakers[id] = `Speaker ${Object.keys(doc.speakers).length + 1}`; changed(); renderEditor(); });
   $('import').addEventListener('change', async () => {
     try {
+      if(hasPendingPassageSaves())throw new Error('Wait for the passage save to finish before importing.');
       if (saving) throw new Error('Wait for this save to finish before importing.');
       const file = $('import').files[0]; if (!file) return;
       if (dirty && !confirm('Replace the current transcript, including unsaved edits, with this JSON file?')) return;
@@ -432,16 +480,10 @@ function wire() {
       selected = result; doc = structuredClone(result.document); dirty = false; setStatus(); renderEditor(); notice('Imported and saved locally.');
     } catch (e) { notice(e.message, true); } finally { saving = false; $('editor').inert = false; $('import').value = ''; }
   });
-  document.querySelectorAll('[data-export]').forEach(button => button.addEventListener('click', async () => {
-    try {
-      if(hasPassageDrafts())throw new Error('Save or discard passage drafts before exporting.');
-      await save(); if (dirty) throw new Error('New edits were made during saving. Save them before exporting.'); const kind = button.dataset.export;
-      const link = node('a');
-      link.href = `/api/jobs/${selected.id}/export/${kind}`;
-      link.download = `${selected.name.replace(/\.[^.]+$/, '')}.${kind}`;
-      document.body.append(link); link.click(); link.remove();
-    } catch (e) { notice(e.message, true); }
-  }));
+  document.querySelectorAll('[data-export]').forEach(button => button.addEventListener('click', () => downloadExport(button.dataset.export).catch(e=>notice(e.message,true))));
+  document.querySelector('a[href="/api/notices"]').addEventListener('click',event=>{
+    event.preventDefault();downloadExport().catch(e=>notice(e.message,true));
+  });
   $('delete').addEventListener('click', async () => {
     if (saving) { notice('Wait for this save to finish before deleting.'); return; }
     if (!confirm(`Delete ${selected.name} and its local audio and transcript?`)) return;

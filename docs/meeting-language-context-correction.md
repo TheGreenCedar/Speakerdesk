@@ -1,4 +1,4 @@
-# Meeting language, retained speech and compact transcript
+# Meeting language, transcript recovery and safe exports
 
 The released 0.4.0 UI placed the current-language selector beside capture controls
 and repeated visible language-retry selectors on saved passages. Uncertain LID,
@@ -65,14 +65,55 @@ is synthetic and is not asserted identical to the independent audit's baseline.
 CPU tests exercise production routing, import workers, sample ranges, subprocess
 protocols, persistence, epochs, failure barriers, exports and protected edits with
 explicit acoustic/model peers. They do not measure acoustic accuracy or native
-performance. All **202 CPU tests passed**; independent source review found no
+performance. All **205 CPU tests passed**; independent source review found no
 remaining actionable backend issue after correcting historical context and
 review-resolution regressions. This correction has not yet received new real NVIDIA/Whisper/Cohere
-validation: shared free disk remains below the 40 GB floor plus CodeStory reserve,
-so no native model run or package build was started. Existing installed models
+validation. No native model run or package build was started. The latest resource
+checkpoint recovered above the shared floor, but full-build admission and CodeStory
+resource coordination are pending. Existing installed models
 and the signed 0.4.0 release are preserved. No new release is published.
 
 Cohere supplies no word timestamps or trustworthy no-speech score. Nonzero room
 noise and overlapping voices may still yield incorrect text; this change does
 not invent confidence or discard returned words based on amplitude. Empty/failed
 results remain available for audio review and an explicit language retry.
+
+## Recovering a correction after new machine words
+
+When refinement changes a passage while someone edits it, the UI retains the
+draft and shows a copyable comparison with the latest machine words. **Keep my
+correction** saves only the text against the revision displayed in that comparison.
+Another unseen update still returns a conflict and preserves the draft. **Use
+latest words** keeps the discarded draft available through **Recover my correction**,
+including when the machine result is empty. Successful correction remains protected
+from later refinement. Five browser regressions cover these recovery paths,
+including an actual successful PATCH with its response held while controls are
+rebuilt. All correction actions remain guarded until acknowledgement; text typed
+while saving remains a draft against the acknowledged revision.
+
+![Draft retained beside latest words with explicit recovery](screenshots/meeting-draft-conflict-recovery.png)
+
+## Native export correction
+
+The independent installed-app audit traced the main thread waiting inside
+`blocking_save_file()` during the WebKit download callback. The correction downloads
+into an owned private temporary directory, then opens the [nonblocking dialog](https://docs.rs/tauri-plugin-dialog/latest/tauri_plugin_dialog/struct.FileDialogBuilder.html#method.save_file).
+The worker copies into a new private sibling file before atomically replacing the
+chosen destination. It does not overwrite an existing destination on failed copying.
+
+Only the current loopback port's transcript/notices routes with a validated nonce
+are accepted. One export owns download, dialog and write until success, cancellation
+or failure. Late callbacks cannot release a newer export. Shutdown removes owned
+staging. Recording storage is excluded as a destination. Backend serialization and
+the native worker enforce a 16 MiB UTF-8 download cap; an oversized response returns
+413 before becoming an attachment and leaves the canonical meeting/audio unchanged.
+
+Eight standalone Rust tests pass for staging, cancellation, stale callbacks,
+retry, safe replacement, failed writes, shutdown and recording-storage protection.
+Three CPU export tests cover inclusive UTF-8 bounds and actual GET/HEAD refusals.
+Eight browser checks cover the busy guard, matching/stale native status peers,
+save/switch/edit races, error responses and an actual Chromium text download.
+Native statuses in those browser checks are explicit test peers: no native dialog
+or packaged Save/Cancel/retry was executed. Full pinned Tauri compilation and the
+packaged native dialog checks await coordinated native build admission. The
+installed application and published 0.4.0 artifacts have not been replaced.

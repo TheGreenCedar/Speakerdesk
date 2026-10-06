@@ -18,7 +18,7 @@ from werkzeug.utils import secure_filename
 from audio import normalize
 from pipeline import infer, model_config, preflight, MODELS, retry_passage
 from language_detection import LANGUAGE_CHOICES, detector_issues
-from transcript import LANGUAGES, validate, export
+from transcript import LANGUAGES, validate, export, ExportTooLarge
 from model_setup import register_setup
 from live_meeting import register_meetings, LIVE
 from people import register_people, reconcile_assignments
@@ -341,7 +341,10 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
         document=copy.deepcopy(job['document'])
         if kind=='json' and job.get('speaker_assignments'):
             document['speaker_assignments']=job['speaker_assignments']
-        content,mimetype=export(document,kind)
+        try:
+            content,mimetype=export(document,kind)
+        except ExportTooLarge as error:
+            abort(413,description=str(error))
         response=app.response_class(content,content_type=mimetype)
         filename=f'{Path(job["name"]).stem}.{kind}'
         response.headers['Content-Disposition']=f'attachment; filename="{secure_filename(filename) or "transcript."+kind}"'

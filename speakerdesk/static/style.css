@@ -56,6 +56,11 @@
 .rolling-segment:focus-within .rolling-actions,.rolling-segment.has-draft .rolling-actions{display:flex}
 .rolling-actions button{min-height:25px;padding:2px 7px;font-size:11px}.rolling-actions .text-button{display:none}
 .rolling-segment.has-new-words .rolling-actions .text-button{display:inline-flex}.passage-save-status{font-size:11px}
+.rolling-actions .keep-correction,.rolling-actions .recover-correction,.passage-comparison{display:none}
+.rolling-segment.has-new-words .keep-correction,.rolling-segment.has-recoverable-draft .recover-correction{display:inline-flex}
+.rolling-segment.has-recoverable-draft .rolling-actions{display:flex}
+.rolling-segment.has-new-words .passage-comparison{display:block;border-left:2px solid var(--line);padding:6px 10px;margin-top:5px;font-size:11px;color:var(--muted)}
+.passage-comparison strong{display:block;font-size:11px;margin:3px 0}.passage-comparison .local-correction-copy{font-size:13px;line-height:1.4;padding-right:0;min-height:20px}.latest-machine-words{white-space:pre-wrap;font-size:13px;margin:3px 0;line-height:1.4}
 .speaker-continuation{border-top:0;padding-top:2px}.speaker-continuation .speaker-avatar{visibility:hidden}
 .speaker-continuation .segment-top{position:absolute;right:0;top:0;min-height:20px;padding-right:0;margin:0}.speaker-continuation textarea{padding-right:170px}
 .speaker-continuation:focus-within .segment-top{position:static;padding-right:105px}.speaker-continuation:focus-within textarea{padding-right:0}

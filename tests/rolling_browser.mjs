@@ -66,7 +66,8 @@ try {
   assert.equal(await evaluate('document.activeElement === draftNode'),true);
   assert.equal(await evaluate('draftNode.value'),'My unsaved correction');
   await click('.rolling-actions button');
-  await wait('document.querySelector(".passage-save-status").textContent.includes("changed")');
+  await wait('document.querySelector(".passage-save-status").textContent.includes("Compare both versions")');
+  await wait('!isPassageSaving("row-0")');
   assert.equal(await evaluate('draftNode.value'),'My unsaved correction');
   await click('.rolling-actions .text-button');
   await wait('document.querySelector(".rolling-segment textarea").value.includes("larger-context")');
