@@ -280,7 +280,7 @@ function renderSegments() {
     if(!isLive()){text.value=segment.text;text.rows=2;text.setAttribute('aria-label',`Transcript at ${time(segment.start)}`);text.placeholder=segment.language_detection?.mode==='auto' && !segment.language?'Language uncertain or unsupported. Play this passage and enter its original words.':'';
       text.addEventListener('input',()=>{segment.text=text.value;text.style.height='auto';text.style.height=`${text.scrollHeight}px`;changed();});}
 
-    card.addEventListener('focusin', () => {if(!isLive())showInspector(segment,card);});
+    card.addEventListener('focusin', event => {if(!isLive() && !event.target.closest('.segment-actions, .review-action'))showInspector(segment,card);});
     body.append(top,text);
     const reason=passageReviewReason(segment);
     if(reason)body.append(node('p',`${passageTime(segment.start)}–${passageTime(segment.end)} · ${reason}. Play this passage to review it.`, 'passage-review'));
