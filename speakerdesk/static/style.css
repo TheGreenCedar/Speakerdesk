@@ -138,3 +138,5 @@
   .segment-actions{opacity:1}.details-toggle{display:inline-flex}
 }
 @media(min-width:901px){.transcript-search input{width:150px}}
+.speaker-continuation .segment-top>select{position:static;width:auto;height:auto;clip-path:none;visibility:hidden}
+.speaker-continuation:hover .segment-top>select,.speaker-continuation:focus-within .segment-top>select{visibility:visible}
