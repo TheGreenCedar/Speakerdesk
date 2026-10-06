@@ -6,18 +6,45 @@ All positions reference the original16kHz recording, never inferred word times.
 import copy
 import hashlib
 import re
+import json
+import os
+from pathlib import Path
 
 RATE = 16000
+MAX_DECODE_SAMPLES = 392000
+CORE_SAMPLES = 18*RATE
+CONTEXT_SAMPLES = 3*RATE
+
+
+class RevisionArchive:
+    """Private append-only raw versions; hot versions can then be bounded."""
+    def __init__(self, path):
+        self.path=Path(path)
+        descriptor=os.open(self.path,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+        os.close(descriptor)
+
+    def append(self,event):
+        data=(json.dumps(event,ensure_ascii=False,separators=(',',':'))+'\n').encode()
+        with self.path.open('r+b') as output:
+            output.seek(0,os.SEEK_END);offset=output.tell()
+            try:output.write(data);output.flush();os.fsync(output.fileno())
+            except Exception:
+                output.truncate(offset)
+                raise
 
 
 class UtteranceBook:
-    def __init__(self, job_id, *, silence_samples=8000, context_samples=3200):
+    def __init__(self, job_id, *, silence_samples=8000, context_samples=3200,
+                 history_limit=None, archive=None):
         if not isinstance(job_id, str) or not job_id:
             raise ValueError('Utterance identity requires a recording.')
         if (type(silence_samples) is not int or type(context_samples) is not int
                 or not 0 < context_samples < silence_samples):
             raise ValueError('Invalid utterance context policy.')
         self.job_id, self.silence_samples, self.context_samples = job_id, silence_samples, context_samples
+        if history_limit is not None and (type(history_limit) is not int or history_limit<1 or archive is None):
+            raise ValueError('Bounded utterance history requires durable archival.')
+        self.history_limit,self.archive=history_limit,archive
         self.cursor = self.epoch_start = self.epoch = 0
         self.rows = {}
         self.order = []
@@ -103,6 +130,11 @@ class UtteranceBook:
         row = self.rows[identity]
         if type(revision) is not int or revision != row['machine_revision'] or not isinstance(text, str):
             raise ValueError('Utterance changed; preserve the draft for comparison.')
+        if self.archive:
+            self.archive.append({'type':'human_edit','utterance_id':identity,
+                'base_revision':revision,'previous_text':row['text'],'text':text,
+                'audio_revision':row['audio_revision'],
+                'audio_anchor':{'start_sample':row['start_sample'],'end_sample':row['end_sample']}})
         row['text'] = text
         row['text_audio_anchor'] = {'start_sample': row['start_sample'], 'end_sample': row['end_sample']}
         row['protected_fields'] = sorted(set(row['protected_fields']) | {'text'})
@@ -122,7 +154,10 @@ class UtteranceBook:
         version = {'text': text, 'stage': stage, 'complete': complete,
                    'audio_anchor': {'start_sample': start_sample, 'end_sample': end_sample},
                    'base_revision': revision, 'audio_revision': row['audio_revision']}
+        if self.archive:
+            self.archive.append({'type':'machine_version','utterance_id':identity,'version':version})
         row['machine_versions'].append(version)
+        if self.history_limit is not None:row['machine_versions']=row['machine_versions'][-self.history_limit:]
         # Incomplete decoding is retained as a candidate, never a replacement
         # that silently clears earlier words. Human corrections stay primary.
         if complete and 'text' not in row['protected_fields']:
@@ -132,6 +167,20 @@ class UtteranceBook:
             row['refinement_state'] = 'refined' if stage == 'refined' and row['state'] == 'sealed' else 'provisional'
             row.pop('alignment', None)
         return copy.deepcopy(row)
+
+    def decode_requests(self, identity):
+        """Bounded core/context requests, without assigning words to cores."""
+        row=self.rows[identity];start,end=row['start_sample'],row['end_sample']
+        requests=[]
+        for core_start in range(start,end,CORE_SAMPLES):
+            core_end=min(end,core_start+CORE_SAMPLES)
+            a,b=max(start,core_start-CONTEXT_SAMPLES),min(end,core_end+CONTEXT_SAMPLES)
+            if b-a>MAX_DECODE_SAMPLES:raise ValueError('Oversized canonical decode request.')
+            requests.append({'utterance_id':identity,'machine_revision':row['machine_revision'],
+                'audio_revision':row['audio_revision'],'language_epoch':row['language_epoch'],
+                'core_start_sample':core_start,'core_end_sample':core_end,
+                'start_sample':a,'end_sample':b})
+        return requests
 
     def attach_alignment(self, identity, revision, text_sha256, words, *, audio_revision):
         row = self.rows[identity]

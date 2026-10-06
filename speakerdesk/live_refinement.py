@@ -150,6 +150,12 @@ class Models:
         self.diar=load(Path(config['diar_path']),strict=True);self.diar.set_streaming_config('low')
         self.state=self.diar.init_streaming_state()
         self.asr=CohereAsrModel.from_path(Path(config['cohere_path']))
+        from speech_admission import SileroModel, FrameArchive
+        import uuid
+        self.speech=SileroModel(config['speech_path'])
+        self.speech_live=self.speech.session(archive=FrameArchive(
+            Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'))
+        self.speech_historical=None
         self.language_context=None;self.transcription_start_sample=0
     def set_language_context(self,context,start_sample):
         self.language_context=copy.deepcopy(context);self.transcription_start_sample=start_sample
@@ -158,7 +164,9 @@ class Models:
         from language_detection import SpeechTranscriber,WhisperLanguageDetector
         self.check_memory()
         if language=='auto' and self.detector is None:self.detector=WhisperLanguageDetector(self.config['lid_path'])
-        transcriber=SpeechTranscriber(self.asr,language,self.config.get('lid_path'),detector=self.detector,context=self.language_context)
+        transcriber=SpeechTranscriber(self.asr,language,self.config.get('lid_path'),detector=self.detector,
+            context=self.language_context,speech_evidence=(self.speech_historical
+                if self.speech_historical is not None else self.speech_live.evidence))
         with contextlib.redirect_stdout(sys.stderr):
             result=transcriber.transcribe(audio,RATE,tuple(names),max_asr_seconds=24.5,allow_overlap=overlap,
                 start_sample=self.transcription_start_sample)
@@ -167,8 +175,10 @@ class Models:
     def feed(self,audio,final=False):
         import sys
         with contextlib.redirect_stdout(sys.stderr):
+            self.speech_live.feed(audio,self.speech_live.received,final=final)
             result,self.state=self.diar.feed(audio,self.state,sample_rate=RATE,final=final,threshold=.5,min_duration=0,merge_gap=0)
-        return [{'start':s.start,'end':s.end,'speaker':f'speaker_{s.speaker}'} for s in result.segments],self.state.frames_processed*.01
+        return [{'start':s.start,'end':s.end,'speaker':f'speaker_{s.speaker}'} for s in result.segments],min(
+            self.state.frames_processed*.01,self.speech_live.evidence.end_sample/RATE)
     def batch_turns(self,audio):
         import sys
         self.check_memory()
@@ -182,6 +192,14 @@ class Models:
         return [{'start':s.start,'end':s.end,'speaker':f'speaker_{s.speaker}'} for s in result.segments]
     def metrics(self):
         return {'peak_mlx_bytes':self.mx.get_peak_memory(),'peak_process_rss_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
+    def begin_refinement(self,audio,start_sample):
+        from speech_admission import FrameArchive
+        import uuid
+        self.speech_historical=None
+        self.speech_historical=self.speech.inspect_frames(audio,start_sample,archive=FrameArchive(
+            Path(self.config['audio_path']).parent/f'speech-refine-{uuid.uuid4().hex}.jsonl'))
+    def end_refinement(self):
+        self.speech_historical=None
 
 
 class Engine:
@@ -398,9 +416,15 @@ class Engine:
             if self.cursor>=available:break
         self.turns=[dict(t,start=max(t['start'],self.cursor)) for t in self.turns if t['end']>self.cursor]
     def refine(self,request):
+        try:return self._refine(request)
+        finally:
+            if hasattr(self.models,'end_refinement'):self.models.end_refinement()
+    def _refine(self,request):
         window=request['window'];a=window['context_start_sample'];b=window['context_end_sample']
         if self.inbox.cancelled_request(request):return {'type':'refinement_result',**{k:request[k] for k in ('operation_id','language_epoch','window')},'cancelled':True}
-        pcm=read_audio(self.path,a,b);turns=self.models.batch_turns(pcm)
+        pcm=read_audio(self.path,a,b)
+        if hasattr(self.models,'begin_refinement'):self.models.begin_refinement(pcm,a)
+        turns=self.models.batch_turns(pcm)
         absolute=[dict(t,start=t['start']+a/RATE,end=t['end']+a/RATE) for t in turns]
         diagnostics=[] if self.config.get('track_mapping_diagnostics') else None
         raw_turns=copy.deepcopy(absolute) if diagnostics is not None else None
@@ -455,10 +479,14 @@ class Engine:
             if self.capture_finished:raise ValueError('Audio arrived after capture finished.')
             stamp={'start_sample':message['start_sample'],'language':message['language'],'epoch':message['language_epoch']}
             if stamp['epoch']!=self.timeline[-1]['epoch']:self.timeline.append(stamp)
-            pcm=read_audio(self.path,message['start_sample'],message['end_sample'])
-            output,self.processed=self.models.feed(pcm);self.received=message['end_sample']
-            self.turns.extend(output)
-            self.commit()
+            # Inbox coalescing must not turn a queued recording range into an
+            # oversized model read or alter the one-second feeding cadence.
+            for a in range(message['start_sample'],message['end_sample'],RATE):
+                b=min(a+RATE,message['end_sample'])
+                pcm=read_audio(self.path,a,b)
+                output,self.processed=self.models.feed(pcm);self.received=b
+                self.turns.extend(output)
+                self.commit()
             self.emit({'type':'progress','processed_seconds':self.processed,'received_seconds':self.received/RATE,**self.models.metrics()})
         elif kind in ('flush','stop'):
             if kind=='stop':

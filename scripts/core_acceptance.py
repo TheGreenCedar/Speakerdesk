@@ -33,8 +33,13 @@ def assignment(path,name):
 
 def models(root=ROOT):
     values=assignment(root/'speakerdesk/model_setup.py','SPECS')
-    specs=[ast.literal_eval(value) for value in values.elts if isinstance(value,ast.Dict)]
-    specs.append(ast.literal_eval(assignment(root/'speakerdesk/language_detection.py','LID_SPEC')))
+    imported={'LID_SPEC':'language_detection.py','SILERO_SPEC':'speech_admission.py'}
+    specs=[]
+    for value in values.elts:
+        if isinstance(value,ast.Name):
+            require(value.id in imported,'Unresolved model identity: '+value.id)
+            value=assignment(root/'speakerdesk'/imported[value.id],value.id)
+        specs.append(ast.literal_eval(value))
     return {s['directory']:{k:s[k] for k in ('repo','revision','bytes','sha256','files')} for s in specs}
 
 def model_file_pins(root=ROOT):

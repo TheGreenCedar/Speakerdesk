@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
-from pcm_peer import varying_pcm
+from pcm_peer import varying_pcm, SpeechFramePeer, SpeechEvidencePeer
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
@@ -113,7 +113,7 @@ class LiveLanguageAPITests(MeetingHarness,unittest.TestCase):
         self.assertEqual(job['sources'],['microphone','system'])
         for source,value in [('microphone',.2),('system',.3),('audio',.5)]:
             np.testing.assert_array_equal(self.samples(jid,f'{source}.wav'),
-                                          (np.full(1600,value,dtype=np.float32)*32767).astype('<i2'))
+                                          np.rint(np.full(1600,value,dtype=np.float32).astype(np.float64)*32768).astype('<i2'))
 
     def test_failed_persistence_and_full_queue_never_acknowledge_or_enqueue_a_change(self):
         jid=self.paused_inflight()
@@ -158,6 +158,7 @@ class LiveLanguageWorkerTests(unittest.TestCase):
         output=io.StringIO();asr=cohere_model();detector=Mock()
         detector.detect.side_effect=detector_scores or []
         with patch.dict(sys.modules,model_modules(asr,Diarizer())),patch('inference_worker.check_memory'), \
+             patch('speech_admission.SileroModel',side_effect=lambda path:SpeechFramePeer()), \
              patch('language_detection.WhisperLanguageDetector',return_value=detector), \
              patch('sys.stdin',io.StringIO('\n'.join(json.dumps(m) for m in messages)+'\n')),contextlib.redirect_stdout(output):
             from support.resident_fixture import run_messages
@@ -191,7 +192,7 @@ class LiveLanguageWorkerTests(unittest.TestCase):
     def test_new_auto_epoch_clears_hysteresis_and_reuses_detector_after_manual_override(self):
         detector=Mock();detector.detect.side_effect=[scores('en'),scores('fr',.92)]
         with patch('language_detection.WhisperLanguageDetector',return_value=detector) as load:
-            transcriber=SpeechTranscriber(cohere_model(),'auto','local-approved')
+            transcriber=SpeechTranscriber(cohere_model(),'auto','local-approved',speech_evidence=SpeechEvidencePeer())
             pcm=varying_pcm(16000,.1,dtype=np.float32)
             self.assertEqual(transcriber.transcribe(pcm,16000,('speaker_0',))[0]['language'],'en')
             transcriber.set_language('fr')

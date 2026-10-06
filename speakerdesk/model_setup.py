@@ -9,6 +9,7 @@ import certifi
 from pathlib import Path
 from flask import jsonify
 from language_detection import LID_SPEC
+from speech_admission import SILERO_SPEC
 from voice_setup import VoiceSetup
 
 SPECS=[
@@ -19,6 +20,7 @@ SPECS=[
      'directory':'cohere-speech','bytes':1505759837,'sha256':'ae947c13ba1cb8ce24c8bf72ded2520dcda1894ebf5a54fbb803c03bc28ef7fb',
      'files':['config.json','model.safetensors','generation_config.json','preprocessor_config.json','processor_config.json','special_tokens_map.json','tokenizer.json','tokenizer.model','tokenizer_config.json','README.md']},
     LID_SPEC,
+    SILERO_SPEC,
 ]
 
 

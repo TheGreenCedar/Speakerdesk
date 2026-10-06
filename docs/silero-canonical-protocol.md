@@ -1,8 +1,9 @@
 # Speech admission and canonical utterances: correction checkpoint
 
 This branch is an isolated source checkpoint based on the withheld 0.5.1
-candidate. It is not a replacement release. The new speech and utterance
-modules are not connected to production inference yet. CPU tests exercise
+candidate. It is not a replacement release. Hard speech admission is wired to
+production Cohere call paths in this source, but canonical utterance assembly
+is not connected to the controller yet. CPU tests exercise
 control flow with supplied probabilities, not speech recognition accuracy.
 
 The capture writer now rounds the inverse of PCM16/32768 and saturates signed
@@ -32,6 +33,19 @@ The conversion script is reviewed provenance, never executed. No weights have
 been downloaded or run at this checkpoint. The recorded provenance/resource
 proposal outside the checkout is the acquisition handoff.
 
+Every live, refinement, retry and imported Cohere call requires complete pinned
+Silero evidence for its exact input range. Missing evidence stays pending;
+neither manual language, recent language context nor speaker names bypass it.
+Whisper's no-speech head is no longer consulted. Refinement clears its historical
+evidence on success, cancellation and error, restoring the live provider. The
+packaged acceptance inventory now includes the proposed Silero files and hashes;
+this is an identity contract, not evidence that its weights have been acquired.
+
+Live processing is limited by both NVIDIA's processed horizon and Silero's
+completed frames. Coalesced inbox audio is fed in one-second packets. A final
+partial Silero frame retains the true input endpoint. This does not yet fix the
+separate controller Pause acknowledgement requirement.
+
 ## Canonical protocol
 
 `UtteranceBook` identifies a recording/language-epoch/audio-origin object before
@@ -58,19 +72,23 @@ voice duration, quality and consent requirements still apply separately.
 
 ## Remaining integration gates
 
-The alignment owner must verify the shared sample/revision/text contract before
-integration. Continuous speech can exceed Cohere's24.5s input cap: decode requests
-must use bounded context windows while one canonical reading identity survives.
+The alignment owner has confirmed the shared sample/revision/text contract against
+the initial1599e815 checkpoint. Its source-only adapter remains separate and has
+not been integrated or executed here. Continuous speech can exceed Cohere's24.5s
+input cap: the planner supplies18s disjoint cores with3s context on each side
+while one canonical reading identity survives.
 Words can be assigned to nonoverlapping cores only after verified alignment;
 failed alignment retains an unresolved candidate, never greedy lexical glue.
 The prototype does not yet implement that partition/assembly protocol.
 
-The complete frame and machine-version ledgers currently have no retention cap.
-Production wiring requires bounded hot history with archived raw evidence and
-audio retained for review. The canonical protocol must be mapped to the existing
+Speech frames now have a60s hot cap with private durable indexed raw archives;
+archive failures poison the session before pruning. Canonical version history
+can be configured with a hot cap only when a durable raw version/edit journal is
+provided. Production must choose that cap when it wires the book. Original audio
+remains retained for review. The canonical protocol must be mapped to the existing
 controller/CAS/editor/export persistence; standalone object tests do not prove
-that mapping. Hard Silero admission must cover every live, refinement, retry and
-imported Cohere call. `fallback_vad=True` is prohibited. Whisper remains language
+that mapping. Hard Silero admission is wired in source, with CPU gate/route checks;
+neural parity and acoustic quality remain unmeasured. `fallback_vad=True` is prohibited. Whisper remains language
 detection only; Cohere remains the sole transcriber.
 
 Before a new release: coordinate the small Silero-only window, measure actual

@@ -46,11 +46,11 @@ class MeetingLifecycleTests(MeetingHarness, unittest.TestCase):
                 for source, pair in values.items():
                     if source in sources:
                         expected = np.concatenate([np.full(1600, pair[0]), np.full(4000, pair[1])])
-                        np.testing.assert_array_equal(self.samples(jid, f'{source}.wav'), (expected * 32767).astype('<i2'))
+                        np.testing.assert_array_equal(self.samples(jid, f'{source}.wav'), np.rint(expected.astype(np.float64)*32768).clip(-32768,32767).astype('<i2'))
                     else:
                         self.assertFalse((self.root / jid / f'{source}.wav').exists())
                 expected_mix = sum(np.concatenate([np.full(1600, values[source][0]), np.full(4000, values[source][1])]) for source in sources)
-                np.testing.assert_array_equal(self.samples(jid, 'audio.wav'), (expected_mix * 32767).astype('<i2'))
+                np.testing.assert_array_equal(self.samples(jid, 'audio.wav'), np.rint(expected_mix.astype(np.float64)*32768).clip(-32768,32767).astype('<i2'))
                 with self.client.get(f'/api/jobs/{jid}/audio') as response:
                     self.assertEqual(response.status_code, 200)
                 self.assertIn('Synthetic transport result.', self.client.get(f'/api/jobs/{jid}/export/txt').get_data(as_text=True))
@@ -136,7 +136,7 @@ class MeetingLifecycleTests(MeetingHarness, unittest.TestCase):
         audio = self.samples(jid, 'audio.wav')
         self.assertEqual(len(audio), 545600)
         self.assertEqual(saved['duration'], len(audio) / RATE)
-        np.testing.assert_array_equal(audio, np.full(545600, int(.2 * 32767), dtype='<i2'))
+        np.testing.assert_array_equal(audio, np.full(545600, 6554, dtype='<i2'))
 
     def test_worker_error_stops_capture_and_preserves_recording(self):
         self.scenario = 'worker_error'

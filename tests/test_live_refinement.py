@@ -44,6 +44,21 @@ class EngineTests(unittest.TestCase):
     def tearDown(self):self.temp.cleanup()
     def feed(self,start,end,mode='en',epoch=0):
         for n in range(start,end):self.engine.handle({'type':'audio','start_sample':n*RATE,'end_sample':(n+1)*RATE,'language':mode,'language_epoch':epoch})
+    def test_historical_evidence_clears_after_success_cancel_and_error(self):
+        self.models.end_refinement=Mock()
+        for result in ({'status':'complete'},{'status':'cancelled'}):
+            with patch.object(self.engine,'_refine',return_value=result):
+                self.assertEqual(self.engine.refine({}),result)
+            self.models.end_refinement.assert_called_once_with();self.models.end_refinement.reset_mock()
+        with patch.object(self.engine,'_refine',side_effect=ValueError('inspection failed')):
+            with self.assertRaisesRegex(ValueError,'inspection failed'):self.engine.refine({})
+        self.models.end_refinement.assert_called_once_with()
+    def test_new_historical_inspection_failure_cannot_leave_prior_evidence(self):
+        models=Models.__new__(Models);models.config={'audio_path':str(self.path)}
+        models.speech_historical=object();models.speech=Mock()
+        models.speech.inspect_frames.side_effect=ValueError('neural peer failed')
+        with self.assertRaisesRegex(ValueError,'neural peer failed'):models.begin_refinement([],0)
+        self.assertIsNone(models.speech_historical)
     def test_six_second_midword_is_replaced_at_same_audio_origin(self):
         def transcribe(audio,language,names,overlap=False):
             duration=len(audio)/RATE

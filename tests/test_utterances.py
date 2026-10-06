@@ -1,10 +1,12 @@
 """CPU lifecycle contract tests, not acoustic or alignment accuracy evidence."""
 import hashlib
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'speakerdesk'))
-from utterances import UtteranceBook
+from utterances import UtteranceBook, RevisionArchive, MAX_DECODE_SAMPLES
 
 
 def observed(start, end, regions):
@@ -125,6 +127,30 @@ class UtteranceTests(unittest.TestCase):
                    {'start_sample': 5000, 'end_sample': 8000, 'speakers': []}]
         row = book.attach_activity(row['id'], row['audio_revision'], regions)
         self.assertTrue(row['voice_eligible'])
+
+    def test_hot_versions_are_bounded_only_after_raw_versions_are_archived(self):
+        with tempfile.TemporaryDirectory() as folder:
+            archive=RevisionArchive(Path(folder)/'versions.jsonl')
+            book=UtteranceBook('job',history_limit=2,archive=archive)
+            row=book.observe(observed(0,8000,[(0,5000)]))[0]
+            for n in range(12):
+                row=book.apply_model(row['id'],row['machine_revision'],f'Raw {n}',
+                    start_sample=0,end_sample=8000,stage='live',complete=True)
+            self.assertEqual(len(row['machine_versions']),2)
+            events=[json.loads(line) for line in archive.path.read_text().splitlines()]
+            self.assertEqual(len(events),12)
+            self.assertEqual([e['version']['text'] for e in events],[f'Raw {n}' for n in range(12)])
+        with self.assertRaises(ValueError):UtteranceBook('job',history_limit=2)
+
+    def test_continuous_utterance_has_bounded_overlapping_context_requests(self):
+        book=UtteranceBook('job');row=book.observe(observed(0,90*16000,[(0,90*16000)]))[0]
+        requests=book.decode_requests(row['id'])
+        self.assertEqual(len(requests),5)
+        self.assertEqual(requests[0]['core_start_sample'],0)
+        self.assertEqual(requests[-1]['core_end_sample'],90*16000)
+        self.assertTrue(all(b['core_start_sample']==a['core_end_sample'] for a,b in zip(requests,requests[1:])))
+        self.assertTrue(all(r['end_sample']-r['start_sample']<=MAX_DECODE_SAMPLES for r in requests))
+        self.assertEqual(len({r['utterance_id'] for r in requests}),1)
 
 
 if __name__ == '__main__':unittest.main()

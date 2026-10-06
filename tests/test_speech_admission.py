@@ -3,12 +3,15 @@ import sys
 import tempfile
 import unittest
 import wave
+import types
+from unittest.mock import Mock
 from pathlib import Path
 import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from audio import pcm16_bytes
-from speech_admission import FRAME, SpeechFrames, SpeechSession
+from speech_admission import FRAME, SpeechFrames, SpeechSession, FrameArchive
 from live_refinement import read_audio
+from language_detection import SpeechTranscriber
 
 
 class SpeechAdmissionTests(unittest.TestCase):
@@ -87,6 +90,61 @@ class SpeechAdmissionTests(unittest.TestCase):
         result = np.frombuffer(pcm16_bytes(np.array([-2., -1., 0., 1., 2.])), dtype='<i2')
         self.assertEqual(result.tolist(), [-32768, -32768, 0, 32767, 32767])
         with self.assertRaises(ValueError):pcm16_bytes(np.array([np.nan]))
+
+    def test_bounded_hot_frames_preserve_queryable_durable_raw_history(self):
+        with tempfile.TemporaryDirectory() as folder:
+            archive=FrameArchive(Path(folder)/'evidence.jsonl')
+            frames=SpeechFrames(max_frames=32,archive=archive)
+            for n in range(1000):frames.append(n*FRAME,(n+1)*FRAME,.8 if 10<=n<12 else .01)
+            self.assertLessEqual(len(frames.frames),32)
+            past=frames.admission(0,20*FRAME)
+            self.assertTrue(past['complete'])
+            self.assertEqual(past['speech_regions'],[{'start_sample':10*FRAME,'end_sample':12*FRAME}])
+            self.assertEqual(frames.admission(900*FRAME,1000*FRAME)['decision'],'no_speech')
+            self.assertTrue(archive.path.stat().st_size>0)
+            frames.persist()
+            self.assertEqual(frames.frames,[])
+            self.assertEqual(frames.admission(0,20*FRAME)['decision'],'speech')
+
+    def test_archive_failure_cannot_drop_evidence_or_retry_neural_state(self):
+        class Boundary:
+            def initial_state(self):return 0
+            def feed(self,chunk,state):return .01,state+1
+        class FailedArchive:
+            def append(self,frames):raise OSError('Fixture write failed')
+            def query(self,a,b):return []
+        session=SpeechSession(Boundary(),max_frames=1,archive=FailedArchive())
+        session.feed(np.zeros(FRAME),0)
+        with self.assertRaises(OSError):session.feed(np.zeros(FRAME),FRAME)
+        self.assertTrue(session.failed)
+        self.assertEqual(session.evidence.end_sample,FRAME)
+        self.assertEqual(session.evidence.admission(0,2*FRAME)['decision'],'pending')
+        with self.assertRaises(ValueError):SpeechFrames(max_frames=2)
+
+    def test_language_context_names_and_overlap_never_bypass_missing_speech(self):
+        for language in ('en','fr','auto'):
+            for speakers in (('speaker_0',),(),('speaker_0','speaker_1')):
+                for decision in ('pending','no_speech'):
+                    frames=SpeechFrames()
+                    if decision=='no_speech':
+                        for a in range(0,16000,FRAME):frames.append(a,min(a+FRAME,16000),.01)
+                    asr=Mock();detector=Mock();detector.detect.return_value={'en':.99,'fr':.01}
+                    transcriber=SpeechTranscriber(asr,language,detector=detector,
+                        context={'language':'en','end_sample':0},speech_evidence=frames)
+                    row=transcriber.transcribe(np.ones(16000,dtype=np.float32)*.000001,16000,speakers)[0]
+                    self.assertEqual(row['text'],'')
+                    self.assertEqual(row['audio_state'],'model_non_speech' if decision=='no_speech' else 'speech_evidence_pending')
+                    asr.transcribe.assert_not_called();detector.detect.assert_not_called()
+
+    def test_positive_short_evidence_is_not_vetoed_by_whisper_or_amplitude(self):
+        frames=SpeechFrames();frames.append(0,512,.8);frames.append(512,1000,.4)
+        detector=Mock();detector.no_speech_probability.side_effect=AssertionError('Whisper cannot gate speech')
+        asr=Mock();asr.transcribe.return_value=types.SimpleNamespace(text='Blue',tokens=[1])
+        pcm=np.ones(1000,dtype=np.float32)*.000001
+        row=SpeechTranscriber(asr,'en',detector=detector,speech_evidence=frames).transcribe(pcm,16000,('speaker_0',))[0]
+        self.assertEqual(row['text'],'Blue')
+        np.testing.assert_array_equal(asr.transcribe.call_args.args[0],pcm)
+        detector.no_speech_probability.assert_not_called()
 
 
 if __name__ == '__main__':unittest.main()

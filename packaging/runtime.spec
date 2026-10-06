@@ -19,6 +19,8 @@ for package in ['mlx','mlx-audio','mlx-speech','huggingface-hub','numpy','scipy'
 hidden=[name for name in collect_submodules('mlx') if all(part.isidentifier() for part in name.split('.'))]
 hidden+=collect_submodules('mlx_audio.vad.models.nemotron_diarization')
 hidden+=collect_submodules('mlx_audio.vad.models.sortformer')
+hidden+=collect_submodules('mlx_audio.vad.models.silero_vad')
+hidden+=['speech_admission','utterances']
 hidden+=collect_submodules('mlx_audio.stt.models.whisper')
 hidden+=collect_submodules('mlx_speech.models.cohere_asr')
 hidden+=['mlx_speech.generation.cohere_asr','mlx_audio.vad','inference_worker','live_worker','live_refinement','live_language','meeting_refinement','rolling_refinement','live_meeting','model_setup','language_detection','app','pipeline','audio','transcript','review']

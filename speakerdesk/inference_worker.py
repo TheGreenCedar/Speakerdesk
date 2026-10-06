@@ -38,10 +38,25 @@ def run(task, request):
     elif task == 'transcribe':
         from mlx_speech.generation.cohere_asr import CohereAsrModel
         from language_detection import SpeechTranscriber
+        from speech_admission import SileroModel, FrameArchive
+        import uuid
         import soundfile as sf
 
+        speech=SileroModel(request['speech_path'])
+        speech_session=speech.session(archive=FrameArchive(
+            Path(request['audio']).parent/f'speech-import-{uuid.uuid4().hex}.jsonl'))
+        with sf.SoundFile(request['audio']) as recording:
+            if (recording.samplerate != 16000 or recording.channels != 1
+                    or not 0 < recording.frames <= 7200*16000):
+                raise ValueError('Invalid speech-admission recording.')
+            while len(pcm:=recording.read(16000,dtype='float32')):
+                check_memory()
+                speech_session.feed(pcm,speech_session.received)
+        import numpy as np
+        speech_session.feed(np.empty(0,dtype=np.float32),speech_session.received,final=True)
         model = CohereAsrModel.from_path(model_path)
-        transcriber = SpeechTranscriber(model, request['language'], request.get('lid_path'))
+        transcriber = SpeechTranscriber(model, request['language'], request.get('lid_path'),
+            speech_evidence=speech_session.evidence)
         loaded = time.perf_counter()
         regions = []
         for chunk in request['chunks']:

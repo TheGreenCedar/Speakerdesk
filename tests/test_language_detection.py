@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
-from pcm_peer import varying_pcm
+from pcm_peer import varying_pcm, SpeechEvidencePeer, SpeechFramePeer
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'speakerdesk'))
@@ -61,7 +61,7 @@ def model_modules(asr, diar=None):
 class LanguageRoutingTests(unittest.TestCase):
     def transcriber(self, distributions, context=None):
         detector=Mock();detector.detect.side_effect=distributions
-        return SpeechTranscriber(cohere_model(),'auto',detector=detector,context=context)
+        return SpeechTranscriber(cohere_model(),'auto',detector=detector,context=context,speech_evidence=SpeechEvidencePeer())
 
     def test_confident_switch_routes_current_supported_language_immediately(self):
         transcriber=self.transcriber([scores('en'),scores('fr',.92),scores('fr',.92)])
@@ -147,7 +147,7 @@ class LanguageRoutingTests(unittest.TestCase):
 
     def test_manual_overrides_short_quiet_overlap_and_never_loads_detector(self):
         with patch('language_detection.WhisperLanguageDetector') as detector:
-            transcriber=SpeechTranscriber(cohere_model(),'fr')
+            transcriber=SpeechTranscriber(cohere_model(),'fr',speech_evidence=SpeechEvidencePeer())
         for pcm in [varying_pcm(1000,.0001,dtype=np.float32),varying_pcm(24*16000,.1,dtype=np.float32)]:
             row=transcriber.transcribe(pcm,16000,('speaker_0','speaker_1'))[0]
             self.assertEqual((row['start'],row['end'],row['language']),(0,len(pcm)/16000,'fr'))
@@ -161,11 +161,11 @@ class LanguageRoutingTests(unittest.TestCase):
 
     def test_digital_silence_skips_models_and_preserves_explicit_manual_language(self):
         for language in ['auto','fr']:
-            detector=Mock();transcriber=SpeechTranscriber(cohere_model(),language,detector=detector)
+            detector=Mock();transcriber=SpeechTranscriber(cohere_model(),language,detector=detector,speech_evidence=SpeechEvidencePeer('no_speech'))
             row=transcriber.transcribe(np.zeros(16000,dtype=np.float32),16000,('speaker_0',))[0]
             self.assertEqual(row['language'],None if language=='auto' else 'fr')
             self.assertEqual(row['language_detection']['reason'],'insufficient_speech')
-            self.assertEqual(row['audio_state'],'digital_silence')
+            self.assertEqual(row['audio_state'],'model_non_speech')
             self.assertEqual(row['text'],'');self.assertTrue(row['review'])
             detector.detect.assert_not_called();transcriber.asr.transcribe.assert_not_called()
 
@@ -274,13 +274,16 @@ class DecoderContractTests(unittest.TestCase):
                 (folder/'model.safetensors').touch()
             cfg={'diar_path':str(root/'diar'),'cohere_path':str(root/'asr'), 'lid_path':str(root/'missing'),
                  'diar_python':sys.executable,'asr_python':sys.executable,'device':'mlx'}
-            self.assertEqual(preflight(cfg,'fr'),[])
+            with patch('pipeline.speech_issues',return_value=[]):self.assertEqual(preflight(cfg,'fr'),[])
             self.assertTrue(preflight(cfg,'auto'))
             (root/'missing').mkdir();(root/'missing/config.json').write_text('{}')
             self.assertTrue(detector_issues(root/'missing'))
 
 
 class WorkerLanguageTests(unittest.TestCase):
+    def setUp(self):
+        model=patch('speech_admission.SileroModel',side_effect=lambda path:SpeechFramePeer())
+        model.start();self.addCleanup(model.stop)
     def test_import_pipeline_routes_mixed_language_with_correct_offsets_and_cleans_only_crops(self):
         import inference_worker
         with tempfile.TemporaryDirectory() as temporary:

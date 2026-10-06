@@ -6,10 +6,12 @@ generator. Missing, incomplete or failed evidence never becomes no-speech.
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 
 RATE = 16000
 FRAME = 512
+HOT_FRAMES = 1875  #60 seconds, exceeding any single admitted decode window.
 SILERO_SPEC = {
     'name': 'Speech detection', 'repo': 'mlx-community/silero-vad-v6',
     'revision': '2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06',
@@ -24,12 +26,49 @@ SILERO_SPEC = {
 }
 
 
+class FrameArchive:
+    """Append original probabilities before pruning hot memory; query by block."""
+    def __init__(self, path):
+        self.path = Path(path)
+        descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        self.index = []
+
+    def append(self, frames):
+        if not frames:return
+        block = (json.dumps(frames, separators=(',', ':'))+'\n').encode()
+        with self.path.open('r+b') as output:
+            output.seek(0, os.SEEK_END)
+            offset = output.tell()
+            try:
+                output.write(block);output.flush();os.fsync(output.fileno())
+            except Exception:
+                output.truncate(offset)
+                raise
+        self.index.append((frames[0][0], frames[-1][1], offset, len(block)))
+
+    def query(self, start, end):
+        result = []
+        with self.path.open('rb') as source:
+            for a, b, offset, size in self.index:
+                if b <= start:continue
+                if a >= end:break
+                source.seek(offset)
+                result.extend(frame for frame in json.loads(source.read(size))
+                              if frame[0] < end and frame[1] > start)
+        return result
+
+
 class SpeechFrames:
     """An ordered ledger of actual neural frames; partial audio stays pending."""
-    def __init__(self, start_sample=0):
+    def __init__(self, start_sample=0, *, max_frames=None, archive=None):
         if type(start_sample) is not int or start_sample < 0:
             raise ValueError('Invalid speech-evidence origin.')
         self.start_sample = self.end_sample = start_sample
+        self.origin_sample = start_sample
+        if max_frames is not None and (type(max_frames) is not int or max_frames < 1 or archive is None):
+            raise ValueError('Bounded speech evidence requires durable archival.')
+        self.max_frames, self.archive = max_frames, archive
         self.frames = []
         self.speaking = False
 
@@ -38,6 +77,11 @@ class SpeechFrames:
                 or not start < end <= start+FRAME or type(probability) not in (int, float)
                 or not math.isfinite(probability) or not 0 <= probability <= 1):
             raise ValueError('Invalid or noncontiguous Silero evidence.')
+        if self.max_frames is not None and len(self.frames) == self.max_frames:
+            count = min(256, self.max_frames)
+            self.archive.append(self.frames[:count])
+            self.frames = self.frames[count:]
+            self.start_sample = self.frames[0][0] if self.frames else start
         # Standard Silero onset/release hysteresis; no minimum speech duration.
         # A single positive32ms frame is retained rather than discarding a word.
         if probability >= .5:
@@ -51,8 +95,15 @@ class SpeechFrames:
         if type(start) is not int or type(end) is not int or not 0 <= start < end:
             raise ValueError('Invalid speech-admission range.')
         selected = [frame for frame in self.frames if frame[0] < end and frame[1] > start]
-        covered = (start >= self.start_sample and end <= self.end_sample and bool(selected))
+        if self.archive is not None and start < self.start_sample:
+            selected = self.archive.query(start, min(end, self.start_sample))+selected
+        cursor = start
+        for a, b, _, _ in selected:
+            if a > cursor:break
+            cursor = max(cursor, b)
+        covered = start >= self.origin_sample and end <= self.end_sample and cursor >= end
         result = {'source': 'silero_v6', 'start_sample': start, 'end_sample': end,
+                  'model_revision': SILERO_SPEC['revision'],
                   'observed_until_sample': self.end_sample, 'complete': covered,
                   'decision': 'pending', 'speech_regions': []}
         if not covered:
@@ -69,22 +120,42 @@ class SpeechFrames:
         result['decision'] = 'speech' if result['speech_regions'] else 'no_speech'
         return result
 
+    def persist(self):
+        if self.archive is not None and self.frames:
+            self.archive.append(self.frames)
+            self.frames=[]
+            self.start_sample=self.end_sample
+
+
+def checkpoint_files(path):
+    path = Path(path)
+    for name, expected in SILERO_SPEC['file_sha256'].items():
+        with (path/name).open('rb') as content:
+            if hashlib.file_digest(content, 'sha256').hexdigest() != expected:
+                raise ValueError('Speech-detection checkpoint verification failed.')
+    if (path/'model.safetensors').stat().st_size != SILERO_SPEC['bytes']:
+        raise ValueError('Incomplete speech-detection checkpoint.')
+    config = json.loads((path/'config.json').read_text())
+    expected_branch = {'sample_rate': 16000, 'filter_length': 256, 'hop_length': 128,
+                       'pad': 64, 'cutoff': 129, 'context_size': 64, 'chunk_size': 512}
+    if config.get('branch_16k') != expected_branch or config.get('version') != 'v6':
+        raise ValueError('Incompatible speech-detection architecture.')
+    return expected_branch
+
+
+def speech_issues(path):
+    try:
+        checkpoint_files(path)
+        return []
+    except (OSError,ValueError,TypeError):
+        return ['Speech detection needs its verified local model. Download models in Settings.']
+
 
 class SileroModel:
     """Strict16k branch of the reviewed dependency; explicit recurrent state."""
     def __init__(self, path):
         path = Path(path)
-        for name, expected in SILERO_SPEC['file_sha256'].items():
-            with (path/name).open('rb') as content:
-                if hashlib.file_digest(content, 'sha256').hexdigest() != expected:
-                    raise ValueError('Speech-detection checkpoint verification failed.')
-        if (path/'model.safetensors').stat().st_size != SILERO_SPEC['bytes']:
-            raise ValueError('Incomplete speech-detection checkpoint.')
-        config = json.loads((path/'config.json').read_text())
-        expected_branch = {'sample_rate': 16000, 'filter_length': 256, 'hop_length': 128,
-                           'pad': 64, 'cutoff': 129, 'context_size': 64, 'chunk_size': 512}
-        if config.get('branch_16k') != expected_branch or config.get('version') != 'v6':
-            raise ValueError('Incompatible speech-detection architecture.')
+        expected_branch = checkpoint_files(path)
         import mlx.core as mx
         from mlx_audio.vad.models.silero_vad.config import BranchConfig
         from mlx_audio.vad.models.silero_vad.silero_vad import SileroVADBranch
@@ -111,11 +182,11 @@ class SileroModel:
         self.mx.eval(probability, recurrent)
         return float(probability.item()), (recurrent, audio[:, -64:])
 
-    def session(self, start_sample=0):
-        return SpeechSession(self, start_sample)
+    def session(self, start_sample=0, *, archive=None):
+        return SpeechSession(self, start_sample, max_frames=HOT_FRAMES if archive else None, archive=archive)
 
-    def inspect_frames(self, audio, start_sample=0):
-        session = self.session(start_sample)
+    def inspect_frames(self, audio, start_sample=0, *, archive=None):
+        session = self.session(start_sample,archive=archive)
         session.feed(audio, start_sample, final=True)
         return session.evidence
 
@@ -125,10 +196,10 @@ class SileroModel:
 
 class SpeechSession:
     """Carry64 context samples and LSTM state across contiguous capture packets."""
-    def __init__(self, model, start_sample=0):
+    def __init__(self, model, start_sample=0, *, max_frames=None, archive=None):
         import numpy as np
         self.model, self.state = model, model.initial_state()
-        self.evidence = SpeechFrames(start_sample)
+        self.evidence = SpeechFrames(start_sample, max_frames=max_frames, archive=archive)
         self.received = start_sample
         self.pending = np.empty(0, dtype=np.float32)
         self.closed = False
@@ -158,5 +229,9 @@ class SpeechSession:
             self.state = state
             self.pending = self.pending[count:]
         if final:
+            try:self.evidence.persist()
+            except Exception:
+                self.failed=True
+                raise
             self.closed = True
         return self.evidence
