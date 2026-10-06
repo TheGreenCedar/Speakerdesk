@@ -90,6 +90,17 @@ class NumericPrefixExamples(unittest.TestCase):
             with self.subTest(old=old, new=new):
                 self.assertIsNone(split_same_origin(old, new))
 
+    def test_fractional_compounds_never_fold_integer_prefixes(self):
+        for digit, fraction in [('1', 'one half'), ('2', 'two thirds'),
+                                ('4', 'four and a third'), ('4', 'four and two thirds'),
+                                ('4', 'four and half'), ('6', 'six sevenths'),
+                                ('1', 'one twentieth')]:
+            with self.subTest(digit=digit, fraction=fraction):
+                self.assertIsNone(split_same_origin(f'I counted {digit}.', f'I counted {fraction}.'))
+                self.assertIsNone(split_same_origin(f'I counted {fraction}.', f'I counted {digit}.'))
+        self.assertEqual(split_same_origin('I counted one half.', 'I counted one half. Blue.'),
+                         ('I counted one half.', 'Blue.'))
+
 
 if __name__ == '__main__':
     unittest.main()

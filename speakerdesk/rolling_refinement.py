@@ -250,6 +250,11 @@ SINGLE_CARDINAL_WORDS = dict(zip(
     'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(),
     range(20)))
 SINGLE_CARDINAL_WORDS.update(dict(zip('twenty thirty forty fifty sixty seventy eighty ninety'.split(),range(20,100,10))))
+FRACTION_DENOMINATORS = frozenset(
+    'half halves quarter quarters second third fourth fifth sixth seventh eighth ninth tenth '
+    'eleventh twelfth thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth nineteenth '
+    'twentieth thirtieth fortieth fiftieth sixtieth seventieth eightieth ninetieth hundredth '
+    'thousandth millionth'.split())
 
 def split_same_origin(previous_text, extended_text):
     """Split a growing decode by matching its SAME audio-origin text prefix.
@@ -282,9 +287,15 @@ def split_same_origin(previous_text, extended_text):
         if following in ('/','+','-','−','–','—',':') or preceding in ('/','+','-','−','–','—',':'):return False
         # Do not split a changed compound value into a prefix plus a new word.
         if following in ('point','hundred','thousand','dozen','score','gross') or (following and re.fullmatch(r'[a-z]+illion',following)):return False
-        if following=='and' and index+3<len(matches):
-            fraction=matches[index+3].group().casefold()
-            if fraction in ('half','halves','quarter','quarters'):return False
+        def denominator(token):
+            return token in FRACTION_DENOMINATORS or token.removesuffix('s') in FRACTION_DENOMINATORS
+        if following and denominator(following):return False
+        if following=='and' and index+2<len(matches):
+            fraction_index=index+2
+            fraction=matches[fraction_index].group().casefold()
+            if fraction in ('a','an') or cardinal(fraction) is not None:
+                fraction_index+=1
+            if fraction_index<len(matches) and denominator(matches[fraction_index].group().casefold()):return False
         value=cardinal(token)
         if value in range(20,100,10) and cardinal(following or '') in range(1,10):return False
         if value in range(1,10) and cardinal(preceding or '') in range(20,100,10):return False

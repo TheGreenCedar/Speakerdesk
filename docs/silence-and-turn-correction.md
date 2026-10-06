@@ -89,7 +89,10 @@ now permits isolated single-token English cardinals (zero through nineteen and
 the decade tens) to match their canonical unsigned digits. Original strings and
 positions remain unchanged. Changed values cannot use unfinished-word fuzzy
 matching; leading-zero identifiers, decimals, ordinals, compound numbers,
-signed/date/range forms remain literal and unresolved when spellings differ.
+signed/date/range forms and fractional compounds remain literal and unresolved
+when spellings differ. Common denominators (such as half, thirds and twentieths)
+are rejected directly or after "and a"/"and two"; literal identical fractions
+still match without rewriting either transcript.
 Real appended numbers and repeated phrases remain suffix words. This conservative
 orthography comparison does not claim numeric extraction or semantic paraphrase.
 
