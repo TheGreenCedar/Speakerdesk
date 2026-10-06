@@ -183,7 +183,7 @@ Screenshots contain synthetic CPU outputs:
 ![Dark appearance](screenshots/rolling-context-dark.png)
 
 A real local MLX NVIDIA/Cohere synthetic replay ran at commit `00d6615`: 49.758
-seconds of installed-voice audio saved sample-exactly, 15 provisional revisions,
+seconds of installed-voice audio preserved through capture quantization, 15 provisional revisions,
 three successful contextual results, Auto English to French at sample 664136,
 and a protected edit retained through pause/resume and Stop. One French phrase
 grew from 6.48 to 7.10 seconds at the same audio origin and added “les noms.”
@@ -192,9 +192,19 @@ and 2.145 GB reported peak MLX allocation. The corresponding hosted ad-hoc Mac
 package build succeeded; it was not downloaded or launched.
 
 That replay exposed falsely complete refinement bookkeeping, corrected by this
-follow-up. Retest of the corrected source and its explicit saved-audio recovery
-is pending a fresh parent-coordinated CodeStory resource window. The previous
-successful run does not verify this follow-up. Speaker mapping still left several
+follow-up. Corrected source `861fcd7` subsequently passed a real-model replay
+and explicit saved-audio recovery in 58.35 seconds, preserving protected edits,
+original per-range languages and the WAV across retry. All 796,128 frames match
+the documented float32-to-PCM16 capture conversion; fixture PCM16 differs by at
+most one unit. The fresh worker produced 15 provisional revisions and five
+successful contextual results with 2.00 GB peak process-tree RSS. A previously
+blank English sentence was recovered. Independent evidence review confirmed
+these results after qualifying the PCM conversion.
+
+Two retry ranges correctly remain unresolved: English and French candidate
+endpoints are 10–21.5 ms shorter than retained provisional coverage. Original
+usable words remain; deterministic retries keep the review state. This verifies
+the controller contracts, rather than establishing natural-meeting accuracy. Speaker mapping still left several
 clean synthetic regions mixed/unknown; brief uncertain Auto regions remained
 blank review placeholders. Real microphone/system capture and natural-meeting
 acoustic accuracy are unverified. Keep 0.3.0 release assets and website publication
