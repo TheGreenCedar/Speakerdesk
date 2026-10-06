@@ -177,6 +177,7 @@ class Models:
         with contextlib.redirect_stdout(sys.stderr):
             self.speech_live.feed(audio,self.speech_live.received,final=final)
             result,self.state=self.diar.feed(audio,self.state,sample_rate=RATE,final=final,threshold=.5,min_duration=0,merge_gap=0)
+        self.nvidia_observed_sample=round(self.state.frames_processed*.01*RATE)
         return [{'start':s.start,'end':s.end,'speaker':f'speaker_{s.speaker}'} for s in result.segments],min(
             self.state.frames_processed*.01,self.speech_live.evidence.end_sample/RATE)
     def batch_turns(self,audio):

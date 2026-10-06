@@ -42,6 +42,16 @@ class CanonicalLifecycle(MeetingHarness,unittest.TestCase):
         self.assertLess(next(i for i,item in enumerate(commands) if item['type']=='stop'),
                         next(i for i,item in enumerate(commands) if item['type']=='shutdown'))
         self.assertTrue(list((self.root/jid).glob('utterance-versions-*.jsonl')))
+        # Explicit saved retry must redispatch an attempted unresolved source.
+        stored=self.manager.get(jid);sid=row['id']
+        stored['rolling_sources'][sid]['canonical_unresolved']='refinement_incomplete'
+        stored['refinement_status']='unresolved';self.manager.put(stored)
+        before=sum(item['type']=='refine' for item in commands)
+        self.assertEqual(self.client.post(f'/api/jobs/{jid}/refinement/resume',headers=self.headers).status_code,202)
+        self.wait_for(lambda:self.manager.jid is None)
+        after=[json.loads(line) for line in (self.root/jid/'worker-commands.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(item['type']=='refine' for item in after),before+1)
+        self.assertEqual(self.job(jid)['refinement_status'],'complete')
 
 
 if __name__=='__main__':unittest.main()

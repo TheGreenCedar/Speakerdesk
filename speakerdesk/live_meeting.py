@@ -533,6 +533,10 @@ class MeetingManager:
             if preflight(model_config(),job['language']):abort(409,description='Finish local model setup before refining saved audio.')
             from rolling_refinement import RollingPlan
             self.refinement.initialize(job);plan=RollingPlan(job['rolling_refinement'],recover=True)
+            if job.get('canonical_utterances'):
+                for row in job['rolling_sources'].values():
+                    if row.get('canonical_unresolved'):
+                        job.setdefault('canonical_refined',{}).pop(row['id'],None)
             plan.cancel();plan.resume();job['rolling_refinement']=plan.snapshot()
             if job['refinement_unresolved']:
                 job['rolling_refinement']['completed_sample']=min(job['rolling_refinement']['completed_sample'],min(w['start_sample'] for w in job['refinement_unresolved']))

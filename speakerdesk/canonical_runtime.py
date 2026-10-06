@@ -11,14 +11,16 @@ import uuid
 from utterances import UtteranceBook, RevisionArchive, MAX_DECODE_SAMPLES, RATE
 
 
-def activity_regions(turns, start, end):
+def activity_regions(turns, start, end, *, observed=None):
     points={start,end}
+    if observed is not None and start<observed<end:points.add(observed)
     for turn in turns:
         a,b=max(start,round(turn['start']*RATE)),min(end,round(turn['end']*RATE))
         if a<b:points.update((a,b))
     points=sorted(points)
     return [{'start_sample':a,'end_sample':b,'speakers':sorted({turn['speaker'] for turn in turns
-             if round(turn['start']*RATE)<b and round(turn['end']*RATE)>a})}
+             if round(turn['start']*RATE)<b and round(turn['end']*RATE)>a
+             and (observed is None or b<=observed)})}
             for a,b in zip(points,points[1:])]
 
 
@@ -168,7 +170,7 @@ class CanonicalRuntime:
         e.emit({'type':'canonical_revision','candidate':candidate,'fast_sequence':e.fast_sequence})
 
     def commit(self,final=False):
-        e=self.engine;available=min(e.received,round(e.processed*RATE))
+        e=self.engine;available=min(e.received,e.models.speech_live.evidence.end_sample)
         self.observe(available)
         if e.capture_finished and available==e.received and not self.book.closed:self.book.finish()
         for identity in self.book.order:
@@ -176,7 +178,8 @@ class CanonicalRuntime:
             previous=self.published.get(identity)
             if (row['state']=='sealed' and previous and previous['canonical_state']=='sealed'
                     and previous['audio_revision']==row['audio_revision']):continue
-            self.book.attach_activity(identity,row['audio_revision'],activity_regions(e.turns,row['start_sample'],row['end_sample']))
+            self.book.attach_activity(identity,row['audio_revision'],activity_regions(e.turns,row['start_sample'],row['end_sample'],
+                observed=min(e.received,getattr(e.models,'nvidia_observed_sample',round(e.processed*RATE)))))
             last=self.last_decoded.get(identity)
             changed=last is None or last[1]!=row['audio_revision']
             # Keep the existing6s first/3s subsequent cadence for growing audio.

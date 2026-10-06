@@ -65,6 +65,16 @@ class CanonicalTests(unittest.TestCase):
         rows=self.engine.canonical.book.snapshot();self.assertEqual(len(rows),1)
         self.assertEqual(rows[0]['speaker_candidates'],['speaker_0','speaker_1']);self.assertFalse(rows[0]['voice_eligible'])
         self.assertEqual(rows[0]['text'],self.peer.text)
+    def test_nvidia_lookahead_cannot_truncate_retained_utterance_audio(self):
+        original=self.peer.feed
+        def lagged(audio,final=False):
+            turns,end=original(audio,final);return turns,max(0,end-.2)
+        self.peer.feed=lagged;self.feed(0,7);self.engine.handle({'type':'stop'})
+        row=self.rows()[-1]
+        self.assertEqual((row['start_sample'],row['end_sample']),(0,7*RATE))
+        self.assertEqual(row['canonical_state'],'sealed');self.assertFalse(row['voice_eligible'])
+        self.assertEqual(row['speaker_activity']['regions'][-1]['speakers'],[])
+        self.assertEqual(self.events[-1]['canonical_observed_sample'],7*RATE)
     def test_silence_seals_vad_object_without_nvidia_word_partition(self):
         self.peer.silent_after=6*RATE;self.feed(0,8)
         rows=self.engine.canonical.book.snapshot();self.assertEqual(len(rows),1);self.assertEqual(rows[0]['state'],'sealed')
