@@ -183,6 +183,7 @@ function renderLiveSegments() {
   }
   $('pending-phrases').hidden=!pending;$('pending-phrases').textContent=pending?'Listening · uncertain phrases are waiting for more context. Original audio retained.':'';
   $('listening').hidden=visible>0 || pending>0 || !isLive();
+  renderSearchResults(visible,query);
   $('no-results').hidden=visible>0 || !query;
   if(isLive() && followingLive && !focused)pane.scrollTop=pane.scrollHeight;
   else if(anchorTime!==null) {
