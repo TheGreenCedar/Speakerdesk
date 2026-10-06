@@ -197,12 +197,12 @@ class SpeechTranscriber:
             if (evidence.get('source')!='silero_v6' or evidence.get('model_revision')!=SILERO_SPEC['revision']
                     or evidence.get('start_sample')!=start or evidence.get('end_sample')!=end
                     or evidence.get('complete') is not True
-                    or evidence.get('decision') not in ('speech','no_speech')):
+                    or evidence.get('decision') not in ('speech','no_speech','uncertain')):
                 return pending
             probability=evidence.get('maximum_probability')
             if (type(probability) not in (int,float) or not math.isfinite(probability)
                     or not 0<=probability<=1
-                    or (evidence['decision']=='no_speech' and probability>=.5)):return pending
+                    or (evidence['decision'] in ('no_speech','uncertain') and probability>=.5)):return pending
             cursor = start
             regions = evidence.get('speech_regions')
             if not isinstance(regions, list):return pending
@@ -234,7 +234,7 @@ class SpeechTranscriber:
             evidence = self.admission(start_sample+int(begin), start_sample+int(end))
             state = evidence['decision']
             if state != 'speech':
-                reason = 'insufficient_speech' if state == 'no_speech' else 'speech_evidence_pending'
+                reason = 'insufficient_speech' if state == 'no_speech' else 'speech_admission_uncertain' if state=='uncertain' else 'speech_evidence_pending'
                 decision={'language':None if automatic else self.language,'review':True,
                           'language_detection':{'mode':'auto' if automatic else 'manual','reason':reason},
                           'audio_state':'model_non_speech' if state == 'no_speech' else 'speech_evidence_pending'}

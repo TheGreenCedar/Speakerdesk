@@ -17,6 +17,7 @@ REASONS = {
     'unassigned_audio': 'Audio outside detected speech; may be silence or missed speech',
     'refinement_incomplete': 'Refinement incomplete; previous words and audio retained',
     'canonical_ownership_unresolved': 'Word ownership unresolved; previous words and original audio retained',
+    'speech_admission_uncertain': 'Speech detection uncertain; original audio retained for review',
 }
 
 

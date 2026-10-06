@@ -76,7 +76,7 @@ class UtteranceBook:
 
     def observe(self, evidence):
         start, end = evidence['start_sample'], evidence['end_sample']
-        if (self.closed or evidence.get('complete') is not True or evidence.get('decision') not in ('speech', 'no_speech')
+        if (self.closed or evidence.get('complete') is not True or evidence.get('decision') not in ('speech', 'no_speech','uncertain')
                 or type(start) is not int or type(end) is not int or start != self.cursor or end <= start):
             raise ValueError('Canonical utterances require ordered complete speech evidence.')
         regions = evidence['speech_regions']

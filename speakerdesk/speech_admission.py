@@ -12,6 +12,7 @@ from pathlib import Path
 RATE = 16000
 FRAME = 512
 HOT_FRAMES = 1875  #60 seconds, exceeding any single admitted decode window.
+INPUT_POLICY = 'raw_and_peak025_gaincap256_per512_v1'
 SILERO_SPEC = {
     'name': 'Speech detection', 'repo': 'mlx-community/silero-vad-v6',
     'revision': '2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06',
@@ -72,7 +73,7 @@ class SpeechFrames:
         self.frames = []
         self.speaking = False
 
-    def append(self, start, end, probability):
+    def append(self, start, end, probability, *, observation=None):
         if (type(start) is not int or type(end) is not int or start != self.end_sample
                 or not start < end <= start+FRAME or type(probability) not in (int, float)
                 or not math.isfinite(probability) or not 0 <= probability <= 1):
@@ -88,7 +89,8 @@ class SpeechFrames:
             self.speaking = True
         elif probability < .35:
             self.speaking = False
-        self.frames.append((start, end, float(probability), self.speaking))
+        frame=(start, end, float(probability), self.speaking)
+        self.frames.append(frame+(observation,) if observation is not None else frame)
         self.end_sample = end
 
     def admission(self, start, end):
@@ -98,7 +100,8 @@ class SpeechFrames:
         if self.archive is not None and start < self.start_sample:
             selected = self.archive.query(start, min(end, self.start_sample))+selected
         cursor = start
-        for a, b, _, _ in selected:
+        for frame in selected:
+            a,b=frame[:2]
             if a > cursor:break
             cursor = max(cursor, b)
         covered = start >= self.origin_sample and end <= self.end_sample and cursor >= end
@@ -108,8 +111,11 @@ class SpeechFrames:
                   'decision': 'pending', 'speech_regions': []}
         if not covered:
             return result
+        conditioned=all(len(frame)==5 and frame[4].get('input_policy')==INPUT_POLICY for frame in selected)
+        if conditioned:result['input_policy']=INPUT_POLICY
         result['maximum_probability'] = max(frame[2] for frame in selected)
-        for a, b, _, speaking in selected:
+        for frame in selected:
+            a,b,_,speaking=frame[:4]
             if not speaking:
                 continue
             a, b = max(a, start), min(b, end)
@@ -118,6 +124,14 @@ class SpeechFrames:
             else:
                 result['speech_regions'].append({'start_sample': a, 'end_sample': b})
         result['decision'] = 'speech' if result['speech_regions'] else 'no_speech'
+        if conditioned and not result['speech_regions']:
+            constants=[frame[4].get('constant_value') for frame in selected]
+            # A model-negative waveform is not known silence. Exact digital
+            # zero/DC is deterministic non-speech; other negative input stays
+            # uncertain and cannot clear words or authorize a Cohere decode.
+            constant=constants[0] is not None and all(value==constants[0] for value in constants)
+            if not constant:result['decision']='uncertain'
+            result['negative_signal_state']='exact_constant' if constant else 'model_negative_uncertain'
         return result
 
     def persist(self):
@@ -154,6 +168,7 @@ def speech_issues(path):
 class SileroModel:
     """Strict16k branch of the reviewed dependency; explicit recurrent state."""
     def __init__(self, path):
+        self.normalized_view=True
         path = Path(path)
         expected_branch = checkpoint_files(path)
         import mlx.core as mx
@@ -199,6 +214,7 @@ class SpeechSession:
     def __init__(self, model, start_sample=0, *, max_frames=None, archive=None):
         import numpy as np
         self.model, self.state = model, model.initial_state()
+        self.normalized_state=model.initial_state() if getattr(model,'normalized_view',False) else None
         self.evidence = SpeechFrames(start_sample, max_frames=max_frames, archive=archive)
         self.received = start_sample
         self.pending = np.empty(0, dtype=np.float32)
@@ -220,7 +236,23 @@ class SpeechSession:
             begin = self.evidence.end_sample
             try:
                 probability, state = self.model.feed(chunk, self.state)
-                self.evidence.append(begin, begin+count, probability)
+                observation=None
+                if getattr(self.model,'normalized_view',False):
+                    raw=chunk[:count];peak=float(np.max(np.abs(raw)))
+                    # Conditioning is only for a second VAD view. Original PCM,
+                    # NVIDIA and Cohere input are untouched. Gain is independent
+                    # of labels, window size, packets and language; no clipping.
+                    gain=min(256.,max(1.,.25/peak)) if peak else 1.
+                    normalized_probability,normalized_state=self.model.feed(chunk*gain,self.normalized_state)
+                    if (not math.isfinite(normalized_probability) or not 0<=normalized_probability<=1
+                            or not math.isfinite(probability) or not 0<=probability<=1):
+                        raise ValueError('Invalid neural speech probability.')
+                    observation={'input_policy':INPUT_POLICY,'raw_probability':probability,
+                        'normalized_probability':normalized_probability,'gain':gain,
+                        'constant_value':float(raw[0]) if bool(np.all(raw==raw[0])) else None}
+                    probability=max(probability,normalized_probability)
+                    self.normalized_state=normalized_state
+                self.evidence.append(begin, begin+count, probability,observation=observation)
             except Exception:
                 # Recurrent state may have advanced inside the neural adapter.
                 # Do not retry this packet or label the unobserved tail silent.
