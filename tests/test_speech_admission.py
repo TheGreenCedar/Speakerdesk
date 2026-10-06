@@ -15,6 +15,28 @@ from language_detection import SpeechTranscriber
 
 
 class SpeechAdmissionTests(unittest.TestCase):
+    def test_virtual_asr_boundary_context_preserves_physical_pcm_anchor_and_admission(self):
+        audio=np.linspace(-.01,.01,4000,dtype=np.float32);original=audio.copy()
+        frames=SpeechFrames()
+        for a in range(0,len(audio),FRAME):frames.append(a,min(a+FRAME,len(audio)),.8)
+        asr=Mock();asr.transcribe.return_value=types.SimpleNamespace(text='Original words',tokens=[1])
+        row=SpeechTranscriber(asr,'en',speech_evidence=frames).transcribe(audio,16000,('speaker_0',),
+            max_asr_seconds=24.5,asr_padding=(3200,3200))[0]
+        seen=asr.transcribe.call_args.args[0]
+        np.testing.assert_array_equal(seen[3200:7200],original)
+        self.assertTrue(np.all(seen[:3200]==0));self.assertTrue(np.all(seen[7200:]==0))
+        np.testing.assert_array_equal(audio,original)
+        self.assertEqual((row['start'],row['end']),(0,len(audio)/16000))
+        self.assertEqual(row['cohere_input_padding']['physical_end_sample'],len(audio))
+        negative=SpeechFrames()
+        for a in range(0,len(audio),FRAME):negative.append(a,min(a+FRAME,len(audio)),.01)
+        asr.reset_mock()
+        SpeechTranscriber(asr,'en',speech_evidence=negative).transcribe(audio,16000,('speaker_0',),asr_padding=(3200,3200))
+        asr.transcribe.assert_not_called()
+        for padding in ((True,0),(6400,0),(3200,3200,0)):
+            with self.assertRaises(ValueError):
+                SpeechTranscriber(asr,'en',speech_evidence=frames).transcribe(audio,16000,('speaker_0',),asr_padding=padding)
+
     def test_dual_views_are_independent_packet_invariant_and_leave_pcm_unchanged(self):
         class Boundary:
             normalized_view=True

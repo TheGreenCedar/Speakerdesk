@@ -21,6 +21,9 @@ class Peer:
     def __init__(self):
         self.received=0;self.calls=[];self.speech_live=SimpleNamespace(evidence=SpeechFrames())
         self.mixed=False;self.silent_after=None;self.text='  Please review the secs  '
+        self.asr_padding=(0,0);self.padding_calls=[]
+    def set_decode_boundary_padding(self,left,right):
+        self.asr_padding=(left,right);self.padding_calls.append((left,right))
     def feed(self,audio,final=False):
         start=self.received;self.received+=len(audio)
         ledger=self.speech_live.evidence
@@ -126,6 +129,8 @@ class CanonicalTests(unittest.TestCase):
         journal=[json.loads(line) for line in self.engine.canonical.archive.path.read_text().splitlines()]
         retained=next(event for event in journal if event['type']=='bounded_machine_version')
         self.assertEqual(len(retained['parts']),3);self.assertTrue(all(part['text']==self.peer.text for part in retained['parts']))
+        self.assertEqual(self.peer.padding_calls[-6:],[(0,3200),(0,0),(3200,3200),(0,0),(3200,0),(0,0)])
+        self.assertEqual(self.peer.asr_padding,(0,0))
     def test_whole_utterance_refinement_replaces_same_id_and_preserves_anchor(self):
         self.feed(0,7);self.engine.handle({'type':'stop'});row=self.rows()[-1]
         request={'type':'refine','canonical':row,'operation_id':'one','language_epoch':0,

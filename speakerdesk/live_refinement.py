@@ -156,7 +156,11 @@ class Models:
         self.speech_live=self.speech.session(archive=FrameArchive(
             Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'))
         self.speech_historical=None
-        self.language_context=None;self.transcription_start_sample=0;self.coarse_aligner=None
+        self.language_context=None;self.transcription_start_sample=0;self.coarse_aligner=None;self.asr_padding=(0,0)
+    def set_decode_boundary_padding(self,left,right):
+        if type(left) is not int or type(right) is not int or left not in (0,3200) or right not in (0,3200):
+            raise ValueError('Invalid canonical decode boundary context.')
+        self.asr_padding=(left,right)
     def align_canonical(self,request,text,*,language):
         # No implicit download or non-English calibration extrapolation. The
         # existing null/review path remains when the optional provider is absent.
@@ -183,7 +187,7 @@ class Models:
                 if self.speech_historical is not None else self.speech_live.evidence))
         with contextlib.redirect_stdout(sys.stderr):
             result=transcriber.transcribe(audio,RATE,tuple(names),max_asr_seconds=24.5,allow_overlap=overlap,
-                start_sample=self.transcription_start_sample)
+                start_sample=self.transcription_start_sample,asr_padding=self.asr_padding)
         self.detector=transcriber.detector
         self.mx.clear_cache();return result
     def feed(self,audio,final=False):

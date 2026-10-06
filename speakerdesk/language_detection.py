@@ -216,10 +216,13 @@ class SpeechTranscriber:
             pending['evidence_error']=True
             return pending
 
-    def transcribe(self, audio, sample_rate, speaker, *, max_asr_seconds=6, allow_overlap=False, start_sample=0):
+    def transcribe(self, audio, sample_rate, speaker, *, max_asr_seconds=6, allow_overlap=False, start_sample=0, asr_padding=(0,0)):
         import numpy as np
 
-        if (not .75 <= max_asr_seconds <= 24.5 or len(audio) > 24.5*sample_rate
+        if (not isinstance(asr_padding,tuple) or len(asr_padding)!=2
+                or any(type(value) is not int or value not in (0,3200) for value in asr_padding)
+                or len(audio)+sum(asr_padding)>24.5*sample_rate
+                or not .75 <= max_asr_seconds <= 24.5 or len(audio) > 24.5*sample_rate
                 or not len(audio) or sample_rate != 16000 or np.asarray(audio).ndim != 1 or not np.isfinite(audio).all()
                 or type(start_sample) is not int or start_sample<0):
             raise ValueError('Language routing requires finite 16 kHz mono speech audio and its sample position.')
@@ -306,7 +309,19 @@ class SpeechTranscriber:
             window['acoustic_evidence'] = evidence
             if window['language'] and evidence['decision']=='speech' and detection['reason']!='insufficient_speech':
                 try:
-                    result=self.asr.transcribe(audio[window['begin']:window['end_sample']],
+                    pcm=audio[window['begin']:window['end_sample']]
+                    left=asr_padding[0] if window['begin']==0 else 0
+                    right=asr_padding[1] if window['end_sample']==len(audio) else 0
+                    if left or right:
+                        # Virtual silence only at a clipped canonical context
+                        # edge. Physical PCM/admission/anchors remain original;
+                        # the aligner independently sees unpadded original PCM.
+                        pcm=np.concatenate((np.zeros(left,dtype=np.float32),pcm,np.zeros(right,dtype=np.float32)))
+                        window['cohere_input_padding']={'policy':'canonical_cut_context_200ms_zeros_v1',
+                            'leading_samples':left,'trailing_samples':right,
+                            'physical_start_sample':start_sample+window['begin'],
+                            'physical_end_sample':start_sample+window['end_sample']}
+                    result=self.asr.transcribe(pcm,
                         sample_rate=sample_rate,language=window['language'],max_new_tokens=448)
                     raw_text=result.text
                     text=raw_text.strip()
@@ -335,5 +350,6 @@ class SpeechTranscriber:
                             **{key:window[key] for key in ('language','language_detection','review')},
                             **({'audio_state':window['audio_state']} if 'audio_state' in window else {}),
                             **({'acoustic_evidence':window['acoustic_evidence']} if 'acoustic_evidence' in window else {}),
-                            **({'transcription_review':transcription_review} if transcription_review else {})})
+                            **({'transcription_review':transcription_review} if transcription_review else {}),
+                            **({'cohere_input_padding':window['cohere_input_padding']} if 'cohere_input_padding' in window else {})})
         return results

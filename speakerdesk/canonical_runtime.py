@@ -76,9 +76,12 @@ class CanonicalRuntime:
                 x,y=request['start_sample'],request['end_sample']
                 pcm=read_audio(e.path,x,y)
                 try:
+                    if hasattr(e.models,'set_decode_boundary_padding'):
+                        e.models.set_decode_boundary_padding(3200 if x>a else 0,3200 if y<b else 0)
                     if stage=='refined' and hasattr(e.models,'begin_refinement'):e.models.begin_refinement(pcm,x)
                     passages=e.decode(pcm,stamp['language'],names,x/RATE,row['language_epoch'],overlap=True)
                 finally:
+                    if hasattr(e.models,'set_decode_boundary_padding'):e.models.set_decode_boundary_padding(0,0)
                     if stage=='refined' and hasattr(e.models,'end_refinement'):e.models.end_refinement()
                 text=passages[0].get('cohere_raw_text',passages[0]['text']) if len(passages)==1 else ''
                 complete=len(passages)==1 and not passages[0].get('transcription_review')
