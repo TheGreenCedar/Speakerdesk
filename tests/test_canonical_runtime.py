@@ -114,10 +114,16 @@ class CanonicalTests(unittest.TestCase):
         manager.refinement.initialize(job);manager.put(job);manager.duration=6
         try:
             manager.refinement.canonical(self.jid,{'candidate':candidate,'fast_sequence':1})
-            current=manager.get(self.jid);row=current['document']['segments'][0];row.update(text='My correction',protected_fields=['text'],machine_revision=5);manager.put(current)
-            changed=copy.deepcopy(candidate);changed.update(text='Machine correction',canonical_machine_revision=candidate['canonical_machine_revision']+1)
+            current=manager.get(self.jid);row=current['document']['segments'][0]
+            prior_anchor={'start_sample':candidate['start_sample'],'end_sample':candidate['end_sample']}
+            row.update(text='My correction',protected_fields=['text'],machine_revision=5,text_audio_anchor=prior_anchor);manager.put(current)
+            changed=copy.deepcopy(candidate);changed.update(text='Machine correction',canonical_machine_revision=candidate['canonical_machine_revision']+1,
+                end_sample=candidate['end_sample']+RATE,end=candidate['end']+1,audio_revision=candidate['audio_revision']+1,
+                text_audio_anchor={'start_sample':candidate['start_sample'],'end_sample':candidate['end_sample']+RATE})
+            manager.duration=7
             manager.refinement.canonical(self.jid,{'candidate':changed,'fast_sequence':2})
             actual=manager.get(self.jid)['document']['segments'][0];self.assertEqual(actual['text'],'My correction');self.assertEqual(actual['refinement_state'],'edited')
+            self.assertEqual(actual['text_audio_anchor'],prior_anchor)
             stale=copy.deepcopy(changed);stale['end_sample']-=1;stale['end']=stale['end_sample']/RATE
             with self.assertRaisesRegex(ValueError,'Stale canonical'):manager.refinement.canonical(self.jid,{'candidate':stale,'fast_sequence':3})
             self.assertEqual(manager.get(self.jid)['document']['segments'][0],actual)
