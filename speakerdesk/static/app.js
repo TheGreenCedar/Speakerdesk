@@ -6,6 +6,7 @@ let meeting = null, followingLive = true, passageEnd = null, retrying = false;
 let changingLiveLanguage = false, changingDefaultLanguage = false, defaultLanguageGeneration = 0;
 let pendingExport = null, autosaveTimer = null, setupState = null, undoRemoval = null;
 const savedPassageBindings = new WeakMap();
+const readingTurnBindings = new WeakMap();
 let playbackDocument = null, playbackIndexDirty = true, playbackRows = [], playbackEnds = [];
 let playbackSegments = new Map(), playbackCards = new Map(), playingCards = new Set();
 const narrowLayout = () => matchMedia('(max-width: 900px)').matches;
@@ -224,7 +225,7 @@ function removePassage(segment) {
   }});
 }
 function markReviewable(segment) {
-  return !!segment.text.trim() && !(segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length > 1 || segment.speaker === 'unassigned');
+  return !!segment.text.trim() && !hasOverlappingSpeakers(segment) && segment.speaker !== 'unassigned';
 }
 function renderSearchResults(visible, query) {
   $('no-results').hidden = visible > 0 || !query;
@@ -259,6 +260,122 @@ function renderEditor() {
   renderSegments();
   refreshIdentitySuggestions();
   updateNameControls();
+}
+// Server-owned reading slices are a projection of one canonical passage.
+// Offsets use Unicode code points, not textarea/JavaScript UTF-16 positions.
+function validReadingTurns(segment) {
+  const turns=segment.reading_turns;
+  if(!Array.isArray(turns) || !turns.length || typeof segment.text!=='string')return null;
+  let cursor=0,joined='';
+  for(const turn of turns) {
+    if(!turn || typeof turn.text!=='string' || typeof turn.speaker!=='string' ||
+       !['single','overlap','unknown'].includes(turn.attribution) ||
+       !Number.isSafeInteger(turn.start_offset) || !Number.isSafeInteger(turn.end_offset) ||
+       turn.start_offset!==cursor || turn.end_offset<=cursor ||
+       turn.end_offset-cursor!==Array.from(turn.text).length)return null;
+    if(![turn.start,turn.end].every(value=>value===null || (Number.isFinite(value) && value>=0)) ||
+       (turn.start!==null && turn.end!==null && turn.end<turn.start))return null;
+    cursor=turn.end_offset;joined+=turn.text;
+  }
+  return joined===segment.text && cursor===Array.from(segment.text).length ? turns : null;
+}
+function hasOverlappingSpeakers(segment) {
+  const turns=validReadingTurns(segment);
+  if(turns)return turns.some(turn=>turn.attribution==='overlap');
+  return segment.speaker.startsWith('overlap') ||
+    (segment.speaker!=='multiple_speakers' && segment.speaker_candidates?.length>1);
+}
+function readingTurnLabel(turn) {
+  if(turn.attribution==='overlap')return 'Overlapping speakers';
+  if(turn.attribution==='unknown')return 'Unknown speaker';
+  return doc.speakers[turn.speaker] || (/^speaker_\d+$/.test(turn.speaker)?`Speaker ${Number(turn.speaker.slice(8))+1}`:'Unknown speaker');
+}
+function passageSearchText(segment) {
+  const names=validReadingTurns(segment)?.map(readingTurnLabel).join(' ') || '';
+  return segment.text+' '+(doc.speakers[segment.speaker] || '')+' '+names;
+}
+function refreshReadingTurnView(card,segment) {
+  const turns=validReadingTurns(segment);let binding=readingTurnBindings.get(card);
+  if(!binding && !turns)return;
+  if(!binding) {
+    const body=card.querySelector('.segment-body'),text=body.querySelector(':scope > textarea');
+    if(!text)return;
+    const host=node('div',undefined,'reading-turn-view');host.setAttribute('role','group');
+    host.setAttribute('aria-label',`Speaker turns for passage at ${passageTime(segment.start)}`);
+    const button=node('button','Edit passage','segment-action edit-whole-passage');button.type='button';
+    button.setAttribute('aria-label',`Edit whole passage at ${passageTime(segment.start)}`);
+    body.append(host);card.querySelector('.segment-actions').append(button);
+    binding={host,text,button,editing:false,signature:null};readingTurnBindings.set(card,binding);
+    const current=()=>doc.segments.find(row=>row.id===card.dataset.segmentId) || segment;
+    button.addEventListener('click',()=>{
+      if(isPassageSaving(card.dataset.segmentId) || passageDrafts.has(card.dataset.segmentId) ||
+         recoverablePassageDrafts.has(card.dataset.segmentId))return;
+      binding.editing=!binding.editing;if(!binding.editing)text.blur();refreshReadingTurnView(card,current());
+      if(binding.editing){text.focus();fitPassageText(text);}
+    });
+    text.addEventListener('focus',()=>{binding.editing=true;refreshReadingTurnView(card,current());fitPassageText(text);});
+    text.addEventListener('input',()=>refreshReadingTurnView(card,current()));
+  }
+  const {host,text,button}=binding;
+  const signature=JSON.stringify([turns,doc.speakers]);
+  if(signature!==binding.signature) {
+    binding.signature=signature;host.replaceChildren();
+    const groups=[];
+    for(const turn of turns || []) {
+      const previous=groups.at(-1);
+      if(previous && previous.speaker===turn.speaker && previous.attribution===turn.attribution) {
+        previous.text+=turn.text;previous.slices.push(turn);
+        if(previous.start!==null && turn.start!==null && turn.end!==null)previous.end=turn.end;
+        else previous.start=previous.end=null;
+      }else {
+        const timed=turn.start!==null && turn.end!==null;
+        groups.push({...turn,slices:[turn],start:timed?turn.start:null,end:timed?turn.end:null});
+      }
+    }
+    // Bridge only brief unassigned text between the same singleton owner.
+    // This is paragraph layout, never an ownership or timing reassignment.
+    const paragraphs=[];
+    const shortUnknown=turn=>turn?.attribution==='unknown' && turn.text.trim() &&
+      turn.text.trim().split(/\s+/u).length<=6 && Array.from(turn.text.trim()).length<=80;
+    for(let index=0;index<groups.length;index++) {
+      const turn=groups[index];
+      while(turn.attribution==='single' && shortUnknown(groups[index+1]) &&
+            groups[index+2]?.attribution==='single' && groups[index+2].speaker===turn.speaker) {
+        const unknown=groups[index+1],following=groups[index+2];
+        turn.text+=unknown.text+following.text;turn.slices.push(...unknown.slices,...following.slices);
+        turn.includesUnassigned=true;
+        if(turn.start!==null && unknown.start!==null && following.start!==null)turn.end=following.end;
+        else turn.start=turn.end=null;
+        index+=2;
+      }
+      paragraphs.push(turn);
+    }
+    for(const turn of paragraphs) {
+      const row=node('section',undefined,'reading-turn');
+      row.dataset.attribution=turn.includesUnassigned?'single_with_unassigned':turn.attribution;
+      const label=node('div',undefined,'reading-turn-meta');label.append(node('span',readingTurnLabel(turn),'reading-turn-speaker'));
+      if(turn.includesUnassigned)label.append(node('span','Includes unassigned words','reading-unassigned-note'));
+      if(turn.start!==null)label.append(node('span',passageTime(turn.start),'reading-turn-time'));
+      const words=node('p',undefined,'reading-turn-words');
+      if(turn.includesUnassigned) {
+        for(const slice of turn.slices) {
+          if(slice.attribution!=='unknown'){words.append(slice.text);continue;}
+          const unassigned=node('span',slice.text,'reading-turn-unassigned');
+          unassigned.title='Unassigned words; speaker attribution unavailable.';unassigned.setAttribute('role','note');
+          unassigned.setAttribute('aria-label',`Unassigned words: ${slice.text}`);
+          unassigned.dataset.attribution=slice.attribution;unassigned.dataset.speaker=slice.speaker;
+          unassigned.dataset.startOffset=slice.start_offset;unassigned.dataset.endOffset=slice.end_offset;
+          words.append(unassigned);
+        }
+      }else words.textContent=turn.text;
+      row.append(label,words);host.append(row);
+    }
+  }
+  const blocked=passageDrafts.has(segment.id) || recoverablePassageDrafts.has(segment.id) || isPassageSaving(segment.id);
+  const reading=!!turns && !binding.editing && !blocked && text.value===segment.text && document.activeElement!==text;
+  host.hidden=!reading;text.hidden=reading;button.hidden=!turns;
+  button.disabled=blocked;button.textContent=reading?'Edit passage':'View speaker turns';
+  setPassageClass(card,'has-reading-turns',!!turns);setPassageClass(card,'editing-reading-turns',!reading);
 }
 function savedPassageSignature(segment) {
   return JSON.stringify([segment,doc.speakers,doc.provenance,selected.speaker_assignments?.[segment.speaker],
@@ -303,7 +420,7 @@ function savedCard(segment) {
     repairToggle.addEventListener('click',()=>{repair.open=!repair.open;if(repair.open)repair.querySelector('select')?.focus();});
     repair.addEventListener('toggle',()=>repairToggle.setAttribute('aria-expanded',String(repair.open)));
   }else repairToggle.hidden=true;
-  card.append(avatar,body);
+  card.append(avatar,body);refreshReadingTurnView(card,segment);
   card.dataset.meetingId=selected.id;savedPassageBindings.set(card,segment);
   // Defer a changed focused row until focus leaves, rather than losing its caret.
   card.addEventListener('focusout',()=>queueMicrotask(()=>{
@@ -322,7 +439,7 @@ function renderSegments() {
   for(let index=0;index<doc.segments.length;index++) {
     const segment=doc.segments[index];
     if(!showTranscriptPassage(segment))continue;
-    if(query && !(segment.text+' '+doc.speakers[segment.speaker]).toLowerCase().includes(query))continue;
+    if(query && !passageSearchText(segment).toLowerCase().includes(query))continue;
     visible++;const signature=savedPassageSignature(segment);let card=existing.get(segment.id);
     const focused=card?.contains(document.activeElement);
     if(!card || (card.dataset.signature!==signature && !focused)) {
@@ -339,6 +456,7 @@ function renderSegments() {
       const stale=String(card.dataset.signature!==signature);if(card.dataset.stale!==stale)card.dataset.stale=stale;
     }
     retained.add(card);if(card!==cursor)host.insertBefore(card,cursor);cursor=card.nextSibling;
+    refreshReadingTurnView(card,segment);
     setPassageClass(card,'active',segment.id===inspected);
   }
   for(const child of Array.from(host.children))if(!retained.has(child))child.remove();
@@ -381,7 +499,7 @@ function appendPassageRepair(body,segment,reason) {
     tools.append(language,retry);repair.append(tools);body.append(repair);
     if(reason && segment.text.trim()) {
       const reviewed=node('button','Mark words reviewed');reviewed.disabled=busy;
-      reviewed.addEventListener('click',()=>{segment.review_resolution='words_reviewed';segment.review=segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length>1;changed();renderSegments();});
+      reviewed.addEventListener('click',()=>{segment.review_resolution='words_reviewed';segment.review=hasOverlappingSpeakers(segment);changed();renderSegments();});
       tools.append(reviewed);
     }
     const candidate=segment.retry_candidate;
@@ -422,10 +540,10 @@ function appendUncoveredAudio(body,segment) {
   body.append(node('p',`Audio to review: ${ranges.join('; ')}. Current words and original audio retained.`,'review-audio-ranges'));
 }
 function passageReviewReason(segment) {
-  if(segment.review_resolution==='words_reviewed' && segment.text.trim())return segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length>1 ? reviewReasons.overlapping_speech : '';
+  if(segment.review_resolution==='words_reviewed' && segment.text.trim())return hasOverlappingSpeakers(segment) ? reviewReasons.overlapping_speech : '';
   if(segment.transcription_review?.reason==='refinement_conflict')return 'Previous words retained because the new passage also covers another passage needing review.';
   if(['transcription_failed','empty_result','token_limit'].includes(segment.transcription_review?.reason))return reviewReasons[segment.transcription_review.reason];
-  if(segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length>1)return reviewReasons.overlapping_speech;
+  if(hasOverlappingSpeakers(segment))return reviewReasons.overlapping_speech;
   if(segment.transcription_review?.reason)return reviewReasons[segment.transcription_review.reason] || 'Passage needs review; audio retained';
   if(segment.language_detection?.reason==='recent_context')return 'Language inferred from recent meeting context';
   if(segment.language_detection?.reason==='best_effort')return 'Best-effort words; language needs review';

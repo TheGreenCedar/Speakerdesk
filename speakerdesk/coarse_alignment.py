@@ -28,6 +28,9 @@ class CoarseAlignment:
         self.session=ort.InferenceSession(str(directory/'model.int8.onnx'),
             sess_options=options,providers=['CPUExecutionProvider'])
         self.vocabulary=parse_vocabulary((directory/'tokens.txt').read_text())
+        from alignment_cache import AlignmentCache
+        self.cache=AlignmentCache((MODEL_SHA256,TOKEN_SHA256,CALIBRATION_ID,
+            'ctc_emission_cell_envelope',320,0,-20,'onnxruntime-1.30.0','ctc-segmentation-1.7.4'))
 
     def align(self,audio,text,*,start_sample,language):
         if language!='en':return None
@@ -36,6 +39,12 @@ class CoarseAlignment:
         if (audio.ndim!=1 or not 0<len(audio)<=MAX_AUDIO_SAMPLES or not np.isfinite(audio).all()
                 or type(start_sample) is not int or start_sample<0):
             raise ValueError('Invalid coarse alignment audio anchor.')
+        if not isinstance(text,str):raise ValueError('Invalid supplied Cohere text.')
+        audio_bytes=audio.astype('<f4').tobytes()
+        key=self.cache.key(text,audio_bytes,start_sample,start_sample+len(audio),language)
+        cached=self.cache.get(key)
+        if cached is not None:return cached
+        self.cache.provider_calls+=1
         x=(audio-audio.mean())/np.sqrt(audio.var()+np.float32(1e-5))
         logits,=self.session.run(None,{'x':x[None,:].astype(np.float32)})
         scores=logits[0].copy();scores-=np.max(scores,axis=1,keepdims=True)
@@ -43,6 +52,7 @@ class CoarseAlignment:
         result=align_ctc_scores(text,scores,self.vocabulary,
             clock=FrameClock(320,0,CALIBRATION_ID),policy=AcceptancePolicy(-20,CALIBRATION_ID),
             audio_start_sample=start_sample,audio_num_samples=len(audio))
-        result['audio_float32_sha256']=hashlib.sha256(audio.astype('<f4').tobytes()).hexdigest()
+        result['audio_float32_sha256']=hashlib.sha256(audio_bytes).hexdigest()
         result['qualified_scope']='bounded_ami_english_coarse_envelopes'
+        self.cache.put(key,result)
         return result

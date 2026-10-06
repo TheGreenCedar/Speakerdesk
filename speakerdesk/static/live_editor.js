@@ -140,7 +140,7 @@ function liveCard(segment) {
     });details.append(prior);
   }
   body.append(details);
-  card.append(avatar,body);renderPassageSaveState(card);return card;
+  card.append(avatar,body);refreshReadingTurnView(card,segment);renderPassageSaveState(card);return card;
 }
 function renderLiveSegments() {
   const pane=$('transcript-pane'),host=$('segments'),scroll=pane.scrollTop;
@@ -157,8 +157,8 @@ function renderLiveSegments() {
   const retained=new Set();
   for(const segment of rows) {
     if(!showTranscriptPassage(segment) && !isPassageSaving(segment.id)){if(segment.refinement_state==='provisional' && !isEmptyNonSpeechPlaceholder(segment))pending++;continue;}
-    if(query && !(segment.text+' '+doc.speakers[segment.speaker]).toLowerCase().includes(query) && !passageDrafts.has(segment.id))continue;
-    const signature=JSON.stringify([segment,doc.speakers[segment.speaker]]);let card=existing.get(segment.id);
+    if(query && !passageSearchText(segment).toLowerCase().includes(query) && !passageDrafts.has(segment.id))continue;
+    const signature=JSON.stringify([segment,doc.speakers]);let card=existing.get(segment.id);
     if(!card || (card.dataset.signature!==signature && !card.contains(document.activeElement) && !passageDrafts.has(segment.id) && !isPassageSaving(segment.id))) {
       const next=liveCard(segment);next.dataset.signature=signature;
       if(card){if(cursor===card)cursor=next;card.replaceWith(next);}card=next;
@@ -167,6 +167,7 @@ function renderLiveSegments() {
     if(card!==cursor)host.insertBefore(card,cursor);cursor=card.nextSibling;
     const draft=passageDrafts.get(segment.id);
     const uiSignature=JSON.stringify([signature,draft?.text,draft?.revision,recoverablePassageDrafts.has(segment.id),isPassageSaving(segment.id)]);
+    refreshReadingTurnView(card,segment);
     if(card.dataset.uiSignature===uiSignature)continue;
     card.dataset.uiSignature=uiSignature;
     if(card.dataset.speaker!==segment.speaker)card.dataset.speaker=segment.speaker;
