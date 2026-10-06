@@ -167,6 +167,10 @@ class Models:
         if type(left) is not int or type(right) is not int or left not in (0,3200) or right not in (0,3200):
             raise ValueError('Invalid canonical decode boundary context.')
         self.asr_padding=(left,right)
+    def alignment_supported(self,language):
+        from alignment_artifact import ALIGNMENT_SPEC
+        path=Path(self.config.get('alignment_path',''))
+        return language=='en' and bool(self.config.get('alignment_path')) and all((path/name).is_file() for name in ALIGNMENT_SPEC['files'])
     def align_canonical(self,request,text,*,language):
         # No implicit download or non-English calibration extrapolation. The
         # existing null/review path remains when the optional provider is absent.

@@ -36,11 +36,12 @@ class AdmissionReceipts(unittest.TestCase):
             for a in range(0,len(pcm),size):session.feed(pcm[a:a+size],a)
             session.feed([],len(pcm),final=True)
             receipt=self.receipt(session)
-            self.assertEqual(receipt['uncertain_samples'],len(pcm))
+            self.assertEqual(receipt['uncertain_samples'],0)
             self.assertEqual(receipt['negative_constant_samples'],0)
-            self.assertEqual(receipt['decision'],'uncertain')
+            self.assertEqual(receipt['model_negative_samples'],len(pcm))
+            self.assertEqual(receipt['decision'],'no_speech')
             validate_receipt(receipt,self.identity,phase='stop',request_id='stop-one',
-                received_sample=len(pcm),observed_sample=len(pcm),uncertain_samples=len(pcm))
+                received_sample=len(pcm),observed_sample=len(pcm),uncertain_samples=0)
             hashes.append(receipt['pcm_sha256'])
         expected=hashlib.sha256(np.rint(pcm*32768).astype('<i2').tobytes()).hexdigest()
         self.assertEqual(hashes,[expected]*3)
@@ -59,7 +60,7 @@ class AdmissionReceipts(unittest.TestCase):
         with self.assertRaises(ValueError):failed.inspection()
         session=SpeechSession(ScorePeer());session.feed(np.zeros(512,dtype=np.float32),0,final=True)
         receipt=self.receipt(session)
-        for key,value in [('schema_version',True),('received_sample',True),('end_sample',511),
+        for key,value in [('schema_version',1),('schema_version',True),('input_policy','raw_and_peak025_gaincap256_per512_v1'),('received_sample',True),('end_sample',511),
                           ('closed',False),('inspection_state','failed'),('uncertain_samples',True),
                           ('execution_id','c'*32),('job_id','d'*32),('input_policy','unverified'),
                           ('pcm_sha256','0'*64)]:

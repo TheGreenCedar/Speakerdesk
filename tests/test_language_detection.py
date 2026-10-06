@@ -456,7 +456,7 @@ class LanguageAppTests(unittest.TestCase):
         root=self.root/'alignment-models';checkpoint=root/'coarse-alignment';checkpoint.mkdir(parents=True)
         weights=checkpoint/'model.int8.onnx';tokens=checkpoint/'tokens.txt'
         weights.write_bytes(b'yes');tokens.write_bytes(b'tokens')
-        spec={'name':'Transcript alignment','directory':'coarse-alignment','weight_file':'model.int8.onnx',
+        spec={'name':'Transcript alignment','optional':True,'directory':'coarse-alignment','weight_file':'model.int8.onnx',
               'bytes':3,'files':['model.int8.onnx','tokens.txt'],
               'file_sha256':{'model.int8.onnx':hashlib.sha256(b'yes').hexdigest(),
                              'tokens.txt':hashlib.sha256(b'tokens').hexdigest()}}
@@ -466,12 +466,17 @@ class LanguageAppTests(unittest.TestCase):
                 client=app.test_client()
                 self.assertTrue(client.get('/api/setup').json['core_ready'])
                 self.assertEqual(model_config()['alignment_path'],str(checkpoint))
+                self.assertTrue(client.get('/api/setup').json['models'][0]['optional'])
+                self.assertEqual(client.get('/api/setup').json['total_bytes'],app.extensions['speakerdesk']['voice_setup'].state['total_bytes'])
                 weights.write_bytes(b'bad')
-                self.assertFalse(client.get('/api/setup').json['core_ready'])
+                self.assertTrue(client.get('/api/setup').json['core_ready'])
+                self.assertFalse(client.get('/api/setup').json['models'][0]['installed'])
                 weights.write_bytes(b'yes');tokens.write_bytes(b'broken')
-                self.assertFalse(client.get('/api/setup').json['core_ready'])
+                self.assertTrue(client.get('/api/setup').json['core_ready'])
+                self.assertFalse(client.get('/api/setup').json['models'][0]['installed'])
                 tokens.unlink()
-                self.assertFalse(client.get('/api/setup').json['core_ready'])
+                self.assertTrue(client.get('/api/setup').json['core_ready'])
+                self.assertFalse(client.get('/api/setup').json['models'][0]['installed'])
             finally:
                 app.extensions['speakerdesk']['meetings'].close()
                 app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)

@@ -102,13 +102,13 @@ class CoreAcceptanceTests(unittest.TestCase):
         pause['admission_receipt']={**identity,'phase':'pause','request_id':trace['pause_request_id'],
             'inspection_state':'observed_prefix','start_sample':0,'end_sample':0,'received_sample':1,
             'closed':False,'audio_encoding':'pcm_s16le','pcm_sha256':empty,
-            'speech_samples':0,'uncertain_samples':0,'negative_constant_samples':0,'decision':'no_speech'}
+            'speech_samples':0,'uncertain_samples':0,'negative_constant_samples':0,'model_negative_samples':0,'decision':'no_speech'}
         final=trace['refined'];final.update(canonical_observed_sample=1,canonical_uncertain_samples=uncertain,
             capture_inspection_request={'through_sample':1,'request_id':'fixture-stop'},rolling_sources={})
         final['capture_admission']={**identity,'phase':'stop','request_id':'fixture-stop',
             'inspection_state':'observed_prefix','start_sample':0,'end_sample':1,'received_sample':1,
             'closed':True,'audio_encoding':'pcm_s16le','pcm_sha256':whole,
-            'speech_samples':0,'uncertain_samples':uncertain,'negative_constant_samples':1-uncertain,
+            'speech_samples':0,'uncertain_samples':uncertain,'negative_constant_samples':1-uncertain,'model_negative_samples':0,
             'decision':'uncertain' if uncertain else 'no_speech'}
         if uncertain:final['refinement_status']='unresolved';final['rolling_refinement']['completed_sample']=0
         return recipe,trace

@@ -1,8 +1,9 @@
 """Resident canonical utterances, independent of NVIDIA's activity boundaries.
 
 The short utterance path replaces one complete same-anchor Cohere revision.
-Long utterances retain bounded context decodes as unresolved candidates until
-the configured alignment provider supplies calibrated ownership evidence.
+Long English utterances may use calibrated context ownership. Other languages
+and missing/failed alignment use disjoint original-audio crops, preserving every
+raw core text without pretending to know individual word boundaries.
 """
 import copy
 from pathlib import Path
@@ -70,35 +71,62 @@ class CanonicalRuntime:
             if not complete or not text.strip():updated['canonical_unresolved']='incomplete_cohere_revision'
             else:updated.pop('canonical_unresolved',None)
         else:
-            parts=[]
-            for request in self.book.decode_requests(row['id']):
-                if stage=='refined' and e.inbox.cancelled_request(self.refinement_request):return False
-                x,y=request['start_sample'],request['end_sample']
-                pcm=read_audio(e.path,x,y)
-                try:
-                    if hasattr(e.models,'set_decode_boundary_padding'):
-                        e.models.set_decode_boundary_padding(3200 if x>a else 0,3200 if y<b else 0)
-                    if stage=='refined' and hasattr(e.models,'begin_refinement'):e.models.begin_refinement(pcm,x)
-                    passages=e.decode(pcm,stamp['language'],names,x/RATE,row['language_epoch'],overlap=True)
-                finally:
-                    if hasattr(e.models,'set_decode_boundary_padding'):e.models.set_decode_boundary_padding(0,0)
-                    if stage=='refined' and hasattr(e.models,'end_refinement'):e.models.end_refinement()
-                text=passages[0].get('cohere_raw_text',passages[0]['text']) if len(passages)==1 else ''
-                complete=len(passages)==1 and not passages[0].get('transcription_review')
-                alignment=None
-                if complete and text.strip() and hasattr(e.models,'align_canonical'):
-                    # Provider must independently enforce its approved clock/score
-                    # policy and return the exact raw-text/revision-bound result.
-                    alignment=e.models.align_canonical(request,text,language=passages[0].get('language'))
-                parts.append({'request':request,'text':text,'complete':complete,'alignment':alignment,
-                              'passages':passages})
-            self.book.apply_decode_parts(row['id'],parts,stage=stage)
-            updated=self.book.rows[row['id']]
+            use_alignment=(stamp['language']=='en' and hasattr(e.models,'align_canonical')
+                and (not hasattr(e.models,'alignment_supported') or e.models.alignment_supported('en')))
+            if use_alignment:
+                parts=self.decode_long_parts(row,stage,self.book.decode_requests(row['id']),aligned=True)
+                if parts is False:return False
+                self.book.apply_decode_parts(row['id'],parts,stage=stage)
+                updated=self.book.rows[row['id']]
+                # Keep failed aligned candidates in the journal. If ownership
+                # failed, decode separate cores; no uncalibrated CTC fallback.
+                if not updated['machine_versions'][-1]['complete'] and all(p['complete'] for p in parts):
+                    use_alignment=False
+            if not use_alignment:
+                parts=self.decode_long_parts(row,stage,self.book.core_decode_requests(row['id']),aligned=False)
+                if parts is False:return False
+                self.book.apply_core_parts(row['id'],parts,stage=stage)
+                updated=self.book.rows[row['id']]
             last=updated['machine_versions'][-1]
-            if not last['complete']:updated['canonical_unresolved']=last['reason']
+            if not last['complete']:updated['canonical_unresolved']=last.get('reason') or 'incomplete_cohere_revision'
             else:updated.pop('canonical_unresolved',None)
         self.last_decoded[row['id']]=(b,row['audio_revision'],stage)
         return True
+
+    def decode_long_parts(self,row,stage,requests,*,aligned):
+        from live_refinement import read_audio
+        from rolling_refinement import successful_non_speech
+        e=self.engine;stamp=e.language_at(row['start_sample']);a,b=row['start_sample'],row['end_sample']
+        parts=[]
+        for request in requests:
+            if stage=='refined' and e.inbox.cancelled_request(self.refinement_request):return False
+            x,y=request['start_sample'],request['end_sample'];pcm=read_audio(e.path,x,y)
+            try:
+                if hasattr(e.models,'set_decode_boundary_padding'):
+                    e.models.set_decode_boundary_padding(3200 if x>a else 0,3200 if y<b else 0)
+                if stage=='refined' and hasattr(e.models,'begin_refinement'):e.models.begin_refinement(pcm,x)
+                passages=e.decode(pcm,stamp['language'],row.get('speaker_candidates',[]),x/RATE,row['language_epoch'],overlap=True)
+            finally:
+                if hasattr(e.models,'set_decode_boundary_padding'):e.models.set_decode_boundary_padding(0,0)
+                if stage=='refined' and hasattr(e.models,'end_refinement'):e.models.end_refinement()
+            # Language-routed pieces must cover this core in order. Keep their
+            # raw text/provenance; missing or failed ASR cannot become a blank.
+            cursor=0;complete=bool(passages);texts=[]
+            for passage in passages:
+                begin,end=round(passage['start']*RATE),round(passage['end']*RATE)
+                text=passage.get('cohere_raw_text',passage['text']);texts.append(text)
+                valid=(begin==cursor and begin<end<=y-x and not passage.get('transcription_review')
+                       and (bool(text.strip()) or successful_non_speech(dict(passage,start=passage['start']+x/RATE,end=passage['end']+x/RATE))))
+                complete=complete and valid;cursor=end
+            complete=complete and cursor==y-x and (not aligned or len(passages)==1)
+            text=' '.join(texts)
+            alignment=None
+            if aligned and complete and text.strip():
+                alignment=e.models.align_canonical(request,text,language=passages[0].get('language'))
+            parts.append({'request':request,'text':text,'complete':complete,'alignment':alignment,
+                          'cohere_input_padding':[copy.deepcopy(p.get('cohere_input_padding')) for p in passages],
+                          'passages':passages})
+        return parts
 
     def refine(self,request):
         from live_refinement import read_audio,align_tracks

@@ -1,3 +1,5 @@
+> Historical source-only handoff. The adapter is now wired into the app and approved cached acoustic tests have run. The former protobuf6 proposal is superseded by the existing protobuf7.36.2 runtime. Read [current integration and bounded English scope](alignment-integration-status.md) for operative behavior and remaining signed-package gates.
+
 # Cohere alignment source prototype
 
 This branch is based on `fdc27e67760093a97feef6ea3c2e7012b512813f`. It adds an isolated supplied-text alignment adapter and proposal files. It does not wire the adapter into a running app, load an acoustic model, install dependencies, build native code, capture audio or replace Cohere. Source ownership was coordinated with integrator `01a10a26-9958-70a6-b686-61dd425cf0cf`; its canonical contract was inspected at `1599e815ba9c56239d316fb9b48e0c1de0dccd04`.

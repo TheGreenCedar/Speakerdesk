@@ -49,13 +49,13 @@ The local web app opens at http://127.0.0.1:8790. Use its setup control to downl
 
 ## Apple builds
 
-`Apple package` is a manual GitHub Actions workflow. Its default ad-hoc mode produces private test artifacts. Ad-hoc signing does not establish trusted distribution or notarization. Its notarized mode requires existing Apple credentials using BatCave's secret names; see [credential reuse](docs/credential-reuse.md). No secrets are provisioned by the workflow source and no release is published.
+`Apple package` is a manual GitHub Actions workflow. Its default ad-hoc mode produces private test artifacts. Ad-hoc signing does not establish trusted distribution or notarization. Exact candidate signing/notarization uses the separate approved AppleRelease workflow with existing central Apple credentials; see [credential reuse](docs/credential-reuse.md). No secrets are provisioned by the producer and no release is published.
 
 ```sh
 APPLE_SIGNING_IDENTITY="existing Developer ID identity" ./scripts/build_macos.sh
 ```
 
-Local real-model streaming has been exercised on synthetic two-voice speech. CPU CI checks timing, lifecycle and access controls; it does not prove noisy-meeting accuracy, native capture quality or packaged-model parity. Live text is committed in short crops; stopping saves pending results without a full-recording refinement pass. Diarization provides region boundaries; Cohere supplies text without word timestamps, so exported times are speech-region boundaries.
+Local real-model streaming has been exercised on synthetic two-voice speech. CPU CI checks timing, lifecycle and access controls; it does not prove noisy-meeting accuracy, native capture quality or packaged-model parity. Live text replaces stable canonical utterances; Stop performs bounded larger-context refinement while preserving human edits and original audio. NVIDIA supplies independent speaker activity and Cohere supplies all words. Long turns can use optional bounded English coarse timing or disjoint original-audio core crops for every supported language; word timing remains null when unqualified. Exported passage times are retained audio anchors. See [canonical protocol](docs/silero-canonical-protocol.md) and [alignment scope](docs/alignment-integration-status.md).
 
 The current build remains a release candidate until notarization, normal first-launch checks and native meeting capture checks succeed. [Download contract](docs/download-contract.md) describes the future stable download handoff.
 

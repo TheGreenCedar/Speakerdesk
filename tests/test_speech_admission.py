@@ -60,13 +60,13 @@ class SpeechAdmissionTests(unittest.TestCase):
             np.testing.assert_array_equal(first,second);self.assertEqual(state,other_state)
         self.assertEqual([state for _,state in models[0].inputs],[0,0,1,1])
 
-    def test_conditioned_negative_waveform_is_uncertain_except_exact_dc(self):
+    def test_successfully_inspected_model_negative_nonconstant_audio_finishes(self):
         class Boundary:
             normalized_view=True
             def initial_state(self):return 0
             def feed(self,chunk,state):return .01,state+1
         for audio,decision in ((np.zeros(700),'no_speech'),(np.full(700,.04),'no_speech'),
-                               (np.linspace(-.01,.01,700),'uncertain')):
+                               (np.linspace(-.01,.01,700),'no_speech')):
             with tempfile.TemporaryDirectory() as folder:
                 session=SpeechSession(Boundary(),max_frames=1,archive=FrameArchive(Path(folder)/'frames'))
                 session.feed(audio,0,final=True)
@@ -104,20 +104,20 @@ class SpeechAdmissionTests(unittest.TestCase):
         together=UtteranceBook('same-fixed-frames');separate=UtteranceBook('same-fixed-frames')
         together.observe(frames.admission(0,1024))
         separate.observe(frames.admission(0,512));separate.observe(frames.admission(512,1024))
-        self.assertEqual(together.uncertain_sample_count,512)
-        self.assertEqual(separate.uncertain_sample_count,512)
+        self.assertEqual(together.uncertain_sample_count,0)
+        self.assertEqual(separate.uncertain_sample_count,0)
         self.assertEqual(together.snapshot(),separate.snapshot())
-        self.assertEqual(frames.admission(700,900)['uncertain_regions'],[{'start_sample':700,'end_sample':900}])
+        self.assertEqual(frames.admission(700,900)['model_negative_regions'],[{'start_sample':700,'end_sample':900}])
 
-    def test_dc_step_is_uncertain_in_its_fixed_boundary_frame(self):
+    def test_model_negative_dc_step_preserves_classification_not_false_uncertainty(self):
         class Boundary:
             normalized_view=True
             def initial_state(self):return 0
             def feed(self,chunk,state):return .01,state+1
         session=SpeechSession(Boundary());session.feed(np.concatenate((np.zeros(512),np.ones(512)*.04)),0,final=True)
-        self.assertEqual(session.evidence.admission(0,1024)['uncertain_regions'],[{'start_sample':512,'end_sample':1024}])
+        self.assertEqual(session.evidence.admission(0,1024)['uncertain_regions'],[])
         self.assertEqual(session.evidence.admission(0,512)['decision'],'no_speech')
-        self.assertEqual(session.evidence.admission(512,1024)['decision'],'uncertain')
+        self.assertEqual(session.evidence.admission(512,1024)['decision'],'no_speech')
 
     def test_no_evidence_and_partial_evidence_are_pending(self):
         frames = SpeechFrames()
