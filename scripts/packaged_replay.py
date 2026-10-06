@@ -23,7 +23,7 @@ import urllib.request
 import wave
 import zipfile
 from acceptance_fixtures import generate, read_wav, write_wav
-from core_acceptance import ROOT, HARNESSES, artifact, bundle_identity, digest_file, established_context, evaluate, model_file_pins, models, require, suite, transport_pcm, zip_bundle
+from core_acceptance import ROOT, HARNESSES, artifact, bundle_identity, digest_file, established_context, evaluate, model_file_pins, models, pause_acknowledged, require, suite, transport_pcm, zip_bundle
 
 def write(path,value):path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
 
@@ -199,11 +199,11 @@ def case_run(recipe,all_recipes,backend,home,directory,budget):
     edit=None
     if recipe.get('correction') or start_sample:
         budget.wait(lambda:(replay/'stage-edit').exists(),60)
-        backend.api('/api/meetings/'+jid+'/pause',{},'POST')
+        pause_request=backend.api('/api/meetings/'+jid+'/pause',{},'POST')['pause_flush']['request_id']
         def flushed():
-            observed=get();state=backend.api('/api/meeting')
+            observed=get()
             point=json.loads((replay/'replay.json').read_text())['hold_sample']
-            return observed if observed.get('last_fast_sequence') and observed['status']=='paused' and state['processed_seconds']>=point/16000-.001 else None
+            return observed if observed['status']=='paused' and pause_acknowledged(observed,pause_request,point) else None
         observed=budget.wait(flushed,40)
         if start_sample:
             context=established_context(observed,start_sample)
@@ -215,10 +215,10 @@ def case_run(recipe,all_recipes,backend,home,directory,budget):
             edit=result['segment']
         backend.api('/api/meetings/'+jid+'/resume',{},'POST')
     budget.wait(lambda:(replay/'stage-end').exists(),80)
-    backend.api('/api/meetings/'+jid+'/pause',{},'POST')
+    pause_request=backend.api('/api/meetings/'+jid+'/pause',{},'POST')['pause_flush']['request_id']
     def settled():
-        current=get();state=backend.api('/api/meeting')
-        return current if current.get('last_fast_sequence') and state.get('processed_seconds',0)>=frames/16000-.001 and current['status']=='paused' else None
+        current=get()
+        return current if current['status']=='paused' and pause_acknowledged(current,pause_request,frames) else None
     provisional=budget.wait(settled,40)
     backend.api('/api/jobs/'+jid+'/refinement/resume',{},'POST')
     backend.api('/api/meetings/'+jid+'/stop',{},'POST')

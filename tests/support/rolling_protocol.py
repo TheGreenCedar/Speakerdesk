@@ -21,6 +21,12 @@ class RecordingInput:
 
 sys.stdin=RecordingInput()
 live_refinement.Models=CPUModels
+if config.get('test_pause_lag'):
+    class LaggedCPUModels(CPUModels):
+        def feed(self,audio,final=False):
+            turns,end=super().feed(audio,final=final)
+            return turns,end if final else max(0,end-.032)
+    live_refinement.Models=LaggedCPUModels
 def emit(message):
     if (config.get('test_hold_old_refinement') and message['type']=='refinement_result'
             and message['language_epoch']==0):

@@ -44,6 +44,18 @@ class EngineTests(unittest.TestCase):
     def tearDown(self):self.temp.cleanup()
     def feed(self,start,end,mode='en',epoch=0):
         for n in range(start,end):self.engine.handle({'type':'audio','start_sample':n*RATE,'end_sample':(n+1)*RATE,'language':mode,'language_epoch':epoch})
+    def test_pause_ack_follows_publish_and_preserves_real_lookahead(self):
+        original=self.models.feed
+        def lagged(audio,final=False):
+            turns,end=original(audio,final);return turns,max(0,end-.2)
+        self.models.feed=lagged;self.feed(0,1)
+        self.engine.handle({'type':'flush','request_id':'pause-a','through_sample':RATE})
+        ack=self.events[-1];self.assertEqual(ack,{'type':'flush_ack','request_id':'pause-a','received_sample':RATE,
+            'available_sample':12800,'speech_observed_sample':12800,'fast_sequence':self.engine.fast_sequence})
+        self.assertTrue(any(e['type']=='provisional_revision' for e in self.events[:-1]))
+        self.assertFalse(self.engine.capture_finished)
+        with self.assertRaisesRegex(ValueError,'exact captured audio endpoint'):
+            self.engine.handle({'type':'flush','request_id':'wrong','through_sample':RATE+1})
     def test_historical_evidence_clears_after_success_cancel_and_error(self):
         self.models.end_refinement=Mock()
         for result in ({'status':'complete'},{'status':'cancelled'}):
@@ -168,6 +180,17 @@ class HostTests(unittest.TestCase):
                 'candidates':[{'start':0,'end':end,'text':text,'speaker':'speaker_0','language':'en','language_epoch':0,
                                'language_generation':0,'language_mode':'en','fast_origin_sample':0,'refinement_state':'provisional'}]}
         self.manager.refinement.provisional(self.jid,result);return result
+    def test_pause_ack_persists_exact_endpoint_rejects_stale_ids_and_invalid_horizon(self):
+        job=self.manager.get(self.jid);job['pause_flush']={'request_id':'a','state':'awaiting_capture'};self.manager.put(job)
+        request=self.manager.pause_flush_request(self.jid,16000)
+        self.assertEqual(request,{'type':'flush','request_id':'a','through_sample':16000})
+        receipt={'request_id':'a','received_sample':16000,'available_sample':12000,'speech_observed_sample':15872,'fast_sequence':0}
+        self.assertFalse(self.manager.acknowledge_pause_flush(self.jid,{**receipt,'request_id':'stale'}))
+        with self.assertRaisesRegex(ValueError,'differs'):self.manager.acknowledge_pause_flush(self.jid,{**receipt,'available_sample':16001})
+        self.assertTrue(self.manager.acknowledge_pause_flush(self.jid,receipt))
+        actual=self.manager.get(self.jid)['pause_flush'];self.assertEqual(actual['state'],'complete')
+        self.assertEqual(actual['deferred_audio'],[{'start_sample':12000,'end_sample':16000}])
+        self.assertFalse(self.manager.acknowledge_pause_flush(self.jid,receipt))
     def test_saved_prefix_does_not_block_new_tail_or_get_overwritten(self):
         self.provisional(6,'Please review the secs');row=self.manager.get(self.jid)['document']['segments'][0]
         response=self.client.patch(f'/api/jobs/{self.jid}/segments/{row["id"]}',headers=self.headers,

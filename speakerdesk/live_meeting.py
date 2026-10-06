@@ -119,6 +119,7 @@ class MeetingManager:
                     'language_revision':job.get('language_revision',0) if job else 0,
                     'language_acknowledged_revision':job.get('language_acknowledged_revision',0) if job else 0,
                     'language_from_sample':job.get('language_history',[{'start_sample':0}])[-1]['start_sample'] if job else 0,
+                    'pause_flush':job.get('pause_flush') if job else None,
                     'refinement_status':job.get('refinement_status','waiting') if job else 'idle'}
 
     def queue_worker(self, message):
@@ -213,11 +214,38 @@ class MeetingManager:
                 self.patch(jid,status='finishing',message='Finishing transcript…')
                 self._stop_capture()
             else:
+                if action=='pause':
+                    job=self.get(jid);job['pause_flush']={'request_id':uuid.uuid4().hex,'state':'awaiting_capture'};self.put(job)
                 try:self._send(self.capture,{'type':action})
                 except (OSError,ValueError):
                     self.stopped.set()
                     self._stop_capture()
                     abort(409,description='Audio capture stopped. Wait for the saved recording.')
+
+    def pause_flush_request(self,jid,through_sample):
+        """Bind the capture Pause endpoint to one ordered worker flush."""
+        with self.lock:
+            if type(through_sample) is not int or through_sample<0:raise ValueError('Invalid Pause audio endpoint.')
+            job=self.get(jid);pending=job.get('pause_flush')
+            if not pending or pending.get('state')!='awaiting_capture':raise ValueError('Unrequested capture Pause.')
+            pending.update(state='pending',through_sample=through_sample)
+            self.put(job)
+            return {'type':'flush','request_id':pending['request_id'],'through_sample':through_sample}
+
+    def acknowledge_pause_flush(self,jid,result):
+        with self.lock:
+            job=self.get(jid);pending=job.get('pause_flush') or {}
+            if result.get('request_id')!=pending.get('request_id') or pending.get('state')!='pending':return False
+            received=result.get('received_sample');available=result.get('available_sample');speech=result.get('speech_observed_sample')
+            if (type(received) is not int or received!=pending['through_sample']
+                    or type(available) is not int or type(speech) is not int or not 0<=available<=speech<=received
+                    or type(result.get('fast_sequence')) is not int
+                    or result['fast_sequence']!=job.get('last_fast_sequence',0)):
+                raise ValueError('Pause flush acknowledgement differs from received audio or published revisions.')
+            pending.update(state='complete',received_sample=received,available_sample=available,
+                speech_observed_sample=speech,fast_sequence=result['fast_sequence'],
+                deferred_audio=([{'start_sample':available,'end_sample':received}] if available<received else []))
+            self.put(job);return True
 
     def _stop_capture(self):
         """Bound every stop request, including worker errors and a stalled helper."""
@@ -291,6 +319,7 @@ class MeetingManager:
                             self.refinement.capture_done(jid)
                         elif result['type']=='progress':
                             self.processed=result['processed_seconds'];self.refinement.schedule(jid,force=bool(result.get('flush')))
+                        elif result['type']=='flush_ack':self.acknowledge_pause_flush(jid,result)
                         elif result['type']=='error':fail(result['error']);break
                         elif result['type']=='finished':
                             if not worker_stop_sent.is_set():fail('Live inference finished before recording stopped. Captured audio has been saved.')
@@ -382,7 +411,8 @@ class MeetingManager:
                     if kind=='paused':
                         mixer.flush(result['time'],final=True)
                         self.patch(jid,duration=self.duration)
-                        if self.two_pass:self.refinement.force=True;packets.put({'type':'flush'},timeout=2)
+                        if self.two_pass:
+                            self.refinement.force=True;packets.put(self.pause_flush_request(jid,mixer.cursor),timeout=2)
                     elif not self.refinement.final:self.refinement.force=False
                 elif kind=='stopped':
                     mixer.flush(result['time'],final=True);capture_finished=True

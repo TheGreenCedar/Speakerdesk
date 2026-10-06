@@ -43,8 +43,25 @@ this is an identity contract, not evidence that its weights have been acquired.
 
 Live processing is limited by both NVIDIA's processed horizon and Silero's
 completed frames. Coalesced inbox audio is fed in one-second packets. A final
-partial Silero frame retains the true input endpoint. This does not yet fix the
-separate controller Pause acknowledgement requirement.
+partial Silero frame retains the true input endpoint.
+
+## Pause acknowledgement
+
+A Pause request now creates a unique receipt before sending capture control.
+After the mixer drains through the exact captured sample, an ordered worker flush
+binds that ID and endpoint. The worker publishes available revisions first, then
+acknowledges received samples, available processing horizon, Silero horizon and
+fast sequence. The controller rejects mismatched endpoints/horizons/sequences and
+ignores stale IDs. Any lookahead tail is explicit `deferred_audio`; Pause neither
+feeds fake future audio nor finalizes the recurrent VAD state, so Resume remains
+valid. Stop retains its separate full finalization path.
+
+Packaged acceptance waits for the matching receipt, rather than demanding that
+NVIDIA's available horizon already equal the capture endpoint during Pause. It
+still requires exact saved PCM, actual speech/text expectations and complete Stop
+refinement. Old candidate assertions/results remain preserved. CPU tests cover
+lagged available horizons through real pipes, SQLite and repeated Pause/Resume;
+this source fix has not yet passed signed packaged acoustic acceptance.
 
 ## Canonical protocol
 

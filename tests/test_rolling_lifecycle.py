@@ -19,10 +19,30 @@ class RollingLifecycleTests(MeetingHarness,unittest.TestCase):
                 worker=Path(__file__).parent/'support/rolling_protocol.py'
                 config=json.loads(command[-1])
                 if self.scenario=='hold_refinement':config['test_hold_old_refinement']=True
+                if self.scenario=='pause_lag':config['test_pause_lag']=True
                 process=real_popen([sys.executable,str(worker),json.dumps(config)],**kwargs)
             else:process=real_popen([sys.executable,str(PROTOCOL),'capture',str(folder),self.scenario,'en'],**kwargs)
             self.children.append(process);return process
         self.peers=patch('live_meeting.subprocess.Popen',side_effect=peer);self.peers.start()
+    def test_pause_ack_reaches_real_pipes_sqlite_without_requiring_future_lookahead(self):
+        self.scenario='pause_lag';jid=self.start(['microphone'])
+        self.wait_for(lambda:self.job(jid)['status']=='recording')
+        self.client.post(f'/api/jobs/{jid}/refinement/pause',headers=self.headers)
+        response=self.client.post(f'/api/meetings/{jid}/pause',headers=self.headers)
+        self.assertEqual(response.status_code,202,response.json);identity=response.json['pause_flush']['request_id']
+        job=self.wait_for(lambda:self.job(jid) if self.job(jid).get('pause_flush',{}).get('state')=='complete' else None)
+        receipt=job['pause_flush'];self.assertEqual(receipt['request_id'],identity)
+        self.assertEqual(receipt['received_sample'],1600);self.assertLess(receipt['available_sample'],1600)
+        self.assertEqual(receipt['deferred_audio'],[{'start_sample':receipt['available_sample'],'end_sample':1600}])
+        self.assertEqual(self.client.get('/api/meeting').json['pause_flush'],receipt)
+        self.control(jid,'resume');self.wait_for(lambda:self.job(jid)['status']=='recording')
+        second=self.client.post(f'/api/meetings/{jid}/pause',headers=self.headers)
+        self.assertEqual(second.status_code,202,second.json);second_id=second.json['pause_flush']['request_id']
+        self.assertNotEqual(second_id,identity)
+        self.wait_for(lambda:self.job(jid).get('pause_flush',{}).get('state')=='complete')
+        self.assertEqual(self.job(jid)['pause_flush']['received_sample'],5600)
+        self.control(jid,'stop');self.wait_for(lambda:self.manager.jid is None)
+        self.assertEqual(self.job(jid)['status'],'ready');self.assertEqual(len(self.samples(jid,'audio.wav')),5600)
     def test_short_pause_resume_stop_drains_real_engine_and_refinement_before_shutdown(self):
         # Hold an actual old-epoch refinement response until the language change.
         # Otherwise a faster worker may finish that window before the switch,

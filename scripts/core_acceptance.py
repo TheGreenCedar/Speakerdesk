@@ -91,6 +91,17 @@ def established_context(observed,boundary_sample):
     from meeting_refinement import preceding_language_context
     return preceding_language_context(observed.get('document',{}).get('segments',[]),boundary_sample,observed.get('language_epoch',0))
 
+def pause_acknowledged(job,request_id,through_sample):
+    receipt=job.get('pause_flush') or {}
+    available=receipt.get('available_sample');speech=receipt.get('speech_observed_sample')
+    return (isinstance(request_id,str) and bool(request_id) and receipt.get('request_id')==request_id
+        and type(through_sample) is int and through_sample>=0
+        and receipt.get('state')=='complete' and type(receipt.get('through_sample')) is int and receipt['through_sample']==through_sample
+        and type(receipt.get('received_sample')) is int and receipt['received_sample']==through_sample
+        and type(available) is int and type(speech) is int and 0<=available<=speech<=through_sample
+        and receipt.get('deferred_audio')==([{'start_sample':available,'end_sample':through_sample}] if available<through_sample else [])
+        and type(receipt.get('fast_sequence')) is int and receipt['fast_sequence']==job.get('last_fast_sequence',0))
+
 def evaluate(recipe, trace):
     """Recompute mandatory assertions from primary production documents."""
     checks={};expected=recipe['expect']
@@ -132,6 +143,8 @@ def evaluate(recipe, trace):
             checks[stage+'_actual_context_fallback']=any(p.get('decision',p).get('reason')=='recent_context' for p in probes)
     final=trace.get('refined',{})
     checks['provisional_paused_before_refinement']=trace.get('provisional',{}).get('status')=='paused' and trace.get('provisional',{}).get('rolling_refinement',{}).get('cancelled') is True
+    paused=trace.get('provisional',{})
+    checks['provisional_pause_acknowledged']=pause_acknowledged(paused,(paused.get('pause_flush') or {}).get('request_id'),trace.get('input_frames',-1))
     checks['same_job']=final.get('id')==trace.get('job_id')==trace.get('provisional',{}).get('id')
     checks['refinement_executed']=final.get('status')=='ready' and final.get('refinement_status')=='complete' and not final.get('refinement_unresolved') and final.get('rolling_refinement',{}).get('completed_sample',0)>=trace.get('input_frames',float('inf'))
     saved=trace.get('saved_audio',{})

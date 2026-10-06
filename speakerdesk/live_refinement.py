@@ -489,10 +489,20 @@ class Engine:
                 self.commit()
             self.emit({'type':'progress','processed_seconds':self.processed,'received_seconds':self.received/RATE,**self.models.metrics()})
         elif kind in ('flush','stop'):
+            if kind=='flush' and 'request_id' in message:
+                if (not isinstance(message['request_id'],str) or not message['request_id']
+                        or type(message.get('through_sample')) is not int or message['through_sample']!=self.received):
+                    raise ValueError('Pause flush must follow its exact captured audio endpoint.')
             if kind=='stop':
                 output,self.processed=self.models.feed(np.empty(0,dtype='float32'),final=True);self.turns.extend(output)
             self.commit(final=True)
             self.emit({'type':'progress','processed_seconds':self.processed,'received_seconds':self.received/RATE,'flush':True,**self.models.metrics()})
+            if kind=='flush' and 'request_id' in message:
+                speech=getattr(self.models,'speech_live',None)
+                speech_sample=speech.evidence.end_sample if speech is not None else round(self.processed*RATE)
+                self.emit({'type':'flush_ack','request_id':message['request_id'],'received_sample':self.received,
+                    'available_sample':min(self.received,round(self.processed*RATE)),
+                    'speech_observed_sample':min(self.received,speech_sample),'fast_sequence':self.fast_sequence})
             if kind=='stop':self.capture_finished=True;self.emit({'type':'capture_finished','duration':self.received/RATE})
         elif kind=='language':
             generation=message.get('generation',message.get('language_epoch'))

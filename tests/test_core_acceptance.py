@@ -64,6 +64,9 @@ class CoreAcceptanceTests(unittest.TestCase):
             job={'id':'f'*32,'last_fast_sequence':1,'document':{'segments':rows,'provenance':{'kind':'local_inference'}},
                  'status':'ready','refinement_status':'complete','refinement_unresolved':[],'rolling_refinement':{'completed_sample':1,'cancelled':False}}
             provisional=copy.deepcopy(job);provisional.update(status='paused');provisional['rolling_refinement']['cancelled']=True
+            provisional['pause_flush']={'request_id':'synthetic-pause','state':'complete','through_sample':1,
+                'received_sample':1,'available_sample':0,'speech_observed_sample':0,'fast_sequence':1,
+                'deferred_audio':[{'start_sample':0,'end_sample':1}]}
             synthesis={'recipe_id':recipe['id']}
             pcm_hash=hashlib.sha256(b'\0\0').hexdigest()
             preceding={'id':job['id'],'language_epoch':0,'document':{'segments':[{'start':0,'end':1,'language_epoch':0,'language':'en','text':'Successful English predecessor','language_detection':{'reason':'detected'}}]}}
@@ -82,6 +85,16 @@ class CoreAcceptanceTests(unittest.TestCase):
     def validate(self):self.save();return core.validate(self.report_path,self.manifest_path,root=self.root)
     def test_complete_contract_is_accepted_not_model_accuracy(self):
         self.assertEqual(len(self.validate()['cases']),15)
+    def test_pause_receipt_accepts_actual_lookahead_but_rejects_stale_or_unobserved_endpoint(self):
+        job={'last_fast_sequence':2,'pause_flush':{'request_id':'current','state':'complete','through_sample':16000,
+            'received_sample':16000,'available_sample':12000,'speech_observed_sample':15872,'fast_sequence':2,
+            'deferred_audio':[{'start_sample':12000,'end_sample':16000}]}}
+        self.assertTrue(core.pause_acknowledged(job,'current',16000))
+        self.assertFalse(core.pause_acknowledged(job,'old',16000))
+        self.assertFalse(core.pause_acknowledged(job,'current',32000))
+        for field,value in [('state','pending'),('available_sample',16001),('speech_observed_sample',11000),('deferred_audio',[]),('fast_sequence',1)]:
+            changed=copy.deepcopy(job);changed['pause_flush'][field]=value
+            self.assertFalse(core.pause_acknowledged(changed,'current',16000))
     def test_missing_report_blocks_before_external_request(self):
         self.report_path.unlink()
         with patch.object(promote_release,'api') as network:
