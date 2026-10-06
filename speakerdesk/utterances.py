@@ -58,6 +58,7 @@ class UtteranceBook:
             row['end_sample'] = end
             row['audio_revision'] += 1
             row.pop('alignment', None)
+            row.pop('reading_word_evidence',None)
             row.pop('assembly_provenance',None)
             row.pop('bounded_decode_provenance',None)
             row.pop('speaker_activity', None)
@@ -161,6 +162,7 @@ class UtteranceBook:
         row['protected_fields'] = sorted(set(row['protected_fields']) | {'text'})
         row['machine_revision'] += 1
         row.pop('alignment', None)
+        row.pop('reading_word_evidence',None)
         row.pop('assembly_provenance',None)
         row.pop('bounded_decode_provenance',None)
         return copy.deepcopy(row)
@@ -189,6 +191,7 @@ class UtteranceBook:
             row['machine_revision'] += 1
             row['refinement_state'] = 'refined' if stage == 'refined' and row['state'] == 'sealed' else 'provisional'
             row.pop('alignment', None)
+            row.pop('reading_word_evidence',None)
             row.pop('assembly_provenance',None)
             row.pop('bounded_decode_provenance',None)
         return copy.deepcopy(row)
@@ -249,7 +252,8 @@ class UtteranceBook:
                 'parts':[{'audio_anchor':{'start_sample':p['request']['start_sample'],'end_sample':p['request']['end_sample']},
                           'raw_text_sha256':hashlib.sha256(p['text'].encode()).hexdigest(),
                           'cohere_input_padding':copy.deepcopy(p.get('cohere_input_padding'))} for p in parts]}
-            row.pop('alignment',None);row.pop('assembly_provenance',None)
+            row.pop('alignment',None)
+            row.pop('reading_word_evidence',None);row.pop('assembly_provenance',None)
             row['voice_eligible']=False
         return copy.deepcopy(row)
 
@@ -275,6 +279,7 @@ class UtteranceBook:
             row['text_audio_anchor']=copy.deepcopy(version['audio_anchor'])
             row['refinement_state']='refined' if stage=='refined' and row['state']=='sealed' else 'provisional'
             row.pop('alignment',None)
+            row.pop('reading_word_evidence',None)
             row.pop('bounded_decode_provenance',None)
             row['assembly_provenance']={key:copy.deepcopy(assembled[key]) for key in
                 ('text_sha256','words','alignment_complete','model_sha256','timing_kind',

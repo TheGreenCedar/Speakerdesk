@@ -179,22 +179,24 @@ class RefinementController:
                     row['refinement_state']='edited';row['voice_eligible']=False
                     row.pop('alignment',None)
                     row.pop('assembly_provenance',None)
-                    row.pop('bounded_decode_provenance',None)
+                    row.pop('bounded_decode_provenance',None);row.pop('reading_turns',None);row.pop('reading_turn_provenance',None)
                     if protected & {'start','end'}:row.pop('text_audio_anchor',None)
                 if not row['text'].strip() and prior['text'].strip():
                     row['text']=prior['text'];row['review']=True;row.pop('alignment',None);row.pop('assembly_provenance',None)
-                    row.pop('bounded_decode_provenance',None)
+                    row.pop('bounded_decode_provenance',None);row.pop('reading_turns',None);row.pop('reading_turn_provenance',None)
                     row.pop('text_audio_anchor',None)
                     if prior.get('text_audio_anchor') and not protected & {'start','end'}:
                         row['text_audio_anchor']=copy.deepcopy(prior['text_audio_anchor'])
                 job['document']['segments']=[row if s['id']==sid else s for s in job['document']['segments']]
             else:
                 row['machine_revision']=0;job['document']['segments'].append(row)
+            if row.get('reading_turn_provenance'):
+                row['reading_turn_provenance']['machine_revision']=row['machine_revision']
             names=result.get('speakers') or {}
             for name in {row['speaker'],*row.get('speaker_candidates',[])}:
                 job['document']['speakers'].setdefault(name,names.get(name,
                     'Speaker '+str(int(name.split('_')[-1])+1) if name.startswith('speaker_') else
-                    'Unknown speaker' if name=='unassigned' else 'Mixed audio'))
+                    'Unknown speaker' if name=='unassigned' else 'Multiple speakers' if name=='multiple_speakers' else 'Mixed audio'))
             job['duration']=max(job.get('duration',0),self.manager.duration)
             job['document']=validate(job['document'],job['duration'])
             job['document']['provenance'].update(kind='local_inference',mode='canonical_vad_utterances',

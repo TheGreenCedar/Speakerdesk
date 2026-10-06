@@ -253,6 +253,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             row.pop('alignment',None)
             row.pop('assembly_provenance',None)
             row.pop('bounded_decode_provenance',None)
+            row.pop('reading_turns',None);row.pop('reading_turn_provenance',None)
             if any(row[k]!=prior[k] for k in ('start','end')):row.pop('text_audio_anchor',None)
             if any(row[k]!=prior[k] for k in ('speaker','start','end')):
                 row.update(voice_eligible=False,speaker_candidates=[]);row.pop('retry_candidate',None)
@@ -297,7 +298,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                 edited={k for k in ('text','speaker','start','end') if prior and segment[k]!=prior[k]}
                 for key in ('audio_anchor','source_start','source_end','source_speaker_candidates','activity_regions','language_epoch','finalized','refinement_window','fast_origin_sample','language_generation','language_mode',
                             'canonical_utterance_id','canonical_machine_revision','canonical_state','start_sample','end_sample','audio_revision',
-                            'text_audio_anchor','alignment','speech_regions','speaker_activity','assembly_provenance','bounded_decode_provenance'):
+                            'text_audio_anchor','alignment','speech_regions','speaker_activity','assembly_provenance','bounded_decode_provenance','reading_turns','reading_turn_provenance'):
                     segment.pop(key,None)
                     if prior and key in prior:segment[key]=copy.deepcopy(prior[key])
                 if prior and ('machine_revision' in prior or protected or edited):
@@ -309,6 +310,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                 if edited or body.get('imported'):
                     segment.pop('alignment',None);segment.pop('assembly_provenance',None)
                     segment.pop('bounded_decode_provenance',None)
+                    segment.pop('reading_turns',None);segment.pop('reading_turn_provenance',None)
                 if edited & {'start','end'} or body.get('imported'):segment.pop('text_audio_anchor',None)
                 # Client edits/imports cannot manufacture server-owned clean-audio evidence.
                 unchanged=bool(prior and not body.get('imported') and all(segment[k]==prior[k] for k in ('speaker','start','end')))

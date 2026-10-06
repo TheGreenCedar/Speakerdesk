@@ -21,7 +21,7 @@ hidden=[name for name in collect_submodules('mlx') if all(part.isidentifier() fo
 hidden+=collect_submodules('mlx_audio.vad.models.nemotron_diarization')
 hidden+=collect_submodules('mlx_audio.vad.models.sortformer')
 hidden+=collect_submodules('mlx_audio.vad.models.silero_vad')
-hidden+=['speech_admission','admission_receipt','utterances','canonical_assembly','canonical_runtime','word_alignment','coarse_alignment','alignment_artifact','language_preferences','job_store']
+hidden+=['speech_admission','admission_receipt','utterances','canonical_assembly','canonical_runtime','reading_turns','word_alignment','coarse_alignment','alignment_artifact','language_preferences','job_store']
 for package,version in [('onnxruntime','1.30.0'),('ctc-segmentation','1.7.4'),('flatbuffers','25.12.19')]:
     assert importlib.metadata.version(package)==version, f'Install pinned alignment runtime: {package}'
     data+=copy_metadata(package)

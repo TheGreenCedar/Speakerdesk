@@ -346,10 +346,12 @@ class SpeechTranscriber:
                         if text and not transcription_review:
                             self.context={'language':language,'end_sample':event['end_sample']}
                         elif self.context and self.context['language']!=language:self.context=None
+            language_review=bool(window['review'])
             if transcription_review or len(speaker)>1:window['review']=True
             results.append({'start':window['begin']/sample_rate,'end':window['end_sample']/sample_rate,'text':text,
                             **({'cohere_raw_text':raw_text} if raw_text is not None else {}),
                             **{key:window[key] for key in ('language','language_detection','review')},
+                            'language_review':language_review,
                             **({'audio_state':window['audio_state']} if 'audio_state' in window else {}),
                             **({'acoustic_evidence':window['acoustic_evidence']} if 'acoustic_evidence' in window else {}),
                             **({'transcription_review':transcription_review} if transcription_review else {}),

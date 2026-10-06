@@ -4,6 +4,7 @@ import json
 import math
 from itertools import chain
 from review import export_text
+from reading_turns import validated_turns
 
 LANGUAGES = {'en':'English','de':'German','fr':'French','it':'Italian','es':'Spanish',
              'pt':'Portuguese','el':'Greek','nl':'Dutch','pl':'Polish','vi':'Vietnamese',
@@ -80,17 +81,33 @@ def export(document, kind):
         if kind == 'vtt':
             yield 'WEBVTT'
             yield ''
-        passages = (s for s in document['segments'] if s.get('text','').strip())
+        def projected_passages():
+            for s in document['segments']:
+                if not s.get('text','').strip():continue
+                turns=validated_turns(s)
+                # Subtitle cues require actual timing for every slice. Preserve
+                # the complete parent cue if even one word has unknown timing.
+                if turns and (kind=='txt' or all(t['attribution']!='unknown' for t in turns)):
+                    for turn in turns:
+                        yield dict(s,text=turn['text'],speaker=turn['speaker'],reading_slice=True,
+                            start=turn['start'] if turn['start'] is not None else s['start'],
+                            end=turn['end'] if turn['end'] is not None else s['end'],
+                            coarse_timing=turn['attribution']!='unknown',review=False,
+                            speaker_candidates=[])
+                else:yield s
+        passages = projected_passages()
         emitted = kind == 'vtt'
         for n, s in enumerate(passages, 1):
             emitted = True
-            speaker = document['speakers'][s['speaker']]
+            speaker = document['speakers'].get(s['speaker'],
+                'Unknown speaker' if s['speaker']=='unassigned' else 'Overlapping speakers')
             # Plain subtitle text avoids VTT/HTML interpretation and cue injection.
             passage = export_text(s)
             text = ' '.join(passage.split()).replace('-->', '→').replace('<', '‹').replace('>', '›')
             name = ' '.join(speaker.split()).replace('-->', '→').replace('<', '‹').replace('>', '›')
             if kind == 'txt':
-                yield f'[{timestamp(s["start"])} – {timestamp(s["end"])}] {speaker}: {passage}'
+                timing=('Coarse timing ' if s.get('coarse_timing') else 'Timing unknown; parent audio ' if s.get('reading_slice') else '')
+                yield f'[{timing}{timestamp(s["start"])} – {timestamp(s["end"])}] {speaker}: {passage}'
             else:
                 sep = ',' if kind == 'srt' else '.'
                 yield str(n)

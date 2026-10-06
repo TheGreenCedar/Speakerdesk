@@ -22,12 +22,15 @@ REASONS = {
 
 
 def review_reason(segment):
-    mixed=len(segment.get('speaker_candidates', [])) > 1 or str(segment.get('speaker', '')).startswith('overlap')
+    mixed=str(segment.get('speaker', '')).startswith('overlap')
+    multiple=segment.get('speaker')=='multiple_speakers'
     if segment.get('review_resolution') == 'words_reviewed' and segment.get('text', '').strip():
         return REASONS['overlapping_speech'] if mixed else 'Speaker uncertain' if segment.get('speaker')=='unassigned' else ''
     transcription = segment.get('transcription_review') or {}
     if transcription.get('reason') in REASONS:
         return REASONS[transcription['reason']]
+    if multiple:
+        return 'Multiple speakers; see localized turns where timing is available'
     if mixed:
         return REASONS['overlapping_speech']
     detection = segment.get('language_detection') or {}
