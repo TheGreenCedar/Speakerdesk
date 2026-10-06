@@ -156,7 +156,7 @@ function renderLiveSegments() {
   rows.sort((a,b)=>a.start-b.start || a.end-b.end);
   const retained=new Set();
   for(const segment of rows) {
-    if(!showTranscriptPassage(segment) && !isPassageSaving(segment.id)){if(segment.refinement_state==='provisional' && segment.audio_state!=='digital_silence')pending++;continue;}
+    if(!showTranscriptPassage(segment) && !isPassageSaving(segment.id)){if(segment.refinement_state==='provisional' && !isEmptyNonSpeechPlaceholder(segment))pending++;continue;}
     if(query && !(segment.text+' '+doc.speakers[segment.speaker]).toLowerCase().includes(query) && !passageDrafts.has(segment.id))continue;
     const signature=JSON.stringify([segment,doc.speakers[segment.speaker]]);let card=existing.get(segment.id);
     if(!card || (card.dataset.signature!==signature && !card.contains(document.activeElement) && !passageDrafts.has(segment.id) && !isPassageSaving(segment.id))) {

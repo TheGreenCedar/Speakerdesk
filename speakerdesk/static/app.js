@@ -449,10 +449,21 @@ function appendPassageEvidence(host,segment) {
 function showTranscriptPassage(segment) {
   return !!segment.text.trim() || passageDrafts.has(segment.id) || !!recoverablePassageDrafts.get(segment.id)?.text.trim() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
 }
+function isEmptyNonSpeechPlaceholder(segment) {
+  // Presentation only: legacy no-word hints do not establish verified silence
+  // or manufacture acoustic receipts. Keep words, candidates and failures.
+  const transcription=segment.transcription_review;
+  if(segment.text.trim() || transcription?.candidate_text?.trim() || transcription?.partial_text)return false;
+  if(transcription?.reason && transcription.reason!=='insufficient_speech')return false;
+  if(['speech','uncertain','pending'].includes(segment.acoustic_evidence?.decision) ||
+     ['speech_evidence_pending','insufficient_acoustic_context'].includes(segment.audio_state))return false;
+  return ['digital_silence','model_non_speech','insufficient_speech'].includes(segment.audio_state) ||
+    segment.language_detection?.reason==='insufficient_speech' || transcription?.reason==='insufficient_speech';
+}
 function renderRetainedAudioReview() {
   const host=$('retained-audio-review'),open=host.open;
   if(host.contains(document.activeElement))return;
-  const rows=doc.segments.filter(segment=>!showTranscriptPassage(segment) && segment.audio_state!=='digital_silence' &&
+  const rows=doc.segments.filter(segment=>!showTranscriptPassage(segment) && !isEmptyNonSpeechPlaceholder(segment) &&
     (segment.transcription_review?.reason || ['unsupported','uncertain','change_pending','needs_language','insufficient_speech'].includes(segment.language_detection?.reason) ||
      (segment.refinement_state==='unresolved' && segment.language_detection?.reason!=='silence')));
   host.hidden=!rows.length;host.replaceChildren();if(!rows.length)return;
