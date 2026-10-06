@@ -53,6 +53,18 @@ class RefinementTailContextTests(unittest.TestCase):
         self.response(['Earlier words.','Earlier words. Blue.'])
         tail=self.engine.refine(self.request(4.74))['candidates'][0]
         self.assertEqual(tail['text'],'Blue.');self.assertEqual((tail['start'],tail['end']),(4.74,self.end))
+    def test_preserved_numeric_format_failure_resolves_with_raw_provenance(self):
+        self.models.batch_turns.return_value=[{'start':0,'end':3,'speaker':'speaker_0'}]
+        reference="Bring it to the library before 6 o'clock."
+        extended="Bring it to the library before six o'clock."
+        self.response([reference,extended])
+        tail=self.engine.refine(self.request(4.74))['candidates'][0]
+        self.assertEqual(tail['text'],'');self.assertTrue(successful_coverage(tail))
+        self.assertEqual(tail['context_evidence']['reference_text'],reference)
+        self.assertEqual(tail['context_evidence']['extended_text'],extended)
+        self.response([reference,"Bring it to the library before seven o'clock."])
+        changed=self.engine.refine(self.request(4.74))['candidates'][0]
+        self.assertFalse(successful_coverage(changed));self.assertNotIn('context_evidence',changed)
     def test_language_epoch_prevents_context_crossing(self):
         self.engine.inbox.latest_epoch=1
         self.models.batch_turns.return_value=[{'start':0,'end':3,'speaker':'speaker_0'}]

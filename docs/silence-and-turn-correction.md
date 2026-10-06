@@ -82,6 +82,17 @@ erase previous words. No amplitude or no-speech threshold was broadened for the
 longer noise control. Two additional independent quiet/brief recipes are frozen
 before synthesis; their failures must remain failures.
 
+The next actual run retained both unseen quiet controls and removed the added
+"you", but its same-origin tail comparison remained unresolved when Cohere
+rendered the identical prefix as "6 o'clock" versus "six o'clock". Prefix matching
+now permits isolated single-token English cardinals (zero through nineteen and
+the decade tens) to match their canonical unsigned digits. Original strings and
+positions remain unchanged. Changed values cannot use unfinished-word fuzzy
+matching; leading-zero identifiers, decimals, ordinals, compound numbers,
+signed/date/range forms remain literal and unresolved when spellings differ.
+Real appended numbers and repeated phrases remain suffix words. This conservative
+orthography comparison does not claim numeric extraction or semantic paraphrase.
+
 The exact signed packaged gate is described in [core-acceptance.md](core-acceptance.md).
 No microphone/system capture or user recording was used for this investigation.
 CPU/browser tests prove routing, ownership and reading behavior; they do not

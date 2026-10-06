@@ -246,6 +246,11 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
             'coverage_gaps':{s['id']:uncovered_samples(s,proposed) for s in blocked}}
 
 
+SINGLE_CARDINAL_WORDS = dict(zip(
+    'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(),
+    range(20)))
+SINGLE_CARDINAL_WORDS.update(dict(zip('twenty thirty forty fifty sixty seventy eighty ninety'.split(),range(20,100,10))))
+
 def split_same_origin(previous_text, extended_text):
     """Split a growing decode by matching its SAME audio-origin text prefix.
 
@@ -260,15 +265,47 @@ def split_same_origin(previous_text, extended_text):
     if not previous or not extended:return None
     old = [m.group().casefold() for m in previous]
     new = [m.group().casefold() for m in extended]
+    def cardinal(token):
+        if token in SINGLE_CARDINAL_WORDS:return SINGLE_CARDINAL_WORDS[token]
+        # Leading-zero identifiers and non-ASCII/compound number forms retain
+        # literal spelling. This is not a general numeric text normalizer.
+        if len(token)<=2 and re.fullmatch(r'0|[1-9][0-9]*',token) and int(token) in SINGLE_CARDINAL_WORDS.values():return int(token)
+        return None
+    def isolated(matches,index,text):
+        match=matches[index];before=text[:match.start()];after=text[match.end():]
+        if before and before[-1] in '.+-−–—/:':return False
+        if after and after[0] in '+-−–—/:':return False
+        if len(after)>1 and after[0] in '.,' and after[1].isalnum():return False
+        token=match.group().casefold()
+        following=matches[index+1].group().casefold() if index+1<len(matches) else None
+        preceding=matches[index-1].group().casefold() if index else None
+        if following in ('/','+','-','−','–','—',':') or preceding in ('/','+','-','−','–','—',':'):return False
+        # Do not split a changed compound value into a prefix plus a new word.
+        if following in ('point','hundred','thousand','dozen','score','gross') or (following and re.fullmatch(r'[a-z]+illion',following)):return False
+        if following=='and' and index+3<len(matches):
+            fraction=matches[index+3].group().casefold()
+            if fraction in ('half','halves','quarter','quarters'):return False
+        value=cardinal(token)
+        if value in range(20,100,10) and cardinal(following or '') in range(1,10):return False
+        if value in range(1,10) and cardinal(preceding or '') in range(20,100,10):return False
+        return True
+    def equivalent(index):
+        if old[index]==new[index]:return True
+        first,second=cardinal(old[index]),cardinal(new[index])
+        return (first is not None and first==second and old[index].isascii() and new[index].isascii()
+                and old[index].isdigit()!=new[index].isdigit()
+                and isolated(previous,index,previous_text) and isolated(extended,index,extended_text))
     lexical=next((i for i in range(len(old)-1,-1,-1) if re.search(r'\w',old[i])),None)
     if lexical is None:return None
     punctuation=old[lexical+1:];old=old[:lexical+1]
     same = 0
-    while same < min(len(old),len(new)) and old[same] == new[same]:same += 1
+    while same < min(len(old),len(new)) and equivalent(same):same += 1
     cut = same
     if same < len(old):
         # Only the unfinished last lexical token may be expanded/corrected.
         if (same != len(old)-1 or same >= len(new)
+                or old[same] in SINGLE_CARDINAL_WORDS or new[same] in SINGLE_CARDINAL_WORDS
+                or any(c.isdigit() for c in old[same]+new[same])
                 or len(old[same]) < 3 or old[same][:3] != new[same][:3]
                 or difflib.SequenceMatcher(None,old[same],new[same]).ratio() < .5):return None
         cut += 1
