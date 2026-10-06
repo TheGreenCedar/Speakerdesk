@@ -450,6 +450,32 @@ class LanguageAppTests(unittest.TestCase):
                 app.extensions['speakerdesk']['meetings'].close()
                 app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
 
+    def test_setup_verifies_non_safetensors_alignment_files_and_model_config_path(self):
+        from pipeline import model_config
+        # Fabricated tiny artifacts exercise the ONNX setup contract, no models.
+        root=self.root/'alignment-models';checkpoint=root/'coarse-alignment';checkpoint.mkdir(parents=True)
+        weights=checkpoint/'model.int8.onnx';tokens=checkpoint/'tokens.txt'
+        weights.write_bytes(b'yes');tokens.write_bytes(b'tokens')
+        spec={'name':'Transcript alignment','directory':'coarse-alignment','weight_file':'model.int8.onnx',
+              'bytes':3,'files':['model.int8.onnx','tokens.txt'],
+              'file_sha256':{'model.int8.onnx':hashlib.sha256(b'yes').hexdigest(),
+                             'tokens.txt':hashlib.sha256(b'tokens').hexdigest()}}
+        with patch('model_setup.SPECS',[spec]),patch.dict('os.environ',{'SPEAKERDESK_MODELS':str(root)}):
+            app=create_app(self.root/'alignment-setup-test')
+            try:
+                client=app.test_client()
+                self.assertTrue(client.get('/api/setup').json['core_ready'])
+                self.assertEqual(model_config()['alignment_path'],str(checkpoint))
+                weights.write_bytes(b'bad')
+                self.assertFalse(client.get('/api/setup').json['core_ready'])
+                weights.write_bytes(b'yes');tokens.write_bytes(b'broken')
+                self.assertFalse(client.get('/api/setup').json['core_ready'])
+                tokens.unlink()
+                self.assertFalse(client.get('/api/setup').json['core_ready'])
+            finally:
+                app.extensions['speakerdesk']['meetings'].close()
+                app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
+
     def test_language_metadata_and_blank_review_passage_survive_editor_export_and_restart(self):
         jid='f'*32
         folder=self.root/jid;folder.mkdir();(folder/'audio.wav').write_bytes(b'retained audio')

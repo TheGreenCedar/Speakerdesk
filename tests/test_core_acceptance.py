@@ -21,7 +21,8 @@ import packaged_replay
 class CoreAcceptanceTests(unittest.TestCase):
     def test_discovery_includes_mandatory_speech_checkpoint_and_metadata(self):
         pins=core.models(self.root);files=core.model_file_pins(self.root)
-        self.assertEqual(set(pins),{'nemotron','cohere-speech','whisper-language','silero-speech'})
+        self.assertEqual(set(pins),{'nemotron','cohere-speech','whisper-language','silero-speech','coarse-alignment'})
+        self.assertEqual(files['coarse-alignment']['model.int8.onnx'],pins['coarse-alignment']['sha256'])
         self.assertEqual(files['silero-speech']['model.safetensors'],pins['silero-speech']['sha256'])
         self.assertEqual(set(files['silero-speech']),set(pins['silero-speech']['files']))
         path=self.root/'speakerdesk/model_setup.py'
@@ -29,7 +30,7 @@ class CoreAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Unresolved model identity'):core.models(self.root)
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory();self.base=Path(self.temporary.name);self.root=self.base/'source';self.root.mkdir()
-        paths=list(core.HARNESSES)+['scripts/promote_release.py','speakerdesk/model_setup.py','speakerdesk/language_detection.py','speakerdesk/speech_admission.py','tests/acceptance/recipes.json','tests/acceptance/holdout-recipes.json','tests/acceptance/model-metadata.json']
+        paths=list(core.HARNESSES)+['scripts/promote_release.py','speakerdesk/model_setup.py','speakerdesk/language_detection.py','speakerdesk/speech_admission.py','speakerdesk/alignment_artifact.py','tests/acceptance/recipes.json','tests/acceptance/holdout-recipes.json','tests/acceptance/model-metadata.json']
         for name in paths:
             target=self.root/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(SOURCE/name,target)
         subprocess.run(['git','init','-q',str(self.root)],check=True)

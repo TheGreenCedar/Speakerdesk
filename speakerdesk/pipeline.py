@@ -43,6 +43,7 @@ def model_config():
             'cohere_path':os.getenv('COHERE_MODEL_PATH',str(models/'cohere-speech')),
             'lid_path':os.getenv('LID_MODEL_PATH',str(models/'whisper-language')),
             'speech_path':os.getenv('SPEECH_MODEL_PATH',str(models/'silero-speech')),
+            'alignment_path':os.getenv('ALIGNMENT_MODEL_PATH',str(models/'coarse-alignment')),
             'diar_python':os.getenv('DIAR_PYTHON',str(home/'.venv/bin/python')),
             'asr_python':os.getenv('ASR_PYTHON',str(home/'.venv-asr/bin/python')),
             'diar_kind':'nemotron', 'device':'mlx'}

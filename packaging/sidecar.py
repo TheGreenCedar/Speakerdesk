@@ -12,11 +12,27 @@ if __name__=='__main__':
         import importlib.metadata
         import json
         import platform
+        import importlib.machinery
+        import importlib.util
         import mlx.core as mx
-        versions={name:importlib.metadata.version(name) for name in ('mlx','mlx-audio','mlx-speech')}
+        import onnxruntime as ort
+        ort.disable_telemetry_events()
+        package=importlib.util.find_spec('ctc_segmentation')
+        native=package and importlib.machinery.PathFinder.find_spec(
+            'ctc_segmentation.ctc_segmentation_dyn',package.submodule_search_locations)
+        if native is None or not isinstance(native.loader,importlib.machinery.ExtensionFileLoader):
+            raise ImportError('Bundled precompiled CTC extension unavailable.')
+        extension=importlib.util.module_from_spec(native)
+        native.loader.exec_module(extension)
+        sys.modules[native.name]=extension
+        import ctc_segmentation
+        versions={name:importlib.metadata.version(name) for name in ('mlx','mlx-audio','mlx-speech','onnxruntime','ctc-segmentation')}
+        if versions['onnxruntime']!='1.30.0' or versions['ctc-segmentation']!='1.7.4':
+            raise ImportError('Bundled alignment dependency differs.')
         print(json.dumps({'scope':'capability_only','frozen':bool(getattr(sys,'frozen',False)),
                           'architecture':platform.machine(),'metal_available':bool(mx.metal.is_available()),
-                          'versions':versions,'models_executed':False,'native_capture':False}),flush=True)
+                          'versions':versions,'alignment_native_loaded':True,
+                          'alignment_model_executed':False,'models_executed':False,'native_capture':False}),flush=True)
         sys.exit(0)
     if len(sys.argv)>1 and sys.argv[1]=='--live-worker':
         import json

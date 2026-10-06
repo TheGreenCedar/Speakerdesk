@@ -1,7 +1,8 @@
 """Pinned English coarse CTC envelopes for supplied Cohere text only.
 
-Optional until the approved runtime/model are packaged. No transcription
-decode, download, native compilation fallback or unverified language policy.
+The managed setup provides pinned model data and the desktop bundles the runtime.
+No transcription decode, download, native compilation fallback or unverified
+language policy occurs here. Unsupported languages remain unresolved.
 """
 import hashlib
 from pathlib import Path

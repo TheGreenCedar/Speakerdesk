@@ -281,7 +281,7 @@ def main(args):
         budget.start();expected_metadata=model_file_pins()
         for directory,spec in pins.items():
             folder=args.models/directory;require(folder.is_dir(),'Cached pinned model missing: '+directory)
-            artifact(folder/'model.safetensors',spec)
+            artifact(folder/spec.get('weight_file','model.safetensors'),spec)
             hashes={name:digest_file(folder/name) for name in spec['files']}
             require(hashes==expected_metadata[directory],'Loaded model/configuration differs: '+directory)
             report['model_files'][directory]=hashes;(home/'models'/directory).symlink_to(folder.resolve(),target_is_directory=True)

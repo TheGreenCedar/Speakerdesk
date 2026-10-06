@@ -10,6 +10,7 @@ from pathlib import Path
 from flask import jsonify
 from language_detection import LID_SPEC
 from speech_admission import SILERO_SPEC
+from alignment_artifact import ALIGNMENT_SPEC
 from voice_setup import VoiceSetup
 
 SPECS=[
@@ -21,6 +22,7 @@ SPECS=[
      'files':['config.json','model.safetensors','generation_config.json','preprocessor_config.json','processor_config.json','special_tokens_map.json','tokenizer.json','tokenizer.model','tokenizer_config.json','README.md']},
     LID_SPEC,
     SILERO_SPEC,
+    ALIGNMENT_SPEC,
 ]
 
 
@@ -49,8 +51,9 @@ def register_setup(app, activate_voice):
 
     def installed(spec):
         folder=root/spec['directory']
+        weight=spec.get('weight_file','model.safetensors')
         return (all((folder/name).is_file() for name in spec['files'])
-                and (folder/'model.safetensors').stat().st_size==spec['bytes']
+                and (folder/weight).stat().st_size==spec['bytes']
                 and all(verified(folder/name,digest)
                         for name,digest in spec.get('file_sha256',{}).items()))
 
@@ -68,10 +71,11 @@ def register_setup(app, activate_voice):
             for spec in SPECS:
                 if installed(spec):finished+=spec['bytes'];continue
                 folder=root/spec['directory'];folder.mkdir(exist_ok=True)
+                weight=spec.get('weight_file','model.safetensors')
                 update(phase=spec['name'])
                 for name in spec['files']:
                     dest=folder/name
-                    if dest.exists() and name!='model.safetensors':
+                    if dest.exists() and name!=weight:
                         expected=spec.get('file_sha256',{}).get(name)
                         if not expected or hashlib.sha256(dest.read_bytes()).hexdigest()==expected:continue
                     partial=folder/(name+'.part')
@@ -84,8 +88,8 @@ def register_setup(app, activate_voice):
                         with partial.open('ab' if offset else 'wb') as output:
                             while block:=response.read(1024**2):
                                 output.write(block);offset+=len(block)
-                                if name=='model.safetensors':update(downloaded_bytes=finished+offset)
-                    if name=='model.safetensors':
+                                if name==weight:update(downloaded_bytes=finished+offset)
+                    if name==weight:
                         update(phase=f'Verifying {spec["name"].lower()}')
                         digest=hashlib.sha256()
                         with partial.open('rb') as content:

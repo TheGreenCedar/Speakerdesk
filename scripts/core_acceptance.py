@@ -33,20 +33,22 @@ def assignment(path,name):
 
 def models(root=ROOT):
     values=assignment(root/'speakerdesk/model_setup.py','SPECS')
-    imported={'LID_SPEC':'language_detection.py','SILERO_SPEC':'speech_admission.py'}
+    imported={'LID_SPEC':'language_detection.py','SILERO_SPEC':'speech_admission.py',
+              'ALIGNMENT_SPEC':'alignment_artifact.py'}
     specs=[]
     for value in values.elts:
         if isinstance(value,ast.Name):
             require(value.id in imported,'Unresolved model identity: '+value.id)
             value=assignment(root/'speakerdesk'/imported[value.id],value.id)
         specs.append(ast.literal_eval(value))
-    return {s['directory']:{k:s[k] for k in ('repo','revision','bytes','sha256','files')} for s in specs}
+    return {s['directory']:{**{k:s[k] for k in ('repo','revision','bytes','sha256','files')},
+                           **({'weight_file':s['weight_file']} if 'weight_file' in s else {})} for s in specs}
 
 def model_file_pins(root=ROOT):
     pinned=json.loads((root/'tests/acceptance/model-metadata.json').read_text())['models'];result={}
     for name,spec in models(root).items():
         require(pinned[name]['repo']==spec['repo'] and pinned[name]['revision']==spec['revision'],'Model metadata revision differs')
-        hashes=dict(pinned[name]['file_sha256']);hashes['model.safetensors']=spec['sha256']
+        hashes=dict(pinned[name]['file_sha256']);hashes[spec.get('weight_file','model.safetensors')]=spec['sha256']
         require(set(hashes)==set(spec['files']),'Model metadata inventory differs')
         result[name]=hashes
     return result
