@@ -74,11 +74,11 @@ class LiveLanguageAPITests(MeetingHarness,unittest.TestCase):
         finally:
             reopened.extensions['speakerdesk']['meetings'].close()
             reopened.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
-        # Meeting-only override does not become a default for the next meeting.
+        # The successful active override is also the new default for the next meeting.
         self.scenario='normal'
         response=self.client.post('/api/meetings',headers=self.headers,json={'sources':['microphone']})
         self.assertEqual(response.status_code,201,response.json)
-        self.assertEqual(response.json['language'],'auto')
+        self.assertEqual(response.json['language'],'fr')  # Last successful mode is the persisted new default.
         self.assertEqual(response.json['language_revision'],0)
         self.control(response.json['id'],'stop');self.wait_for(lambda:self.manager.jid is None)
 

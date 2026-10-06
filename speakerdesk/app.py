@@ -50,6 +50,8 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
 
     with db() as conn:
         conn.execute('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+        from language_preferences import initialize as initialize_preferences
+        initialize_preferences(conn)
         for row in conn.execute('SELECT * FROM jobs').fetchall():
             job=json.loads(row['payload'])
             if job['status'] in ACTIVE:
@@ -67,10 +69,17 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
         if not row:abort(404)
         return json.loads(row['payload'])
 
-    def put(job):
+    def put(job, *, default_language=None):
         job['updated']=time.time()
         with db() as conn:
             conn.execute('INSERT OR REPLACE INTO jobs VALUES (?,?)',(job['id'],json.dumps(job,ensure_ascii=False)))
+            if default_language is not None:
+                from language_preferences import save_default_language
+                save_default_language(conn,default_language)
+
+    def get_default_language():
+        from language_preferences import default_language
+        with lock,db() as conn:return default_language(conn)
 
     def patch(jid,**changes):
         with lock:
@@ -162,12 +171,27 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     @app.get('/api/config')
     def config():
         cfg=model_config();issues=preflight(cfg)
-        return jsonify(languages=LANGUAGE_CHOICES,default_language='auto',readiness={'configured':not issues,'issues':issues,
+        return jsonify(languages=LANGUAGE_CHOICES,default_language=get_default_language(),readiness={'configured':not issues,'issues':issues,
             'automatic_language':not detector_issues(cfg['lid_path']),
             'model':MODELS.get(cfg['diar_kind'],('unknown',0))[0],
             'speaker_limit':MODELS.get(cfg['diar_kind'],('',0))[1],
             'device':cfg['device'],'note':'Model execution is checked when inference starts. Configuration is not proof of working inference.'},
             decoder='FFmpeg' if shutil.which('ffmpeg') else ('macOS AudioToolbox' if shutil.which('afconvert') else 'PCM WAV only'))
+
+    @app.patch('/api/preferences/language')
+    def change_default_language():
+        body=request.get_json()
+        if not isinstance(body,dict):raise ValueError('Choose a supported language mode.')
+        language=body.get('language')
+        from language_preferences import save_default_language
+        with lock:
+            manager=app.extensions['speakerdesk']['meetings']
+            if manager.jid and get(manager.jid)['status'] in LIVE:
+                job=get(manager.jid)
+                changed=manager.change_language(manager.jid,language,body.get('language_revision',job['language_revision']))
+                return jsonify(default_language=changed['default_language'],meeting=changed)
+            with db() as conn:save_default_language(conn,language)
+        return jsonify(default_language=language)
 
     @app.get('/api/jobs')
     def jobs():
@@ -414,7 +438,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     if voice_backend is None and managed_voice.released() and managed_voice.supported() and managed_voice.installed():
         try:activate_voice(managed_voice.root,managed_voice.calibration_path)
         except (ValueError,OSError,KeyError,TypeError) as exc:app.logger.warning('Managed voice setup is unavailable: %s',exc)
-    register_meetings(app,get,put,patch,folder,lock,inference_busy,recognizer)
+    register_meetings(app,get,put,patch,folder,lock,inference_busy,recognizer,default_language=get_default_language)
     return app
 
 

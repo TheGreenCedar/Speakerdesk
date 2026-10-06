@@ -85,11 +85,12 @@ class SourceMixer:
 
 
 class MeetingManager:
-    def __init__(self, get, put, patch, folder, lock, inference_busy, recognizer=None):
+    def __init__(self, get, put, patch, folder, lock, inference_busy, recognizer=None, *, default_language=None):
         self.get, self.put, self.patch, self.folder = get, put, patch, folder
         self.lock = lock
         self.inference_busy = inference_busy
         self.recognizer = recognizer
+        self.default_language=default_language or (lambda:'auto')
         self.jid = None
         self.capture = self.worker = None
         self.packets = queue.Queue(maxsize=120)  # At most30s audio; recording itself remains independent.
@@ -135,7 +136,9 @@ class MeetingManager:
             if job['status'] not in ('recording','paused') or self.stopped.is_set() or not self.worker or self.worker.poll() is not None:
                 abort(409,description='Language can change while recording or paused.')
             if revision!=job['language_revision']:abort(409,description='The live language changed in another window. Try again with its current setting.')
-            if language==job['language']:return job
+            if language==job['language']:
+                self.put(job,default_language=language)
+                return {**job,'default_language':language}
             issues=preflight(model_config(),language)
             if issues:abort(409,description=' '.join(issues))
             if self.packets.full():abort(429,description='Live transcription is catching up. Try changing language again shortly.')
@@ -150,11 +153,11 @@ class MeetingManager:
             plan.state['completed_sample']=max(plan.state['completed_sample'],epoch['start_sample'])
             if not paused:plan.resume()
             job['rolling_refinement']=plan.snapshot();job.pop('rolling_inflight',None)
-            self.put(job)  # One transaction before either producer observes the boundary.
+            self.put(job,default_language=language)  # Job and preference commit before either producer observes the boundary.
             self.active_language=language;self.active_epoch=revision+1
             self.packets.put_nowait({'type':'language','generation':revision+1,'language_epoch':revision+1,
                                     'language':language,'start_sample':epoch['start_sample']})
-            return job
+            return {**job,'default_language':language}
 
     def start(self, name, language, sources):
         with self.lock:
@@ -185,7 +188,7 @@ class MeetingManager:
                        'warnings':['Phrase boundaries may cut words. Overlapping speech needs review.'] +
                            (['Uncertain language uses recent established context or a marked supported-language guess when available. Choose the meeting language if Auto has no supported context. Original audio is preserved.'] if language=='auto' else [])}}
             self.refinement.initialize(job)
-            try:self.put(job)
+            try:self.put(job,default_language=language)
             except Exception:
                 dest.rmdir()
                 raise
@@ -599,8 +602,8 @@ def append_finalized_segment(document, result):
     document['segments'].append(result['segment'])
 
 
-def register_meetings(app, get, put, patch, folder, lock, inference_busy, recognizer=None):
-    manager=MeetingManager(get,put,patch,folder,lock,inference_busy,recognizer)
+def register_meetings(app, get, put, patch, folder, lock, inference_busy, recognizer=None, *, default_language=None):
+    manager=MeetingManager(get,put,patch,folder,lock,inference_busy,recognizer,default_language=default_language)
     app.extensions['speakerdesk']['meetings']=manager
     @app.get('/api/meeting')
     def meeting_status():return jsonify(manager.status())
@@ -609,7 +612,7 @@ def register_meetings(app, get, put, patch, folder, lock, inference_busy, recogn
         body=request.get_json();sources=body.get('sources')
         if not isinstance(sources,list) or any(not isinstance(s,str) for s in sources) or len(sources)!=len(set(sources)):
             raise ValueError('Select valid meeting audio sources.')
-        return jsonify(manager.start(body.get('name','Meeting'),body.get('language','auto'),sources)),201
+        return jsonify(manager.start(body.get('name','Meeting'),body.get('language',manager.default_language()),sources)),201
     @app.post('/api/meetings/<jid>/<action>')
     def control_meeting(jid,action):
         if action not in ('pause','resume','stop'):abort(404)
