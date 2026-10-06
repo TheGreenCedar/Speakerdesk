@@ -26,7 +26,7 @@ def read_audio(path, start, end):
         if end > source.getnframes():raise ValueError('Requested audio is not yet saved.')
         source.setpos(start);data=source.readframes(end-start)
     if len(data)!=(end-start)*2:raise ValueError('Incomplete saved audio.')
-    return np.frombuffer(data,dtype='<i2').astype('float32')/32767
+    return np.frombuffer(data,dtype='<i2').astype('float32')/32768
 
 
 class Inbox:

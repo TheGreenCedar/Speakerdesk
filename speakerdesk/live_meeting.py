@@ -13,6 +13,7 @@ import uuid
 import wave
 from pathlib import Path
 from flask import abort, jsonify, request
+from audio import pcm16_bytes
 from pipeline import model_config, preflight
 from language_detection import LANGUAGE_CHOICES, LID_CHECKPOINT
 from meeting_refinement import RefinementController
@@ -347,9 +348,9 @@ class MeetingManager:
             def sink(mixed, separate):
                 with self.lock:
                     start_sample=wav.getnframes()
-                    wav.writeframes((mixed*32767).astype('<i2').tobytes())
+                    wav.writeframes(pcm16_bytes(mixed))
                     audio.flush()  # Finalized voice clips must already be readable by the identity worker.
-                    for source,track in tracks.items():track.writeframes((np.clip(separate[source],-1,1)*32767).astype('<i2').tobytes())
+                    for source,track in tracks.items():track.writeframes(pcm16_bytes(separate[source]))
                     self.duration=wav.getnframes()/RATE
                     if not failure:
                         mode,epoch=self.active_language,self.active_epoch

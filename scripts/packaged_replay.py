@@ -232,8 +232,8 @@ def case_run(recipe,all_recipes,backend,home,directory,budget):
         final=budget.wait(lambda:get() if get().get('refinement_status') in ('complete','unresolved') and backend.api('/api/meeting')['status']=='idle' else None,70)
     with wave.open(str(home/'recordings'/jid/'audio.wav'),'rb') as recorded:
         recorded_frames=recorded.getnframes();saved_pcm=recorded.readframes(recorded_frames)
-    # Production mixer receives PCM16/32768 as float32, then truncates x*32767.
-    # Recompute that exact transport conversion; equal frame count is insufficient.
+    # Production mixer receives exactly representable PCM16/32768 as float32.
+    # Check every saved PCM byte; equal frame count is insufficient.
     expected_pcm=transport_pcm(directory/'replay.wav')
     trace={'job_id':jid,'input_frames':frames,'slice_start_sample':start_sample,'synthesis':json.loads((directory/'synthesis.json').read_text()),'provisional':document_slice(provisional,start_sample),
            'refined':document_slice(final,start_sample),'edit':edit,'preceding':preceding,

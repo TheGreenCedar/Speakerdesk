@@ -75,9 +75,10 @@ def words(text):
 def transport_pcm(path):
     with wave.open(str(path),'rb') as stream:
         require((stream.getnchannels(),stream.getsampwidth(),stream.getframerate())==(1,2,16000),'Invalid replay PCM')
-        samples=array.array('h',stream.readframes(stream.getnframes()))
-    if sys.byteorder!='little':samples.byteswap()
-    return b''.join(struct.pack('<h',int(sample*32767/32768)) for sample in samples)
+        # Replay emits exactly representable PCM16/32768 float32. The capture
+        # writer now rounds the inverse and saturates; every source PCM16 bit
+        # survives. Keep the original0.5.1 evaluator/results unchanged elsewhere.
+        return stream.readframes(stream.getnframes())
 
 def established_context(observed,boundary_sample):
     # Pure production reconciliation policy: no app, model, or MLX import.
