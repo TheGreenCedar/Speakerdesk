@@ -13,7 +13,8 @@ function acceptIdentityJob(result) {
   setStatus(); renderEditor();
 }
 async function identityAction(action) {
-  if (saving || identityBusy || dirty) throw new Error('Save transcript edits before naming a speaker.');
+  if (identityBusy) throw new Error('Wait for the name change to finish.');
+  if (dirty || saving) await flushSave();
   identityBusy = true; $('editor').inert = true; updateNameControls();
   try { return await action(); }
   finally { identityBusy = false; $('editor').inert = false; updateNameControls(); }
@@ -56,12 +57,13 @@ function renderPeople() {
 }
 function personOptions(current = '') {
   $('name-person').replaceChildren();
-  const local = node('option', 'This meeting only'); local.value = ''; $('name-person').append(local);
+  const local = node('option', 'Not linked · this meeting only'); local.value = ''; $('name-person').append(local);
   people.forEach(person => { const option = node('option', person.name); option.value = person.id; $('name-person').append(option); });
   $('name-person').value = current;
 }
 async function openNamePicker(track) {
-  if (saving || identityBusy || dirty) throw new Error('Save transcript edits before naming a speaker.');
+  if (identityBusy) throw new Error('Wait for the name change to finish.');
+  if (dirty || saving) await flushSave();
   const jid = selected.id, generation = ++nameOpenGeneration;
   await loadPeople();
   if (generation !== nameOpenGeneration || selected?.id !== jid || !doc?.speakers[track] || dirty || identityBusy) return;
@@ -69,7 +71,7 @@ async function openNamePicker(track) {
   const assignment=selected.speaker_assignments?.[track];
   const assigned = assignment?.person_id || '';
   personOptions(assigned); $('name-value').value = doc.speakers[track];
-  $('name-title').textContent = 'Name & remember voice';
+  $('name-title').textContent = 'Name speaker';
   $('name-message').textContent = ''; $('voice-consent').checked = false;
   nameClipState = null; $('voice-clip-list').replaceChildren(); $('voice-excluded-list').replaceChildren();
   $('voice-preview').pause(); $('voice-preview').removeAttribute('src'); $('voice-preview').hidden = true;
