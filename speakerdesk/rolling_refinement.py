@@ -37,7 +37,7 @@ def intersects(first, second):
 def uncovered_samples(segment, candidates):
     """Exact candidate coverage gaps; no tolerance or word alignment."""
     a,b=bounds(segment);cursor=a;gaps=[]
-    for start,end in sorted(bounds(s) for s in candidates if s['text'].strip() and not s.get('transcription_review')):
+    for start,end in sorted(bounds(s) for s in candidates if successful_coverage(s)):
         if end<=cursor or start>=b:continue
         if start>cursor:gaps.append({'start_sample':cursor,'end_sample':min(start,b)})
         cursor=max(cursor,min(end,b))
@@ -140,6 +140,21 @@ def segment_version(segment):
     return hashlib.sha256(json.dumps(value,sort_keys=True).encode()).hexdigest()
 
 
+def successful_non_speech(row):
+    """Independent successful audio admission, never empty/failed ASR alone."""
+    if row.get('text','').strip() or row.get('transcription_review'):return False
+    state=row.get('audio_state');evidence=row.get('acoustic_evidence') or {}
+    if state=='digital_silence':return True
+    if state=='constant_signal':
+        return evidence.get('source')=='pcm_constant' and type(evidence.get('sample_count')) is int and evidence['sample_count']>=320 and isinstance(evidence.get('constant_value'),(int,float)) and math.isfinite(evidence['constant_value'])
+    if state=='model_non_speech':
+        value=evidence.get('no_speech_probability')
+        return evidence.get('source')=='whisper_sot' and isinstance(value,(int,float)) and math.isfinite(value) and .95<=value<=1
+    return False
+
+def successful_coverage(row):
+    return (bool(row.get('text','').strip()) or successful_non_speech(row)) and not row.get('transcription_review')
+
 def reconcile_window(document, window, expected, candidates, speakers=None):
     """Return a new document plus the previous window revision, without mutating inputs.
 
@@ -167,8 +182,7 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
                or not owned[0] <= bounds(s)[0] < bounds(s)[1] <= owned[1]]
     # A failed/blank/incomplete candidate does not discard previous usable words.
     def covers(old, replacements):
-        replacements = [s for s in replacements if intersects(bounds(s),bounds(old)) and s['text'].strip()
-                        and not s.get('transcription_review')]
+        replacements = [s for s in replacements if intersects(bounds(s),bounds(old)) and successful_coverage(s)]
         intervals = sorted(bounds(s) for s in replacements)
         cursor = bounds(old)[0]
         for start,end in intervals:
@@ -199,7 +213,7 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
         if sid in used or (not old and sid in old_ids):raise ValueError('Refinement ID collision.')
         fast = window.get('kind') == 'fast_tail'
         candidate.update(id=sid,machine_revision=(old.get('machine_revision',0)+1 if old else 1),
-                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if (candidate['text'].strip() or candidate.get('audio_state')=='digital_silence') and not candidate.get('transcription_review') else 'unresolved'),
+                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if (candidate['text'].strip() or successful_non_speech(candidate)) and not candidate.get('transcription_review') else 'unresolved'),
                          refinement_window=window['id'],finalized=bool(candidate.get('finalized')) if fast else True)
         candidate['audio_anchor'] = (copy.deepcopy(old.get('audio_anchor')) if old and bounds(old)==bounds(candidate) and old.get('audio_anchor')
                                      else {'start_sample':bounds(candidate)[0],'end_sample':bounds(candidate)[1]})

@@ -37,8 +37,31 @@ verbose explanations. Explicit Details retains confidence, language decisions,
 original timing, uncovered audio and review controls. Playback/editing remain
 available. JSON evidence and text export warning semantics are unchanged.
 
-Actual-model silence/quiet controls and admission design remain pending a fresh
-shared-resource window. No phrase blacklist or amplitude-only quiet-speech
-cutoff is implemented. No microphone/system capture or user recording was used
-for this investigation. CPU/browser tests prove routing, ownership and reading
-behavior; they do not establish natural-room recognition accuracy.
+Actual cached models reproduced the released failure on synthetic controls:
+Cohere produced “Thank you.” on a constant one-LSB signal and named stationary
+noise. NVIDIA returned no speaker activity for those controls. Quiet speech,
+a 250ms speech fragment and genuinely spoken repeated thanks remained usable.
+Those measurements diagnose the released source route; they are not validation
+of this corrective candidate or proof of a natural meeting's accuracy.
+
+The candidate rejects physically constant PCM independently of its amplitude.
+Changing quiet PCM is not removed by a loudness threshold. The existing pinned
+Whisper SOT no-speech threshold of .95 is checked before Cohere for all speaker
+labels and manual/automatic routes when the local detector is available.
+Unavailable, failed, invalid or inconclusive detector output still permits ASR;
+it cannot authorize erasing words. Manual mode without the optional detector
+retains that limitation. The widened use of .95 requires actual candidate
+quiet/brief/holdout controls before release; baseline measurements do not prove
+its recall or general noise robustness.
+
+Fully covered successful non-speech candidates may replace unprotected machine
+words while retaining their previous revision. Protected edits, changed revisions,
+missing coverage and failed/empty/truncated ASR do not qualify. Coverage reporting
+uses the same predicate as reconciliation. Blank cap output owns only its core,
+with original acoustic observation bounds kept separately. No phrase blacklist
+is used. JSON evidence and saved audio remain available for diagnosis.
+
+The exact signed packaged gate is described in [core-acceptance.md](core-acceptance.md).
+No microphone/system capture or user recording was used for this investigation.
+CPU/browser tests prove routing, ownership and reading behavior; they do not
+establish acoustic accuracy or satisfy the packaged gate.

@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock,patch
 import wave
 import numpy as np
+from pcm_peer import varying_pcm
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from language_detection import SpeechTranscriber
 from live_refinement import Engine, Inbox, context_regions
@@ -38,11 +39,11 @@ class CoverageTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.path=Path(self.temp.name)/'audio.wav'
         with wave.open(str(self.path),'wb') as f:
-            f.setparams((1,2,RATE,0,'NONE','not compressed'));f.writeframes(b'\x01\x00'*90*RATE)
+            f.setparams((1,2,RATE,0,'NONE','not compressed'));f.writeframes(b'\x01\x00\xff\xff'*(90*RATE//2))
         self.models=RoutingModels();self.events=[];self.engine=Engine({'audio_path':str(self.path),'language':'auto'},self.models,self.events.append,Inbox())
     def tearDown(self):self.temp.cleanup()
     def decode(self,start=0,epoch=0,language='auto',names=()):
-        return self.engine.decode(np.full(RATE,1/32767,dtype=np.float32),language,names,start,epoch,overlap=len(names)>1)
+        return self.engine.decode(varying_pcm(RATE,1/32767,dtype=np.float32),language,names,start,epoch,overlap=len(names)>1)
     def test_coverage_includes_pauses_and_missing_speakers_without_assigning_their_words(self):
         turns=[{'start':1,'end':2,'speaker':'speaker_0'},{'start':3,'end':4,'speaker':'speaker_1'}]
         self.assertEqual(speech_crops(turns,coverage=(0,5)),[

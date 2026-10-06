@@ -118,6 +118,7 @@ def coalesce_blanks(rows):
     for row in rows:
         reason=(row.get('language_detection') or {}).get('reason')
         if (result and not row['text'].strip() and not result[-1]['text'].strip()
+                and not row.get('acoustic_evidence') and not result[-1].get('acoustic_evidence')
                 and not row.get('activity_regions') and not result[-1].get('activity_regions')
                 and not (row.get('language_detection') or {}).get('probes')
                 and not (result[-1].get('language_detection') or {}).get('probes')
@@ -332,8 +333,22 @@ class Engine:
                 row.update(finalized=settled,voice_eligible=settled and len(names)==1 and not row.get('audio_state') and not region.get('activity_regions'))
                 if region.get('activity_regions'):row['activity_regions']=copy.deepcopy(region['activity_regions'])
             if decode_end>end:
-                if rows and all(s.get('audio_state')=='digital_silence' for s in rows):
-                    self.publish(start,decode_end,rows,names);self.cursor=end;self.last_decode=end;self.carry=None
+                from rolling_refinement import successful_non_speech
+                if rows and all(successful_non_speech(s) for s in rows):
+                    # Blank audio needs no word alignment. Keep ownership within
+                    # this core; contextual observation bounds remain explicit.
+                    owned=[]
+                    for row in rows:
+                        if row['start']>=end:continue
+                        observation={'start_sample':round(row['start']*RATE),'end_sample':round(row['end']*RATE)}
+                        row=copy.deepcopy(row);row['end']=min(row['end'],end)
+                        row['source_end']=min(row.get('source_end',row['end']),end)
+                        row.setdefault('acoustic_evidence',{})['observation_bounds']=observation
+                        if row.get('activity_regions'):
+                            row['activity_regions']=[{**part,'start':max(part['start'],row['start']),'end':min(part['end'],row['end'])}
+                                for part in row['activity_regions'] if part['start']<row['end'] and part['end']>row['start']]
+                        owned.append(row)
+                    self.publish(start,end,owned,names);self.cursor=end;self.last_decode=end;self.carry=None
                     continue
                 previous=[s for s in self.document['segments'] if s['start']>=start and s['end']<=end]
                 if not previous:

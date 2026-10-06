@@ -8,6 +8,16 @@ APP_ROOT=Path(sys._MEIPASS) if getattr(sys,'frozen',False) else Path(__file__).r
 sys.path.insert(0,str(APP_ROOT))
 
 if __name__=='__main__':
+    if len(sys.argv)>1 and sys.argv[1]=='--model-capability':
+        import importlib.metadata
+        import json
+        import platform
+        import mlx.core as mx
+        versions={name:importlib.metadata.version(name) for name in ('mlx','mlx-audio','mlx-speech')}
+        print(json.dumps({'scope':'capability_only','frozen':bool(getattr(sys,'frozen',False)),
+                          'architecture':platform.machine(),'metal_available':bool(mx.metal.is_available()),
+                          'versions':versions,'models_executed':False,'native_capture':False}),flush=True)
+        sys.exit(0)
     if len(sys.argv)>1 and sys.argv[1]=='--live-worker':
         import json
         from live_worker import run, emit

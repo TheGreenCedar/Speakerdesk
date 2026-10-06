@@ -9,6 +9,10 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
 required = {'packaging/overrides/mlx_audio/vad/models/__init__.py',
+            'scripts/promote_release.py', 'scripts/core_acceptance.py',
+            'scripts/packaged_replay.py', 'scripts/replay_capture.py', 'scripts/acceptance_fixtures.py',
+            'tests/acceptance/recipes.json', 'tests/acceptance/holdout-recipes.json',
+            'tests/acceptance/model-metadata.json',
             'packaging/runtime.spec', 'packaging/sidecar.py',
             'packaging/THIRD_PARTY_NOTICES.txt', 'desktop/capture/MeetingCapture.swift',
             'desktop/capture/Info.plist', 'desktop/src-tauri/icons/icon.icns',

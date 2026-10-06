@@ -7,6 +7,7 @@ import wave
 from pathlib import Path
 from unittest.mock import Mock
 import numpy as np
+from pcm_peer import varying_pcm
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from language_detection import SpeechTranscriber
 from live_refinement import Engine,Inbox
@@ -28,48 +29,53 @@ class AcousticTests(unittest.TestCase):
             for samples in (78,159,160,319):
                 with self.subTest(mode=mode,samples=samples):
                     asr=self.model();detector=Mock()
-                    row=SpeechTranscriber(asr,mode,detector=detector).transcribe(np.ones(samples),RATE,('speaker_0',))[0]
+                    row=SpeechTranscriber(asr,mode,detector=detector).transcribe(varying_pcm(samples),RATE,('speaker_0',))[0]
                     asr.transcribe.assert_not_called();detector.detect.assert_not_called()
                     self.assertEqual(row['text'],'');self.assertEqual(row['audio_state'],'insufficient_acoustic_context')
                     self.assertTrue(row['review']);self.assertEqual(row['end'],samples/RATE)
-    def test_valid_short_candidate_is_recoverable_and_truncation_is_preserved(self):
+    def test_valid_short_speech_and_truncation_are_preserved(self):
         for tokens in (1,448):
             asr=self.model('Okay.',tokens)
-            row=SpeechTranscriber(asr,'en',detector=Evidence()).transcribe(np.ones(658),RATE,('speaker_0',))[0]
+            detector=type('SpeechEvidence',(Evidence,),{'no_speech_probability':lambda self,audio:.1})()
+            row=SpeechTranscriber(asr,'en',detector=detector).transcribe(varying_pcm(658),RATE,('speaker_0',))[0]
             asr.transcribe.assert_called_once()
-            self.assertEqual(row['text'],'');self.assertEqual(row['transcription_review']['candidate_text'],'Okay.')
+            self.assertEqual(row['text'],'Okay.')
             self.assertEqual(row['transcription_review']['partial_text'],tokens==448)
             self.assertTrue(row['review'])
             row.update(speaker='speaker_0',speaker_candidates=['speaker_0'],finalized=True)
             self.assertFalse(speaker_audio_eligible(row,'speaker_0'))
-            self.assertNotIn('Okay.',export({'speakers':{'speaker_0':'One'},'segments':[row]},'txt')[0])
+            self.assertIn('Okay.',export({'speakers':{'speaker_0':'One'},'segments':[row]},'txt')[0])
             self.assertIn('Okay.',export({'speakers':{'speaker_0':'One'},'segments':[row]},'json')[0])
-    def test_quiet_real_short_control_reaches_asr_without_amplitude_cutoff(self):
+    def test_toy_quiet_short_control_reaches_asr_without_amplitude_cutoff(self):
         asr=self.model('the blue')
-        row=SpeechTranscriber(asr,'en').transcribe(np.full(4000,1/32768),RATE,('speaker_0',))[0]
+        row=SpeechTranscriber(asr,'en').transcribe(varying_pcm(4000,1/32768),RATE,('speaker_0',))[0]
         self.assertEqual(row['text'],'the blue');asr.transcribe.assert_called_once()
         self.assertNotIn('transcription_review',row)
-    def test_no_speech_score_with_missing_speaker_demotes_instead_of_erasing_candidate(self):
+    def test_no_speech_score_gates_cohere_before_decode_for_all_names_and_modes(self):
+      for names in ((),('speaker_0',)):
         for mode in ('auto','en'):
             asr=self.model('Thank you.')
-            row=SpeechTranscriber(asr,mode,detector=Evidence()).transcribe(np.full(RATE,.0001),RATE,())[0]
-            asr.transcribe.assert_called_once();self.assertEqual(row['text'],'')
-            self.assertEqual(row['transcription_review']['candidate_text'],'Thank you.')
+            row=SpeechTranscriber(asr,mode,detector=Evidence()).transcribe(varying_pcm(RATE,.0001),RATE,names)[0]
+            asr.transcribe.assert_not_called();self.assertEqual(row['text'],'')
+            self.assertNotIn('transcription_review',row)
             self.assertEqual(row['acoustic_evidence']['no_speech_probability'],.96)
-            self.assertTrue(row['review']);self.assertEqual(row['audio_state'],'possible_non_speech')
-    def test_independent_acoustic_warning_does_not_gate_named_speech_or_language(self):
-        row=SpeechTranscriber(self.model('Real words'),'auto',detector=Evidence()).transcribe(np.ones(RATE),RATE,('speaker_0',))[0]
-        self.assertEqual(row['text'],'Real words');self.assertEqual(row['language'],'en')
+            self.assertTrue(row['review']);self.assertEqual(row['audio_state'],'model_non_speech')
+    def test_constant_signal_has_no_acoustic_information_at_any_level(self):
+        for value in (1/32768,.2,-.4):
+            asr=self.model();detector=Mock()
+            row=SpeechTranscriber(asr,'auto',detector=detector).transcribe(np.full(RATE,value),RATE,('speaker_0',))[0]
+            asr.transcribe.assert_not_called();detector.detect.assert_not_called()
+            self.assertEqual(row['audio_state'],'constant_signal')
     def test_brief_intelligible_words_remain_visible_without_independent_no_speech_evidence(self):
         for detector in (None,type('SpeechEvidence',(Evidence,),{'no_speech_probability':lambda self,audio:.1})()):
-            row=SpeechTranscriber(self.model('Yes.'),'en',detector=detector).transcribe(np.ones(1600),RATE,('speaker_0',))[0]
+            row=SpeechTranscriber(self.model('Yes.'),'en',detector=detector).transcribe(varying_pcm(1600),RATE,('speaker_0',))[0]
             self.assertEqual(row['text'],'Yes.');self.assertTrue(row['review'])
             self.assertNotIn('candidate_text',row['transcription_review'])
             self.assertIn('Yes.',export({'speakers':{'speaker_0':'One'},'segments':[{**row,'speaker':'speaker_0'}]},'txt')[0])
     def test_language_abstention_and_prior_context_do_not_hide_brief_words(self):
         detector=Mock();detector.detect.return_value={'en':.6,'fr':.4}
         row=SpeechTranscriber(self.model('Yes.'),'auto',detector=detector,
-            context={'language':'en','end_sample':0}).transcribe(np.ones(1600)*.00001,RATE,(),start_sample=0)[0]
+            context={'language':'en','end_sample':0}).transcribe(varying_pcm(1600)*.00001,RATE,(),start_sample=0)[0]
         self.assertEqual(row['text'],'Yes.');self.assertEqual(row['language_detection']['reason'],'recent_context')
         self.assertNotIn('candidate_text',row['transcription_review'])
 

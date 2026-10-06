@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "purpose": "Freeze metadata from previously approved pinned local checkpoint snapshots before acceptance; checkpoint weights remain bound by production SPECS.",
+  "models": {
+    "nemotron": {
+      "repo": "mlx-community/Nemotron-3-Diarization",
+      "revision": "59ed2dbfc1346dcea9d423c71306a3a2499c568f",
+      "file_sha256": {
+        "config.json": "f215091252bc54f8dcc7d682962a659e03a6bcb26d1c86e4728b8c6730130eb4",
+        "README.md": "d1b1fbd0f419306e2de500e1e1884aff0a90d8cc0b9422152c18929d903e44e9"
+      }
+    },
+    "cohere-speech": {
+      "repo": "spokedotso/cohere-transcribe-03-2026-mlx-4bit",
+      "revision": "064e51eab6db47066cbeaa85e2894b5691bd8d12",
+      "file_sha256": {
+        "config.json": "c9f2934c33c22014a339d2451493c72f2fddff289ca83c62cd07c6502fcc092d",
+        "generation_config.json": "a4837377b5696b1d04033536f25a6d0a11d5e613c6d7d75bf20ffc463ae642c6",
+        "preprocessor_config.json": "9f297d330646ecc8ebb9dc5784f48b7c35b118c913e306a1ccd0192f2c976332",
+        "processor_config.json": "d5eff85971bab7f42480856f8fb397d8dd966858d67049def99aa8a665aa87d5",
+        "special_tokens_map.json": "1814ce01458ff6a72b04a6618e75f18ce627be4dc17619cd3a7cd7f71e137f0f",
+        "tokenizer.json": "780ccca2de2ccd289971b1fb7d4f0b5ec2dc908872f6e350181c7eba9db3fa9f",
+        "tokenizer.model": "6d21e6a83b2d0d3e1241a7817e4bef8eb63bcb7cfe4a2675af9a35ff3bbf0e14",
+        "tokenizer_config.json": "b462e16e04c9dbae82289b6ef9b080d8dbad331586ece3ebded0bd09996db636",
+        "README.md": "11b92505082f5707e9601f24141d480960919388d610f427ab2d6f07f5c85e45"
+      }
+    },
+    "whisper-language": {
+      "repo": "mlx-community/whisper-tiny-asr-fp16",
+      "revision": "77fa3f52b482ec80d086df55f893065a9baab172",
+      "file_sha256": {
+        "config.json": "cf7def105e7cc5ba77a0c8fae7e97aac1ca896b70b288dec3d64fad6d9c08f7a",
+        "added_tokens.json": "9715fd2243b6f06a5858b5e32950d2853f73dd5bc201aafcf76f5082a2d8acd1",
+        "README.md": "d68f867f75885b5fb22073dee9befb9bcb5586a4ba1cdfe39153f0335b2ca9e4"
+      }
+    }
+  }
+}

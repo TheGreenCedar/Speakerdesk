@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "suite_id": "speakerdesk-turn-holdout-v1",
+  "partition": "holdout",
+  "purpose": "Fresh structural acceptance cases, separate from en_one and the tuning thanks control.",
+  "status": "recipes_only_not_executed",
+  "tuning_policy": "Freeze and hash before the first admitted synthesis/model run. Do not tune on these cases or relabel a failed case as tuning; retain every result and revision.",
+  "synthesis": {
+    "provider": "preinstalled Apple super-compact voices only; exact MauiSupport VoiceId metadata verified before first synthesis",
+    "download_allowed": false,
+    "capture_allowed": false,
+    "installed_voice_verification_required": true,
+    "voice_metadata_and_payload_hashes_required": true,
+    "assembly": "Synthesize each speech part separately after resource admission. Remove only verified digital-zero leading/trailing padding, preserving every nonzero speech sample. Insert the specified digital-zero pauses. Record original PCM, trimmed sample bounds, assembled PCM hashes and sample rate.",
+    "missing_voice_behavior": "Stop that case as unavailable; do not download, substitute a voice or count it as a pass."
+  },
+  "evaluation": {
+    "text_source": "Primary transcript text only; secondary candidates and source/browser mock text cannot satisfy word coverage.",
+    "normalization": "Unicode casefold; ignore punctuation and whitespace differences. Accent folding is allowed for lexical coverage, but does not determine the language assertion.",
+    "word_coverage": "Require every expected content term in order across the primary transcript and each required phrase as contiguous normalized words; permit other grammatical words and punctuation differences.",
+    "structure": "Evaluate live/provisional and final saved-refinement outputs separately. Count the prescribed nonempty reading turns when the actual activity ledger supplies the stated ownership/pause evidence. An unexpected speaker or language barrier must be reported explicitly, not silently skipped or called a structural pass.",
+    "source_timing": "Audio-region bounds only. Do not claim exact word timestamps, sentence alignment or exact punctuation."
+  },
+  "recipes": [
+    {
+      "id": "holdout_en_lamp_continuity_v1",
+      "partition": "holdout",
+      "speech": "Could you move the small lamp closer so I can read the final line?",
+      "voiceid": "com.apple.voice.super-compact.en-US.Samantha",
+      "voice_locale": "en-US",
+      "rate_words_per_minute": 175,
+      "language_mode": "auto",
+      "parts": [
+        {"kind": "speech", "text": "Could you move the small lamp closer"},
+        {"kind": "pause", "duration_ms": 180},
+        {"kind": "speech", "text": "so I can read the final line?"}
+      ],
+      "expected": {
+        "language": "en",
+        "terms": ["move", "small", "lamp", "closer", "read", "final", "line"],
+        "required_phrases": ["so I can read", "final line"],
+        "reading_turns": 1,
+        "pause_role": "Short internal pause; same clean singleton ownership on both sides should share continuous ASR context.",
+        "voice_evidence": "A bridged unassigned/overlap interval is not clean enrollment evidence, even when the text is one reading turn."
+      },
+      "reasons": [
+        "A fresh question tests one sentence crossing an ordinary brief pause and the three-second language-probe grid.",
+        "Required content terms catch loss of either sentence half without depending on punctuation or a contraction."
+      ]
+    },
+    {
+      "id": "holdout_en_gratitude_then_request_v1",
+      "partition": "holdout",
+      "speech": "Thank you, thank you. Please keep the green folder near the window.",
+      "voiceid": "com.apple.voice.super-compact.fr-FR.Thomas",
+      "voice_locale": "fr-FR",
+      "speech_language": "en",
+      "accent_note": "English rendered by the super-compact French voice is synthetic accented speech, not evidence of human accent robustness.",
+      "rate_words_per_minute": 165,
+      "language_mode": "en",
+      "parts": [
+        {"kind": "speech", "text": "Thank you, thank you."},
+        {"kind": "pause", "duration_ms": 1200},
+        {"kind": "speech", "text": "Please keep the green folder near the window."}
+      ],
+      "expected": {
+        "language": "en",
+        "terms": ["thank", "you", "thank", "you", "keep", "green", "folder", "near", "window"],
+        "required_phrases": ["near the window"],
+        "phrase_occurrences": [{"phrase": "thank you", "minimum": 2, "maximum": 2}],
+        "reading_turns": 2,
+        "pause_role": "A long pause should remain a boundary when the actual raw activity ledger contains a gap exceeding the configured bridge threshold.",
+        "voice_evidence": "Same TTS voice does not authorize merging across a long pause or asserting a remembered human identity."
+      },
+      "reasons": [
+        "Two deliberately spoken thank-you instances must remain primary words; do not suffix-deduplicate or hide them as generic trailing hallucinations.",
+        "A fresh accented request checks that sentence continuity does not erase meaningful pause boundaries."
+      ]
+    },
+    {
+      "id": "holdout_fr_book_after_english_v1",
+      "partition": "holdout",
+      "speech": "Je voudrais placer le livre rouge près de la porte, puis fermer la fenêtre.",
+      "voiceid": "com.apple.voice.super-compact.fr-FR.Thomas",
+      "voice_locale": "fr-FR",
+      "rate_words_per_minute": 165,
+      "language_mode": "auto",
+      "preceding_context_case": "holdout_en_lamp_continuity_v1",
+      "context_setup": "Replay the English case through the same packaged production route first, then this French case in the same auto-language epoch. Use only successful actual preceding observations; do not inject mock detected language. Preserve an explicit 1200ms inter-case pause and record the language probe chronology.",
+      "parts": [
+        {"kind": "speech", "text": "Je voudrais placer le livre rouge près de la porte"},
+        {"kind": "pause", "duration_ms": 180},
+        {"kind": "speech", "text": "puis fermer la fenêtre."}
+      ],
+      "expected": {
+        "language": "fr",
+        "terms": ["voudrais", "placer", "livre", "rouge", "porte", "fermer", "fenêtre"],
+        "required_phrases": ["de la porte", "fermer la fenêtre"],
+        "reading_turns": 1,
+        "pause_role": "One French sentence with a short internal pause; retain a real language contradiction as an evidence barrier.",
+        "language_evidence": [
+          "A confident French probe contradicting prior English must invalidate English context even if French ASR fails.",
+          "Weak routing must retain review status and its individual probe decisions; successful weak ASR must not refresh a confident context endpoint.",
+          "If automatic output remains English or loses required French words, record a language/coverage failure. A later manual-French diagnostic cannot overwrite this holdout result."
+        ],
+        "voice_evidence": "Language routing and shared TTS voice are not speaker-identity evidence."
+      },
+      "reasons": [
+        "Fresh French content checks automatic routing after a successful supported-language predecessor.",
+        "Probe chronology distinguishes legitimate recent-context fallback from a clear contradiction and prevents aggregate warnings from discarding confident events."
+      ]
+    }
+  ],
+  "identity_and_overlap_contract": [
+    "These single-voice synthetic recipes do not prove diarization accuracy, enrollment calibration, human identity or overlap separation.",
+    "For separate overlap regressions, A to A+B to B preserves the switch; A to A+B to A may share a bounded ASR envelope while retaining the raw activity ledger and mixed/ineligible ownership.",
+    "Never label an overlap decode as separated per-speaker text. Unknown gaps must contribute no clean track-mapping reference coverage.",
+    "Preserve protected edits, revision/CAS checks, immutable saved audio, historical epoch ownership and original confident probe endpoints."
+  ],
+  "packaged_receipt_contract": {
+    "required_bindings": [
+      "Exact candidate source commit and clean tree identity",
+      "Signed app ZIP SHA256, trusted signer provenance and unchanged production signature protections",
+      "Actual executed frozen runtime SHA256 and packaged static/module hashes",
+      "SHA256 and sizes of every loaded diarization, Cohere and language/acoustic checkpoint and configuration",
+      "This frozen recipe file SHA256, verifier/suite implementation hashes and exact synthesized fixture hashes",
+      "Actual packaged-route request/job IDs, raw probe/activity evidence, live/final outputs and explicit per-case verdicts",
+      "Successful bounded resource supervisor, process cleanup and completed execution rather than only startup"
+    ],
+    "gate": "Fail closed for missing, stale, mismatched, skipped or unsuccessful required evidence. Source CPU/browser results and ad-hoc model-script outputs cannot satisfy actual signed packaged-model gates.",
+    "scope": "Passing these bounded synthetic cases is structural regression evidence only, not general transcription accuracy or real-meeting robustness."
+  }
+}
