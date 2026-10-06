@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import sys
+import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'speakerdesk'))
 import live_refinement
@@ -20,7 +21,15 @@ class RecordingInput:
 
 sys.stdin=RecordingInput()
 live_refinement.Models=CPUModels
-def emit(message):print(json.dumps(message),flush=True)
+def emit(message):
+    if (config.get('test_hold_old_refinement') and message['type']=='refinement_result'
+            and message['language_epoch']==0):
+        (folder/'refinement-response-held').touch()
+        deadline=time.monotonic()+10
+        while not (folder/'refinement-response-release').exists():
+            if time.monotonic()>=deadline:raise RuntimeError('Test refinement response was not released.')
+            time.sleep(.01)
+    print(json.dumps(message),flush=True)
 try:live_refinement.run(config,emit)
 except Exception as error:
     emit({'type':'error','error':str(error)});sys.exit(1)

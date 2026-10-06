@@ -179,9 +179,9 @@ class MeetingManager:
                        'provenance':{'kind':'pending_inference','mode':'live_phrase_windows',
                            'language':language,'language_detector':LID_CHECKPOINT if language=='auto' else None,
                            'models':['nvidia/Nemotron-3-Diarization','CohereLabs/cohere-transcribe-03-2026'],
-                           'timing':'NVIDIA speech-region boundaries; Cohere phrase text. No word timestamps.'},
+                           'timing':'Retained audio regions with NVIDIA speaker labels and Cohere phrase text. No word timestamps.'},
                        'warnings':['Phrase boundaries may cut words. Overlapping speech needs review.'] +
-                           (['Automatic language detection leaves uncertain or unsupported speech blank for review; original audio is preserved. Language changes inside a probe may be missed.'] if language=='auto' else [])}}
+                           (['Uncertain language uses recent established context or a marked supported-language guess when available. Choose the meeting language if Auto has no supported context. Original audio is preserved.'] if language=='auto' else [])}}
             self.refinement.initialize(job)
             try:self.put(job)
             except Exception:

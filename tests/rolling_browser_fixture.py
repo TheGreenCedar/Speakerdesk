@@ -62,6 +62,22 @@ def main():
             job['document']['speakers']['overlap_unknown']='Unassigned audio'
             manager.put(job);manager.jid=jid if live else None
             return jsonify(ok=True)
+        @app.post('/fixture/candidate-review')
+        def candidate_review():
+            job=manager.get(jid)
+            job['document']['segments']=[
+                {'id':'candidate-tail','start':0,'end':.12,'speaker':'speaker_0','text':'','review':True,'refinement_state':'unresolved',
+                 'transcription_review':{'reason':'short_acoustic_context','candidate_text':'Unconfirmed tail words: please keep this exact punctuation — and accents, français.'}},
+                {'id':'candidate-no-speech','start':1,'end':3,'speaker':'speaker_0','text':'','review':True,'refinement_state':'unresolved',
+                 'transcription_review':{'reason':'possible_non_speech','candidate_text':'Unconfirmed words without a detected speaker.'}},
+                {'id':'guarded-fragment','start':4,'end':4.01,'speaker':'speaker_0','text':'','review':True,'refinement_state':'unresolved',
+                 'transcription_review':{'reason':'insufficient_acoustic_context'}},
+                {'id':'quiet-positive','start':5,'end':7,'speaker':'speaker_0','text':'Quiet but intelligible speech remains visible.','language':'en','refinement_state':'refined',
+                 'language_detection':{'mode':'auto','reason':'best_effort'}},
+                {'id':'short-positive','start':7,'end':7.25,'speaker':'speaker_0','text':'Yes.','language':'en','refinement_state':'refined'}]
+            job.update(status='ready',duration=10,refinement_status='complete',revision=job['revision']+1)
+            manager.put(job);manager.jid=None
+            return jsonify(ok=True)
         app.view_functions['config']=lambda:jsonify(languages=LANGUAGE_CHOICES,default_language='auto',readiness={'configured':True,'automatic_language':True},decoder='CPU fixture')
         app.view_functions['status']=lambda:jsonify(models=[],status='ready',ready=True,core_ready=True,supported=True,total_bytes=1,downloaded_bytes=1,error=None,
             voice={'status':'ready','available':False,'enabled':False,'message':'CPU UI fixture'})

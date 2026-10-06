@@ -83,13 +83,16 @@ def parse_turns(lines, duration, speaker_limit):
     return sorted(turns,key=lambda t:(t['start'],t['end']))
 
 
-def speech_crops(turns, max_seconds=24.5):
+def speech_crops(turns, max_seconds=24.5, *, coverage=None):
     """Keep simultaneous speakers as a shared region: never invent text ownership."""
     boundaries=sorted({t[k] for t in turns for k in ('start','end')})
+    if coverage is not None:
+        first,last=coverage
+        boundaries=sorted({first,last,*[x for x in boundaries if first<x<last]})
     regions=[]
     for start,end in zip(boundaries,boundaries[1:]):
         active=sorted({t['speaker'] for t in turns if t['start'] < end and t['end'] > start})
-        if not active:
+        if not active and coverage is None:
             continue
         if regions and regions[-1]['speakers']==active and abs(regions[-1]['end']-start)<1e-6:
             regions[-1]['end']=end
@@ -156,11 +159,11 @@ def infer(audio_path, duration, language, folder, progress, config=None):
     result=run_worker(config['diar_python'],'diarize',{'model_path':config['diar_path'],
         'model_kind':config['diar_kind'],'audio':str(audio_path),'device':config['device']},folder)
     turns=parse_turns(result['turns'],duration,limit)
-    chunks=speech_crops(turns, max_seconds=6 if language == 'auto' else 24.5)
+    chunks=speech_crops(turns, max_seconds=6 if language == 'auto' else 24.5,coverage=(0.,duration))
     crop_context(chunks,duration,padding=0 if language == 'auto' else .22)
     if len(chunks)>10000:
         raise RuntimeError('Too many speaker transitions. Split the recording into smaller files.')
-    progress(f'Transcribing {len(chunks)} speech regions with Cohere…' if chunks else 'No speech regions detected. Audio is retained for review.')
+    progress(f'Transcribing {len(chunks)} audio regions with Cohere…')
     crop_dir=folder/'crops';crop_dir.mkdir(exist_ok=True)
     try:
         for i,chunk in enumerate(chunks):
@@ -178,27 +181,28 @@ def infer(audio_path, duration, language, folder, progress, config=None):
     for chunk,regions in zip(chunks,asr['regions']):
         if len(chunk['speakers'])>1:
             speaker='overlap';speakers[speaker]='Overlapping speakers'
-        else:speaker=chunk['speakers'][0]
+        elif chunk['speakers']:speaker=chunk['speakers'][0]
+        else:speaker='unassigned';speakers[speaker]='Unknown speaker'
         for region in regions:
             start=max(chunk['start'],chunk['audio_start']+region['start'])
             end=min(chunk['end'],chunk['audio_start']+region['end'])
             if end <= start:continue
             segments.append({**region,'id':f'seg-{len(segments)}','start':start,'end':end,'speaker':speaker,
-                             'speaker_candidates':chunk['speakers'],'voice_eligible':len(chunk['speakers'])==1,
-                             'review':region['review'] or len(chunk['speakers'])>1 or end-start<.5,
+                             'speaker_candidates':chunk['speakers'],'voice_eligible':len(chunk['speakers'])==1 and not region.get('audio_state'),
+                             'review':region['review'] or len(chunk['speakers'])!=1 or end-start<.5,
                              'timing':'audio_crop','confidence':None})
     return retain_unassigned_audio({'schema_version':1,'speakers':speakers,'segments':segments,'diarization':turns,
             'provenance':{'kind':'local_inference','asr_model':'CohereLabs/cohere-transcribe-03-2026',
                           'diarization_model':model_id,'language':language,'device':config['device'],
                           'language_detector':LID_CHECKPOINT if language=='auto' else None,
-                          'timing':('NVIDIA speech regions with ≤3-second language probes and ≤6-second ASR crops; no word alignment' if language=='auto' else 'NVIDIA speech regions split into ≤25-second crops; no word alignment'),
+                          'timing':('Retained audio with ≤3-second language probes and ≤6-second ASR crops; no word alignment' if language=='auto' else 'Retained audio split into ≤25-second crops; no word alignment'),
                           'speaker_limit':limit,
                           'diarization_checkpoint':'mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f',
                           'asr_checkpoint':'spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12',
                           'metrics':{'diarization':result.get('metrics',{}),'asr':asr.get('metrics',{})},
                           'libraries':{'diarization':result.get('versions',{}),'asr':asr.get('versions',{})}},
             'warnings':['Times are speech crop boundaries, not word timestamps. Review subtitle timing.',
-                        ('Automatic language detection may leave uncertain or unsupported speech blank for review; original audio is preserved. Language changes inside a probe may be missed.' if language=='auto' else 'ASR crops include up to 0.22 seconds of neighboring silence to preserve word endings.'),
+                        ('Uncertain language uses recent established context or a marked supported-language guess when available. These attempts can be wrong; audio without a supported language remains available for review.' if language=='auto' else 'The selected language applies to every audio crop, including speech without a detected speaker.'),
                         'Overlapping speech is mixed audio; text cannot be reliably assigned to an individual speaker.',
                         f'This diarizer supports at most {limit} speakers; excess speakers cannot be reliably detected.']}, duration)
 

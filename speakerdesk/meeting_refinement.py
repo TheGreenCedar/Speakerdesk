@@ -6,6 +6,21 @@ from transcript import validate
 from live_language import validate_language_segment
 
 
+def preceding_language_context(sources,start_sample,epoch):
+    """Replay preceding observations without extending failed-ASR context."""
+    context=None
+    preceding=sorted((s for s in sources if s.get('language_epoch')==epoch
+        and round(s['end']*RATE)<=start_sample),key=lambda s:s['end'])
+    for row in preceding:
+        reason=(row.get('language_detection') or {}).get('reason')
+        if reason=='unsupported':context=None
+        elif reason=='detected':
+            if row.get('language') and row.get('text','').strip() and not row.get('transcription_review'):
+                context={'language':row['language'],'end_sample':round(row['end']*RATE)}
+            elif context and context['language']!=row.get('language'):context=None
+    return context if context and 0<=start_sample-context['end_sample']<=60*RATE else None
+
+
 class RefinementController:
     def __init__(self,manager):
         self.manager=manager;self.enabled=False;self.force=False;self.final=False;self.shutdown_sent=False
@@ -64,8 +79,14 @@ class RefinementController:
                 references=[{'start':s.get('source_start',s['start']),'end':s.get('source_end',s['end']),
                              'speaker_candidates':s.get('source_speaker_candidates',s.get('speaker_candidates',[s['speaker']]))}
                             for s in sources if s['start']<dispatched['context_end_sample']/RATE and s['end']>dispatched['context_start_sample']/RATE]
+                # Speaker mapping intentionally retains raw removed-row history.
+                # Language routing follows current machine rows instead, so an
+                # obsolete split cannot contradict a newer merged/refined row.
+                language_sources=[job['rolling_sources'].get(s['id'],s) if s.get('protected_fields') else s
+                    for s in job['document']['segments']]
                 request={'type':'refine','window':dispatched,'operation_id':dispatched['operation_id'],
                          'language_epoch':stamp['epoch'],'language':stamp['language'],
+                         'language_context':preceding_language_context(language_sources,dispatched['start_sample'],stamp['epoch']),
                          'expected':expected,'references':references}
                 job['rolling_inflight']=copy.deepcopy(request)
                 if self.send(request):job['refinement_status']='refining'

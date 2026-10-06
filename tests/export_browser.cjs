@@ -1,0 +1,120 @@
+// Export staged-download browser regression; native status/dialog peers are mocked. Uses installed Chromium;
+// starts no devices or model workers and downloads no browser dependencies.
+const assert = require('node:assert/strict');
+const {spawn} = require('node:child_process');
+const {mkdtemp, readFile, readdir, rm, mkdir, writeFile} = require('node:fs/promises');
+const {tmpdir} = require('node:os');
+const {join} = require('node:path');
+const {setTimeout: delay} = require('node:timers/promises');
+const [base, chromium, output, mode='after'] = process.argv.slice(2);
+async function main() {
+  assert(base && chromium && output, 'Pass fixture URL, installed Chromium path, output and optional before mode.');
+  await mkdir(output,{recursive:true});
+  const profile=await mkdtemp(join(tmpdir(),'speakerdesk-density-'));
+  const browser=spawn(chromium,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check',
+    '--disable-background-networking','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{stdio:'ignore'});
+  let ws;
+  try {
+    let port;
+    for(let i=0;i<100;i++){try{port=(await readFile(join(profile,'DevToolsActivePort'),'utf8')).split('\n')[0];break;}catch{await delay(100);}}
+    assert(port,'Chromium did not start');
+    const targets=await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    ws=new WebSocket(targets.find(t=>t.type==='page').webSocketDebuggerUrl);
+    await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=reject;});
+    let id=0;const pending=new Map(),errors=[];
+    ws.onmessage=event=>{const m=JSON.parse(event.data);if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text);
+      if(pending.has(m.id)){const [resolve,reject]=pending.get(m.id);pending.delete(m.id);m.error?reject(new Error(m.error.message)):resolve(m.result);}};
+    const send=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;pending.set(key,[resolve,reject]);ws.send(JSON.stringify({id:key,method,params}));});
+    const evaluate=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});
+      if(r.exceptionDetails)throw new Error(JSON.stringify(r.exceptionDetails));return r.result.value;};
+    const wait=async expression=>{for(let i=0;i<100;i++){if(await evaluate(expression))return;await delay(100);}throw new Error(`Timed out: ${expression}`);};
+    const screenshot=async name=>{const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});await writeFile(join(output,name),Buffer.from(shot.data,'base64'));};
+    await send('Runtime.enable');await send('Page.enable');
+    await send('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});
+    await send('Page.navigate',{url:`${base}/?meeting=${'d'.repeat(32)}`});
+    await wait('typeof selected !== "undefined" && selected?.id && !meetingPoll && !polling');
+    const checks=[];
+    await evaluate(`(async()=>{await api('/fixture/saved-owned',{method:'POST',body:JSON.stringify({owned:false})});await poll();await refreshMeeting();polling=true;meetingPoll=true;
+      window.exportClicks=[];window.anchorClick=HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click=function(){if(new URL(this.href).searchParams.has('download'))exportClicks.push({url:this.href,filename:this.download});else anchorClick.call(this);};
+      window.speakerdeskNativeExport=true;})()`);
+    await evaluate("downloadExport('txt')");
+    await wait('pendingExport && exportClicks.length===1');
+    const first=await evaluate('exportClicks[0]'),nonce=new URL(first.url).searchParams.get('download');
+    assert.match(nonce,/^[0-9a-f]{32}$/);assert.match(first.url,/\/api\/jobs\/[a-f0-9]{32}\/export\/txt\?download=/);
+    assert.equal(await evaluate("[...document.querySelectorAll('[data-export]')].every(el=>el.disabled)"),true);
+    for(const phase of ['downloading','choosing','writing'])assert.equal(await evaluate(`speakerdeskExportStatus(${JSON.stringify(nonce)},${JSON.stringify(phase)})`),true);
+    await evaluate("downloadExport('json');document.querySelector('a[href=\"/api/notices\"]').click()");
+    assert.equal(await evaluate('exportClicks.length'),1);
+    assert.equal(await evaluate(`speakerdeskExportStatus('${'f'.repeat(32)}','saved')`),false);
+    assert.equal(await evaluate(`speakerdeskExportStatus(${JSON.stringify(nonce)},'not-a-phase')`),false);
+    assert.equal(await evaluate('pendingExport!==null'),true);
+    assert.equal(await evaluate(`speakerdeskExportStatus(${JSON.stringify(nonce)},'cancelled')`),true);
+    assert.equal(await evaluate('pendingExport===null'),true);
+    checks.push('Mock-native staged download retains one busy nonce through downloading/choosing/writing, blocks formats and notices, ignores stale status and releases on cancellation; no native dialog executed.');
+    await evaluate("(async()=>{await downloadExport('srt')})()");
+    const retryNonce=await evaluate('pendingExport.nonce');assert.notEqual(retryNonce,nonce);
+    assert.equal(await evaluate(`speakerdeskExportStatus(${JSON.stringify(nonce)},'saved')`),false);
+    assert.equal(await evaluate(`speakerdeskExportStatus(${JSON.stringify(retryNonce)},'failed')`),true);
+    assert.equal(await evaluate("$('notice').className"),'error');
+    await evaluate("(async()=>{await downloadExport('vtt')})()");
+    const successful=await evaluate('pendingExport.nonce');
+    assert.equal(await evaluate(`speakerdeskExportStatus(${JSON.stringify(successful)},'saved')`),true);
+    assert.equal(await evaluate('pendingExport===null'),true);
+    checks.push('Mock-native failure enables retry with a fresh nonce; an old completion cannot release the retry; matching saved completion clears busy.');
+    await evaluate("(async()=>{await downloadExport()})()");
+    const notices=await evaluate('exportClicks.at(-1)');assert.match(notices.url,/\/api\/notices\?download=[0-9a-f]{32}$/);
+    await evaluate(`speakerdeskExportStatus(${JSON.stringify(new URL(notices.url).searchParams.get('download'))},'cancelled')`);
+    checks.push('Third-party notices use the same bounded staged-download nonce contract.');
+    await evaluate(`window.originalFetch=fetch;window.headRequests=[];window.refuseHead=true;
+      window.fetch=async(input,options)=>{if(options?.method==='HEAD'){headRequests.push(String(input));if(refuseHead)return new Response('private failure body',{status:413});}return originalFetch(input,options);}`);
+    const beforeRefusal=await evaluate('exportClicks.length');
+    const refusal=await evaluate("downloadExport('json').then(()=>null,e=>e.message)");assert.match(refusal,/too large/);
+    assert.equal(await evaluate('exportClicks.length'),beforeRefusal);assert.equal(await evaluate('pendingExport===null'),true);
+    for(const code of [400,404]){
+      await evaluate(`window.fetch=async(input,options)=>options?.method==='HEAD'?new Response('do not download me',{status:${code}}):originalFetch(input,options)`);
+      assert.match(await evaluate("downloadExport('txt').then(()=>null,e=>e.message)"),/unavailable/);
+      assert.equal(await evaluate('exportClicks.length'),beforeRefusal);
+    }
+    await evaluate('window.fetch=originalFetch');
+    checks.push('Controlled HEAD 413/400/404 refusals create no download and release busy without exposing or downloading an error body.');
+    await evaluate(`window.originalSave=save;window.saveEntered=false;save=async()=>{saveEntered=true;await new Promise(resolve=>window.finishHeldSave=resolve);};window.heldExport=downloadExport('txt');void 0;`);
+    await wait('saveEntered');assert.equal(await evaluate("[...document.querySelectorAll('[data-export]')].every(el=>el.disabled)"),true);
+    const beforeSave=await evaluate('exportClicks.length');await evaluate("downloadExport('srt');selected.name='Renamed during save';finishHeldSave()");
+    await evaluate('heldExport');assert.equal(await evaluate('exportClicks.length'),beforeSave+1);
+    assert.equal(await evaluate('exportClicks.at(-1).filename'),first.filename);
+    await evaluate('speakerdeskExportStatus(pendingExport.nonce,"saved");save=originalSave');
+    checks.push('Guard is acquired before await-save and preserves the original meeting name for the downloaded filename.');
+    await evaluate(`window.originalId=selected.id;save=async()=>{selected={...selected,id:'e'.repeat(32)};};`);
+    assert.match(await evaluate("downloadExport('json').then(()=>null,e=>e.message)"),/meeting changed/);
+    await evaluate('selected.id=originalId;save=async()=>{dirty=true;}');
+    assert.match(await evaluate("downloadExport('txt').then(()=>null,e=>e.message)"),/latest edits/);
+    await evaluate('dirty=false;save=originalSave');
+    assert.equal(await evaluate('exportClicks.length'),beforeSave+1);
+    checks.push('A meeting switch or newly dirty edits during save prevents any download.');
+    await evaluate(`window.speakerdeskNativeExport=false;doc.segments[0].text='Saved correction exported intact.';changed();`);
+    await evaluate("(async()=>{await downloadExport('json')})()");assert.equal(await evaluate('pendingExport===null'),true);
+    const jsonURL=await evaluate('exportClicks.at(-1).url');
+    const payload=await (await fetch(jsonURL)).json();assert.equal(payload.segments[0].text,'Saved correction exported intact.');
+    await evaluate("(async()=>{await downloadExport('txt')})()");assert.equal(await evaluate('pendingExport===null'),true);
+    const exported=await (await fetch(await evaluate('exportClicks.at(-1).url'))).text();assert.match(exported,/Saved correction exported intact/);
+    checks.push('Browser mode clears busy after anchor dispatch; actual save and JSON/text export endpoints retain edited words. Anchor-click peer prevents disk downloads.');
+    const downloads=await mkdtemp(join(output,'browser-download-'));
+    await send('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloads});
+    await evaluate('HTMLAnchorElement.prototype.click=anchorClick');
+    await evaluate("(async()=>{await downloadExport('txt')})()");
+    let downloaded;
+    for(let attempt=0;attempt<100;attempt++){downloaded=(await readdir(downloads)).find(name=>name.endsWith('.txt'));if(downloaded)break;await delay(100);}
+    assert(downloaded,'The real browser download did not complete.');
+    assert.match(await readFile(join(downloads,downloaded),'utf8'),/Saved correction exported intact/);
+    assert.equal(await evaluate('pendingExport===null'),true);
+    checks.push('An actual Chromium text download completes in the isolated evidence folder with saved edited words; no native dialog or installed application is involved.');
+    assert.deepEqual(errors,[]);
+    await writeFile(join(output,'export-browser-report.json'),JSON.stringify({kind:'mock_native_status_and_anchor_peers_with_real_loopback_API',nativeDialogExecuted:false,modelsOrCaptureExecuted:false,checks,pageErrors:errors},null,2));
+    console.log(JSON.stringify({checks,pageErrors:errors},null,2));
+  }finally{
+    ws?.close();browser.kill('SIGTERM');await new Promise(resolve=>{if(browser.exitCode!==null)resolve();else{browser.once('exit',resolve);setTimeout(()=>{browser.kill('SIGKILL');resolve();},2000).unref();}});
+    await rm(profile,{recursive:true,force:true});
+  }
+}
+main().catch(error=>{console.error(error);process.exitCode=1;});

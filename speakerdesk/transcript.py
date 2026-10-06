@@ -2,11 +2,29 @@
 import copy
 import json
 import math
+from itertools import chain
 from review import export_text
 
 LANGUAGES = {'en':'English','de':'German','fr':'French','it':'Italian','es':'Spanish',
              'pt':'Portuguese','el':'Greek','nl':'Dutch','pl':'Polish','vi':'Vietnamese',
              'zh':'Chinese','ar':'Arabic','ja':'Japanese','ko':'Korean'}
+
+MAX_EXPORT_BYTES = 16 * 1024 * 1024
+
+
+class ExportTooLarge(ValueError):
+    """The serialized download exceeds the local export limit."""
+
+
+def bounded_text(parts):
+    chunks = []
+    size = 0
+    for part in parts:
+        size += len(part.encode('utf-8'))
+        if size > MAX_EXPORT_BYTES:
+            raise ExportTooLarge('Export exceeds the 16 MiB download limit. The saved meeting is unchanged.')
+        chunks.append(part)
+    return ''.join(chunks)
 
 
 def validate(document, duration):
@@ -55,17 +73,31 @@ def timestamp(seconds, separator='.'):
 
 def export(document, kind):
     if kind == 'json':
-        return json.dumps(document, ensure_ascii=False, indent=2) + '\n', 'application/json'
-    lines = ['WEBVTT', ''] if kind == 'vtt' else []
-    for n, s in enumerate(document['segments'], 1):
-        speaker = document['speakers'][s['speaker']]
-        # Plain subtitle text avoids VTT/HTML interpretation and cue injection.
-        passage = export_text(s)
-        text = ' '.join(passage.split()).replace('-->', '→').replace('<', '‹').replace('>', '›')
-        name = ' '.join(speaker.split()).replace('-->', '→').replace('<', '‹').replace('>', '›')
-        if kind == 'txt':
-            lines.append(f'[{timestamp(s["start"])} – {timestamp(s["end"])}] {speaker}: {passage}')
-        else:
-            sep = ',' if kind == 'srt' else '.'
-            lines.extend([str(n), f'{timestamp(s["start"],sep)} --> {timestamp(s["end"],sep)}', f'{name}: {text}', ''])
-    return '\n'.join(lines) + '\n', 'text/plain; charset=utf-8' if kind != 'vtt' else 'text/vtt; charset=utf-8'
+        parts = json.JSONEncoder(ensure_ascii=False, indent=2).iterencode(document)
+        return bounded_text(chain(parts, ('\n',))), 'application/json'
+
+    def lines():
+        if kind == 'vtt':
+            yield 'WEBVTT'
+            yield ''
+        passages = (s for s in document['segments'] if s.get('text','').strip())
+        emitted = kind == 'vtt'
+        for n, s in enumerate(passages, 1):
+            emitted = True
+            speaker = document['speakers'][s['speaker']]
+            # Plain subtitle text avoids VTT/HTML interpretation and cue injection.
+            passage = export_text(s)
+            text = ' '.join(passage.split()).replace('-->', '→').replace('<', '‹').replace('>', '›')
+            name = ' '.join(speaker.split()).replace('-->', '→').replace('<', '‹').replace('>', '›')
+            if kind == 'txt':
+                yield f'[{timestamp(s["start"])} – {timestamp(s["end"])}] {speaker}: {passage}'
+            else:
+                sep = ',' if kind == 'srt' else '.'
+                yield str(n)
+                yield f'{timestamp(s["start"],sep)} --> {timestamp(s["end"],sep)}'
+                yield f'{name}: {text}'
+                yield ''
+        if not emitted:
+            yield ''
+
+    return bounded_text(line + '\n' for line in lines()), 'text/plain; charset=utf-8' if kind != 'vtt' else 'text/vtt; charset=utf-8'

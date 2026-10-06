@@ -33,31 +33,37 @@ token adapter is deliberately coupled to this pinned dependency and artifact.
 Waveforms are converted to MLX and padded with silence to 30 seconds **before**
 log-Mel extraction; zero padding the feature matrix is incorrect.
 
-Import/live workers share the same `SpeechTranscriber`. AUTO divides diarized
-speech into balanced probes of at most three seconds; adjacent confident probes
-of one language can share an ASR crop of at most six seconds. State belongs to
-each raw diarization track, separately from person names or voice profiles.
-Strong English/French changes can switch within a speaker's phrase. Moderate
-changes require two observations; the first disputed window stays blank instead
-of being forced to the preceding language. A probe can still contain a language
-change that this detector misses. There is no word alignment or claim of perfect
-code-switch recognition.
+Import/live workers share `SpeechTranscriber`. Auto divides retained audio into
+balanced probes of at most three seconds. Adjacent confident probes can share a
+bounded ASR crop. NVIDIA speaker labels do not decide whether words are attempted:
+unknown speakers and overlapping audio still reach Cohere. Their text remains
+separate from eligibility for clean voice enrollment.
 
-Only an accepted Cohere language is sent to Cohere. Unsupported winners are
-never renormalized away. Uncertain, unsupported, short/quiet, and overlapping
-AUTO speech stays as a blank review passage with its original audio retained.
-Abstention invalidates prior continuity. JSON retains `language`,
-`language_detection` (reason, probability, margin, top candidates), and review
-state; the editor explains blank passages and preserves this metadata through
-save/export/restart. Manual overrides keep the existing full-crop path.
+A supported winner with probability at least .90 and margin at least .20 applies
+immediately. These closed-set scores are not calibrated accuracy guarantees.
+Uncertain probes use the most recent successfully transcribed, confidently
+detected supported language from the same meeting configuration epoch, provided
+it ended no more than 60 audio seconds earlier. This fallback does not extend
+its own expiry. Clear contrary evidence invalidates contradicted context even
+if the new ASR attempt fails. Historical refinement receives a frozen preceding
+snapshot and cannot borrow language from future resident-worker audio.
 
-Policy defaults are provisional, **not calibrated accuracy claims**: admission
-probability .90 and margin .20; immediate change .95/.30; minimum .75 seconds
-and RMS .001. Weak acoustic evidence abstains even after an earlier accepted
-language. These more conservative gates follow the first real compact-voice
-probe, where French-accented synthetic English produced moderate French scores. Full
-99-class softmax probabilities are closed-set scores, not measured probabilities
-of correctness. A weak result following contrary evidence cannot use continuity.
+Without fresh context, an uncertain supported winner produces a marked
+best-effort transcript. Unsupported evidence without usable context or a failed
+detector leaves retained audio available for an explicit meeting-language choice.
+Manual language bypasses detection. Short, quiet and overlapping speech do not
+abstain solely because of duration, amplitude or speaker uncertainty. Only exact
+zero PCM skips detection and ASR, marked `audio_state=digital_silence`; nonzero
+room noise cannot safely be classified as silence by these outputs.
+
+The meeting header has one current-language selector. Settings controls the
+persisted default independently. Blank machine passages are hidden from the
+ordinary transcript; unresolved audio is available through one collapsed review
+surface. TXT/SRT/VTT omit empty passages. Canonical JSON, WAV, segment identities
+and review metadata retain all internal ranges. User edits remain protected
+from asynchronous blank or failed results. Returned best-effort words are shown
+with an understated uncertainty note. No word alignment or reliable separation
+of overlapping voices is claimed.
 
 ## Artifact and packaging
 
