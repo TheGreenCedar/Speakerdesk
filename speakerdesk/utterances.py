@@ -50,6 +50,7 @@ class UtteranceBook:
         self.order = []
         self.active = None
         self.closed = False
+        self.uncertain_sample_count = 0
 
     @staticmethod
     def _set_end(row, end):
@@ -88,6 +89,13 @@ class UtteranceBook:
             if type(a) is not int or type(b) is not int or not position <= a < b <= end:
                 raise ValueError('Invalid speech-region ledger.')
             position = b
+        if evidence['decision']=='uncertain':
+            # FrameArchive retains exact ranges/probabilities. Keep a bounded
+            # summary independent of speech objects so empty uncertain input
+            # cannot disappear from the final completion receipt.
+            if self.archive:self.archive.append({'type':'speech_admission_uncertain',
+                'start_sample':start,'end_sample':end,'language_epoch':self.epoch})
+            self.uncertain_sample_count+=end-start
         for region in regions:
             a, b = region['start_sample'], region['end_sample']
             if self.active and a-self.rows[self.active]['last_speech_sample'] >= self.silence_samples:

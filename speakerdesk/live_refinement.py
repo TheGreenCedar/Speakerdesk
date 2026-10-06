@@ -516,7 +516,8 @@ class Engine:
             if kind=='stop':
                 self.capture_finished=True
                 self.emit({'type':'capture_finished','duration':self.received/RATE,
-                    **({'canonical_observed_sample':self.canonical.book.cursor} if self.canonical else {})})
+                    **({'canonical_observed_sample':self.canonical.book.cursor,
+                        'canonical_uncertain_samples':self.canonical.book.uncertain_sample_count} if self.canonical else {})})
         elif kind=='language':
             generation=message.get('generation',message.get('language_epoch'))
             boundary=message.get('start_sample',message.get('apply_from_sample'))

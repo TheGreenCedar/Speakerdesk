@@ -42,6 +42,18 @@ def repeated_parts(book,row):
 
 
 class AssemblyTests(unittest.TestCase):
+    def test_coarse_envelope_near_seam_cannot_claim_exact_core_ownership(self):
+        # Documented AMI 'designing' counterexample translated to the 18s
+        # fixture seam: emission end is 560 samples before the seam, while
+        # the external coarse reference crosses it. No acoustic claim here.
+        book,row=book_for();requests=book.decode_requests(row['id'])
+        parts=[part(requests[0],'before designing',[(250000,255000),(280000,287440)]),
+               part(requests[1],'before designing after',[(250000,255000),(280000,287440),(400000,410000)])]
+        result=assemble_parts(row,requests,parts)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['reason'],'boundary_uncertainty_unresolved')
+        self.assertIsNone(result['text']);self.assertEqual(result['words'],[])
+
     def test_opposing_context_ownership_cannot_silently_omit_or_duplicate_a_word(self):
         for opposing in ('omit','duplicate'):
             book,row=book_for();requests=book.decode_requests(row['id'])
@@ -52,7 +64,7 @@ class AssemblyTests(unittest.TestCase):
             # disagree about which disjoint core owns the shared final word.
             result=assemble_parts(row,requests,parts)
             self.assertFalse(result['complete'],opposing)
-            self.assertEqual(result['reason'],'context_ownership_unresolved')
+            self.assertIn(result['reason'],('context_ownership_unresolved','boundary_uncertainty_unresolved'))
             self.assertIsNone(result['text'])
     def test_shared_context_missing_unit_or_changed_raw_unit_remains_unresolved(self):
         for defect in ('missing','different'):

@@ -223,7 +223,8 @@ class RefinementController:
             if self.send(request):job['rolling_inflight']=request;job['refinement_status']='refining'
         elif self.final:
             unresolved=(any(row.get('canonical_unresolved') or row.get('canonical_state')!='sealed' for row in sources)
-                or job.get('canonical_observed_sample')!=round(job.get('duration',0)*RATE))
+                or job.get('canonical_observed_sample')!=round(job.get('duration',0)*RATE)
+                or bool(job.get('canonical_uncertain_samples',0)))
             job['refinement_status']='unresolved' if unresolved else 'complete'
             if not unresolved:
                 plan.state['completed_sample']=round(job.get('duration',0)*RATE)
@@ -341,12 +342,16 @@ class RefinementController:
             raise ValueError('Canonical refinement changed its original anchor.')
         self.manager.put(job)
         self.canonical(jid,{'candidate':candidate,'fast_sequence':result['fast_sequence']})
-    def capture_done(self,jid,*,observed_sample=None):
+    def capture_done(self,jid,*,observed_sample=None,uncertain_samples=None):
         if observed_sample is not None:
             with self.manager.lock:
                 job=self.manager.get(jid)
                 if type(observed_sample) is not int or not 0<=observed_sample<=round(job.get('duration',0)*RATE):
                     raise ValueError('Invalid canonical capture horizon.')
+                if uncertain_samples is not None:
+                    if type(uncertain_samples) is not int or not 0<=uncertain_samples<=observed_sample:
+                        raise ValueError('Invalid canonical uncertain-audio count.')
+                    job['canonical_uncertain_samples']=uncertain_samples
                 job['canonical_observed_sample']=observed_sample;self.manager.put(job)
         self.force=self.final=True;self.schedule(jid,force=True)
     def pause(self,jid,final=False):

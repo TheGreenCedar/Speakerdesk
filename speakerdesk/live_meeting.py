@@ -327,7 +327,8 @@ class MeetingManager:
                             job.setdefault('boundary_candidates',{})[key]=result;self.put(job)
                         elif result['type']=='capture_finished':
                             if not worker_stop_sent.is_set():fail('Capture finalization arrived before Stop. Audio is preserved.')
-                            self.refinement.capture_done(jid,observed_sample=result.get('canonical_observed_sample'))
+                            self.refinement.capture_done(jid,observed_sample=result.get('canonical_observed_sample'),
+                                uncertain_samples=result.get('canonical_uncertain_samples'))
                         elif result['type']=='progress':
                             self.processed=result['processed_seconds'];self.refinement.schedule(jid,force=bool(result.get('flush')))
                         elif result['type']=='flush_ack':self.acknowledge_pause_flush(jid,result)
@@ -579,7 +580,8 @@ class MeetingManager:
             sender=threading.Thread(target=send,daemon=True);sender.start()
             for line in process.stdout:
                 result=json.loads(line)
-                if result['type']=='capture_finished':self.refinement.capture_done(jid,observed_sample=result.get('canonical_observed_sample'))
+                if result['type']=='capture_finished':self.refinement.capture_done(jid,observed_sample=result.get('canonical_observed_sample'),
+                    uncertain_samples=result.get('canonical_uncertain_samples'))
                 elif result['type']=='refinement_result':self.refinement.result(jid,result)
                 elif result['type']=='finished':break
                 elif result['type']=='error':raise RuntimeError(result.get('error','Saved refinement failed.'))

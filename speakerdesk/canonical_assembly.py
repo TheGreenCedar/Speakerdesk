@@ -9,6 +9,11 @@ import hashlib
 import json
 from word_alignment import AlignmentRequest, attachment_for
 
+# Frozen AMI coarse-envelope qualification. These cells are useful anchors,
+# not phonetic boundaries; interior-core ownership needs the tested 250ms
+# uncertainty margin. Outer utterance endpoints do not create a shared seam.
+SEAM_UNCERTAINTY_SAMPLES = 4000
+
 
 def part_utterance(request, text):
     """Give a bounded decode its own identity bound to the whole source revision."""
@@ -90,6 +95,9 @@ def assemble_parts(row, requests, parts):
             if y<=a or x>=b:continue
             if x<a or y>b:
                 return {'complete':False,'reason':'boundary_emission_unresolved','text':None,'words':[]}
+            if ((a>row['start_sample'] and x<a+SEAM_UNCERTAINTY_SAMPLES)
+                    or (b<row['end_sample'] and y>b-SEAM_UNCERTAINTY_SAMPLES)):
+                return {'complete':False,'reason':'boundary_uncertainty_unresolved','text':None,'words':[]}
             owned.append(word)
         # An empty text ownership result is not proof that the speech core was
         # silent. Keep the prior words and the entire supplied candidate.
