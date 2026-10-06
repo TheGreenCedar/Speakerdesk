@@ -154,8 +154,8 @@ class CanonicalTests(unittest.TestCase):
                 self.assertEqual(row['text_audio_anchor'],{'start_sample':0,'end_sample':30*RATE})
                 self.assertNotIn('alignment',row)
                 self.assertEqual([p['audio_anchor'] for p in row['bounded_decode_provenance']['parts']],
-                    [{'start_sample':0,'end_sample':18*RATE},{'start_sample':18*RATE,'end_sample':30*RATE}])
-                self.assertEqual(peer.calls[-2:],[18*RATE,12*RATE])
+                    [{'start_sample':0,'end_sample':15*RATE},{'start_sample':15*RATE,'end_sample':30*RATE}])
+                self.assertEqual(peer.calls[-2:],[15*RATE,15*RATE])
                 self.assertLessEqual(max(peer.calls),392000)
 
     def test_long_core_language_probes_replace_prior_confident_language_and_keep_review(self):
@@ -172,7 +172,7 @@ class CanonicalTests(unittest.TestCase):
         self.assertEqual(row['language'],'fr');self.assertEqual(row['language_detection']['reason'],'best_effort')
         self.assertTrue(row['review']);self.assertNotIn('canonical_unresolved',row)
         probes=row['language_detection']['probes']
-        self.assertEqual([(p['start_sample'],p['end_sample']) for p in probes],[(0,18*RATE),(18*RATE,30*RATE)])
+        self.assertEqual([(p['start_sample'],p['end_sample']) for p in probes],[(0,15*RATE),(15*RATE,30*RATE)])
         self.assertTrue(all(p['language']=='fr' and p['decision']['reason']=='best_effort' for p in probes))
 
     def test_bounded_core_provenance_is_invalidated_by_machine_and_human_revisions(self):
@@ -204,6 +204,17 @@ class CanonicalTests(unittest.TestCase):
             self.assertNotIn('bounded_decode_provenance',manager.get(self.jid)['document']['segments'][0])
         finally:
             manager.close();app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
+
+    def test_disjoint_long_planner_never_produces_tiny_unusable_remainder(self):
+        from utterances import UtteranceBook
+        for total in (392001,36*RATE+1,54*RATE+319):
+            book=UtteranceBook('tail-case')
+            book.observe({'start_sample':0,'end_sample':total,'complete':True,'decision':'speech','speech_regions':[{'start_sample':0,'end_sample':total}]})
+            row=book.finish()[0];requests=book.core_decode_requests(row['id'])
+            sizes=[r['end_sample']-r['start_sample'] for r in requests]
+            self.assertLessEqual(max(sizes),18*RATE);self.assertGreater(min(sizes),3200)
+            self.assertEqual(sum(sizes),total);self.assertLessEqual(max(sizes)-min(sizes),1)
+            self.assertTrue(all(x['end_sample']==y['start_sample'] for x,y in zip(requests,requests[1:])))
 
     def test_whole_utterance_refinement_replaces_same_id_and_preserves_anchor(self):
         self.feed(0,7);self.engine.handle({'type':'stop'});row=self.rows()[-1]

@@ -208,9 +208,14 @@ class UtteranceBook:
         return requests
 
     def core_decode_requests(self, identity):
-        """Disjoint original-audio crops require no word-alignment calibration."""
-        return [dict(request,start_sample=request['core_start_sample'],end_sample=request['core_end_sample'])
-                for request in self.decode_requests(identity)]
+        """Balanced disjoint crops avoid an unusably short final remainder."""
+        row=self.rows[identity];a,b=row['start_sample'],row['end_sample']
+        count=max(1,(b-a+CORE_SAMPLES-1)//CORE_SAMPLES)
+        edges=[a+(b-a)*i//count for i in range(count+1)]
+        return [{'utterance_id':identity,'machine_revision':row['machine_revision'],
+            'audio_revision':row['audio_revision'],'language_epoch':row['language_epoch'],
+            'core_start_sample':x,'core_end_sample':y,'start_sample':x,'end_sample':y}
+            for x,y in zip(edges,edges[1:])]
 
     def apply_core_parts(self, identity, parts, *, stage):
         """Retain every whole raw core decode; no shared context or word timing.
