@@ -74,6 +74,29 @@ class SpeechAdmissionTests(unittest.TestCase):
         with self.assertRaises(ValueError):session.feed(np.ones(FRAME),FRAME)
         self.assertEqual(model.calls,2)
 
+    def test_mixed_frame_uncertainty_is_independent_of_query_grouping_and_clips_exactly(self):
+        from utterances import UtteranceBook
+        frames=SpeechFrames()
+        for a,probability in ((0,.9),(512,.1)):
+            frames.append(a,a+512,probability,observation={'input_policy':INPUT_POLICY,'constant_value':None})
+        together=UtteranceBook('same-fixed-frames');separate=UtteranceBook('same-fixed-frames')
+        together.observe(frames.admission(0,1024))
+        separate.observe(frames.admission(0,512));separate.observe(frames.admission(512,1024))
+        self.assertEqual(together.uncertain_sample_count,512)
+        self.assertEqual(separate.uncertain_sample_count,512)
+        self.assertEqual(together.snapshot(),separate.snapshot())
+        self.assertEqual(frames.admission(700,900)['uncertain_regions'],[{'start_sample':700,'end_sample':900}])
+
+    def test_dc_step_is_uncertain_in_its_fixed_boundary_frame(self):
+        class Boundary:
+            normalized_view=True
+            def initial_state(self):return 0
+            def feed(self,chunk,state):return .01,state+1
+        session=SpeechSession(Boundary());session.feed(np.concatenate((np.zeros(512),np.ones(512)*.04)),0,final=True)
+        self.assertEqual(session.evidence.admission(0,1024)['uncertain_regions'],[{'start_sample':512,'end_sample':1024}])
+        self.assertEqual(session.evidence.admission(0,512)['decision'],'no_speech')
+        self.assertEqual(session.evidence.admission(512,1024)['decision'],'uncertain')
+
     def test_no_evidence_and_partial_evidence_are_pending(self):
         frames = SpeechFrames()
         self.assertEqual(frames.admission(0, FRAME)['decision'], 'pending')

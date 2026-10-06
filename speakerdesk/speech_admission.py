@@ -112,7 +112,18 @@ class SpeechFrames:
         if not covered:
             return result
         conditioned=all(len(frame)==5 and frame[4].get('input_policy')==INPUT_POLICY for frame in selected)
-        if conditioned:result['input_policy']=INPUT_POLICY
+        if conditioned:
+            result['input_policy']=INPUT_POLICY
+            # Uncertainty belongs to the fixed neural frame ledger, including
+            # negative frames in a query that also contains admitted speech.
+            # Query/notification grouping cannot change the final receipt.
+            result['uncertain_regions']=[]
+            for frame in selected:
+                if frame[3] or frame[4].get('constant_value') is not None:continue
+                a,b=max(start,frame[0]),min(end,frame[1])
+                if result['uncertain_regions'] and result['uncertain_regions'][-1]['end_sample']==a:
+                    result['uncertain_regions'][-1]['end_sample']=b
+                else:result['uncertain_regions'].append({'start_sample':a,'end_sample':b})
         result['maximum_probability'] = max(frame[2] for frame in selected)
         for frame in selected:
             a,b,_,speaking=frame[:4]
@@ -125,11 +136,10 @@ class SpeechFrames:
                 result['speech_regions'].append({'start_sample': a, 'end_sample': b})
         result['decision'] = 'speech' if result['speech_regions'] else 'no_speech'
         if conditioned and not result['speech_regions']:
-            constants=[frame[4].get('constant_value') for frame in selected]
             # A model-negative waveform is not known silence. Exact digital
             # zero/DC is deterministic non-speech; other negative input stays
             # uncertain and cannot clear words or authorize a Cohere decode.
-            constant=constants[0] is not None and all(value==constants[0] for value in constants)
+            constant=not result['uncertain_regions']
             if not constant:result['decision']='uncertain'
             result['negative_signal_state']='exact_constant' if constant else 'model_negative_uncertain'
         return result
@@ -220,6 +230,7 @@ class SpeechSession:
         self.pending = np.empty(0, dtype=np.float32)
         self.closed = False
         self.failed = False
+        self.previous_sample = None
 
     def feed(self, audio, start_sample, *, final=False):
         import numpy as np
@@ -249,7 +260,8 @@ class SpeechSession:
                         raise ValueError('Invalid neural speech probability.')
                     observation={'input_policy':INPUT_POLICY,'raw_probability':probability,
                         'normalized_probability':normalized_probability,'gain':gain,
-                        'constant_value':float(raw[0]) if bool(np.all(raw==raw[0])) else None}
+                        'constant_value':float(raw[0]) if (bool(np.all(raw==raw[0]))
+                            and (self.previous_sample is None or self.previous_sample==float(raw[0]))) else None}
                     probability=max(probability,normalized_probability)
                     self.normalized_state=normalized_state
                 self.evidence.append(begin, begin+count, probability,observation=observation)
@@ -259,6 +271,7 @@ class SpeechSession:
                 self.failed = True
                 raise
             self.state = state
+            self.previous_sample=float(chunk[count-1])
             self.pending = self.pending[count:]
         if final:
             try:self.evidence.persist()
