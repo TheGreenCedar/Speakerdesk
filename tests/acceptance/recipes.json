@@ -237,8 +237,11 @@
           "text": "Please keep the original words in the first passage on this computer."
         },
         {
-          "kind": "zero",
-          "seconds": 1.2
+          "kind": "noise",
+          "seconds": 1.2,
+          "seed": 1040601,
+          "pcm_rms": 3,
+          "smoothing": 0.82
         },
         {
           "kind": "speech",

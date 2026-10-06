@@ -54,7 +54,7 @@ class CanonicalTests(unittest.TestCase):
     def feed(self,start,end,mode='en',epoch=0):
         for n in range(start,end):self.engine.handle({'type':'audio','start_sample':n*RATE,'end_sample':(n+1)*RATE,'language':mode,'language_epoch':epoch})
     def rows(self):return [event['candidate'] for event in self.events if event['type']=='canonical_revision']
-    def test_uncertain_only_audio_survives_final_receipt_without_asr_or_complete_claim(self):
+    def test_actual_model_negative_audio_is_finite_but_legacy_uncertain_receipt_stays_unresolved(self):
         def negative(audio,final=False):
             self.peer.received+=len(audio);ledger=self.peer.speech_live.evidence
             end=self.peer.received if final else self.peer.received//512*512
@@ -64,11 +64,11 @@ class CanonicalTests(unittest.TestCase):
             return [],end/RATE
         self.peer.feed=negative;self.feed(0,1);self.engine.handle({'type':'stop'})
         final=self.events[-1]
-        self.assertEqual(final['canonical_uncertain_samples'],RATE)
+        self.assertEqual(final['canonical_uncertain_samples'],0)
         self.assertEqual(self.peer.calls,[]);self.assertEqual(self.rows(),[])
         journal=[json.loads(line) for line in self.engine.canonical.archive.path.read_text().splitlines()]
         self.assertEqual(sum(e['end_sample']-e['start_sample'] for e in journal
-            if e['type']=='speech_admission_uncertain'),RATE)
+            if e['type']=='speech_admission_uncertain'),0)
         app=create_app(self.root/'uncertain-home');manager=app.extensions['speakerdesk']['meetings']
         manager.duration=1
         job={'id':self.jid,'created':1,'status':'refining','kind':'meeting','name':'CPU uncertain',
@@ -123,14 +123,99 @@ class CanonicalTests(unittest.TestCase):
         with patch('live_refinement.split_same_origin',side_effect=AssertionError('lexical stitching')):
             self.feed(0,50);self.engine.handle({'type':'stop'})
         self.assertEqual(len(self.engine.canonical.book.rows),1)
-        row=self.rows()[-1];self.assertEqual(row['end_sample'],50*RATE);self.assertEqual(row['text'],self.peer.text)
-        self.assertEqual(row['canonical_unresolved'],'unresolved_alignment');self.assertFalse(row['voice_eligible'])
+        row=self.rows()[-1];self.assertEqual(row['end_sample'],50*RATE);self.assertEqual(row['text'],' '.join([self.peer.text]*3))
+        self.assertNotIn('canonical_unresolved',row);self.assertFalse(row['voice_eligible'])
+        self.assertEqual(row['bounded_decode_provenance']['method'],'disjoint_original_audio_cores')
+        self.assertIsNone(row['bounded_decode_provenance']['word_timing'])
+        self.assertNotIn('alignment',row)
         self.assertLessEqual(max(self.peer.calls),392000)
         journal=[json.loads(line) for line in self.engine.canonical.archive.path.read_text().splitlines()]
-        retained=next(event for event in journal if event['type']=='bounded_machine_version')
+        retained=next(event for event in journal if event['type']=='disjoint_core_machine_version')
         self.assertEqual(len(retained['parts']),3);self.assertTrue(all(part['text']==self.peer.text for part in retained['parts']))
         self.assertEqual(self.peer.padding_calls[-6:],[(0,3200),(0,0),(3200,3200),(0,0),(3200,0),(0,0)])
         self.assertEqual(self.peer.asr_padding,(0,0))
+    def test_all_supported_manual_languages_finish_long_disjoint_cores_without_ctc(self):
+        from transcript import LANGUAGES
+        for language in LANGUAGES:
+            with self.subTest(language=language),tempfile.TemporaryDirectory() as folder:
+                path=Path(folder)/'audio.wav'
+                with wave.open(str(path),'wb') as wav:
+                    wav.setparams((1,2,RATE,0,'NONE','none'));wav.writeframes(b'\x01\x00'*30*RATE)
+                peer=Peer();events=[]
+                peer.align_canonical=lambda *args,**kw: (_ for _ in ()).throw(AssertionError('Uncalibrated alignment'))
+                peer.alignment_supported=lambda lang:False
+                engine=Engine({'audio_path':str(path),'language':language,'job_id':'b'*32,'canonical_utterances':True},peer,events.append,Inbox())
+                for n in range(30):engine.handle({'type':'audio','start_sample':n*RATE,'end_sample':(n+1)*RATE,'language':language,'language_epoch':0})
+                engine.handle({'type':'stop'})
+                row=next(e['candidate'] for e in reversed(events) if e['type']=='canonical_revision')
+                self.assertEqual(row['text'],' '.join([peer.text]*2))
+                self.assertNotIn('canonical_unresolved',row)
+                self.assertEqual(row['language'],language)
+                self.assertEqual(row['text_audio_anchor'],{'start_sample':0,'end_sample':30*RATE})
+                self.assertNotIn('alignment',row)
+                self.assertEqual([p['audio_anchor'] for p in row['bounded_decode_provenance']['parts']],
+                    [{'start_sample':0,'end_sample':15*RATE},{'start_sample':15*RATE,'end_sample':30*RATE}])
+                self.assertEqual(peer.calls[-2:],[15*RATE,15*RATE])
+                self.assertLessEqual(max(peer.calls),392000)
+
+    def test_long_core_language_probes_replace_prior_confident_language_and_keep_review(self):
+        original=self.peer.transcribe
+        def routed(audio,language,names,overlap=False):
+            passage=original(audio,language,names,overlap=overlap)[0]
+            long=self.engine.canonical.book.rows and max(r['end_sample']-r['start_sample'] for r in self.engine.canonical.book.rows.values())>392000
+            passage.update(language='fr' if long else 'en',review=bool(long),
+                language_detection={'mode':'auto','reason':'best_effort' if long else 'detected','probability':.52 if long else .99})
+            return [passage]
+        self.peer.transcribe=routed;self.engine.timeline[0]['language']='auto'
+        self.feed(0,30,'auto');self.engine.handle({'type':'stop'})
+        row=self.rows()[-1]
+        self.assertEqual(row['language'],'fr');self.assertEqual(row['language_detection']['reason'],'best_effort')
+        self.assertTrue(row['review']);self.assertNotIn('canonical_unresolved',row)
+        probes=row['language_detection']['probes']
+        self.assertEqual([(p['start_sample'],p['end_sample']) for p in probes],[(0,15*RATE),(15*RATE,30*RATE)])
+        self.assertTrue(all(p['language']=='fr' and p['decision']['reason']=='best_effort' for p in probes))
+
+    def test_bounded_core_provenance_is_invalidated_by_machine_and_human_revisions(self):
+        self.feed(0,30);self.engine.handle({'type':'stop'});book=self.engine.canonical.book;row=book.snapshot()[0]
+        self.assertIn('bounded_decode_provenance',row)
+        edited=book.edit(row['id'],row['machine_revision'],'Human text')
+        self.assertNotIn('bounded_decode_provenance',edited)
+        row=book.rows[row['id']];row['protected_fields']=[];row['bounded_decode_provenance']={'old':True}
+        updated=book.apply_model(row['id'],row['machine_revision'],'Whole replacement',start_sample=row['start_sample'],end_sample=row['end_sample'],stage='refined',complete=True)
+        self.assertNotIn('bounded_decode_provenance',updated)
+
+    def test_client_cannot_inject_core_evidence_and_edits_remove_it(self):
+        self.feed(0,30);self.engine.handle({'type':'stop'});candidate=self.rows()[-1]
+        app=create_app(self.root/'evidence-home');manager=app.extensions['speakerdesk']['meetings'];manager.duration=30
+        job={'id':self.jid,'created':1,'status':'ready','kind':'meeting','name':'CPU','language':'en','duration':30,'revision':0,
+             'document':{'speakers':{'speaker_0':'Speaker1'},'segments':[],'provenance':{},'warnings':[]},'canonical_utterances':True}
+        try:
+            manager.refinement.initialize(job);manager.put(job);manager.refinement.canonical(self.jid,{'candidate':candidate,'fast_sequence':1})
+            client=app.test_client();import re
+            headers={'X-Speakerdesk-Token':re.search(r'name="speakerdesk-token" content="([^"]+)"',client.get('/').text)[1]}
+            saved=manager.get(self.jid);original=copy.deepcopy(saved['document']['segments'][0]['bounded_decode_provenance'])
+            forged=copy.deepcopy(saved['document']);forged['segments'][0]['bounded_decode_provenance']={'forged':True}
+            response=client.put('/api/jobs/'+self.jid+'/transcript',headers=headers,json={'revision':saved['revision'],'document':forged})
+            self.assertEqual(response.status_code,200,response.json)
+            saved=manager.get(self.jid);row=saved['document']['segments'][0]
+            self.assertEqual(row['bounded_decode_provenance'],original)
+            response=client.patch('/api/jobs/'+self.jid+'/segments/'+row['id'],headers=headers,json={'segment_revision':row['machine_revision'],'changes':{'text':'Human correction'}})
+            self.assertEqual(response.status_code,200,response.json)
+            self.assertNotIn('bounded_decode_provenance',manager.get(self.jid)['document']['segments'][0])
+        finally:
+            manager.close();app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
+
+    def test_disjoint_long_planner_never_produces_tiny_unusable_remainder(self):
+        from utterances import UtteranceBook
+        for total in (392001,36*RATE+1,54*RATE+319):
+            book=UtteranceBook('tail-case')
+            book.observe({'start_sample':0,'end_sample':total,'complete':True,'decision':'speech','speech_regions':[{'start_sample':0,'end_sample':total}]})
+            row=book.finish()[0];requests=book.core_decode_requests(row['id'])
+            sizes=[r['end_sample']-r['start_sample'] for r in requests]
+            self.assertLessEqual(max(sizes),18*RATE);self.assertGreater(min(sizes),3200)
+            self.assertEqual(sum(sizes),total);self.assertLessEqual(max(sizes)-min(sizes),1)
+            self.assertTrue(all(x['end_sample']==y['start_sample'] for x,y in zip(requests,requests[1:])))
+
     def test_whole_utterance_refinement_replaces_same_id_and_preserves_anchor(self):
         self.feed(0,7);self.engine.handle({'type':'stop'});row=self.rows()[-1]
         request={'type':'refine','canonical':row,'operation_id':'one','language_epoch':0,

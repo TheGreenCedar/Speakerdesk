@@ -1,153 +1,19 @@
-# Speech admission and canonical utterances: correction checkpoint
+# Canonical audio and transcription contract
 
-This branch is an isolated source checkpoint based on the withheld 0.5.1
-candidate. It is not a replacement release. Hard speech admission is wired to
-production Cohere call paths in this source, but canonical utterance assembly
-is not connected to the controller yet. CPU tests exercise
-control flow with supplied probabilities, not speech recognition accuracy.
+Capture retains original mono16k PCM. Verified Silero v6 runs512-sample recurrent frames in two independent states: raw audio and a peak-conditioned VAD view (target0.25, maximum256x gain). NVIDIA and Cohere always receive original audio. There is no amplitude or transcript-word suppression rule. Missing, incomplete, nonfinite or failed neural inspection cannot establish no-speech or authorize Cohere.
 
-The capture writer now rounds the inverse of PCM16/32768 and saturates signed
-16-bit values. The resident audio reader also divides by32768. An actual WAV
-round trip covers all65,536 integer codes, including quiet samples and negative
-full scale. The frozen 0.5.1 fixtures and results remain unchanged. The new
-transport expectation requires exact PCM bytes; it does not retrospectively
-qualify the old candidate or fix its separate Pause acknowledgement defect.
+The current policy `raw_and_peak025_gaincap256_per512_modelnegative_v2` uses max(raw, conditioned) probability with0.5 onset/0.35 release hysteresis. A successfully observed negative frame is `model_non_speech`, including nonconstant room tone. This is a model classification, not certainty that speech is absent. Its probabilities, original PCM hash and count remain evidence. Genuine failed/pending inspection remains unresolved. Historical v1 uncertainty is not reclassified, and schema1 receipts cannot satisfy the current schema2 gate. Empty ASR never establishes nonspeech.
 
-## Speech evidence
+Canonical utterances follow admitted speech, independent of NVIDIA speaker boundaries. Pause retains an open utterance and acknowledges an inspected prefix plus any sub-frame tail. Stop inspects all physical samples, seals utterances and performs bounded larger-context revisions. Typed receipts bind job/execution/model/policy/request, physical horizons, original PCM hash, positive/model-negative/constant/uncertain counts and lifecycle. The host verifies those hashes against retained WAV data. Only completed inference work with full inspected capture and no unresolved speech/refinement may claim completion. Saved retry retains the original capture receipt.
 
-`SpeechSession` carries the pinned neural branch's LSTM state and64 original
-context samples over contiguous packets. Frames contain512 new16kHz samples.
-Only final partial frames are zero padded, and their evidence endpoint remains
-the original recording endpoint. A probability of0.5 starts speech;0.35 releases
-it. No minimum speech duration or loudness cutoff drops a short word. Missing
-coverage remains pending. A neural or probability-validation failure permanently
-poisons that session; it cannot retry altered recurrent state as verified silence.
+Cohere is the only transcript producer. Revisions replace the same utterance ID and whole audio anchor. Durable private journals retain raw machine candidates. CAS checks both machine/audio revisions, epoch and anchor; human words remain primary and stale/removed passages cannot be resurrected.
 
-The proposed checkpoint is `mlx-community/silero-vad-v6` at
-`2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06`, weights SHA256
-`65b6c5f0293cbc44d109e58bef78b474d9c65dedbee814cf0b90ef5f0d9150ff`.
-All three retained files have pinned digests. The adapter uses the existing
-`mlx_audio`0.5.7 implementation at
-`feb25a37b07923bae556e59111995071d66afa0d`, strict16k branch loading only.
-The conversion script is reviewed provenance, never executed. The approved weights have now been acquired and run against eight controlled
-synthetic fixtures. All exact file hashes matched; streamed and whole-input
-probabilities matched. Six decisions matched expectations, but the quiet Blue
-and 250ms quiet fixtures were missed. This is a release blocker. Original
-probabilities, old failures and thresholds are preserved in the external
-`evidence/silero-canonical/SILERO-RELEASED-HANDOFF.json` receipt. Official binary
-parity has not been measured. The initial unexecuted proposal remains historical evidence.
+Utterances up to24.5seconds receive one whole decode. Longer English utterances may use18second cores with up to3seconds context on each side and the optional pinned English coarse aligner. Its calibration is only the bounded AMI English coarse-envelope qualification `ami-english-coarse-v1-5ab4e661e62f`, hop320/origin0/fixed score−20. Contexts must corroborate all shared units, with250ms uncertainty at seams. Near-seam word positions/ownership remain null/unknown. CTC never supplies or changes transcript text, proves speech, certifies spelling, or authorizes phonetic trimming.
 
-Every live, refinement, retry and imported Cohere call requires complete pinned
-Silero evidence for its exact input range. Missing evidence stays pending;
-neither manual language, recent language context nor speaker names bypass it.
-Whisper's no-speech head is no longer consulted. Refinement clears its historical
-evidence on success, cancellation and error, restoring the live provider. The
-packaged acceptance inventory now includes the proposed Silero files and hashes;
-the inventory is an identity contract, separate from acoustic acceptance.
+Other supported languages, a missing English aligner, or failed alignment ownership use balanced disjoint original-audio crops of at most18seconds. They preserve every complete raw Cohere core text in order with one separator; they perform no lexical duplicate deletion and claim no word timing or calibrated seam ownership. A word crossing a crop boundary can be misrecognized. This fallback preserves finite supported transcription without extrapolating English calibration to French, Arabic or other languages. Incomplete ASR stays a candidate and retains previous primary words. All raw core texts, hashes and exact physical anchors remain in the journal/provenance. There is one canonical reading identity. Voice enrollment is disabled for this unaligned long fallback.
 
-Live processing is limited by both NVIDIA's processed horizon and Silero's
-completed frames. Coalesced inbox audio is fed in one-second packets. A final
-partial Silero frame retains the true input endpoint.
+Only physically cut ASR context/core edges receive fixed200ms virtual zero context. Original endpoints, saved PCM, admission and alignment input remain unchanged. Padding is recorded per call and reset in finally. The retained English repeated-phrase regression showed14/98words after this policy versus a preserved15/105 failure before it. This is a bounded result, not proof padding improves every language or cannot hallucinate.
 
-## Pause acknowledgement
+The speech-frame journal stores losslessly compressed bounded blocks of the original JSON observations, including float64 probabilities/gain and None-vs-zero constants. Headers bind ranges/lengths and SHA-256, reads cap decompression, append failures roll back, and the resident index is capped at1024 entries. Older historical queries scan bounded headers. The60second hot frame cap remains. Recording evidence grows on disk with recording duration; it is not silently discarded.
 
-A Pause request now creates a unique receipt before sending capture control.
-A duplicate request before capture acknowledgement preserves that ID and sends
-no second helper command. Capture drains and receipt binding precede publication
-of Paused status. Legacy one-pass workers mark only `capture_complete`; they
-cannot claim a worker processing acknowledgement.
-After the mixer drains through the exact captured sample, an ordered worker flush
-binds that ID and endpoint. The worker publishes available revisions first, then
-acknowledges received samples, available processing horizon, Silero horizon and
-fast sequence. The controller rejects mismatched endpoints/horizons/sequences and
-ignores stale IDs. Any lookahead tail is explicit `deferred_audio`; Pause neither
-feeds fake future audio nor finalizes the recurrent VAD state, so Resume remains
-valid. Stop retains its separate full finalization path.
-
-Packaged traces retain the original POST request ID independently of the receipt,
-so both the runtime wait and later evidence revalidation bind that exact request.
-Packaged acceptance waits for the matching receipt, rather than demanding that
-NVIDIA's available horizon already equal the capture endpoint during Pause. It
-still requires exact saved PCM, actual speech/text expectations and complete Stop
-refinement. Old candidate assertions/results remain preserved. CPU tests cover
-lagged available horizons through real pipes, SQLite and repeated Pause/Resume;
-this source fix has not yet passed signed packaged acoustic acceptance.
-
-## Canonical protocol
-
-`UtteranceBook` identifies a recording/language-epoch/audio-origin object before
-ASR. The retained start/end are original recording sample positions, including
-bounded context; `speech_regions` separately record admitted speech. These
-positions are audio ranges, not word timestamps. Growing live and full refined
-versions replace text on the same identity. Protected human words remain primary.
-Empty or incomplete machine text remains a candidate and cannot erase prior words.
-Stop closes admission; late audio/language messages cannot reopen it.
-
-A text revision and a separate audio revision bind asynchronous results. Changing
-the audio endpoint invalidates alignment even if the text is unchanged. The
-last accepted text retains its own `text_audio_anchor`. An alignment must match
-both revisions and the exact text hash and provide nonempty ordered word ranges
-within the original retained audio. Word/text coverage and alignment accuracy
-remain the aligner's verified contract; bounds validation alone is not proof.
-
-NVIDIA activity is an independent original-audio ledger. It cannot split Cohere
-words at a speaker boundary. Two sequential speakers, overlap, unassigned speech,
-missing coverage, open utterances and stale activity cannot authorize clean
-voice enrollment. Only current complete activity with one owner over all admitted
-speech on a sealed utterance can set `voice_eligible` in this prototype. Production
-voice duration, quality and consent requirements still apply separately.
-
-## Remaining integration gates
-
-The alignment owner has confirmed the shared sample/revision/text contract against
-the initial1599e815 checkpoint. Its exact source adapter is imported from fe8dc0f696347b77fbfe68d90846439cf223451f.
-The alignment owner subsequently ran the approved native runtime at579ea781,
-but its frame-clock and score policy remain unverified for production attachment.
-A permissive diagnostic forced supplied words onto silence: alignment is never
-speech admission or transcript validation. Continuous speech can exceed Cohere's24.5s
-input cap: the planner supplies18s disjoint cores with3s context on each side
-while one canonical reading identity survives.
-Words can be assigned to nonoverlapping cores only after verified alignment;
-failed alignment retains an unresolved candidate, never greedy lexical glue.
-`canonical_assembly.py` now implements a pure-data bounded partition contract:
-all current requests must match whole-utterance identity, both revisions, epoch
-and exact core/context bounds. Every context must have complete raw-text coverage
-and consistent alignment provenance. Attachments require the exact emission
-envelope timing kind and typed nonempty calibration identifiers. Adjacent
-contexts must corroborate every ordered raw display unit in their shared audio:
-unit text must agree, envelopes must intersect, and both must choose the same
-core. Missing units, ownership drift, empty overlap or context-edge uncertainty
-retain an unresolved candidate. No prefix/suffix search or deduplication chooses
-words. Only emission envelopes wholly inside a
-disjoint core own words; crossing envelopes or empty ownership keep the candidate
-unresolved. Internal raw Unicode/spacing is retained, with one explicitly
-documented separator between context substrings. Numbers and real repetitions
-are never normalized or deduplicated. This conservative policy may defer real
-boundary words; it does not establish phonetic edges or acoustic accuracy.
-
-`UtteranceBook.apply_decode_parts` journals every raw context and result before
-pruning hot history or replacing accepted text. Archive failures leave the book
-unchanged. Human corrections remain primary. Complete assemblies attach only
-to the new machine revision/current audio revision/raw hash. The direct book
-attachment also now requires complete raw display-unit coverage and exact text
-audio anchor. CPU fixtures contain explicitly invented envelopes only.
-
-Speech frames now have a60s hot cap with private durable indexed raw archives;
-archive failures poison the session before pruning. Canonical version history
-can be configured with a hot cap only when a durable raw version/edit journal is
-provided. Production must choose that cap when it wires the book. Original audio
-remains retained for review. The canonical protocol must be mapped to the existing
-controller and production VAD-driven scheduler. Existing real Flask targeted
-and whole-document edit routes now preserve server-owned canonical evidence,
-reject client-forged alignment/revision metadata and discard stale attachments
-after edits. Edited display bounds discard the text anchor while original audio
-evidence remains retained. These API checks do not prove Engine emission,
-controller projection, long-utterance scheduling or signed package integration. Hard Silero admission is wired in source, with CPU gate/route checks;
-official neural parity remains unmeasured and short/quiet acoustic quality failed. `fallback_vad=True` is prohibited. Whisper remains language
-detection only; Cohere remains the sole transcriber.
-
-Before a new release: resolve the measured short/quiet admission failures,
-obtain immutable actual Cohere snapshots and independently reviewed alignment
-calibration, complete production canonical scheduling/projection, freeze that source,
-then run the identical packaged capture/pause/stop/refinement/edit/context
-lifecycle with exact model pins and PCM receipts. All old failures remain evidence.
+Source CPU/fixture proofs are distinct from actual acoustic model evidence and exact signed-package/native gates. See [current alignment scope](alignment-integration-status.md). No source check establishes native capture, signed-library loading or natural-meeting accuracy.

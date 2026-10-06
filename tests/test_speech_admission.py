@@ -15,6 +15,21 @@ from language_detection import SpeechTranscriber
 
 
 class SpeechAdmissionTests(unittest.TestCase):
+    def test_decoder_attempt_counter_excludes_negative_audio_and_counts_failure(self):
+        audio=np.linspace(-.01,.01,4000,dtype=np.float32)
+        asr=Mock();asr.transcribe.side_effect=RuntimeError('decoder failed')
+        negative=SpeechFrames();positive=SpeechFrames()
+        for a in range(0,len(audio),FRAME):
+            negative.append(a,min(a+FRAME,len(audio)),.01)
+            positive.append(a,min(a+FRAME,len(audio)),.8)
+        transcriber=SpeechTranscriber(asr,'en',speech_evidence=negative)
+        transcriber.transcribe(audio,16000,('speaker_0',))
+        self.assertEqual(transcriber.cohere_calls,0);asr.transcribe.assert_not_called()
+        transcriber.speech_evidence=positive
+        rows=transcriber.transcribe(audio,16000,('speaker_0',))
+        self.assertEqual(transcriber.cohere_calls,1);asr.transcribe.assert_called_once()
+        self.assertEqual(rows[0]['transcription_review']['reason'],'transcription_failed')
+
     def test_virtual_asr_boundary_context_preserves_physical_pcm_anchor_and_admission(self):
         audio=np.linspace(-.01,.01,4000,dtype=np.float32);original=audio.copy()
         frames=SpeechFrames()
@@ -60,13 +75,13 @@ class SpeechAdmissionTests(unittest.TestCase):
             np.testing.assert_array_equal(first,second);self.assertEqual(state,other_state)
         self.assertEqual([state for _,state in models[0].inputs],[0,0,1,1])
 
-    def test_conditioned_negative_waveform_is_uncertain_except_exact_dc(self):
+    def test_successfully_inspected_model_negative_nonconstant_audio_finishes(self):
         class Boundary:
             normalized_view=True
             def initial_state(self):return 0
             def feed(self,chunk,state):return .01,state+1
         for audio,decision in ((np.zeros(700),'no_speech'),(np.full(700,.04),'no_speech'),
-                               (np.linspace(-.01,.01,700),'uncertain')):
+                               (np.linspace(-.01,.01,700),'no_speech')):
             with tempfile.TemporaryDirectory() as folder:
                 session=SpeechSession(Boundary(),max_frames=1,archive=FrameArchive(Path(folder)/'frames'))
                 session.feed(audio,0,final=True)
@@ -104,20 +119,20 @@ class SpeechAdmissionTests(unittest.TestCase):
         together=UtteranceBook('same-fixed-frames');separate=UtteranceBook('same-fixed-frames')
         together.observe(frames.admission(0,1024))
         separate.observe(frames.admission(0,512));separate.observe(frames.admission(512,1024))
-        self.assertEqual(together.uncertain_sample_count,512)
-        self.assertEqual(separate.uncertain_sample_count,512)
+        self.assertEqual(together.uncertain_sample_count,0)
+        self.assertEqual(separate.uncertain_sample_count,0)
         self.assertEqual(together.snapshot(),separate.snapshot())
-        self.assertEqual(frames.admission(700,900)['uncertain_regions'],[{'start_sample':700,'end_sample':900}])
+        self.assertEqual(frames.admission(700,900)['model_negative_regions'],[{'start_sample':700,'end_sample':900}])
 
-    def test_dc_step_is_uncertain_in_its_fixed_boundary_frame(self):
+    def test_model_negative_dc_step_preserves_classification_not_false_uncertainty(self):
         class Boundary:
             normalized_view=True
             def initial_state(self):return 0
             def feed(self,chunk,state):return .01,state+1
         session=SpeechSession(Boundary());session.feed(np.concatenate((np.zeros(512),np.ones(512)*.04)),0,final=True)
-        self.assertEqual(session.evidence.admission(0,1024)['uncertain_regions'],[{'start_sample':512,'end_sample':1024}])
+        self.assertEqual(session.evidence.admission(0,1024)['uncertain_regions'],[])
         self.assertEqual(session.evidence.admission(0,512)['decision'],'no_speech')
-        self.assertEqual(session.evidence.admission(512,1024)['decision'],'uncertain')
+        self.assertEqual(session.evidence.admission(512,1024)['decision'],'no_speech')
 
     def test_no_evidence_and_partial_evidence_are_pending(self):
         frames = SpeechFrames()

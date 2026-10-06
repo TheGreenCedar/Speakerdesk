@@ -1,0 +1,11 @@
+# Current alignment integration and limits
+
+The source adapter and optional provider are wired into canonical runtime. The desktop packaging inputs contain pinned ONNX1.30.0, CTC1.7.4 native extension and full notices; no end-user Cython compilation is permitted. The existing protobuf7.36.2 is retained. Exact signed native-library loading remains a candidate release gate.
+
+Model setup lists the365,352,120-byte ONNX weight as optional English coarse timing. Normal core readiness and the default download exclude it. Explicit `POST /api/setup` with `{ "alignment": true }` selects its approved pinned four-file download as well. Existing installations reuse verified data. Missing/corrupt data does not disable core speech transcription: long audio falls back to nonoverlapping raw Cohere crops. No implicit provider download occurs during inference.
+
+The artifact metadata covers many languages, but runtime calibration is English-only: `ami-english-coarse-v1-5ab4e661e62f`, exact model digest/hop320/origin0/score−20. Four held-out AMI clips(19.77seconds),42 uniquely associated words, passed frozen coarse highlighting/seek criteria. Combined endpoint median30ms/p95188.5ms; end-only p95397.5ms, four early offsets350–490ms. CTC emission envelopes are not phonetic edges. The documented designing counterexample motivates250ms seam uncertainty. Neither this English subset nor shared vocabulary proves word timing for14languages or universal meeting accuracy.
+
+French, Arabic and all other supported manual languages use bounded balanced disjoint original-audio core decodes for long turns without invoking this English calibration. These have whole-core audio anchors and null word timing. Recognition at crop edges remains a measured/visible limitation, not hidden lexical repair. Cohere alone supplies every raw transcript.
+
+`alignment-*-proposal.json` and `alignment-source-handoff.md` retain historical source-only plans and initial dependency proposals. They are not current readiness records or a download authorization. Current runtime locks, source integration and this document supersede them. Native packaging, aggregate resource and acoustic release qualification require evidence against the exact new signed candidate.

@@ -1,6 +1,6 @@
 """Approved pinned data for English coarse alignment of unchanged Cohere text."""
 ALIGNMENT_SPEC = {
-    'name': 'Transcript alignment',
+    'name': 'English coarse timing (optional)', 'optional': True,
     'repo': 'csukuangfj2/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12',
     'revision': '6fc542a3b0661c8278cca1230c34deb989f31202',
     'directory': 'coarse-alignment', 'weight_file': 'model.int8.onnx',

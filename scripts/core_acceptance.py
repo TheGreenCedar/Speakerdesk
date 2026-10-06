@@ -119,6 +119,10 @@ def evaluate(recipe, trace):
             inspected=canonical_admission(trace,stage)
             checks[stage+'_observed']=isinstance(job.get('id'),str) and inspected
             checks[stage+'_local_models']=inspected
+            receipt=(job.get('pause_flush',{}).get('admission_receipt',{})
+                     if stage=='provisional' else job.get('capture_admission',{}))
+            checks[stage+'_zero_cohere_calls']=(type(receipt.get('cohere_calls')) is int
+                                               and receipt['cohere_calls']==0)
         else:
             checks[stage+'_observed']=isinstance(job.get('id'),str) and bool(job.get('last_fast_sequence'))
             checks[stage+'_local_models']=job.get('document',{}).get('provenance',{}).get('kind')=='local_inference'
@@ -159,10 +163,8 @@ def evaluate(recipe, trace):
         uncertainty=final.get('canonical_uncertain_samples')
         checks['negative_audio_inspected']=(canonical_admission(trace,'refined') and final.get('status')=='ready'
             and not final.get('rolling_sources') and not final.get('refinement_unresolved')
-            and ((uncertainty==0 and final.get('refinement_status')=='complete'
-                  and final.get('rolling_refinement',{}).get('completed_sample',0)>=trace.get('input_frames',float('inf')))
-                 or (type(uncertainty) is int and uncertainty>0 and final.get('refinement_status')=='unresolved'
-                     and final.get('rolling_refinement',{}).get('completed_sample',0)<trace.get('input_frames',0))))
+            and type(uncertainty) is int and uncertainty==0 and final.get('refinement_status')=='complete'
+            and final.get('rolling_refinement',{}).get('completed_sample',0)>=trace.get('input_frames',float('inf')))
     else:
         checks['refinement_executed']=final.get('status')=='ready' and final.get('refinement_status')=='complete' and not final.get('refinement_unresolved') and final.get('rolling_refinement',{}).get('completed_sample',0)>=trace.get('input_frames',float('inf'))
     saved=trace.get('saved_audio',{})

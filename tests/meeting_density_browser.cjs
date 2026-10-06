@@ -179,13 +179,19 @@ async function main() {
       assert.equal(await evaluate("doc.segments.some(s=>s.id==='quiet')"),true);
       checks.push('An asynchronous empty refinement preserves the focused user draft; after explicitly discarding the draft its blank machine card disappears while the audio/timeline row remains.');
       await evaluate(`(()=>{doc.segments.push({id:'unsupported-provisional',start:90,end:95,speaker:'speaker_0',text:'',refinement_state:'provisional',language_detection:{mode:'auto',reason:'unsupported'}},
-        {id:'historical-short',start:95,end:100,speaker:'speaker_0',text:'',refinement_state:'provisional',language_detection:{mode:'auto',reason:'insufficient_speech'}});
+        {id:'historical-short',start:95,end:100,speaker:'speaker_0',text:'',refinement_state:'provisional',language_detection:{mode:'auto',reason:'insufficient_speech'}},
+        {id:'historical-candidate',start:100,end:105,speaker:'speaker_0',text:'',refinement_state:'unresolved',language_detection:{mode:'auto',reason:'insufficient_speech'},transcription_review:{reason:'short_acoustic_context',candidate_text:'Exact retained candidate words.'}},
+        {id:'historical-words',start:105,end:110,speaker:'speaker_0',text:'Intelligible historical words remain visible.',refinement_state:'refined',language_detection:{mode:'auto',reason:'insufficient_speech'}});
         $('retained-audio-review').open=false;renderLiveSegments();})()`);
       assert.equal(await evaluate("document.querySelector('#segments [data-segment-id=unsupported-provisional]')===null"),true);
       assert.match(await evaluate("document.querySelector('#retained-audio-review [data-segment-id=unsupported-provisional]').textContent"),/unsupported/);
-      assert.equal(await evaluate("document.querySelector('#retained-audio-review [data-segment-id=historical-short]')!==null"),true);
+      assert.equal(await evaluate("document.querySelector('#retained-audio-review [data-segment-id=historical-short]')===null"),true);
+      assert.equal(await evaluate("doc.segments.find(s=>s.id==='historical-short').acoustic_evidence===undefined"),true);
+      assert.equal(await evaluate("doc.segments.find(s=>s.id==='historical-short').language_detection.reason"),'insufficient_speech');
+      assert.equal(await evaluate("document.querySelector('#retained-audio-review [data-segment-id=historical-candidate] textarea').value"),'Exact retained candidate words.');
+      assert.equal(await evaluate("document.querySelector('#segments [data-segment-id=historical-words] textarea').value"),'Intelligible historical words remain visible.');
       assert.equal(await evaluate("$('retained-audio-review').open"),false);
-      checks.push('Blank provisional unsupported-language and historical insufficient-speech ranges remain available in collapsed audio review; neither becomes a voice bubble or is mislabeled digital silence.');
+      checks.push('Unsupported-language audio remains reviewable; empty legacy insufficient-speech hints add no review range or acoustic receipt, while candidate and intelligible words remain available.');
       await evaluate(`(async()=>{await api('/fixture/saved-owned',{method:'POST',body:JSON.stringify({owned:false})});
         selected=await api('/api/jobs/'+selected.id);doc=structuredClone(selected.document);dirty=false;meetingPoll=false;await refreshMeeting();meetingPoll=true;setStatus();renderEditor();
         const incoming={schema_version:1,speakers:{speaker_0:'Imported speaker'},segments:[{id:'imported-passage',start:0,end:12,speaker:'speaker_0',text:'Imported transcript words remain intact.'}]};

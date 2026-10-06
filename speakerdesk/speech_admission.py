@@ -7,12 +7,14 @@ import hashlib
 import json
 import math
 import os
+import struct
+import zlib
 from pathlib import Path
 
 RATE = 16000
 FRAME = 512
 HOT_FRAMES = 1875  #60 seconds, exceeding any single admitted decode window.
-INPUT_POLICY = 'raw_and_peak025_gaincap256_per512_v1'
+INPUT_POLICY = 'raw_and_peak025_gaincap256_per512_modelnegative_v2'
 SILERO_SPEC = {
     'name': 'Speech detection', 'repo': 'mlx-community/silero-vad-v6',
     'revision': '2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06',
@@ -28,35 +30,77 @@ SILERO_SPEC = {
 
 
 class FrameArchive:
-    """Append original probabilities before pruning hot memory; query by block."""
+    """Lossless bounded compressed blocks; a bounded hot index skips recent data.
+
+    Original JSON/float64 observations survive byte-for-byte decompression.
+    Historical lookup scans small headers when it precedes the hot index; it
+    never requires loading an unbounded in-memory index or whole journal.
+    """
+    HEADER=struct.Struct('<4sIIQQ32s')
+    MAX_FRAMES=256
+    MAX_RAW=256*1024
+    MAX_COMPRESSED=MAX_RAW+1024
+    MAX_INDEX=1024
+
     def __init__(self, path):
-        self.path = Path(path)
-        descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        self.path=Path(path)
+        descriptor=os.open(self.path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
         os.close(descriptor)
-        self.index = []
+        self.index=[]
 
     def append(self, frames):
         if not frames:return
-        block = (json.dumps(frames, separators=(',', ':'))+'\n').encode()
+        # Final persistence is blocked as well; a 60-second hot tail cannot
+        # accidentally become one large decompression unit.
+        added=[]
         with self.path.open('r+b') as output:
-            output.seek(0, os.SEEK_END)
-            offset = output.tell()
+            output.seek(0,os.SEEK_END);offset=output.tell()
             try:
-                output.write(block);output.flush();os.fsync(output.fileno())
+                for first in range(0,len(frames),self.MAX_FRAMES):
+                    group=frames[first:first+self.MAX_FRAMES]
+                    raw=json.dumps(group,separators=(',',':'),allow_nan=False).encode()
+                    if len(raw)>self.MAX_RAW:raise ValueError('Oversized speech-evidence block.')
+                    payload=zlib.compress(raw)
+                    if len(payload)>self.MAX_COMPRESSED:raise ValueError('Oversized compressed speech evidence.')
+                    a,b=group[0][0],group[-1][1]
+                    if type(a) is not int or type(b) is not int or not 0<=a<b:
+                        raise ValueError('Invalid speech-evidence block range.')
+                    identity=struct.pack('<IQQ',len(raw),a,b)
+                    header=self.HEADER.pack(b'SVF1',len(payload),len(raw),a,b,hashlib.sha256(identity+raw).digest())
+                    begin=output.tell();output.write(header);output.write(payload)
+                    added.append((a,b,begin,len(header)+len(payload)))
+                output.flush();os.fsync(output.fileno())
             except Exception:
-                output.truncate(offset)
-                raise
-        self.index.append((frames[0][0], frames[-1][1], offset, len(block)))
+                output.truncate(offset);output.flush();os.fsync(output.fileno());raise
+        self.index=(self.index+added)[-self.MAX_INDEX:]
 
     def query(self, start, end):
-        result = []
+        result=[]
         with self.path.open('rb') as source:
-            for a, b, offset, size in self.index:
-                if b <= start:continue
-                if a >= end:break
-                source.seek(offset)
-                result.extend(frame for frame in json.loads(source.read(size))
-                              if frame[0] < end and frame[1] > start)
+            source.seek(0,os.SEEK_END);size=source.tell()
+            offset=(next((item[2] for item in self.index if item[1]>start),size)
+                    if self.index and start>=self.index[0][0] else 0)
+            while offset<size:
+                source.seek(offset);header=source.read(self.HEADER.size)
+                if len(header)!=self.HEADER.size:raise ValueError('Truncated speech-evidence header.')
+                magic,compressed,raw_size,a,b,digest=self.HEADER.unpack(header)
+                if (magic!=b'SVF1' or not 0<compressed<=self.MAX_COMPRESSED
+                        or not 0<raw_size<=self.MAX_RAW or not a<b
+                        or offset+self.HEADER.size+compressed>size):
+                    raise ValueError('Invalid speech-evidence block header.')
+                if a>=end:break
+                if b>start:
+                    payload=source.read(compressed);decoder=zlib.decompressobj()
+                    raw=decoder.decompress(payload,raw_size+1)
+                    if (len(raw)!=raw_size or not decoder.eof or decoder.unused_data
+                            or decoder.unconsumed_tail or hashlib.sha256(struct.pack('<IQQ',raw_size,a,b)+raw).digest()!=digest):
+                        raise ValueError('Corrupt speech-evidence block.')
+                    group=json.loads(raw)
+                    if (not isinstance(group,list) or not 0<len(group)<=self.MAX_FRAMES
+                            or group[0][0]!=a or group[-1][1]!=b):
+                        raise ValueError('Invalid speech-evidence block contents.')
+                    result.extend(frame for frame in group if frame[0]<end and frame[1]>start)
+                offset+=self.HEADER.size+compressed
         return result
 
 
@@ -114,16 +158,18 @@ class SpeechFrames:
         conditioned=all(len(frame)==5 and frame[4].get('input_policy')==INPUT_POLICY for frame in selected)
         if conditioned:
             result['input_policy']=INPUT_POLICY
-            # Uncertainty belongs to the fixed neural frame ledger, including
-            # negative frames in a query that also contains admitted speech.
-            # Query/notification grouping cannot change the final receipt.
+            # A successfully evaluated hysteresis-negative neural frame is a
+            # model classification, not a claim of physically known silence.
+            # Nonconstant room tone does not imply failed/unobserved inspection.
+            # Historical uncertain receipts keep their original policy/counts.
             result['uncertain_regions']=[]
+            result['model_negative_regions']=[]
             for frame in selected:
-                if frame[3] or frame[4].get('constant_value') is not None:continue
+                if frame[3]:continue
                 a,b=max(start,frame[0]),min(end,frame[1])
-                if result['uncertain_regions'] and result['uncertain_regions'][-1]['end_sample']==a:
-                    result['uncertain_regions'][-1]['end_sample']=b
-                else:result['uncertain_regions'].append({'start_sample':a,'end_sample':b})
+                if result['model_negative_regions'] and result['model_negative_regions'][-1]['end_sample']==a:
+                    result['model_negative_regions'][-1]['end_sample']=b
+                else:result['model_negative_regions'].append({'start_sample':a,'end_sample':b})
         result['maximum_probability'] = max(frame[2] for frame in selected)
         for frame in selected:
             a,b,_,speaking=frame[:4]
@@ -136,12 +182,8 @@ class SpeechFrames:
                 result['speech_regions'].append({'start_sample': a, 'end_sample': b})
         result['decision'] = 'speech' if result['speech_regions'] else 'no_speech'
         if conditioned and not result['speech_regions']:
-            # A model-negative waveform is not known silence. Exact digital
-            # zero/DC is deterministic non-speech; other negative input stays
-            # uncertain and cannot clear words or authorize a Cohere decode.
-            constant=not result['uncertain_regions']
-            if not constant:result['decision']='uncertain'
-            result['negative_signal_state']='exact_constant' if constant else 'model_negative_uncertain'
+            result['negative_signal_state']='model_non_speech'
+            result['classification_scope']='observed_dual_view_hysteresis_not_acoustic_certainty'
         return result
 
     def persist(self):
@@ -232,7 +274,7 @@ class SpeechSession:
         self.failed = False
         self.previous_sample = None
         self.inspected_pcm = hashlib.sha256()
-        self.inspected_counts = {'speech_samples':0,'uncertain_samples':0,'negative_constant_samples':0}
+        self.inspected_counts = {'speech_samples':0,'uncertain_samples':0,'negative_constant_samples':0,'model_negative_samples':0}
 
     def feed(self, audio, start_sample, *, final=False):
         import numpy as np
@@ -272,8 +314,9 @@ class SpeechSession:
                 # never enters the retained-PCM identity.
                 self.inspected_pcm.update(np.clip(np.rint(chunk[:count]*32768),-32768,32767).astype('<i2').tobytes())
                 speaking=self.evidence.speaking
-                key=('speech_samples' if speaking else 'uncertain_samples'
-                     if observation is None or observation.get('constant_value') is None else 'negative_constant_samples')
+                key=('speech_samples' if speaking else 'uncertain_samples' if observation is None
+                     else 'negative_constant_samples' if observation.get('constant_value') is not None
+                     else 'model_negative_samples')
                 self.inspected_counts[key]+=count
             except Exception:
                 # Recurrent state may have advanced inside the neural adapter.

@@ -11,14 +11,14 @@ from speech_admission import SILERO_SPEC, INPUT_POLICY, RATE
 
 
 def execution(job_id, execution_id):
-    result={'schema_version':1,'component':'silero_v6',
+    result={'schema_version':2,'component':'silero_v6',
             'model_revision':SILERO_SPEC['revision'],'model_sha256':SILERO_SPEC['sha256'],
             'input_policy':INPUT_POLICY,'job_id':job_id,'execution_id':execution_id}
     return validate_execution(result,job_id)
 
 
 def validate_execution(value,job_id):
-    expected={'schema_version':1,'component':'silero_v6',
+    expected={'schema_version':2,'component':'silero_v6',
               'model_revision':SILERO_SPEC['revision'],'model_sha256':SILERO_SPEC['sha256'],
               'input_policy':INPUT_POLICY,'job_id':job_id}
     if (not isinstance(value,dict) or type(value.get('schema_version')) is not int
@@ -48,7 +48,7 @@ def validate_receipt(value,identity,*,phase,request_id,received_sample,observed_
             or value.get('audio_encoding')!='pcm_s16le'
             or re.fullmatch(r'[0-9a-f]{64}',str(value.get('pcm_sha256',''))) is None):
         raise ValueError('Speech-inspection receipt differs from its operation or audio horizon.')
-    counts=[value.get(key) for key in ('speech_samples','uncertain_samples','negative_constant_samples')]
+    counts=[value.get(key) for key in ('speech_samples','uncertain_samples','negative_constant_samples','model_negative_samples')]
     if (any(type(n) is not int or n<0 for n in counts) or sum(counts)!=observed_sample
             or (uncertain_samples is not None and
                 (type(uncertain_samples) is not int or uncertain_samples!=counts[1]))

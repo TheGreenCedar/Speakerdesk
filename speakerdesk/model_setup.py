@@ -7,7 +7,7 @@ import threading
 import urllib.request
 import certifi
 from pathlib import Path
-from flask import jsonify
+from flask import jsonify, request
 from language_detection import LID_SPEC
 from speech_admission import SILERO_SPEC
 from alignment_artifact import ALIGNMENT_SPEC
@@ -30,7 +30,7 @@ def register_setup(app, activate_voice):
     root=Path(os.getenv('SPEAKERDESK_MODELS',Path(__file__).resolve().parents[1]/'models'))
     lock=threading.RLock()
     verified_files={}
-    state={'status':'idle','phase':'','downloaded_bytes':0,'total_bytes':sum(s['bytes'] for s in SPECS),'error':None}
+    state={'status':'idle','phase':'','downloaded_bytes':0,'total_bytes':sum(s['bytes'] for s in SPECS if not s.get('optional')),'error':None}
     voice=VoiceSetup(root,lock,activate_voice,app.logger)
     state['total_bytes']+=voice.state['total_bytes']
     app.extensions['speakerdesk']['voice_setup']=voice
@@ -60,15 +60,16 @@ def register_setup(app, activate_voice):
     def update(**changes):
         with lock:state.update(changes)
 
-    def download():
+    def download(include_alignment=False):
         try:
             root.mkdir(parents=True,exist_ok=True)
-            missing=sum(s['bytes'] for s in SPECS if not installed(s))
+            selected=[s for s in SPECS if not s.get('optional') or include_alignment]
+            missing=sum(s['bytes'] for s in selected if not installed(s))
             if not voice.installed():missing+=voice.state['total_bytes']
             if shutil.disk_usage(root).free < missing+512*1024**2:
                 raise RuntimeError('There is not enough free disk space. Free at least 2.4 GB and retry.')
             finished=0
-            for spec in SPECS:
+            for spec in selected:
                 if installed(spec):finished+=spec['bytes'];continue
                 folder=root/spec['directory'];folder.mkdir(exist_ok=True)
                 weight=spec.get('weight_file','model.safetensors')
@@ -113,8 +114,8 @@ def register_setup(app, activate_voice):
     @app.get('/api/setup')
     def status():
         with lock:result=state.copy()
-        result['models']=[{'name':s['name'],'bytes':s['bytes'],'installed':installed(s)} for s in SPECS]
-        result['core_ready']=all(m['installed'] for m in result['models'])
+        result['models']=[{'name':s['name'],'bytes':s['bytes'],'installed':installed(s),'optional':bool(s.get('optional'))} for s in SPECS]
+        result['core_ready']=all(m['installed'] for m in result['models'] if not m['optional'])
         result['voice']=voice.status(core_busy=result['status']=='downloading',available=voice_available())
         result['voice']['enabled']=app.extensions['speakerdesk']['recognition_preference'].enabled()
         result['models'].append({'name':'Voice recognition','bytes':voice.state['total_bytes'],'installed':result['voice']['installed']})
@@ -122,19 +123,25 @@ def register_setup(app, activate_voice):
         result['supported']=voice.supported()
         if result['status']=='downloading' and voice.state['status']=='downloading':
             result['phase']=voice.state['phase']
-            result['downloaded_bytes']=sum(s['bytes'] for s in SPECS)+voice.state['downloaded_bytes']
+            result['downloaded_bytes']=state['total_bytes']-voice.state['total_bytes']+voice.state['downloaded_bytes']
         if result['ready'] and result['status']!='downloading':result['status']='ready'
         return jsonify(result)
 
     @app.post('/api/setup')
     def start():
+        body=request.get_json(silent=True)
+        if body is None:body={}
+        if not isinstance(body,dict) or type(body.get('alignment',False)) is not bool:
+            return jsonify(error='Invalid optional alignment selection.'),400
+        include_alignment=body.get('alignment',False)
         if not voice.supported():
             return jsonify(error='This version requires an Apple Silicon Mac with macOS 15 or later.'),409
         with lock:
             if voice.state['status']=='downloading':return jsonify(error='Wait for voice setup to finish.'),409
             if state['status']=='downloading':return jsonify(state),202
-            state.update(status='downloading',error=None,phase='Preparing download')
-        threading.Thread(target=download,daemon=True,name='model-setup').start()
+            state.update(status='downloading',error=None,phase='Preparing download',
+                total_bytes=sum(s['bytes'] for s in SPECS if not s.get('optional') or include_alignment)+voice.state['total_bytes'])
+        threading.Thread(target=download,args=(include_alignment,),daemon=True,name='model-setup').start()
         return jsonify(state),202
 
     @app.post('/api/setup/voice')

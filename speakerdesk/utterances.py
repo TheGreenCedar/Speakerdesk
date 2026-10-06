@@ -59,6 +59,7 @@ class UtteranceBook:
             row['audio_revision'] += 1
             row.pop('alignment', None)
             row.pop('assembly_provenance',None)
+            row.pop('bounded_decode_provenance',None)
             row.pop('speaker_activity', None)
             row['voice_eligible'] = False
 
@@ -161,6 +162,7 @@ class UtteranceBook:
         row['machine_revision'] += 1
         row.pop('alignment', None)
         row.pop('assembly_provenance',None)
+        row.pop('bounded_decode_provenance',None)
         return copy.deepcopy(row)
 
     def apply_model(self, identity, revision, text, *, start_sample, end_sample, stage, complete):
@@ -188,6 +190,7 @@ class UtteranceBook:
             row['refinement_state'] = 'refined' if stage == 'refined' and row['state'] == 'sealed' else 'provisional'
             row.pop('alignment', None)
             row.pop('assembly_provenance',None)
+            row.pop('bounded_decode_provenance',None)
         return copy.deepcopy(row)
 
     def decode_requests(self, identity):
@@ -203,6 +206,52 @@ class UtteranceBook:
                 'core_start_sample':core_start,'core_end_sample':core_end,
                 'start_sample':a,'end_sample':b})
         return requests
+
+    def core_decode_requests(self, identity):
+        """Balanced disjoint crops avoid an unusably short final remainder."""
+        row=self.rows[identity];a,b=row['start_sample'],row['end_sample']
+        count=max(1,(b-a+CORE_SAMPLES-1)//CORE_SAMPLES)
+        edges=[a+(b-a)*i//count for i in range(count+1)]
+        return [{'utterance_id':identity,'machine_revision':row['machine_revision'],
+            'audio_revision':row['audio_revision'],'language_epoch':row['language_epoch'],
+            'core_start_sample':x,'core_end_sample':y,'start_sample':x,'end_sample':y}
+            for x,y in zip(edges,edges[1:])]
+
+    def apply_core_parts(self, identity, parts, *, stage):
+        """Retain every whole raw core decode; no shared context or word timing.
+
+        Cores partition physical audio, not word ownership. A word crossing a
+        crop edge can be misrecognized; no duplicate-removal or timing claim
+        conceals that recognition limit. Failed/empty ASR is never non-speech.
+        """
+        if stage not in ('live','refined'):raise ValueError('Invalid canonical decode stage.')
+        row=self.rows[identity];requests=self.core_decode_requests(identity)
+        if not isinstance(parts,list) or len(parts)!=len(requests):
+            raise ValueError('Missing disjoint core decodes.')
+        for request,part in zip(requests,parts):
+            if (not isinstance(part,dict) or part.get('request')!=request
+                    or not isinstance(part.get('text'),str) or type(part.get('complete')) is not bool):
+                raise ValueError('Disjoint core belongs to another revision or audio anchor.')
+        complete=all(part['complete'] for part in parts)
+        text=' '.join(part['text'] for part in parts)
+        event={'type':'disjoint_core_machine_version','utterance_id':identity,
+            'audio_revision':row['audio_revision'],'base_revision':row['machine_revision'],
+            'stage':stage,'complete':complete,'parts':copy.deepcopy(parts)}
+        if self.archive:self.archive.append(event)
+        self.apply_model(identity,row['machine_revision'],text,start_sample=row['start_sample'],
+            end_sample=row['end_sample'],stage=stage,complete=complete)
+        if complete and text.strip() and 'text' not in row['protected_fields']:
+            row['bounded_decode_provenance']={'method':'disjoint_original_audio_cores',
+                'separator_policy':'one_space_between_whole_raw_core_texts','word_timing':None,
+                'calibration_id':None,'audio_revision':row['audio_revision'],
+                'machine_revision':row['machine_revision'],
+                'audio_anchor':copy.deepcopy(row['text_audio_anchor']),
+                'parts':[{'audio_anchor':{'start_sample':p['request']['start_sample'],'end_sample':p['request']['end_sample']},
+                          'raw_text_sha256':hashlib.sha256(p['text'].encode()).hexdigest(),
+                          'cohere_input_padding':copy.deepcopy(p.get('cohere_input_padding'))} for p in parts]}
+            row.pop('alignment',None);row.pop('assembly_provenance',None)
+            row['voice_eligible']=False
+        return copy.deepcopy(row)
 
     def apply_decode_parts(self, identity, parts, *, stage):
         """CAS-bound bounded decoding; no lexical stitching of context windows."""
@@ -226,6 +275,7 @@ class UtteranceBook:
             row['text_audio_anchor']=copy.deepcopy(version['audio_anchor'])
             row['refinement_state']='refined' if stage=='refined' and row['state']=='sealed' else 'provisional'
             row.pop('alignment',None)
+            row.pop('bounded_decode_provenance',None)
             row['assembly_provenance']={key:copy.deepcopy(assembled[key]) for key in
                 ('text_sha256','words','alignment_complete','model_sha256','timing_kind',
                  'frame_calibration_id','score_calibration_id','separator_policy')}
