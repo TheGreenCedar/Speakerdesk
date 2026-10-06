@@ -35,6 +35,7 @@ class PreparedText:
     targets: tuple
     unsupported: tuple
     text_sha256: str
+    acoustic_aliases: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -125,7 +126,7 @@ def prepare_text(raw_text, vocabulary):
     if not isinstance(raw_text, str) or len(raw_text) > MAX_TEXT_CHARACTERS:
         raise ValueError('Supplied text exceeds the bounded alignment contract.')
     lookup = {token: index for index, token in enumerate(vocabulary) if index >= 4}
-    targets, unsupported = [], []
+    targets, unsupported, aliases = [], [], []
     for character, begin, end in _normalized_characters(raw_text):
         category = unicodedata.category(character)
         if character.isspace():
@@ -139,6 +140,16 @@ def prepare_text(raw_text, vocabulary):
             # target. Numbers such as 12.5 remain one unchanged display unit.
             continue
         if character not in lookup:
+            lower = character.lower()
+            # This export omits the capital letters seen in actual Cohere
+            # snapshots. Map only a supported one-scalar lowercase alias;
+            # retain the exact raw span/hash and never expand/romanize text.
+            if lower != character and len(lower) == 1 and lower in lookup:
+                aliases.append({'start_char':begin,'end_char':end,
+                    'raw_text':raw_text[begin:end],'acoustic_token':lower,
+                    'kind':'supported_single_character_lowercase_alias'})
+                character = lower
+        if character not in lookup:
             unsupported.append({'start_char': begin, 'end_char': end, 'text': raw_text[begin:end]})
             continue
         targets.append(TargetToken(lookup[character], character, begin, end))
@@ -149,7 +160,7 @@ def prepare_text(raw_text, vocabulary):
     while targets and targets[-1].text == ' ':
         targets.pop()
     return PreparedText(raw_text, tuple(targets), tuple(unsupported),
-                        hashlib.sha256(raw_text.encode('utf-8')).hexdigest())
+                        hashlib.sha256(raw_text.encode('utf-8')).hexdigest(),tuple(aliases))
 
 
 def _utf16_offset(text, index):
@@ -191,7 +202,8 @@ def materialize(prepared, anchors, *, clock, policy, audio_start_sample,
                                'end_sample': audio_start_sample+audio_num_samples},
               'status': 'unresolved', 'complete': False, 'reason': None,
               'words': _display_units(prepared), 'characters': [],
-              'unsupported': list(prepared.unsupported), 'non_speech_proof': False}
+              'unsupported': list(prepared.unsupported),
+              'acoustic_aliases': list(prepared.acoustic_aliases), 'non_speech_proof': False}
     if prepared.unsupported:
         result['reason'] = 'unsupported_text'
         return result
@@ -234,6 +246,7 @@ def materialize(prepared, anchors, *, clock, policy, audio_start_sample,
                 and _valid_log_probability(anchor.preceding_blank_log_probability)
                 and anchor.preceding_blank_log_probability >= policy.minimum_log_probability)
         result['characters'].append({'text': target.text, 'token_id': target.token_id,
+            'raw_text':prepared.raw_text[target.start_char:target.end_char],
             'start_char': target.start_char, 'end_char': target.end_char,
             'start_utf16': _utf16_offset(prepared.raw_text, target.start_char),
             'end_utf16': _utf16_offset(prepared.raw_text, target.end_char),
@@ -241,6 +254,10 @@ def materialize(prepared, anchors, *, clock, policy, audio_start_sample,
             'status': 'aligned' if accepted else 'unresolved',
             'start_sample': begin if accepted else None, 'end_sample': end if accepted else None})
     for word in result['words']:
+        aliases = [item for item in prepared.acoustic_aliases
+                   if word['start_char'] <= item['start_char'] < item['end_char'] <= word['end_char']]
+        if aliases:
+            word['acoustic_aliases'] = aliases
         characters = [c for c in result['characters']
                       if word['start_char'] <= c['start_char'] < c['end_char'] <= word['end_char']]
         if not characters:

@@ -36,6 +36,36 @@ REPEATED_WORDS = (TokenAnchor(0, 5, 1, -.1), TokenAnchor(1, 6, 2, -.1),
 
 
 class TextMappingTests(unittest.TestCase):
+    def test_missing_capital_tokens_map_without_changing_cohere_or_attachment_offsets(self):
+        raw = 'Go GO'
+        prepared = prepare_text(raw,VOCABULARY)
+        self.assertFalse(prepared.unsupported)
+        self.assertEqual([t.text for t in prepared.targets],['g','o',' ','g','o'])
+        result = mapped(raw,REPEATED_WORDS)
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['raw_text'],raw)
+        self.assertEqual(result['text_sha256'],hashlib.sha256(raw.encode()).hexdigest())
+        self.assertEqual([c['raw_text'] for c in result['characters']],list(raw))
+        self.assertEqual([(w['text'],w['start_char'],w['end_char']) for w in result['words']],
+                         [('Go',0,2),('GO',3,5)])
+        self.assertEqual([(a['raw_text'],a['acoustic_token'],a['start_char'])
+                          for a in result['acoustic_aliases']],[('G','g',0),('G','g',3),('O','o',4)])
+        row = utterance(raw)
+        attachment = attachment_for(result,AlignmentRequest.from_utterance(row),row)
+        self.assertEqual([w['text'] for w in attachment['words']],['Go','GO'])
+        self.assertTrue(attachment['words'][0]['acoustic_aliases'])
+
+    def test_supported_case_is_preserved_and_expanding_lowercase_stays_unresolved(self):
+        exact = prepare_text('G',VOCABULARY+('G',))
+        self.assertEqual(exact.targets[0].text,'G')
+        self.assertFalse(exact.acoustic_aliases)
+        expanding = prepare_text('İ',VOCABULARY+('i','\u0307'))
+        self.assertEqual(expanding.unsupported,({'start_char':0,'end_char':1,'text':'İ'},))
+        result = materialize(expanding,(),clock=CLOCK,policy=POLICY,
+                             audio_start_sample=16000,audio_num_samples=8000)
+        self.assertEqual((result['reason'],result['raw_text']),('unsupported_text','İ'))
+        self.assertIsNone(result['words'][0]['start_sample'])
+
     def test_unicode_composition_and_both_offset_units_preserve_raw_cohere(self):
         raw = '🙂 e\u0301 أَهلا'
         prepared = prepare_text(raw, VOCABULARY)
