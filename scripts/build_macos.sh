@@ -7,7 +7,7 @@ cd "$task_root"
 export SPEAKERDESK_SIGNING_IDENTITY="$APPLE_SIGNING_IDENTITY"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$task_root/.cache/uv}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
-export RUSTC_WRAPPER=
+export RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
 export MACOSX_DEPLOYMENT_TARGET=15.0
 export PYINSTALLER_CONFIG_DIR="$task_root/.cache/pyinstaller"
 native_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
@@ -29,14 +29,14 @@ uv pip check --python .venv-package/bin/python
 .venv-package/bin/python scripts/check_source.py
 .venv-package/bin/python -m unittest discover -s tests -v
 package_version="$(.venv-package/bin/python -c 'import json;print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')"
-.venv-package/bin/python -m PyInstaller --noconfirm --clean --workpath .cache/pyinstaller-build --distpath desktop/src-tauri/binaries packaging/runtime.spec
-xcrun swiftc -O -j 1 -num-threads 1 -target arm64-apple-macos15.0 -module-cache-path "$task_root/.cache/swift-capture" desktop/capture/MeetingCapture.swift -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker desktop/capture/Info.plist -o desktop/capture/speakerdesk-capture
+.venv-package/bin/python scripts/component_cache.py .cache/components/runtime "${SPEAKERDESK_RUNTIME_KEY:-}" desktop/src-tauri/binaries/speakerdesk-runtime-aarch64-apple-darwin -- .venv-package/bin/python -m PyInstaller --noconfirm --clean --workpath .cache/pyinstaller-build --distpath desktop/src-tauri/binaries packaging/runtime.spec
+.venv-package/bin/python scripts/component_cache.py .cache/components/capture "${SPEAKERDESK_CAPTURE_KEY:-}" desktop/capture/speakerdesk-capture -- xcrun swiftc -O -j 1 -num-threads 1 -target arm64-apple-macos15.0 -module-cache-path "$task_root/.cache/swift-capture" desktop/capture/MeetingCapture.swift -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker desktop/capture/Info.plist -o desktop/capture/speakerdesk-capture
 sign_args=(--force --options runtime --entitlements desktop/src-tauri/Entitlements.plist --sign "$APPLE_SIGNING_IDENTITY")
 if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then sign_args+=(--timestamp); fi
 codesign "${sign_args[@]}" desktop/capture/speakerdesk-capture
 cd desktop
-npm ci --cache "$task_root/.cache/npm"
-npm run build -- --target aarch64-apple-darwin --bundles app
+npm ci
+npm run build -- --target aarch64-apple-darwin --bundles app -- --locked
 cd "$task_root"
 package_stage="$(mktemp -d "$native_root/speakerdesk-package.XXXXXX")"
 trap 'rm -rf "$package_stage"' EXIT
