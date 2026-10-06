@@ -28,9 +28,10 @@ function renderPassageSaveState(card) {
 function renderRefinementStatus() {
   const status=selected?.refinement_status;
   $('refinement-controls').hidden=!selected?.rolling_refinement;
-  $('refinement-status').textContent=({waiting:'Larger context queued',refining:'Refining earlier phrases',paused:'Refinement paused · audio retained',complete:'Refinement complete',unresolved:'Some phrases need review'})[status] || '';
+  $('refinement-status').textContent=({waiting:'Accuracy pass queued · recent words may still change',refining:'Improving earlier phrases with more context',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Some phrases need your review'})[status] || '';
+  $('refinement-status').title='Speakerdesk re-checks recent audio with more context and may correct early words. Your saved corrections are never overwritten.';
   $('refinement-toggle').hidden=status==='complete';
-  $('refinement-toggle').textContent=status==='paused'?'Resume refinement':status==='unresolved'?'Retry unresolved refinement':'Pause refinement';
+  $('refinement-toggle').textContent=status==='paused'?'Resume accuracy pass':status==='unresolved'?'Retry unresolved phrases':'Pause accuracy pass';
 }
 async function toggleRefinement() {
   const jid=selected.id,button=$('refinement-toggle');button.disabled=true;
@@ -46,14 +47,17 @@ function liveCard(segment) {
   avatar.dataset.color=Object.keys(doc.speakers).indexOf(segment.speaker)%8;avatar.setAttribute('aria-hidden','true');
   const body=node('div',undefined,'segment-body'),top=node('div',undefined,'segment-top');
   const identity=node('button',doc.speakers[segment.speaker],'name-speaker');
-  identity.title='Name / remember voice';identity.setAttribute('aria-label',`Name or remember voice for ${doc.speakers[segment.speaker]}`);
+  identity.title='Name this speaker or remember their voice';identity.setAttribute('aria-label',`Name or remember voice for ${doc.speakers[segment.speaker]}`);
   identity.addEventListener('click',()=>openNamePicker(segment.speaker).catch(e=>notice(e.message,true)));
-  const timing=node('span',`${passageTime(segment.start)}–${passageTime(segment.end)}`,'rolling-time');
+  const timing=node('span',time(segment.start),'rolling-time');
+  timing.title=`${passageTime(segment.start)}–${passageTime(segment.end)}`;
+  timing.setAttribute('aria-label',`Passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);
   const state=segment.refinement_state || 'provisional';
   const reviewed=segment.review_resolution==='words_reviewed' && segment.text.trim();
   const badge=node('span',reviewed?'Words reviewed':({provisional:'Provisional',refined:'Refined',unresolved:'Needs review',edited:'Edited'})[state] || state,'refinement-badge');
+  badge.classList.toggle('routine-state',!reviewed && ['provisional','refined'].includes(state));
   badge.title=state==='provisional'?'Words may change with more context.':passageReviewReason(segment);
-  top.append(identity,timing,badge);body.append(top);
+  body.append(timing);top.append(identity);if(state!=='provisional' || reviewed)top.append(badge);body.append(top);
   const draft=passageDrafts.get(segment.id),text=node('textarea');
   text.rows=1;text.value=draft?.text ?? segment.text;
   if(!text.value.trim() && recoverablePassageDrafts.has(segment.id))text.placeholder='Latest words are empty. Your correction is available to recover.';
@@ -71,7 +75,7 @@ function liveCard(segment) {
     comparisonCopy.value=text.value;fitPassageText(comparisonCopy);
     renderPassageSaveState(card);text.style.height='auto';text.style.height=`${text.scrollHeight}px`;
   });
-  text.addEventListener('focus',()=>{followingLive=false;$('follow-live').textContent='Return to live';});
+  text.addEventListener('focus',()=>{followingLive=false;renderFollowLive();});
   const keep=node('button','Keep my correction','quiet'),recover=node('button','Recover my correction','quiet');
   keep.classList.add('keep-correction');recover.classList.add('recover-correction');
   const saveDraft=async revision=>{
@@ -182,6 +186,7 @@ function renderLiveSegments() {
   }
   $('pending-phrases').hidden=!pending;$('pending-phrases').textContent=pending?'Listening · uncertain phrases are waiting for more context. Original audio retained.':'';
   $('listening').hidden=visible>0 || pending>0 || !isLive();
+  renderSearchResults(visible,query);
   $('no-results').hidden=visible>0 || !query;
   if(isLive() && followingLive && !focused)pane.scrollTop=pane.scrollHeight;
   else if(anchorTime!==null) {

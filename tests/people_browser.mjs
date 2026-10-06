@@ -76,7 +76,7 @@ try {
     await click('#name-done');
     await evaluate(`select('${'b'.repeat(32)}')`);
     await wait('document.querySelector("#recording-name").textContent === "Clean spoken passages"');
-    assert.match(await evaluate('document.querySelector(".name-speaker").textContent'),/Name \/ remember voice/);
+    assert.match(await evaluate('document.querySelector(".name-speaker").getAttribute("aria-label")'),/Name or remember voice for /);
     await screenshot('people-speaker-action-light.png');
     await click('.name-speaker');
     await wait('document.querySelector("#name-dialog").open && !document.querySelector("#name-apply").disabled');
