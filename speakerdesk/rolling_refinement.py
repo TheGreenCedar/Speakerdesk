@@ -201,7 +201,7 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
         candidate.update(id=sid,machine_revision=(old.get('machine_revision',0)+1 if old else 1),
                          refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if (candidate['text'].strip() or candidate.get('audio_state')=='digital_silence') and not candidate.get('transcription_review') else 'unresolved'),
                          refinement_window=window['id'],finalized=bool(candidate.get('finalized')) if fast else True)
-        candidate['audio_anchor'] = (copy.deepcopy(old.get('audio_anchor')) if old and old.get('audio_anchor')
+        candidate['audio_anchor'] = (copy.deepcopy(old.get('audio_anchor')) if old and bounds(old)==bounds(candidate) and old.get('audio_anchor')
                                      else {'start_sample':bounds(candidate)[0],'end_sample':bounds(candidate)[1]})
         output['segments'].append(candidate);used.add(sid)
     for key,name in (speakers or {}).items():output['speakers'].setdefault(key,name)

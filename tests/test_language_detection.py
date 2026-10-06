@@ -72,9 +72,14 @@ class LanguageRoutingTests(unittest.TestCase):
     def test_successful_prior_probe_rescues_weak_supported_and_unsupported_scores(self):
         transcriber=self.transcriber([scores('en'),scores('fr',.65),{'ru':.55,'fr':.45}])
         rows=transcriber.transcribe(np.full(9*16000,.1,dtype=np.float32),16000,('speaker_0',))
-        self.assertEqual([r['language'] for r in rows],['en','en','en'])
-        self.assertEqual([r['language_detection']['reason'] for r in rows],['detected','recent_context','recent_context'])
-        self.assertEqual(rows[1]['language_detection']['candidates'][0],{'language':'fr','probability':.65})
+        self.assertEqual([r['language'] for r in rows],['en','en'])
+        self.assertEqual([(r['start'],r['end']) for r in rows],[(0,3),(3,9)])
+        self.assertEqual([r['language_detection']['reason'] for r in rows],['detected','recent_context'])
+        self.assertEqual(rows[1]['language_detection']['candidates'][0],{'language':'ru','probability':.55})
+        probes=rows[1]['language_detection']['probes']
+        self.assertEqual(probes[0]['decision']['candidates'][0],{'language':'fr','probability':.65})
+        self.assertEqual([(p['start_sample'],p['end_sample']) for p in probes],[(48000,96000),(96000,144000)])
+        self.assertEqual(probes[1]['decision']['candidates'][0],{'language':'ru','probability':.55})
         self.assertTrue(all(r['text'] and r['review'] for r in rows[1:]))
         self.assertEqual(transcriber.context,{'language':'en','end_sample':3*16000})
 
@@ -372,12 +377,12 @@ class WorkerLanguageTests(unittest.TestCase):
                  patch('language_detection.WhisperLanguageDetector',return_value=detector), \
                  patch('pipeline.preflight',return_value=[]),patch('pipeline.run_worker',side_effect=worker):
                 document=validate(infer(audio,6,'auto',folder,lambda message:None,config),6)
-            self.assertEqual([(s['start'],s['end']) for s in document['segments']],[(0,3),(3,6)])
+            self.assertEqual([(s['start'],s['end']) for s in document['segments']],[(0,6)])
             self.assertTrue(all(s['text']=='Original English' and s['review'] and not s['voice_eligible'] for s in document['segments']))
             self.assertTrue(all(s['language_detection']['reason']=='best_effort' for s in document['segments']))
             self.assertEqual(automatic_clips({'id':'overlap','document':document},'speaker_0'),[])
             self.assertEqual(automatic_clips({'id':'overlap','document':document},'overlap'),[])
-            self.assertEqual(detector.detect.call_count,2);self.assertEqual(asr.transcribe.call_count,2)
+            self.assertEqual(detector.detect.call_count,2);self.assertEqual(asr.transcribe.call_count,1)
             self.assertEqual(audio.read_bytes(),original)
 
 

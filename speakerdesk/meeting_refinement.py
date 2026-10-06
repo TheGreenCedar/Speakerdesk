@@ -4,6 +4,23 @@ import time
 from rolling_refinement import RATE, CORE_SAMPLES, RollingPlan, anchor_id, bounds, reconcile_window, segment_version, split_same_origin
 from transcript import validate
 from live_language import validate_language_segment
+from language_detection import language_probe_events
+
+
+def activity_references(sources, start_sample, end_sample):
+    """Raw activity only; an ASR envelope does not claim its internal gaps."""
+    references=[]
+    for row in sources:
+        parts=row.get('activity_regions')
+        if parts:
+            for part in parts:
+                a=max(part['start'],row.get('source_start',row['start']),start_sample/RATE)
+                b=min(part['end'],row.get('source_end',row['end']),end_sample/RATE)
+                if a<b:references.append({'start':a,'end':b,'speaker_candidates':list(part['speakers'])})
+        elif row['start']<end_sample/RATE and row['end']>start_sample/RATE:
+            references.append({'start':row.get('source_start',row['start']),'end':row.get('source_end',row['end']),
+                'speaker_candidates':row.get('source_speaker_candidates',row.get('speaker_candidates',[row['speaker']]))})
+    return references
 
 
 def preceding_language_context(sources,start_sample,epoch):
@@ -12,12 +29,13 @@ def preceding_language_context(sources,start_sample,epoch):
     preceding=sorted((s for s in sources if s.get('language_epoch')==epoch
         and round(s['end']*RATE)<=start_sample),key=lambda s:s['end'])
     for row in preceding:
-        reason=(row.get('language_detection') or {}).get('reason')
-        if reason=='unsupported':context=None
-        elif reason=='detected':
-            if row.get('language') and row.get('text','').strip() and not row.get('transcription_review'):
-                context={'language':row['language'],'end_sample':round(row['end']*RATE)}
-            elif context and context['language']!=row.get('language'):context=None
+        for event in language_probe_events(row):
+            reason=event['reason']
+            if reason=='unsupported':context=None
+            elif reason=='detected':
+                if event['language'] and row.get('text','').strip() and not row.get('transcription_review'):
+                    context={'language':event['language'],'end_sample':event['end_sample']}
+                elif context and context['language']!=event['language']:context=None
     return context if context and 0<=start_sample-context['end_sample']<=60*RATE else None
 
 
@@ -76,9 +94,7 @@ class RefinementController:
                 split_blank_placeholders(job['document'],dispatched)
                 expected={s['id']:segment_version(s) for s in job['document']['segments']
                           if s['start']<dispatched['end_sample']/RATE and s['end']>dispatched['start_sample']/RATE}
-                references=[{'start':s.get('source_start',s['start']),'end':s.get('source_end',s['end']),
-                             'speaker_candidates':s.get('source_speaker_candidates',s.get('speaker_candidates',[s['speaker']]))}
-                            for s in sources if s['start']<dispatched['context_end_sample']/RATE and s['end']>dispatched['context_start_sample']/RATE]
+                references=activity_references(sources,dispatched['context_start_sample'],dispatched['context_end_sample'])
                 # Speaker mapping intentionally retains raw removed-row history.
                 # Language routing follows current machine rows instead, so an
                 # obsolete split cannot contradict a newer merged/refined row.

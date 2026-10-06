@@ -5,6 +5,7 @@ speech is attempted with recent context or a marked best-effort language.
 Unsupported speech and genuine ASR failures retain audio for review.
 """
 import hashlib
+import copy
 import json
 import math
 import re
@@ -14,6 +15,22 @@ from types import SimpleNamespace
 from transcript import LANGUAGES
 
 LANGUAGE_CHOICES = {'auto': 'Automatic', **LANGUAGES}
+
+
+def language_probe_events(row, origin_sample=0):
+    """Replay actual probe chronology; an aggregate warning is not an event."""
+    detection=row.get('language_detection') or {}
+    start=origin_sample+round(row['start']*16000);end=origin_sample+round(row['end']*16000)
+    probes=detection.get('probes')
+    if not probes:
+        return [{'start_sample':start,'end_sample':end,'reason':detection.get('reason'),'language':row.get('language')}]
+    events=[]
+    for probe in probes:
+        a,b=probe.get('start_sample'),probe.get('end_sample')
+        if type(a) is not int or type(b) is not int or not start<=a<b<=end:continue
+        events.append({'start_sample':a,'end_sample':b,'reason':probe.get('decision',{}).get('reason'),
+                       'language':probe.get('language')})
+    return sorted(events,key=lambda event:event['end_sample'])
 LID_SPEC = {
     'name': 'Automatic language detection',
     'repo': 'mlx-community/whisper-tiny-asr-fp16',
@@ -242,14 +259,34 @@ class SpeechTranscriber:
                 if context:
                     window['language']=context['language']
                     detection.update(reason='recent_context',context_end_sample=context['end_sample'])
-            # Join adjacent confident windows while preserving whole audio crops.
-            while (not window['review'] and index<len(probes) and not probes[index]['review']
-                   and not window.get('acoustic_suspect') and not probes[index].get('acoustic_suspect')
-                   and probes[index]['language']==window['language']
-                   and probes[index]['end_sample']-window['begin']<=max_asr_seconds*sample_rate):
-                following=probes[index];index+=1;window['end_sample']=following['end_sample']
+            # Language probes are evidence, not sentence boundaries. Compatible
+            # weak/context-routed probes share continuous ASR audio, while every
+            # original decision and uncertainty remains available as provenance.
+            decisions=[{'start_sample':start_sample+window['begin'],
+                        'end_sample':start_sample+window['end_sample'],
+                        'language':window['language'],'decision':copy.deepcopy(detection),'review':window['review']}]
+            while index<len(probes):
+                following=probes[index];next_detection=following['language_detection']
+                if automatic and next_detection['reason'] in ('best_effort','needs_language'):
+                    context=self.recent_context(start_sample+following['begin'])
+                    if context:
+                        following['language']=context['language']
+                        next_detection.update(reason='recent_context',context_end_sample=context['end_sample'])
+                if (not window['language'] or following['language']!=window['language']
+                        or window.get('audio_state') or following.get('audio_state')
+                        or window.get('acoustic_suspect') or following.get('acoustic_suspect')
+                        or detection['reason']=='unsupported' or next_detection['reason']=='unsupported'
+                        or following['end_sample']-window['begin']>max_asr_seconds*sample_rate):break
+                decisions.append({'start_sample':start_sample+following['begin'],
+                                  'end_sample':start_sample+following['end_sample'],
+                                  'language':following['language'],'decision':copy.deepcopy(next_detection),'review':following['review']})
+                index+=1;window['end_sample']=following['end_sample']
+                window['review']=window['review'] or following['review']
                 if following['language_detection'].get('probability',1)<detection.get('probability',1):
                     detection=following['language_detection'];window['language_detection']=detection
+            if len(decisions)>1:
+                detection=copy.deepcopy(detection);detection['probes']=decisions
+                window['language_detection']=detection
             text='';transcription_review=None
             if window.get('audio_state')=='insufficient_acoustic_context':
                 transcription_review={'reason':'insufficient_acoustic_context','partial_text':False,
@@ -282,8 +319,14 @@ class SpeechTranscriber:
                         window['audio_state']='short_acoustic_context'
                 except (RuntimeError,ValueError,OSError):
                     transcription_review={'reason':'transcription_failed','partial_text':False}
-            if automatic and detection['reason']=='detected' and text and not transcription_review:
-                self.context={'language':window['language'],'end_sample':start_sample+window['end_sample']}
+            if automatic:
+                for event in decisions:
+                    reason=event['decision']['reason'];language=event['language']
+                    if reason=='unsupported':self.context=None
+                    elif reason=='detected':
+                        if text and not transcription_review:
+                            self.context={'language':language,'end_sample':event['end_sample']}
+                        elif self.context and self.context['language']!=language:self.context=None
             if transcription_review or len(speaker)>1:window['review']=True
             results.append({'start':window['begin']/sample_rate,'end':window['end_sample']/sample_rate,'text':text,
                             **{key:window[key] for key in ('language','language_detection','review')},

@@ -270,7 +270,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                 prior=original.get(segment['id'])
                 protected=set(prior.get('protected_fields',[])) if prior else set()
                 edited={k for k in ('text','speaker','start','end') if prior and segment[k]!=prior[k]}
-                for key in ('audio_anchor','source_start','source_end','source_speaker_candidates','language_epoch','finalized','refinement_window','fast_origin_sample','language_generation','language_mode'):
+                for key in ('audio_anchor','source_start','source_end','source_speaker_candidates','activity_regions','language_epoch','finalized','refinement_window','fast_origin_sample','language_generation','language_mode'):
                     segment.pop(key,None)
                     if prior and key in prior:segment[key]=copy.deepcopy(prior[key])
                 if prior and ('machine_revision' in prior or protected or edited):

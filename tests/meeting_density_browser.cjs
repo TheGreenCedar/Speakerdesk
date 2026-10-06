@@ -152,7 +152,7 @@ async function main() {
           {id:'overlap',start:10,end:20,speaker:'overlap_unknown',language:'en',text:'Audible words are retained even when the speaker is unknown.',refinement_state:'unresolved'},
           {id:'failed',start:20,end:30,speaker:'overlap_unknown',text:'',language_detection:{mode:'auto',reason:'uncertain'},transcription_review:{reason:'transcription_failed'},refinement_state:'unresolved'},
           {id:'empty',start:30,end:40,speaker:'speaker_0',text:'',language_detection:{mode:'auto',reason:'best_effort'},transcription_review:{reason:'empty_result'},refinement_state:'unresolved'}
-        ];renderLiveSegments();$('transcript-pane').scrollTop=0;document.querySelectorAll('.rolling-review').forEach(el=>el.open=true);})()`);
+        ];renderLiveSegments();$('transcript-pane').scrollTop=0;document.querySelectorAll('.rolling-review').forEach(el=>{el.hidden=false;el.open=true;});})()`);
       assert.match(await evaluate("document.querySelector('[data-segment-id=context]').textContent"),/recent meeting context/);
       assert.equal(await evaluate("document.querySelector('[data-segment-id=overlap] textarea').value"),'Audible words are retained even when the speaker is unknown.');
       assert.equal(await evaluate("document.querySelector('#segments [data-segment-id=failed]')===null"),true);
@@ -160,7 +160,7 @@ async function main() {
       assert.match(await evaluate("document.querySelector('#retained-audio-review [data-segment-id=empty]').textContent"),/No transcript text returned/);
       await evaluate("$('retained-audio-review').open=true");
       await screenshot('after-recovered-unknown-failed-review-1280x800.png');
-      checks.push('Recovered recent-context words show a compact uncertainty note; unknown-speaker text remains editable; genuine ASR failure/empty results remain visible even with overlapping speakers.');
+      checks.push('Recent-context evidence remains available on demand; unknown-speaker text stays editable; actual ASR failure/empty results remain available in audio details, including overlapping speakers.');
       await evaluate(`(()=>{doc.segments.push(...Array.from({length:40},(_,n)=>({id:'silence-'+n,start:40+n,end:41+n,speaker:'speaker_0',text:'',refinement_state:'unresolved',audio_state:'digital_silence'})));
         doc.segments.push({id:'quiet',start:80,end:90,speaker:'speaker_0',text:'Quiet but intelligible words remain in the transcript.',language:'en',language_detection:{mode:'auto',reason:'best_effort'},refinement_state:'refined'});
         renderLiveSegments();$('transcript-pane').scrollTop=0;})()`);
@@ -200,7 +200,7 @@ async function main() {
       await evaluate(`(()=>{doc.segments=[{id:'verified',start:0,end:10,speaker:'speaker_0',text:'Manually verified words.',transcription_review:{reason:'transcription_failed'},refinement_state:'unresolved',review_resolution:'words_reviewed'}];renderLiveSegments()})()`);
       assert.equal(await evaluate("passageReviewReason(doc.segments[0])"),'');
       assert.equal(await evaluate("document.querySelector('[data-segment-id=verified] .refinement-badge').textContent"),'Words reviewed');
-      assert.equal(await evaluate("document.querySelector('[data-segment-id=verified] .rolling-review')===null"),true);
+      assert.equal(await evaluate("document.querySelector('[data-segment-id=verified] .rolling-review').hidden"),true);
       await evaluate("doc.segments[0].speaker='overlap_unknown';doc.speakers.overlap_unknown='Unknown speaker';renderLiveSegments()");
       assert.match(await evaluate("passageReviewReason(doc.segments[0])"),/Overlapping speakers/);
       checks.push('Explicitly reviewed nonempty failed-ASR words clear text warnings while unresolved speaker identity stays visible.');

@@ -80,7 +80,7 @@ class CoverageTests(unittest.TestCase):
                 patch('language_detection.WhisperLanguageDetector',return_value=detector), \
                 patch('pipeline.preflight',return_value=[]),patch('pipeline.run_worker',side_effect=worker):
             doc=infer(self.path,12,'auto',Path(self.temp.name),lambda _:None,cfg)
-        self.assertEqual([(s['start'],s['end']) for s in doc['segments']],[(0,6),(6,9),(9,12)])
+        self.assertEqual([(s['start'],s['end']) for s in doc['segments']],[(0,6),(6,12)])
         self.assertTrue(all(s['text']=='en retained words' and not s['voice_eligible'] for s in doc['segments']))
         self.assertEqual(doc['segments'][1]['language_detection']['context_end_sample'],6*RATE)
         self.assertEqual(self.path.read_bytes(),original);self.assertFalse((Path(self.temp.name)/'crops').exists())

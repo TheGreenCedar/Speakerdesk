@@ -48,7 +48,7 @@ def run(task, request):
             check_memory()
             audio, rate = sf.read(chunk['audio'], dtype='float32')
             regions.append(transcriber.transcribe(audio, rate, tuple(chunk['speakers']),
-                start_sample=round(chunk.get('audio_start',chunk.get('start',0))*rate)))
+                start_sample=round(chunk.get('audio_start',chunk.get('start',0))*rate),max_asr_seconds=18))
             print(f'Transcribed region {len(regions)}/{len(request["chunks"])}', flush=True)
             mx.clear_cache()
         output = {'regions': regions}

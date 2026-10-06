@@ -115,11 +115,16 @@ try {
   assert.equal(await evaluate('doc.segments.find(s=>s.id === "unknown-audio").refinement_state'),'unresolved');
   assert.equal(await evaluate('document.querySelector("#segments [data-segment-id=unknown-audio]") === null'),true);
   assert.equal(await evaluate('document.querySelector("#retained-audio-review [data-segment-id=unknown-audio]") !== null'),true);
-  await evaluate('document.querySelectorAll(".rolling-review").forEach(el=>el.open=true);$("retained-audio-review").open=true;$("transcript-pane").scrollTop=0');
+  await evaluate('document.querySelectorAll(".rolling-review").forEach(el=>{el.hidden=false;el.open=true;});$("retained-audio-review").open=true;$("transcript-pane").scrollTop=0');
   await screenshot('rolling-live-review-ranges.png');
   await evaluate('api("/fixture/review-edges",{method:"POST",body:JSON.stringify({live:false})}).then(()=>poll())');
   await wait('selected.status === "ready" && document.querySelectorAll(".rolling-segment").length === 0');
-  assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".review-audio-ranges"),el=>el.textContent)'),ranges);
+  const savedRanges=[];
+  for(const sid of ['english-tail','french-tail']) {
+    await evaluate(`document.querySelector('[data-segment-id=${sid}] .passage-details-toggle').click()`);
+    savedRanges.push(await evaluate('document.querySelector("#segment-details .review-audio-ranges").textContent'));
+  }
+  assert.deepEqual(savedRanges,ranges);
   assert.equal(await evaluate('document.querySelector("#segments [data-segment-id=unknown-audio]") === null'),true);
   assert.match(await evaluate('document.querySelector("#retained-audio-review [data-segment-id=unknown-audio]").textContent'),/Overlapping speakers/);
   await screenshot('rolling-review-ranges.png');

@@ -28,7 +28,7 @@ function renderPassageSaveState(card) {
 function renderRefinementStatus() {
   const status=selected?.refinement_status;
   $('refinement-controls').hidden=!selected?.rolling_refinement;
-  $('refinement-status').textContent=({waiting:'Accuracy pass queued · recent words may still change',refining:'Improving earlier phrases with more context',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Some phrases need your review'})[status] || '';
+  $('refinement-status').textContent=({waiting:'Accuracy pass queued · recent words may still change',refining:'Improving earlier phrases with more context',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Accuracy pass stopped'})[status] || '';
   $('refinement-status').title='Speakerdesk re-checks recent audio with more context and may correct early words. Your saved corrections are never overwritten.';
   $('refinement-toggle').hidden=status==='complete';
   $('refinement-toggle').textContent=status==='paused'?'Resume accuracy pass':status==='unresolved'?'Retry unresolved phrases':'Pause accuracy pass';
@@ -57,7 +57,7 @@ function liveCard(segment) {
   const badge=node('span',reviewed?'Words reviewed':({provisional:'Provisional',refined:'Refined',unresolved:'Needs review',edited:'Edited'})[state] || state,'refinement-badge');
   badge.classList.toggle('routine-state',!reviewed && ['provisional','refined'].includes(state));
   badge.title=state==='provisional'?'Words may change with more context.':passageReviewReason(segment);
-  body.append(timing);top.append(identity);if(state!=='provisional' || reviewed)top.append(badge);body.append(top);
+  body.append(timing);top.append(identity);if(['edited'].includes(state) || reviewed)top.append(badge);body.append(top);
   const draft=passageDrafts.get(segment.id),text=node('textarea');
   text.rows=1;text.value=draft?.text ?? segment.text;
   if(!text.value.trim() && recoverablePassageDrafts.has(segment.id))text.placeholder='Latest words are empty. Your correction is available to recover.';
@@ -121,22 +121,25 @@ function liveCard(segment) {
   const copy=node('textarea');copy.readOnly=true;copy.rows=1;copy.className='local-correction-copy';copy.setAttribute('aria-label','Your local correction for comparison or copying');
   comparison.append(node('strong','Your correction'),copy,node('strong','Latest machine words'),node('p','','latest-machine-words'));
   actions.append(save,keep,latest,recover,message);body.append(text,actions,comparison);
-  const reason=passageReviewReason(segment);
-  if(reason && state!=='unresolved')body.append(node('span',reason,'passage-context-note'));
-  if(state==='unresolved' && (!reviewed || reason)) {
-    const details=node('details',undefined,'rolling-review');details.append(node('summary','Review details'));
-    details.append(node('p',passageReviewReason(segment) || 'Previous words and original audio retained.','passage-review'));
-    appendUncoveredAudio(details,segment);
-    if(segment.refinement_window) {
-      const prior=node('button','Show prior words','text-button');
-      prior.addEventListener('click',async()=>{
-        try {const history=await api(`/api/jobs/${selected.id}/refinement/revisions/${encodeURIComponent(segment.refinement_window)}`);
-          const previous=history.segments.filter(s=>s.start<segment.end && s.end>segment.start).map(s=>s.text).filter(Boolean).join('\n');
-          details.append(node('p',previous || 'No previous legible words.','prior-words'));prior.remove();}
-        catch(error){notice(error.message,true);}
-      });details.append(prior);
-    }body.append(details);
+  // Evidence is available on request; normal reading shows only the words.
+  const details=node('details',undefined,'rolling-review');details.hidden=true;
+  details.append(node('summary','Passage details'));appendPassageEvidence(details,segment);
+  const inspect=node('button',undefined,'segment-action passage-details-toggle');inspect.type='button';
+  inspect.append(icon('sliders-horizontal'),node('span','Details'));inspect.title='Passage details';
+  inspect.setAttribute('aria-label',`Details for passage at ${passageTime(segment.start)}`);inspect.setAttribute('aria-expanded','false');
+  inspect.addEventListener('click',()=>{details.hidden=!details.hidden;details.open=!details.hidden;inspect.setAttribute('aria-expanded',String(details.open));});
+  details.addEventListener('toggle',()=>{if(!details.open)details.hidden=true;inspect.setAttribute('aria-expanded',String(details.open));});
+  const detailActions=node('div',undefined,'segment-actions');detailActions.append(inspect);top.append(detailActions);
+  if(segment.refinement_window) {
+    const prior=node('button','Show prior words','text-button');
+    prior.addEventListener('click',async()=>{
+      try {const history=await api(`/api/jobs/${selected.id}/refinement/revisions/${encodeURIComponent(segment.refinement_window)}`);
+        const previous=history.segments.filter(s=>s.start<segment.end && s.end>segment.start).map(s=>s.text).filter(Boolean).join('\n');
+        details.append(node('p',previous || 'No previous legible words.','prior-words'));prior.remove();}
+      catch(error){notice(error.message,true);}
+    });details.append(prior);
   }
+  body.append(details);
   card.append(avatar,body);renderPassageSaveState(card);return card;
 }
 function renderLiveSegments() {
@@ -184,7 +187,7 @@ function renderLiveSegments() {
   for(const card of host.children) {
     for(const text of card.querySelectorAll('textarea'))if(text.readOnly || !card.contains(document.activeElement))fitPassageText(text);
   }
-  $('pending-phrases').hidden=!pending;$('pending-phrases').textContent=pending?'Listening · uncertain phrases are waiting for more context. Original audio retained.':'';
+  $('pending-phrases').hidden=!pending;$('pending-phrases').textContent=pending?'Listening…':'';
   $('listening').hidden=visible>0 || pending>0 || !isLive();
   renderSearchResults(visible,query);
   $('no-results').hidden=visible>0 || !query;
