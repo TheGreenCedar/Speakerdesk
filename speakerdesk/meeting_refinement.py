@@ -14,7 +14,9 @@ class RefinementController:
         job.setdefault('language_revision',job['language_epoch'])
         job.setdefault('language_acknowledged_revision',0)
         job.setdefault('language_history',[{'epoch':0,'generation':0,'language':job['language'],'start_sample':0}])
-        job.setdefault('rolling_refinement',RollingPlan().snapshot())
+        if 'rolling_refinement' not in job:
+            plan=RollingPlan();plan.state['last_scheduled_at']=time.monotonic()
+            job['rolling_refinement']=plan.snapshot()
         job.setdefault('refinement_status','waiting')
         job.setdefault('refinement_history',{})
         job.setdefault('fast_history',{})

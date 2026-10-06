@@ -6,7 +6,7 @@ import tempfile
 import threading
 import unittest
 import wave
-from unittest.mock import Mock
+from unittest.mock import Mock,patch
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
@@ -195,6 +195,16 @@ class HostTests(unittest.TestCase):
         self.assertTrue(job['refinement_unresolved']);self.assertEqual(job['document']['segments'][0]['refinement_state'],'unresolved')
         self.manager.refinement.pause(self.jid);self.manager.refinement.resume(self.jid)
         job=self.manager.get(self.jid);self.assertEqual(job['rolling_refinement']['completed_sample'],0)
+    def test_initial_three_section_delay_is_measured_from_meeting_creation(self):
+        job=self.manager.get(self.jid);job.pop('rolling_refinement');job['duration']=11
+        job['rolling_sources']={str(n):{'id':str(n),'start':start,'end':end,'text':'CPU words','speaker':'speaker_0','finalized':True}
+                                for n,(start,end) in enumerate([(0,3),(3,6),(6,8)])}
+        with patch('meeting_refinement.time.monotonic',return_value=100):self.manager.refinement.initialize(job)
+        self.manager.put(job);self.manager.processed=11;self.manager.refinement.enabled=True
+        with patch('meeting_refinement.time.monotonic',return_value=107):self.manager.refinement.schedule(self.jid)
+        self.assertTrue(self.manager.worker_controls.empty())
+        with patch('meeting_refinement.time.monotonic',return_value=108):self.manager.refinement.schedule(self.jid)
+        self.assertEqual(self.manager.worker_controls.get_nowait()['window']['end_sample'],8*RATE)
 
 
 if __name__=='__main__':unittest.main()

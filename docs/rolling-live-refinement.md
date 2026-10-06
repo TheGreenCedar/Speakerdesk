@@ -146,7 +146,7 @@ in place; explicit audio-anchor scroll compensation handles merged rows.
 
 ## Validation and release boundary
 
-The full integrated CPU suite passes: **159 tests in 20.051 seconds**. It exercises
+The full integrated CPU suite passes: **160 tests in 20.299 seconds**. It exercises
 production scheduling, the resident engine and real JSONL/pipes/SQLite/WAV with
 explicit synthetic model substitutes. New cases include a through-word six-second
 cut, sentence punctuation, genuine repetition, lexical code switching, 80 seconds
