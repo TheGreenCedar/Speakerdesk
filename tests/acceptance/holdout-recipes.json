@@ -109,6 +109,62 @@
         "Fresh French content checks automatic routing after a successful supported-language predecessor.",
         "Probe chronology distinguishes legitimate recent-context fallback from a clear contradiction and prevents aggregate warnings from discarding confident events."
       ]
+    },
+    {
+      "id": "holdout_en_quiet_silver_key_v1",
+      "partition": "holdout",
+      "groups": ["quiet_speech", "sentence_continuity"],
+      "speech": "Please put the silver key beside the empty cup.",
+      "voiceid": "com.apple.voice.super-compact.en-US.Samantha",
+      "voice_locale": "en-US",
+      "rate_words_per_minute": 175,
+      "language_mode": "en",
+      "parts": [
+        {"kind": "speech", "text": "Please put the silver key beside the empty cup.", "gain": 0.004},
+        {"kind": "pause", "duration_ms": 300}
+      ],
+      "expected": {
+        "language": "en",
+        "terms": ["please", "put", "silver", "key", "beside", "empty", "cup"],
+        "required_phrases": ["the silver key", "the empty cup"],
+        "reading_turns": 1,
+        "pause_role": "The explicit 300ms digital-zero tail is outside the complete utterance; the fixture builder also appends its standard 1000ms settling tail. Neither interval authorizes extra primary words.",
+        "voice_evidence": "Quiet level and a shared TTS voice establish no remembered identity or clean enrollment evidence for an unassigned tail."
+      },
+      "reasons": [
+        "Fresh complete content at gain 0.004 checks that independent acoustic admission preserves quiet speech in both provisional and saved refinement output.",
+        "One primary reading turn and complete ordered coverage test for word loss and separately published trailing hallucinations without depending on punctuation.",
+        "Freeze this content before its first synthesis or inference; retain any failure without changing its words, gain or expectations."
+      ]
+    },
+    {
+      "id": "holdout_en_quiet_single_blue_v1",
+      "partition": "holdout",
+      "groups": ["quiet_speech", "brief_speech"],
+      "speech": "Blue.",
+      "voiceid": "com.apple.voice.super-compact.en-US.Samantha",
+      "voice_locale": "en-US",
+      "rate_words_per_minute": 175,
+      "language_mode": "en",
+      "parts": [
+        {"kind": "speech", "text": "Blue.", "gain": 0.004},
+        {"kind": "pause", "duration_ms": 300}
+      ],
+      "expected": {
+        "language": "en",
+        "terms": ["blue"],
+        "exact_text": "Blue.",
+        "required_phrases": ["blue"],
+        "phrase_occurrences": [{"phrase": "blue", "minimum": 1, "maximum": 1}],
+        "reading_turns": 1,
+        "pause_role": "The explicit 300ms zero tail follows the entire synthetic word; the fixture builder also adds its standard 1000ms settling tail. Record the measured word duration rather than claiming a predetermined millisecond crop.",
+        "voice_evidence": "A short quiet word must remain primary; short duration, weak language evidence and an unassigned tail do not establish non-speech or a human identity."
+      },
+      "reasons": [
+        "A fresh genuinely spoken single word is a positive control against deleting quiet brief speech while fixing isolated-tail hallucinations.",
+        "Keep the full synthesized speech waveform; remove only verified digital-zero padding before gain scaling and never force its duration with a crop.",
+        "Require one visible primary instance in both stages; freeze this recipe before its first actual run and retain every failure."
+      ]
     }
   ],
   "identity_and_overlap_contract": [

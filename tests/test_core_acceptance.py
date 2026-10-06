@@ -73,7 +73,7 @@ class CoreAcceptanceTests(unittest.TestCase):
         self.report_path.write_text(json.dumps(self.report));self.manifest_path.write_text(json.dumps(self.manifest))
     def validate(self):self.save();return core.validate(self.report_path,self.manifest_path,root=self.root)
     def test_complete_contract_is_accepted_not_model_accuracy(self):
-        self.assertEqual(len(self.validate()['cases']),13)
+        self.assertEqual(len(self.validate()['cases']),15)
     def test_missing_report_blocks_before_external_request(self):
         self.report_path.unlink()
         with patch.object(promote_release,'api') as network:
@@ -110,6 +110,9 @@ class CoreAcceptanceTests(unittest.TestCase):
         case=next(r for r in self.recipes if r['id']=='holdout_en_lamp_continuity_v1')
         trace={'provisional':{'document':{'segments':[{'text':'Move small lamp closer read final line'}]}},'refined':{}}
         self.assertFalse(core.evaluate(case,trace)['provisional_phrase_0'])
+        brief=next(r for r in self.recipes if r['id']=='holdout_en_quiet_single_blue_v1')
+        trace['provisional']['document']['segments']=[{'text':'Blue. You.'}]
+        self.assertFalse(core.evaluate(brief,trace)['provisional_exact_text'])
     def test_backend_teardown_error_still_closes_supervisor(self):
         from unittest.mock import Mock
         backend=Mock();backend.close.side_effect=OSError('fixture teardown error')

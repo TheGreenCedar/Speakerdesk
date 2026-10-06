@@ -61,6 +61,27 @@ uses the same predicate as reconciliation. Blank cap output owns only its core,
 with original acoustic observation bounds kept separately. No phrase blacklist
 is used. JSON evidence and saved audio remain available for diagnosis.
 
+Actual source candidate e20e139 suppressed the constant/noise hallucinations and
+retained quiet speech, but refinement appended "you" to a 241ms terminal activity
+hole at a no-speech score of .94287. Its longer noise decode returned no words
+but remained unresolved. The failed raw output remains local regression evidence;
+neither exit code zero nor those partial successes satisfy acoustic acceptance.
+
+Refinement now shares the live path's bounded same-origin prefix comparison for
+a short contiguous same-owner or unassigned tail. Prefix audio may cross an owned
+commit boundary inside admitted context, but never a language epoch or a real
+speaker switch. Only owned suffix words are published. Two complete matching
+prefix/extended decodes may establish no additional words; their source bounds
+and original texts are retained and rechecked before reconciliation. A failed,
+truncated or unmatched comparison stays unresolved. This is lexical continuity,
+not word alignment or a claim of physical silence.
+
+A successful empty ASR result may finish inspection of an already blank row,
+retaining its empty-result warning. It remains excluded from coverage that could
+erase previous words. No amplitude or no-speech threshold was broadened for the
+longer noise control. Two additional independent quiet/brief recipes are frozen
+before synthesis; their failures must remain failures.
+
 The exact signed packaged gate is described in [core-acceptance.md](core-acceptance.md).
 No microphone/system capture or user recording was used for this investigation.
 CPU/browser tests prove routing, ownership and reading behavior; they do not

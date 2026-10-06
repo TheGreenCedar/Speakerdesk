@@ -52,7 +52,7 @@ def suite(root=ROOT):
     cases=list(values[0]['cases'])
     for raw in values[1]['recipes']:
         case=dict(raw,language=raw['language_mode'],expect=dict(raw['expected']))
-        case['groups']=['sentence_continuity']
+        case['groups']=list(raw.get('groups',['sentence_continuity']))
         if 'gratitude' in raw['id']:case['groups']=['genuine_thanks','sentence_continuity']
         if 'preceding_context_case' in raw:case['groups'].append('language_fallback')
         case['parts']=[dict(p,kind='zero',seconds=p['duration_ms']/1000) if p['kind']=='pause' else
@@ -93,6 +93,7 @@ def evaluate(recipe, trace):
         rows=job.get('document',{}).get('segments',[])
         primary=[row for row in rows if row.get('text','').strip()]
         tokens=words(' '.join(row['text'] for row in primary))
+        if 'exact_text' in expected:checks[stage+'_exact_text']=tokens==words(expected['exact_text'])
         checks[stage+'_observed']=isinstance(job.get('id'),str) and bool(job.get('last_fast_sequence'))
         checks[stage+'_local_models']=job.get('document',{}).get('provenance',{}).get('kind')=='local_inference'
         if expected.get('no_words'):checks[stage+'_no_words']=not tokens

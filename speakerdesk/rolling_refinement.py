@@ -153,7 +153,28 @@ def successful_non_speech(row):
     return False
 
 def successful_coverage(row):
-    return (bool(row.get('text','').strip()) or successful_non_speech(row)) and not row.get('transcription_review')
+    return (bool(row.get('text','').strip()) or successful_non_speech(row) or successful_context_empty(row)) and not row.get('transcription_review')
+
+def successful_context_empty(row):
+    """Two complete same-origin decodes establish no additional owned words.
+
+    This is lexical continuity, not a claim of physically silent audio.
+    """
+    if row.get('text','').strip() or row.get('transcription_review') or row.get('audio_state')!='context_no_new_words':return False
+    evidence=row.get('context_evidence') or {};start,end=bounds(row)
+    if (evidence.get('source')!='same_origin_prefix' or evidence.get('prefix_complete') is not True
+            or evidence.get('extended_complete') is not True or type(evidence.get('start_sample')) is not int
+            or not 0<=evidence['start_sample']<start or evidence.get('prefix_end_sample')!=start
+            or evidence.get('end_sample')!=end):return False
+    reference,extended=evidence.get('reference_text'),evidence.get('extended_text')
+    if not isinstance(reference,str) or not isinstance(extended,str):return False
+    split=split_same_origin(reference,extended)
+    return split is not None and not split[1]
+
+def completed_empty_recognition(row):
+    """Successful empty ASR can finish a blank row; it cannot erase old words."""
+    review=row.get('transcription_review') or {}
+    return not row.get('text','').strip() and review.get('reason')=='empty_result' and review.get('partial_text') is False
 
 def reconcile_window(document, window, expected, candidates, speakers=None):
     """Return a new document plus the previous window revision, without mutating inputs.
@@ -213,7 +234,7 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
         if sid in used or (not old and sid in old_ids):raise ValueError('Refinement ID collision.')
         fast = window.get('kind') == 'fast_tail'
         candidate.update(id=sid,machine_revision=(old.get('machine_revision',0)+1 if old else 1),
-                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if (candidate['text'].strip() or successful_non_speech(candidate)) and not candidate.get('transcription_review') else 'unresolved'),
+                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if successful_coverage(candidate) or completed_empty_recognition(candidate) else 'unresolved'),
                          refinement_window=window['id'],finalized=bool(candidate.get('finalized')) if fast else True)
         candidate['audio_anchor'] = (copy.deepcopy(old.get('audio_anchor')) if old and bounds(old)==bounds(candidate) and old.get('audio_anchor')
                                      else {'start_sample':bounds(candidate)[0],'end_sample':bounds(candidate)[1]})

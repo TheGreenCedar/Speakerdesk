@@ -102,6 +102,7 @@ class RefinementController:
                     for s in job['document']['segments']]
                 request={'type':'refine','window':dispatched,'operation_id':dispatched['operation_id'],
                          'language_epoch':stamp['epoch'],'language':stamp['language'],
+                         'language_start_sample':stamp['start_sample'],
                          'language_context':preceding_language_context(language_sources,dispatched['start_sample'],stamp['epoch']),
                          'expected':expected,'references':references}
                 job['rolling_inflight']=copy.deepcopy(request)
