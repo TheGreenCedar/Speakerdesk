@@ -17,15 +17,24 @@ class RollingLifecycleTests(MeetingHarness,unittest.TestCase):
             folder=Path(kwargs['stderr'].name).parent
             if len(command)>1:
                 worker=Path(__file__).parent/'support/rolling_protocol.py'
-                process=real_popen([sys.executable,str(worker),command[-1]],**kwargs)
+                config=json.loads(command[-1])
+                if self.scenario=='hold_refinement':config['test_hold_old_refinement']=True
+                process=real_popen([sys.executable,str(worker),json.dumps(config)],**kwargs)
             else:process=real_popen([sys.executable,str(PROTOCOL),'capture',str(folder),self.scenario,'en'],**kwargs)
             self.children.append(process);return process
         self.peers=patch('live_meeting.subprocess.Popen',side_effect=peer);self.peers.start()
     def test_short_pause_resume_stop_drains_real_engine_and_refinement_before_shutdown(self):
+        # Hold an actual old-epoch refinement response until the language change.
+        # Otherwise a faster worker may finish that window before the switch,
+        # legitimately leaving no unresolved old audio to assert below.
+        self.scenario='hold_refinement'
         jid=self.start(['microphone','system']);self.wait_for(lambda:self.job(jid)['status']=='recording')
-        self.control(jid,'pause');self.wait_for(lambda:self.job(jid)['status']=='paused')
-        self.wait_for(lambda:self.job(jid)['document']['segments'])
-        self.assertEqual(self.change_language(jid,'fr',0).status_code,200)
+        try:
+            self.control(jid,'pause');self.wait_for(lambda:self.job(jid)['status']=='paused')
+            self.wait_for(lambda:self.job(jid)['document']['segments'])
+            self.wait_for(lambda:(self.root/jid/'refinement-response-held').exists())
+            self.assertEqual(self.change_language(jid,'fr',0).status_code,200)
+        finally:(self.root/jid/'refinement-response-release').touch()
         self.control(jid,'resume');self.wait_for(lambda:self.job(jid)['status']=='recording')
         self.control(jid,'stop');self.wait_for(lambda:self.manager.jid is None)
         job=self.job(jid);self.assertEqual(job['status'],'ready',job)
