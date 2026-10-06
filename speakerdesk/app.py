@@ -293,6 +293,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             incoming=validate(body.get('document'),job['duration'])
             original={s['id']:s for s in (job.get('document') or {}).get('segments',[])}
             for segment in incoming['segments']:
+                segment.pop('decode_core_plan',None)
                 prior=original.get(segment['id'])
                 protected=set(prior.get('protected_fields',[])) if prior else set()
                 edited={k for k in ('text','speaker','start','end') if prior and segment[k]!=prior[k]}

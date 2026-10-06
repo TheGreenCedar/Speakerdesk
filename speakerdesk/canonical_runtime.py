@@ -88,6 +88,9 @@ class CanonicalRuntime:
                 if not updated['machine_versions'][-1]['complete'] and all(p['complete'] for p in parts):
                     use_alignment=False
             if not use_alignment:
+                from core_plan import plan,validate
+                row['decode_core_plan']=plan(row,e.models.speech_live.evidence.admission)
+                validate(row['decode_core_plan'],row)
                 parts=self.decode_long_parts(row,stage,self.book.core_decode_requests(row['id']),aligned=False)
                 if parts is False:return False
                 self.book.apply_core_parts(row['id'],parts,stage=stage)
@@ -285,7 +288,7 @@ class CanonicalRuntime:
         e=self.engine;stamp=e.language_at(row['start_sample']);names=row.get('speaker_candidates',[])
         speaker=names[0] if len(names)==1 else 'multiple_speakers' if names else 'unassigned'
         result={key:copy.deepcopy(value) for key,value in row.items()
-                if key not in ('machine_versions','protected_fields','last_speech_sample','state','machine_revision','reading_word_evidence','reading_turns','reading_turn_provenance')}
+                if key not in ('machine_versions','protected_fields','last_speech_sample','state','machine_revision','reading_word_evidence','reading_turns','reading_turn_provenance','decode_core_plan')}
         result.update(canonical_utterance_id=row['id'],canonical_machine_revision=row['machine_revision'],
             canonical_state=row['state'],start=row['start_sample']/RATE,end=row['end_sample']/RATE,
             speaker=speaker,source_speaker_candidates=names,language_generation=row['language_epoch'],
