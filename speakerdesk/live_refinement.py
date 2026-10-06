@@ -82,19 +82,26 @@ class Inbox:
             self.condition.wait(.1);return None
 
 
-def align_tracks(turns, references):
+def align_tracks(turns, references, *, diagnostics=None):
     """Temporal correspondence only; ambiguous local slots remain mixed/unknown."""
     local=sorted({t['speaker'] for t in turns});known=sorted({s for r in references for s in r.get('speaker_candidates',[])})
-    mapping={};claims={}
+    mapping={};claims={};details={}
     for name in local:
         activity=[t for t in turns if t['speaker']==name];duration=interval_duration([(t['start'],t['end']) for t in activity])
         score={k:interval_duration([(max(t['start'],r['start']),min(t['end'],r['end'])) for t in activity for r in references if k in r.get('speaker_candidates',[])]) for k in known}
         ranked=sorted(score,key=score.get,reverse=True)
+        details[name]={'local_speaker':name,'active_seconds':duration,'reference_overlap_seconds':score,
+                       'best_speaker':ranked[0] if ranked else None,'best_fraction':0.,'runner_up_fraction':0.,
+                       'reason':'no_reference'}
         if ranked and duration>0:
             best=score[ranked[0]]/duration;second=score[ranked[1]]/duration if len(ranked)>1 else 0
+            details[name].update(best_fraction=best,runner_up_fraction=second,
+                reason='insufficient_overlap' if best<.60 else 'insufficient_margin' if best-second<.20 else 'ambiguous_claim')
             if best>=.60 and best-second>=.20:claims.setdefault(ranked[0],[]).append(name)
     for global_name,names in claims.items():
-        if len(names)==1:mapping[names[0]]=global_name
+        if len(names)==1:
+            mapping[names[0]]=global_name;details[names[0]]['reason']='mapped'
+    if diagnostics is not None:diagnostics.extend(details[name] for name in local)
     return mapping
 
 
@@ -301,7 +308,9 @@ class Engine:
         if self.inbox.cancelled_request(request):return {'type':'refinement_result',**{k:request[k] for k in ('operation_id','language_epoch','window')},'cancelled':True}
         pcm=read_audio(self.path,a,b);turns=self.models.batch_turns(pcm)
         absolute=[dict(t,start=t['start']+a/RATE,end=t['end']+a/RATE) for t in turns]
-        mapping=align_tracks(absolute,request['references']);mapped=[]
+        diagnostics=[] if self.config.get('track_mapping_diagnostics') else None
+        raw_turns=copy.deepcopy(absolute) if diagnostics is not None else None
+        mapping=align_tracks(absolute,request['references'],diagnostics=diagnostics);mapped=[]
         for t in absolute:
             t['speaker']=mapping.get(t['speaker'],'unknown_mixed');mapped.append(t)
         rows=[];speakers={}
@@ -317,8 +326,11 @@ class Engine:
                 if 'unknown_mixed' in names:row.update(speaker='overlap_unknown',voice_eligible=False,review=True,speaker_candidates=[])
                 speakers[row['speaker']]='Mixed audio' if row['speaker'].startswith('overlap') else 'Speaker '+str(int(row['speaker'].split('_')[-1])+1)
             rows.extend(produced)
-        return {'type':'refinement_result','operation_id':request['operation_id'],'language_epoch':request['language_epoch'],
+        result={'type':'refinement_result','operation_id':request['operation_id'],'language_epoch':request['language_epoch'],
                 'window':window,'candidates':coalesce_blanks(rows),'speakers':speakers}
+        if diagnostics is not None:result['track_mapping']={'raw_batch_turns':raw_turns,'references':copy.deepcopy(request['references']),
+            'scores':diagnostics,'mapping':mapping}
+        return result
     def handle(self,message):
         import numpy as np
         kind=message['type']

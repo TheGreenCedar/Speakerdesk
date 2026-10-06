@@ -34,6 +34,17 @@ def intersects(first, second):
     return first[0] < second[1] and second[0] < first[1]
 
 
+def uncovered_samples(segment, candidates):
+    """Exact candidate coverage gaps; no tolerance or word alignment."""
+    a,b=bounds(segment);cursor=a;gaps=[]
+    for start,end in sorted(bounds(s) for s in candidates if s['text'].strip() and not s.get('transcription_review')):
+        if end<=cursor or start>=b:continue
+        if start>cursor:gaps.append({'start_sample':cursor,'end_sample':min(start,b)})
+        cursor=max(cursor,min(end,b))
+    if cursor<b:gaps.append({'start_sample':cursor,'end_sample':b})
+    return gaps
+
+
 class RollingPlan:
     """At most two small requests; backlog is a cursor into the saved WAV.
 
@@ -196,7 +207,8 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
     for key,name in (speakers or {}).items():output['speakers'].setdefault(key,name)
     output['segments'].sort(key=lambda s:bounds(s))
     return {'document':output,'previous_revision':{'window_id':window['id'],'segments':previous},
-            'protected_ids':sorted(blocked_ids),'changed':output!=document}
+            'protected_ids':sorted(blocked_ids),'changed':output!=document,
+            'coverage_gaps':{s['id']:uncovered_samples(s,proposed) for s in blocked}}
 
 
 def split_same_origin(previous_text, extended_text):

@@ -151,8 +151,10 @@ class RefinementController:
                             and request['expected'].get(row['id'])==segment_version(row)
                             and window['start_sample']<=bounds(row)[0]<bounds(row)[1]<=window['end_sample']):
                         incomplete=True
+                        gaps=merged['coverage_gaps'].get(row['id'],[])
                         row.update(refinement_state='unresolved',finalized=True,review=True,
-                                   transcription_review={'reason':'refinement_incomplete','partial_text':bool(row['text'].strip())})
+                                   transcription_review={'reason':'refinement_incomplete' if gaps else 'refinement_conflict',
+                                       'partial_text':bool(row['text'].strip()),'uncovered_audio':gaps})
                 save_history(job['refinement_history'],window['id'],{'language_epoch':result['language_epoch'],'created':time.time(),
                     **merged['previous_revision'],'candidates':result.get('candidates',[])})
                 job.update(document=document,revision=job['revision']+1)

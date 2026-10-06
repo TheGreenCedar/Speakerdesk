@@ -149,7 +149,7 @@ in place; explicit audio-anchor scroll compensation handles merged rows.
 
 ## Validation and release boundary
 
-The full integrated CPU suite passes: **183 tests**. It exercises
+The full integrated CPU suite passes: **185 tests**. It exercises
 production scheduling, the resident engine and real JSONL/pipes/SQLite/WAV with
 explicit synthetic model substitutes. New cases include a through-word six-second
 cut, sentence punctuation, genuine repetition, lexical code switching, 80 seconds
@@ -158,11 +158,12 @@ conservative slot mapping, saved-prefix edits, stale operations, failed retries,
 placeholder recovery and restart without capture. Existing import, language,
 voice eligibility, enrollment and error-cleanup regressions also pass.
 
-Ten installed headless Chrome checks pass with zero page errors on the production
+Twelve installed headless Chrome checks pass with zero page errors on the production
 HTML/JS/API and an explicitly synthetic fixture. They cover compact pending rows,
 focused drafts, stale-save rejection, protected saved edits, confirmed names,
 scroll preservation, refinement controls, the live language/default boundary and
-delete protection while a saved refinement owns the meeting.
+delete protection while a saved refinement owns the meeting. Exact uncovered
+audio tails appear in both live and saved editors; unknown audio retains review.
 The enrollment lane's browser flow also passes after integration, including
 bounded preview, consent reset and actionable empty-clip reasons.
 
@@ -215,3 +216,20 @@ when a float endpoint such as `19.560000000000002` represents sample 312960.
 The same contract marks retained incomplete rows inside their owned window.
 A one-sample ownership overrun and genuine missing frame remain rejected or
 unresolved. No timing tolerance is widened; native effect awaits coordination.
+
+Retained incomplete rows now record exact uncovered sample intervals separately
+from the larger contextual retry window. The observed English and French tails
+are displayed as 00:39.8000–00:39.8100 (10 ms) and
+00:49.5585–00:49.5800 (21.5 ms). Shared candidates blocked by a neighboring
+incomplete passage show a reconciliation conflict, rather than claiming missing
+audio throughout an otherwise covered passage. Words, audio, review states and
+retry bookmarks remain retained; these intervals are not word timestamps.
+
+An opt-in worker diagnostic records raw batch speaker slots, temporal overlap
+scores, mapping decisions and reasons for an unknown fallback. Normal worker
+results do not include this diagnostic. A focused native comparison is prepared
+to test the retained reference against the original reference list using one
+actual NVIDIA batch and real ASR for both cases. Preparation replays recorded
+native provisional events through the corrected controller and confirms that
+exactly one reference is added. No additional model execution or improvement
+claim follows from this CPU preparation; the native resource window is pending.

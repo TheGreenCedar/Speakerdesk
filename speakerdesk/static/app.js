@@ -165,6 +165,7 @@ function renderSegments() {
     body.append(top,text);
     const reason=passageReviewReason(segment);
     if(reason)body.append(node('p',`${passageTime(segment.start)}–${passageTime(segment.end)} · ${reason}. Play this passage to review it.`, 'passage-review'));
+    appendUncoveredAudio(body,segment);
     if(!isLive()) {
       const tools=node('div',undefined,'passage-retry'), language=node('select');
       language.setAttribute('aria-label',`Choose language to retry passage at ${time(segment.start)}`);
@@ -228,7 +229,18 @@ function renderSegments() {
   lucide.createIcons();
 }
 const reviewReasons={uncertain:'Language uncertain; audio retained',change_pending:'Language change uncertain; audio retained',unsupported:'Detected language unsupported; audio retained',insufficient_speech:'Too little usable speech; audio retained',overlapping_speech:'Overlapping speakers; voices are not separated',refinement_incomplete:'Larger-context result was incomplete; previous words and audio retained',empty_result:'No transcript text returned; audio retained',transcription_failed:'Transcription failed for this passage; audio retained',token_limit:'Transcript may be incomplete; audio retained',unassigned_audio:'Audio outside detected speech; may be silence or missed speech'};
+function reviewSampleTime(sample) {
+  const units=Math.round(sample*10000/16000),minutes=Math.floor(units/600000),rest=units%600000;
+  return `${String(minutes).padStart(2,'0')}:${String(Math.floor(rest/10000)).padStart(2,'0')}.${String(rest%10000).padStart(4,'0')}`;
+}
+function appendUncoveredAudio(body,segment) {
+  const gaps=segment.transcription_review?.uncovered_audio;
+  if(!gaps?.length)return;
+  const ranges=gaps.map(g=>`${reviewSampleTime(g.start_sample)}–${reviewSampleTime(g.end_sample)} (${Number(((g.end_sample-g.start_sample)/16).toFixed(4))} ms)`);
+  body.append(node('p',`Audio to review: ${ranges.join('; ')}. Current words and original audio retained.`,'review-audio-ranges'));
+}
 function passageReviewReason(segment) {
+  if(segment.transcription_review?.reason==='refinement_conflict')return 'Previous words retained because the new passage also covers another passage needing review.';
   if(segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length>1)return reviewReasons.overlapping_speech;
   if(segment.review_resolution==='words_reviewed' && segment.text.trim())return '';
   if(segment.transcription_review?.reason)return reviewReasons[segment.transcription_review.reason] || 'Passage needs review; audio retained';

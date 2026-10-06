@@ -66,6 +66,7 @@ function liveCard(segment) {
   if(state==='unresolved') {
     const details=node('details',undefined,'rolling-review');details.append(node('summary','Review details'));
     details.append(node('p',passageReviewReason(segment) || 'Previous words and original audio retained.','passage-review'));
+    appendUncoveredAudio(details,segment);
     if(segment.refinement_window) {
       const prior=node('button','Show prior words','text-button');
       prior.addEventListener('click',async()=>{

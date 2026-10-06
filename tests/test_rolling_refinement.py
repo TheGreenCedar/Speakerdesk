@@ -119,5 +119,19 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(result['document']['segments'][1],self.old[1])
         self.assertEqual(result['document']['segments'][2],self.old[2])
 
+    def test_exact_sample_gaps_do_not_mark_the_whole_shared_phrase_uncovered(self):
+        old=[row('hello',41.5085,41.76,'Bonjour.'),row('french',42.48,49.58,'Complete French words')]
+        doc={'speakers':{'speaker_0':'Speaker 1'},'segments':old}
+        expected={s['id']:segment_version(s) for s in old}
+        result=reconcile_window(doc,{'id':'french-core','start_sample':664136,'end_sample':796128},expected,
+            [row('joined',41.5085,49.558499999999995,'Bonjour. Complete French words')])
+        self.assertEqual(result['coverage_gaps']['hello'],[])
+        self.assertEqual(result['coverage_gaps']['french'],[{'start_sample':792936,'end_sample':793280}])
+        self.assertEqual(result['document'],doc)
+        english=[row('english',34.84,39.81,'Complete English words')]
+        result=reconcile_window({'speakers':doc['speakers'],'segments':english},window(24.16,41.5085),
+            {'english':segment_version(english[0])},[row('new',34.84,39.8,'Complete English words')])
+        self.assertEqual(result['coverage_gaps']['english'],[{'start_sample':636800,'end_sample':636960}])
+
 
 if __name__=='__main__':unittest.main()

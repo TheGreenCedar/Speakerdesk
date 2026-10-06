@@ -43,6 +43,25 @@ def main():
             job=manager.get(jid);job.update(status='ready',refinement_status='refining');manager.put(job)
             manager.jid=jid if request.get_json().get('owned') else None
             return jsonify(ok=True)
+        @app.post('/fixture/review-edges')
+        def review_edges():
+            job=manager.get(jid)
+            rows=[]
+            for sid,start,end,a,b,text,language in [
+                ('english-tail',34.84,39.81,636800,636960,'Synthetic retained English words.','en'),
+                ('french-tail',42.48,49.58,792936,793280,'Mots français synthétiques conservés.','fr')]:
+                rows.append({'id':sid,'start':start,'end':end,'text':text,'speaker':'speaker_0',
+                    'language':language,'refinement_state':'unresolved','review':True,'machine_revision':1,
+                    'transcription_review':{'reason':'refinement_incomplete','partial_text':True,
+                        'uncovered_audio':[{'start_sample':a,'end_sample':b}]}})
+            rows.append({'id':'unknown-audio','start':39.81,'end':41.5085,'text':'','speaker':'overlap_unknown',
+                'refinement_state':'unresolved','review':True,'machine_revision':1,'voice_eligible':False})
+            job['document']['segments']=rows
+            live=request.get_json().get('live',False)
+            job.update(status='recording' if live else 'ready',duration=49.758,refinement_status='unresolved',revision=job['revision']+1)
+            job['document']['speakers']['overlap_unknown']='Unassigned audio'
+            manager.put(job);manager.jid=jid if live else None
+            return jsonify(ok=True)
         app.view_functions['config']=lambda:jsonify(languages=LANGUAGE_CHOICES,default_language='auto',readiness={'configured':True,'automatic_language':True},decoder='CPU fixture')
         app.view_functions['status']=lambda:jsonify(models=[],status='ready',ready=True,core_ready=True,supported=True,total_bytes=1,downloaded_bytes=1,error=None,
             voice={'status':'ready','available':False,'enabled':False,'message':'CPU UI fixture'})

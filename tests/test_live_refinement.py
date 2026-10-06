@@ -97,6 +97,21 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(align_tracks(turns,refs),{'speaker_7':'speaker_0','speaker_2':'speaker_1'})
         mixed=[{'start':0,'end':10,'speaker_candidates':['speaker_0','speaker_1']}]
         self.assertEqual(align_tracks(turns,mixed),{})
+
+    def test_opt_in_track_diagnostics_preserve_raw_slots_and_mapping_decisions(self):
+        request={'operation_id':'diagnostic','language_epoch':0,'language':'en',
+            'window':{'id':'diagnostic-window','start_sample':0,'end_sample':10*RATE,'context_start_sample':0,'context_end_sample':10*RATE},
+            'references':[{'start':0,'end':10,'speaker_candidates':['speaker_0']}]}
+        plain=self.engine.refine(request);self.assertNotIn('track_mapping',plain)
+        self.engine.config['track_mapping_diagnostics']=True
+        observed=self.engine.refine(request)
+        self.assertEqual(observed['candidates'],plain['candidates'])
+        d=observed['track_mapping'];self.assertEqual(d['raw_batch_turns'][0]['speaker'],'speaker_7')
+        self.assertEqual(d['mapping'],{'speaker_7':'speaker_0'})
+        self.assertEqual((d['scores'][0]['reason'],d['scores'][0]['best_fraction']),('mapped',1))
+        ambiguous=[];self.assertEqual(align_tracks([{'start':0,'end':10,'speaker':'speaker_7'}],
+            [{'start':0,'end':10,'speaker_candidates':['speaker_0','speaker_1']}],diagnostics=ambiguous),{})
+        self.assertEqual(ambiguous[0]['reason'],'insufficient_margin')
     def test_micro_overlap_is_one_shared_phrase_without_erasing_voice_candidates(self):
         turns=[{'start':0,'end':10,'speaker':'speaker_0'},{'start':4,'end':4.1,'speaker':'speaker_1'}]
         self.assertEqual(context_regions(turns),[{'start':0,'end':10,'speakers':['speaker_0','speaker_1']}])
@@ -292,6 +307,8 @@ class HostTests(unittest.TestCase):
         job=self.manager.get(self.jid)
         self.assertEqual(job['document']['segments'][0]['refinement_state'],'unresolved')
         self.assertEqual(job['document']['segments'][0]['text'],'Complete previous words')
+        self.assertEqual(job['document']['segments'][0]['transcription_review']['uncovered_audio'],
+                         [{'start_sample':312800,'end_sample':312960}])
         self.assertEqual(job['refinement_unresolved'][0]['end_sample'],312960)
 
     def test_delayed_historical_phrase_can_finish_before_its_language_boundary(self):
