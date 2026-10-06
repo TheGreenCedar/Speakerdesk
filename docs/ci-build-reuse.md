@@ -40,14 +40,19 @@ This conservatively invalidates all caches on toolchain drift.
 
 | Cache | Inputs and reuse rule | Persisted paths |
 | --- | --- | --- |
-| uv dependencies | All requirements lock files; exact key | `.cache/uv` |
-| Cargo downloads | Cargo.lock; exact key | Cargo registry and git downloads |
-| npm downloads | package-lock.json; exact key | `.cache/npm` via npm configuration |
+| uv dependencies | All requirements lock files; compatible download fallback | `.cache/uv` |
+| Cargo downloads | Cargo.lock; compatible download fallback | Cargo registry and git downloads |
+| npm downloads | package-lock.json; compatible download fallback | `.cache/npm` via npm configuration |
 | Rust compiler | Compatible toolchain/build contract prefix; immutable source key | Bounded local sccache objects |
 | Python component | All tracked app, packaging, requirements and builder inputs; exact key only | Built ad-hoc sidecar and SHA-256 receipt |
 | Swift component | Swift source, plist, entitlements and builder inputs; exact key only | Capture binary before signing and SHA-256 receipt |
 
 Whole components reject mismatched receipts and changed bytes before copying.
+Download fallbacks only supply dependency caches; locked resolution and integrity
+checks still select the installed dependencies. A release version bump changes
+the exact compiler cache key but preserves its compatible toolchain prefix.
+sccache hashes each actual rustc invocation and its source, dependencies and
+environment; Cargo.toml version changes cannot force unchanged objects cold.
 PyInstaller pickle analysis state is never persisted; `--clean` still applies
 when a component misses. Rust source edits preserve Python and Swift reuse.
 Developer ID local builds bypass component caching entirely. The total save
@@ -79,6 +84,27 @@ warm evidence; compare changed inputs and component hit types before reporting
 savings. Reuse an existing exact-source candidate for release instead of
 dispatching a timing-only rebuild. No paid runner or repeated experiment is
 required.
+
+PR #3 merged at `c9efddd70c6c0eb4e81b833f374e64a687e1da2a`; its native path
+has not yet produced a measured warm run. The 0.4 candidate run
+[37396189760](https://github.com/TheGreenCedar/Speakerdesk/actions/runs/37396189760)
+used PR #4's older producer workflow and does not measure the merged caches.
+The PR #4 integration must retain the main workflow's cache/trust controls and
+add `live_editor.js` to its conditional JavaScript syntax step. New 0.4 modules
+and hidden imports are already covered by the `speakerdesk/` and `packaging/`
+runtime input sets; the capture plist version change correctly invalidates the
+Swift component.
+
+The next normally required main candidate build can populate the trusted caches.
+A later normally required main build on the same toolchain/runner image measures
+download and compiler fallback reuse even if the app version or lock files
+change. Record restored keys, cache bytes, sccache compile requests/hits/misses,
+component hit types and times, build duration, and restore/save transfer time
+from the job steps. For a component comparison, its exact input key must match;
+a Python feature change or embedded capture plist version change correctly
+makes that component cold. No timing-only dispatch is needed. Cross-commit
+results measure observed reuse and elapsed costs, not a controlled speedup;
+releasing an existing exact-source artifact still avoids a second compilation.
 
 ## Applying this pattern to future repositories
 
