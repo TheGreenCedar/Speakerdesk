@@ -37,18 +37,44 @@ def part(request,text,spans):
 
 def repeated_parts(book,row):
     requests=book.decode_requests(row['id'])
-    return [part(requests[0],'go  12.5 go',[(1000,5000),(10000,15000),(300000,310000)]),
+    return [part(requests[0],'go  12.5 go',[(1000,5000),(260000,270000),(300000,310000)]),
             part(requests[1],'12.5 go\t12.5',[(260000,270000),(300000,310000),(400000,410000)])]
 
 
 class AssemblyTests(unittest.TestCase):
+    def test_opposing_context_ownership_cannot_silently_omit_or_duplicate_a_word(self):
+        for opposing in ('omit','duplicate'):
+            book,row=book_for();requests=book.decode_requests(row['id'])
+            first,last=((289000,290000),(286000,287000)) if opposing=='omit' else ((286000,287000),(289000,290000))
+            parts=[part(requests[0],'before final',[(250000,255000),first]),
+                   part(requests[1],'before final after',[(250000,255000),last,(400000,410000)])]
+            # Both independent alignments are complete and in range, but they
+            # disagree about which disjoint core owns the shared final word.
+            result=assemble_parts(row,requests,parts)
+            self.assertFalse(result['complete'],opposing)
+            self.assertEqual(result['reason'],'context_ownership_unresolved')
+            self.assertIsNone(result['text'])
+    def test_shared_context_missing_unit_or_changed_raw_unit_remains_unresolved(self):
+        for defect in ('missing','different'):
+            book,row=book_for();parts=repeated_parts(book,row)
+            if defect=='missing':parts[1]=part(parts[1]['request'],'go 12.5',[(300000,310000),(400000,410000)])
+            else:parts[1]=part(parts[1]['request'],'13.5 go 12.5',[(260000,270000),(300000,310000),(400000,410000)])
+            result=assemble_parts(row,book.decode_requests(row['id']),parts)
+            self.assertFalse(result['complete']);self.assertEqual(result['reason'],'context_ownership_unresolved')
+    def test_unknown_timing_kind_and_missing_calibration_metadata_cannot_assemble(self):
+        for key,value in [('timing_kind','invented_exact_word_edges'),('frame_calibration_id',None),
+                          ('score_calibration_id',False),('frame_calibration_id',' '),('score_calibration_id',7)]:
+            book,row=book_for(seconds=1);request=book.decode_requests(row['id'])[0]
+            supplied=part(request,'go',[(1000,2000)]);supplied['alignment'][key]=value
+            result=assemble_parts(row,[request],[supplied])
+            self.assertFalse(result['complete']);self.assertEqual(result['reason'],'unresolved_alignment')
     def test_core_ownership_preserves_real_repeats_numbers_and_raw_spacing(self):
         book,row=book_for();parts=repeated_parts(book,row)
         assembled=assemble_parts(row,book.decode_requests(row['id']),parts)
         self.assertTrue(assembled['complete']);self.assertEqual(assembled['text'],'go  12.5 go\t12.5')
         self.assertEqual([w['text'] for w in assembled['words']],['go','12.5','go','12.5'])
         self.assertEqual([(w['start_sample'],w['end_sample']) for w in assembled['words']],
-            [(1000,5000),(10000,15000),(300000,310000),(400000,410000)])
+            [(1000,5000),(260000,270000),(300000,310000),(400000,410000)])
         self.assertEqual([assembled['text'][w['start_char']:w['end_char']] for w in assembled['words']],
             ['go','12.5','go','12.5'])
         row=book.apply_decode_parts(row['id'],parts,stage='refined')

@@ -112,7 +112,13 @@ failed alignment retains an unresolved candidate, never greedy lexical glue.
 `canonical_assembly.py` now implements a pure-data bounded partition contract:
 all current requests must match whole-utterance identity, both revisions, epoch
 and exact core/context bounds. Every context must have complete raw-text coverage
-and consistent alignment provenance. Only emission envelopes wholly inside a
+and consistent alignment provenance. Attachments require the exact emission
+envelope timing kind and typed nonempty calibration identifiers. Adjacent
+contexts must corroborate every ordered raw display unit in their shared audio:
+unit text must agree, envelopes must intersect, and both must choose the same
+core. Missing units, ownership drift, empty overlap or context-edge uncertainty
+retain an unresolved candidate. No prefix/suffix search or deduplication chooses
+words. Only emission envelopes wholly inside a
 disjoint core own words; crossing envelopes or empty ownership keep the candidate
 unresolved. Internal raw Unicode/spacing is retained, with one explicitly
 documented separator between context substrings. Numbers and real repetitions

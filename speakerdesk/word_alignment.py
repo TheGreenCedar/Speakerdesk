@@ -266,6 +266,10 @@ def attachment_for(result, request, current_utterance):
             or result.get('model_sha256') != MODEL_SHA256
             or result.get('audio_anchor') != {'start_sample': request.start_sample, 'end_sample': request.end_sample}):
         raise ValueError('Only complete matching Cohere alignment can attach.')
+    if (result.get('timing_kind')!='ctc_emission_cell_envelope'
+            or any(not isinstance(result.get(key),str) or not result[key].strip()
+                   for key in ('frame_calibration_id','score_calibration_id'))):
+        raise ValueError('Alignment timing kind and calibration identifiers are required.')
     words = result.get('words')
     raw_units = list(re.finditer(r'\S+', request.raw_text))
     if not isinstance(words, list) or not words or len(words) != len(raw_units):
@@ -274,6 +278,7 @@ def attachment_for(result, request, current_utterance):
     for word, raw in zip(words, raw_units):
         a, b = word.get('start_sample'), word.get('end_sample')
         if (word.get('status') != 'aligned' or word.get('text') != raw.group()
+                or type(word.get('start_char')) is not int or type(word.get('end_char')) is not int
                 or (word.get('start_char'), word.get('end_char')) != raw.span()
                 or type(a) is not int or type(b) is not int or not previous <= a < b <= request.end_sample):
             raise ValueError('Alignment has unresolved, reordered or out-of-range text.')

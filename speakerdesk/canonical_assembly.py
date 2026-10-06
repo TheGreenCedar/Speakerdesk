@@ -19,6 +19,33 @@ def part_utterance(request, text):
             'text_audio_anchor':{'start_sample':request['start_sample'],'end_sample':request['end_sample']}}
 
 
+def corroborated_seam(left_request,left,right_request,right):
+    """Require both contexts to agree on every shared observed display unit.
+
+    This is a rejection guard, not lexical deduplication: it searches for no
+    matching prefix/suffix and rewrites no text. Exact ordered units, intersecting
+    emission envelopes and the same disjoint-core owner must all corroborate.
+    A word shifted out of both cores cannot silently disappear as context.
+    """
+    a=max(left_request['start_sample'],right_request['start_sample'])
+    b=min(left_request['end_sample'],right_request['end_sample'])
+    seam=left_request['core_end_sample']
+    if not a<seam<b or seam!=right_request['core_start_sample']:return False
+    def shared(attachment):
+        words=[word for word in attachment['words'] if word['start_sample']<b and word['end_sample']>a]
+        if any(not a<=word['start_sample']<word['end_sample']<=b for word in words):return None
+        return words
+    x,y=shared(left),shared(right)
+    if not x or y is None or len(x)!=len(y):return False
+    for first,second in zip(x,y):
+        if (first['text']!=second['text']
+                or max(first['start_sample'],second['start_sample'])>=min(first['end_sample'],second['end_sample'])
+                or (first['end_sample']<=seam)!=(second['end_sample']<=seam)
+                or (first['start_sample']>=seam)!=(second['start_sample']>=seam)):
+            return False
+    return True
+
+
 def assemble_parts(row, requests, parts):
     """Return one replacement only when every bounded part has usable evidence.
 
@@ -30,7 +57,7 @@ def assemble_parts(row, requests, parts):
     """
     if not isinstance(parts,list) or not parts or len(parts)!=len(requests):
         return {'complete':False,'reason':'missing_decode_parts','text':None,'words':[]}
-    fragments=[];words=[];cursor=row['start_sample'];calibration=None
+    fragments=[];words=[];cursor=row['start_sample'];calibration=None;previous=None
     for request,part in zip(requests,parts):
         if (request['utterance_id']!=row['id'] or request['machine_revision']!=row['machine_revision']
                 or request['audio_revision']!=row['audio_revision']
@@ -54,6 +81,9 @@ def assemble_parts(row, requests, parts):
         if calibration is None:calibration=provenance
         elif provenance!=calibration:
             return {'complete':False,'reason':'inconsistent_alignment_provenance','text':None,'words':[]}
+        if previous and not corroborated_seam(previous[0],previous[1],request,attachment):
+            return {'complete':False,'reason':'context_ownership_unresolved','text':None,'words':[]}
+        previous=(request,attachment)
         owned=[];a,b=request['core_start_sample'],request['core_end_sample']
         for word in attachment['words']:
             x,y=word['start_sample'],word['end_sample']

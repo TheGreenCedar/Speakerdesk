@@ -129,6 +129,12 @@ class TimingEvidenceTests(unittest.TestCase):
 
 
 class AttachmentTests(unittest.TestCase):
+    def test_attachment_rejects_unknown_timing_kind_or_untyped_calibration_ids(self):
+        row=utterance();request=AlignmentRequest.from_utterance(row)
+        for key,value in [('timing_kind','anything'),('frame_calibration_id',None),
+                          ('score_calibration_id',None),('frame_calibration_id',''),('score_calibration_id',True)]:
+            result=mapped('go go',REPEATED_WORDS);result[key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(ValueError):attachment_for(result,request,row)
     def test_audio_growth_text_edits_and_revision_changes_reject_late_attachment(self):
         row = utterance();request = AlignmentRequest.from_utterance(row)
         result = mapped('go go', REPEATED_WORDS)
