@@ -215,7 +215,7 @@ Source-only follow-up uses integer sample bounds to retain speaker references
 when a float endpoint such as `19.560000000000002` represents sample 312960.
 The same contract marks retained incomplete rows inside their owned window.
 A one-sample ownership overrun and genuine missing frame remain rejected or
-unresolved. No timing tolerance is widened; native effect awaits coordination.
+unresolved. No timing tolerance is widened; focused native results follow below.
 
 Retained incomplete rows now record exact uncovered sample intervals separately
 from the larger contextual retry window. The observed English and French tails
@@ -231,5 +231,22 @@ results do not include this diagnostic. A focused native comparison is prepared
 to test the retained reference against the original reference list using one
 actual NVIDIA batch and real ASR for both cases. Preparation replays recorded
 native provisional events through the corrected controller and confirms that
-exactly one reference is added. No additional model execution or improvement
-claim follows from this CPU preparation; the native resource window is pending.
+exactly one reference is added. CPU preparation alone is not acoustic evidence.
+
+The admitted focused comparison at `ed99e4b` subsequently ran actual local
+NVIDIA/Cohere inference on the saved 18.16-second context. One real batch was
+reused to control the comparison, with real ASR for both reference sets. Unknown
+coverage fell from 10.87 to 5.89 seconds: the middle 14.58–19.56-second span
+mapped to speaker_1 after its retained reference gave 5.50/7.34 = 0.7493 temporal
+coverage. The first 12.00–13.94 and final 20.21–24.16 spans remained unknown:
+their shared local track had 3.95/8.24 = 0.4794 coverage, below the unchanged
+0.60 threshold. Words and row boundaries stayed identical between cases.
+
+The guard exited 0 in 3.84 seconds with 1.27 GB sampled process-tree RSS and
+1.99 GB reported MLX allocation; the owned process group exited and the resource
+window was released. This was a controlled single-window measurement; it did
+not rerun the full meeting pipeline or endpoint inference. CPU reconciliation
+of recorded real retry candidates separately reproduced exact 160/344-sample
+tail metadata, a fully covered Bonjour conflict and retained blank-audio review.
+Independent evidence review confirmed hashes, scores, words and gap arithmetic.
+Natural-meeting accuracy and native capture devices remain unverified.
