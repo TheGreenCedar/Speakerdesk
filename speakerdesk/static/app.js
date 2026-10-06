@@ -433,11 +433,26 @@ function renderRetainedAudioReview() {
 // Group presentation only: each passage keeps its own edit, timing, retry and
 // playback targets. Recompute after filtering/reconciliation without merging IDs.
 function groupConsecutivePassages(host) {
-  let previous;
+  let previous,liveLabelShown=false;
+  // Use canonical passage state, including while recording is paused or stopped.
+  // Update presentation in place so arriving refinement cannot replace a draft.
+  const provisional=new Set(doc.segments.filter(segment=>segment.refinement_state==='provisional').map(segment=>segment.id));
   for(const card of host.children) {
     const continuation=previous && previous.dataset.speaker===card.dataset.speaker;
     card.classList.toggle('speaker-continuation',!!continuation);
     card.classList.toggle('passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
+    const live=provisional.has(card.dataset.segmentId),start=live && !liveLabelShown;
+    card.classList.toggle('live-provisional',live);
+    card.classList.toggle('live-section-start',start);
+    let label=card.querySelector('.live-section-label');
+    if(start && !label){
+      label=node('span','Live','live-section-label');
+      label.title='These words are awaiting refinement and may change with more context.';
+      label.setAttribute('aria-label','Live words awaiting refinement');
+      const top=card.querySelector('.segment-top');top.insertBefore(label,top.firstChild);
+    }
+    if(label)label.hidden=!start;
+    liveLabelShown ||= live;
     previous=card;
   }
 }
