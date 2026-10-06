@@ -4,7 +4,7 @@ const token = document.querySelector('meta[name="speakerdesk-token"]').content;
 let config, jobs = [], selected = null, doc = null, dirty = false, polling = false, saving = false, editGeneration = 0, selectionGeneration = 0;
 let meeting = null, followingLive = true, passageEnd = null, retrying = false;
 let changingLiveLanguage = false;
-let pendingExport = null, autosaveTimer = null, setupState = null;
+let pendingExport = null, autosaveTimer = null, setupState = null, undoRemoval = null;
 const narrowLayout = () => matchMedia('(max-width: 900px)').matches;
 const liveStatuses = ['starting','recording','paused','finishing'];
 const isLive = () => selected && liveStatuses.includes(selected.status);
@@ -90,14 +90,18 @@ function scheduleAutosave() {
   autosaveTimer = setTimeout(() => {
     autosaveTimer = null;
     if (!dirty || !selected || !doc || isLive()) return;
-    if (saving) { scheduleAutosave(); return; }
+    // A removal stays local while Undo is offered: the server drops audio
+    // anchors and edit protection for passages missing from a saved document.
+    if (saving || undoRemoval) { scheduleAutosave(); return; }
     save({quiet: true}).catch(error => notice(`Couldn’t save automatically: ${error.message}`, true));
   }, 1200);
 }
 async function flushSave() {
   clearTimeout(autosaveTimer); autosaveTimer = null;
-  while (saving) await new Promise(resolve => setTimeout(resolve, 50));
-  if (dirty) await save({quiet: true});
+  while (dirty || saving) {
+    if (saving) await new Promise(resolve => setTimeout(resolve, 50));
+    else await save({quiet: true});
+  }
 }
 function changed() { editGeneration++; dirty = true; renderSaveState(); scheduleAutosave(); }
 function time(seconds) {
@@ -157,11 +161,15 @@ async function select(jid) {
   if(hasPendingPassageSaves()){notice('Wait for the passage save to finish before switching meetings.');return;}
   if(retrying){notice('Wait for the passage retry to start before switching recordings.');return;}
   if (identityBusy) { notice('Wait for the name change to finish before switching meetings.'); return; }
-  if (!(await saveBeforeLeaving())) return;
-  if (hasPassageDrafts() && !confirm('Discard unsaved passage drafts and open another recording?')) return;
-  passageDrafts.clear();recoverablePassageDrafts.clear();$('segments').replaceChildren();
-  const generation = ++selectionGeneration;
-  const result = await api(`/api/jobs/${jid}`);
+  $('editor').inert = true;
+  let result, generation;
+  try {
+    if (!(await saveBeforeLeaving())) return;
+    if (hasPassageDrafts() && !confirm('Discard unsaved passage drafts and open another recording?')) return;
+    passageDrafts.clear();recoverablePassageDrafts.clear();$('segments').replaceChildren();
+    generation = ++selectionGeneration;
+    result = await api(`/api/jobs/${jid}`);
+  } finally { if (!identityBusy) $('editor').inert = false; }
   if (generation !== selectionGeneration) return;
   selected = result; doc = selected.document ? structuredClone(selected.document) : null; dirty = false;
   passageEnd=null;
@@ -189,12 +197,19 @@ function nameSpeaker(id) {
 function removePassage(segment) {
   const index = doc.segments.indexOf(segment), jid = selected.id;
   if (index < 0) return;
+  clearTimeout(undoRemoval?.timer);
+  const removal = {jid, timer: setTimeout(() => { if (undoRemoval === removal) { undoRemoval = null; scheduleAutosave(); } }, 8000)};
+  undoRemoval = removal;
   doc.segments.splice(index, 1); changed(); renderEditor();
   notice('Passage removed.', false, {label: 'Undo', run: () => {
-    if (selected?.id !== jid || !doc || doc.segments.some(s => s.id === segment.id)) return;
+    if (undoRemoval !== removal || selected?.id !== jid || !doc) { notice('That removal is already saved and can’t be undone.'); return; }
+    clearTimeout(removal.timer); undoRemoval = null;
     doc.segments.splice(Math.min(index, doc.segments.length), 0, segment); changed(); renderEditor();
     document.querySelector(`[data-segment-id="${CSS.escape(segment.id)}"] textarea`)?.focus();
   }});
+}
+function markReviewable(segment) {
+  return !!segment.text.trim() && !(segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length > 1 || segment.speaker === 'unassigned');
 }
 function renderSearchResults(visible, query) {
   $('no-results').hidden = visible > 0 || !query;
@@ -258,11 +273,15 @@ function renderSegments() {
     if(selected.speaker_assignments?.[segment.speaker]?.source==='automatic_voice') {
       const recognized=node('span','Recognized','review-tag');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';top.append(recognized);
     }
-    if (segment.review) {
+    if (segment.review && !markReviewable(segment)) {
+      const review=node('span','Needs review','review-tag');
+      review.title=passageReviewReason(segment) || 'Speaker uncertain. Choose the speaker for this passage.';
+      top.append(review);
+    } else if (segment.review) {
       const review=node('button','Needs review','review-tag review-action');review.type='button';
-      review.title='Low confidence or a changed speaker. Play the passage to check it, then click to mark it reviewed.';
+      review.title='Play the passage to check the words, then click to mark them reviewed.';
       review.setAttribute('aria-label',`Mark passage at ${passageTime(segment.start)} as reviewed`);
-      review.addEventListener('click',()=>{segment.review=false;changed();renderSegments();setStatus();});
+      review.addEventListener('click',()=>{segment.review_resolution='words_reviewed';segment.review=false;changed();renderSegments();setStatus();});
       top.append(review);
     }
     if (!segment.language && segment.language_detection?.mode === 'auto') top.append(node('span', 'Language needs review', 'review-tag'));
@@ -448,6 +467,7 @@ async function save({quiet = false} = {}) {
   if (!dirty) return;
   if (saving) throw new Error('A save is in progress. Try again when it finishes.');
   clearTimeout(autosaveTimer); autosaveTimer = null;
+  if (undoRemoval) { clearTimeout(undoRemoval.timer); undoRemoval = null; if (document.querySelector('#notice .notice-action')) notice(''); }
   const generation = editGeneration, jid = selected.id;
   saving = true; renderSaveState();
   try {
@@ -604,9 +624,10 @@ function wire() {
     event.preventDefault();downloadExport().catch(e=>notice(e.message,true));
   });
   $('delete').addEventListener('click', async () => {
-    clearTimeout(autosaveTimer); autosaveTimer = null;
     if (saving) { notice('Wait for this save to finish before deleting.'); return; }
     if (!confirm(`Delete ${selected.name} and its local audio and transcript?`)) return;
+    clearTimeout(autosaveTimer); autosaveTimer = null;
+    if (undoRemoval) { clearTimeout(undoRemoval.timer); undoRemoval = null; }
     try {
       await api(`/api/jobs/${selected.id}`, {method: 'DELETE'}); passageDrafts.clear();selected = doc = null; dirty = false;
       $('player').pause(); $('player').removeAttribute('src'); $('workspace').hidden = true; $('empty').hidden = false;
