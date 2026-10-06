@@ -199,7 +199,7 @@ class CanonicalTests(unittest.TestCase):
             self.assertEqual(response.status_code,200,response.json)
             saved=manager.get(self.jid);row=saved['document']['segments'][0]
             self.assertEqual(row['bounded_decode_provenance'],original)
-            response=client.patch('/api/jobs/'+self.jid+'/segments/'+row['id'],headers=headers,json={'segment_revision':row['machine_revision'],'text':'Human correction'})
+            response=client.patch('/api/jobs/'+self.jid+'/segments/'+row['id'],headers=headers,json={'segment_revision':row['machine_revision'],'changes':{'text':'Human correction'}})
             self.assertEqual(response.status_code,200,response.json)
             self.assertNotIn('bounded_decode_provenance',manager.get(self.jid)['document']['segments'][0])
         finally:
