@@ -832,7 +832,7 @@ async function refreshSetup() {
     const list=$('model-list');list.replaceChildren();
     state.models.forEach(model => {
       const size=formatBytes(model.bytes);
-      const item=node('div',undefined,'model-item'); item.append(node('strong',model.name),node('span',model.installed?'Installed':size));list.append(item);
+      const item=node('div',undefined,'model-item'); item.append(node('strong',model.name),node('span',model.installed?'Installed':model.optional?`Optional · ${size}`:size));list.append(item);
     });
     const busy=state.status==='downloading';
     $('model-progress').hidden=!busy;
