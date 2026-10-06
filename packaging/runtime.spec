@@ -41,7 +41,7 @@ binary+=collect_dynamic_libs('soundfile')
 binary+=collect_dynamic_libs('coremltools')
 binary+=collect_dynamic_libs('onnxruntime')
 a=Analysis([str(root/'packaging/sidecar.py')],pathex=[str(root/'speakerdesk')],binaries=binary,datas=data,
-           hiddenimports=hidden,excludes=['torch','transformers','tensorflow','matplotlib','pandas'],noarchive=False,
+           hiddenimports=hidden,excludes=['torch','transformers','tensorflow','matplotlib','pandas','Cython','pyximport'],noarchive=False,
            module_collection_mode={'mlx_audio':'pyz+py'})
 pyz=PYZ(a.pure)
 exe=EXE(pyz,a.scripts,a.binaries,a.datas,[],name='speakerdesk-runtime-aarch64-apple-darwin',debug=False,
