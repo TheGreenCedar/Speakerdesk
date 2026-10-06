@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="speakerdesk-token"]').content;
 let config, jobs = [], selected = null, doc = null, dirty = false, polling = false, saving = false, editGeneration = 0, selectionGeneration = 0;
 let meeting = null, followingLive = true, passageEnd = null, retrying = false;
+let changingLiveLanguage = false;
 const liveStatuses = ['starting','recording','paused','finishing'];
 const isLive = () => selected && liveStatuses.includes(selected.status);
 const colors = ['#729e87','#7796b4','#b49877','#a184ad','#799da2','#ba8590','#99a36e','#867eae'];
@@ -64,7 +65,7 @@ function setStatus() {
   $('recording-dot').style.stroke=$('recording-dot').style.fill;
   $('run').hidden = !!doc?.segments?.length || live; $('run').disabled = busy || !languageReady(selected.language);
   $('manual').hidden = !!doc || busy || !selected.duration;
-  $('delete').disabled = busy;
+  $('delete').disabled = busy || !!selected.inference_owned;
   $('duration').textContent = selected.duration ? time(selected.duration) : 'Preparing…';
   $('segment-count').textContent = doc && !live ? `${doc.segments.length} passages` : '';
   $('save').hidden = !doc || live; $('search').disabled = !doc;
@@ -75,12 +76,14 @@ function setStatus() {
   $('speaker-tools').hidden=live;$('add').hidden=live;
   $('follow-live').hidden=!live;
   $('listening').hidden=!live || !!doc?.segments?.length;
+  renderRefinementStatus();
 }
 async function select(jid) {
   if(retrying){notice('Wait for the passage retry to start before switching recordings.');return;}
   if (identityBusy) { notice('Wait for the name change to finish before switching meetings.'); return; }
   if (saving) { notice('Wait for this save to finish before switching recordings.'); return; }
-  if (dirty && !confirm('Discard unsaved edits and open another recording?')) return;
+  if ((dirty || hasPassageDrafts()) && !confirm('Discard unsaved edits and open another recording?')) return;
+  passageDrafts.clear();$('segments').replaceChildren();
   const generation = ++selectionGeneration;
   const result = await api(`/api/jobs/${jid}`);
   if (generation !== selectionGeneration) return;
@@ -107,18 +110,21 @@ function renderEditor() {
   Object.entries(doc.speakers).forEach(([id, name], i) => {
     const row = node('div', undefined, 'speaker-name');
     const dot = node('span', undefined, 'speaker-dot'); dot.style.backgroundColor = colors[i % colors.length];
-    const input = node('input'); input.value = name; input.maxLength = 100; input.setAttribute('aria-label', `Rename ${name}`);
-    input.addEventListener('input', () => { doc.speakers[id] = input.value; changed();
-      document.querySelectorAll('.segment-top select').forEach(el => speakerOptions(el, el.value));
-    });
-    row.append(dot, input); $('speaker-list').append(row);
+    const choose = node('button', name, 'speaker-name-action'); choose.type = 'button';
+    choose.setAttribute('aria-label', `Name or remember voice for ${name}`);
+    choose.title = 'Name or remember voice';
+    choose.addEventListener('click', () => openNamePicker(id).catch(error => notice(error.message, true)));
+    row.append(dot, choose); $('speaker-list').append(row);
   });
   $('timing-note').textContent = doc.provenance?.timing || 'User supplied segment boundaries.';
   $('warnings').textContent = (doc.warnings || []).join(' '); $('warnings').hidden = !doc.warnings?.length;
   renderSegments();
   refreshIdentitySuggestions();
+  updateNameControls();
 }
 function renderSegments() {
+  if(isLive() || hasPassageDrafts() || ['waiting','refining'].includes(selected.refinement_status)){renderLiveSegments();return;}
+  $('pending-phrases').hidden=true;
   const pane=$('transcript-pane'), previousScroll=pane.scrollTop;
   $('segments').replaceChildren();
   const query = $('search').value.toLowerCase();
@@ -138,8 +144,8 @@ function renderSegments() {
     seek.disabled=!!isLive();
     speaker.addEventListener('change', () => { segment.speaker = speaker.value; segment.review = true; changed(); });
     top.append(speaker, seek);
-    const nameButton = node('button', undefined, 'name-speaker'); nameButton.append(icon('user-round-pen'));
-    nameButton.setAttribute('aria-label', `Name ${doc.speakers[segment.speaker]}`); nameButton.title = 'Choose speaker name';
+    const nameButton = node('button', undefined, 'name-speaker'); nameButton.append(icon('user-round-pen'),node('span','Name / remember voice'));
+    nameButton.setAttribute('aria-label', `Name or remember voice for ${doc.speakers[segment.speaker]}`);
     nameButton.addEventListener('click', () => openNamePicker(segment.speaker).catch(error => notice(error.message, true)));
     top.append(nameButton);
     if(selected.speaker_assignments?.[segment.speaker]?.source==='automatic_voice') {
@@ -159,6 +165,7 @@ function renderSegments() {
     body.append(top,text);
     const reason=passageReviewReason(segment);
     if(reason)body.append(node('p',`${passageTime(segment.start)}–${passageTime(segment.end)} · ${reason}. Play this passage to review it.`, 'passage-review'));
+    appendUncoveredAudio(body,segment);
     if(!isLive()) {
       const tools=node('div',undefined,'passage-retry'), language=node('select');
       language.setAttribute('aria-label',`Choose language to retry passage at ${time(segment.start)}`);
@@ -221,8 +228,19 @@ function renderSegments() {
   pane.scrollTop=isLive() && followingLive ? pane.scrollHeight : previousScroll;
   lucide.createIcons();
 }
-const reviewReasons={uncertain:'Language uncertain; audio retained',change_pending:'Language change uncertain; audio retained',unsupported:'Detected language unsupported; audio retained',insufficient_speech:'Too little usable speech; audio retained',overlapping_speech:'Overlapping speakers; voices are not separated',empty_result:'No transcript text returned; audio retained',transcription_failed:'Transcription failed for this passage; audio retained',token_limit:'Transcript may be incomplete; audio retained',unassigned_audio:'Audio outside detected speech; may be silence or missed speech'};
+const reviewReasons={uncertain:'Language uncertain; audio retained',change_pending:'Language change uncertain; audio retained',unsupported:'Detected language unsupported; audio retained',insufficient_speech:'Too little usable speech; audio retained',overlapping_speech:'Overlapping speakers; voices are not separated',refinement_incomplete:'Larger-context result was incomplete; previous words and audio retained',empty_result:'No transcript text returned; audio retained',transcription_failed:'Transcription failed for this passage; audio retained',token_limit:'Transcript may be incomplete; audio retained',unassigned_audio:'Audio outside detected speech; may be silence or missed speech'};
+function reviewSampleTime(sample) {
+  const units=Math.round(sample*10000/16000),minutes=Math.floor(units/600000),rest=units%600000;
+  return `${String(minutes).padStart(2,'0')}:${String(Math.floor(rest/10000)).padStart(2,'0')}.${String(rest%10000).padStart(4,'0')}`;
+}
+function appendUncoveredAudio(body,segment) {
+  const gaps=segment.transcription_review?.uncovered_audio;
+  if(!gaps?.length)return;
+  const ranges=gaps.map(g=>`${reviewSampleTime(g.start_sample)}–${reviewSampleTime(g.end_sample)} (${Number(((g.end_sample-g.start_sample)/16).toFixed(4))} ms)`);
+  body.append(node('p',`Audio to review: ${ranges.join('; ')}. Current words and original audio retained.`,'review-audio-ranges'));
+}
 function passageReviewReason(segment) {
+  if(segment.transcription_review?.reason==='refinement_conflict')return 'Previous words retained because the new passage also covers another passage needing review.';
   if(segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length>1)return reviewReasons.overlapping_speech;
   if(segment.review_resolution==='words_reviewed' && segment.text.trim())return '';
   if(segment.transcription_review?.reason)return reviewReasons[segment.transcription_review.reason] || 'Passage needs review; audio retained';
@@ -274,12 +292,14 @@ function wire() {
   wirePeople();
   $('new-meeting').addEventListener('click', () => {
     if(meeting && liveStatuses.includes(meeting.status)){select(meeting.id).catch(e=>notice(e.message,true));return;}
-    if(dirty && !confirm('Discard unsaved transcript edits?'))return;
-    selected=doc=null;dirty=false;selectionGeneration++;$('player').pause();$('player').removeAttribute('src');
+    if((dirty || hasPassageDrafts()) && !confirm('Discard unsaved transcript edits?'))return;
+    passageDrafts.clear();selected=doc=null;dirty=false;selectionGeneration++;$('player').pause();$('player').removeAttribute('src');
     $('workspace').hidden=true;$('empty').hidden=false;renderJobs();$('meeting-title').focus();
   });
+  $('refinement-toggle').addEventListener('click',toggleRefinement);
   $('meeting-search').addEventListener('input',renderJobs);
   $('language').addEventListener('change',()=>{try{localStorage.setItem('speakerdesk.language_mode',$('language').value);}catch{}});
+  $('live-language').addEventListener('change',()=>changeLiveLanguage().catch(error=>notice(error.message,true)));
   $('theme').value=speakerdeskTheme.get();
   $('theme').addEventListener('change',()=>speakerdeskTheme.set($('theme').value));
   $('meeting-form').addEventListener('submit',async event=>{
@@ -363,6 +383,7 @@ function wire() {
   });
   document.querySelectorAll('[data-export]').forEach(button => button.addEventListener('click', async () => {
     try {
+      if(hasPassageDrafts())throw new Error('Save or discard passage drafts before exporting.');
       await save(); if (dirty) throw new Error('New edits were made during saving. Save them before exporting.'); const kind = button.dataset.export;
       const link = node('a');
       link.href = `/api/jobs/${selected.id}/export/${kind}`;
@@ -374,12 +395,12 @@ function wire() {
     if (saving) { notice('Wait for this save to finish before deleting.'); return; }
     if (!confirm(`Delete ${selected.name} and its local audio and transcript?`)) return;
     try {
-      await api(`/api/jobs/${selected.id}`, {method: 'DELETE'}); selected = doc = null; dirty = false;
+      await api(`/api/jobs/${selected.id}`, {method: 'DELETE'}); passageDrafts.clear();selected = doc = null; dirty = false;
       $('player').pause(); $('player').removeAttribute('src'); $('workspace').hidden = true; $('empty').hidden = false;
       jobs = await api('/api/jobs'); renderJobs(); notice('Recording deleted from local storage.');
     } catch (e) { notice(e.message, true); }
   });
-  window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', e => { if (dirty || hasPassageDrafts()) { e.preventDefault(); e.returnValue = ''; } });
 }
 async function poll() {
   if (polling) return; polling = true;
@@ -391,7 +412,7 @@ async function poll() {
       if (generation !== selectionGeneration || selected?.id !== jid || dirty || saving || identityBusy || retrying || next.revision < selected.revision) return;
       const changedAudio = !selected.duration && next.duration;
       const finished = next.status !== selected.status && !['preparing','queued','processing',...liveStatuses].includes(next.status);
-      if (next.revision !== selected.revision) { doc = next.document ? structuredClone(next.document) : null; selected = next; renderEditor(); }
+      if (next.revision !== selected.revision) { doc = next.document ? structuredClone(next.document) : null; selected = next; if(isLive() || hasPassageDrafts()){renderSegments();refreshIdentitySuggestions();updateNameControls();}else renderEditor(); }
       selected = next; setStatus();
       if (finished) notice('');
       if ((changedAudio || finished) && !isLive() && selected.duration) $('player').src = `/api/jobs/${selected.id}/audio`;
@@ -402,7 +423,9 @@ async function poll() {
 async function init() {
   try {
     config = await api('/api/config');
-    Object.entries(config.languages).forEach(([code, name]) => { const option = node('option', name); option.value = code; $('language').append(option); });
+    Object.entries(config.languages).forEach(([code, name]) => {
+      for(const id of ['language','live-language']){const option=node('option',id==='live-language' && code==='auto'?'Auto':name);option.value=code;$(id).append(option);}
+    });
     let previousLanguage='auto';try{previousLanguage=localStorage.getItem('speakerdesk.language_mode')||'auto';}catch{}
     $('language').value=config.languages[previousLanguage]?previousLanguage:'auto';
     wire(); jobs = await api('/api/jobs'); renderJobs(); setInterval(poll, 1000);
@@ -448,12 +471,49 @@ async function meetingAction(action) {
   finally{await refreshMeeting();}
 }
 let meetingPoll=false;
+function liveLanguageTime(samples) {
+  const hundredths=Math.floor(samples/160);
+  return `${time(Math.floor(hundredths/100))}.${String(hundredths%100).padStart(2,'0')}`;
+}
+function renderLiveLanguage() {
+  const control=$('live-language');
+  if(!changingLiveLanguage)control.value=meeting.language || 'auto';
+  control.disabled=changingLiveLanguage || !['recording','paused'].includes(meeting.status);
+  const pending=(meeting.language_acknowledged_revision || 0)<(meeting.language_revision || 0);
+  $('live-language-status').textContent=meeting.language_revision?
+    `From ${liveLanguageTime(meeting.language_from_sample || 0)}${pending?' · Queued':''}`:'This meeting only';
+}
+async function changeLiveLanguage() {
+  if(changingLiveLanguage || !meeting?.id)return;
+  const language=$('live-language').value,jid=meeting.id,revision=meeting.language_revision || 0;
+  changingLiveLanguage=true;renderLiveLanguage();
+  try {
+    const next=await api(`/api/meetings/${jid}/language`,{method:'PATCH',body:JSON.stringify({language,language_revision:revision})});
+    if(meeting?.id===jid && next.language_revision >= (meeting.language_revision || 0)) {
+      meeting={...meeting,language:next.language,language_revision:next.language_revision,
+        language_acknowledged_revision:Math.max(meeting.language_acknowledged_revision || 0,next.language_acknowledged_revision),
+        language_from_sample:next.language_history.at(-1).start_sample};
+      notice(`${config.languages[next.language]} applies from ${liveLanguageTime(meeting.language_from_sample)}. Earlier words keep their language.`);
+    }
+  } finally {
+    changingLiveLanguage=false;renderLiveLanguage();await refreshMeeting();
+  }
+}
 async function refreshMeeting() {
   if(meetingPoll)return;meetingPoll=true;
   try{
-    meeting=await api('/api/meeting');
+    const next=await api('/api/meeting');
+    if(next.id && next.id===meeting?.id) {
+      // A poll begun before PATCH must not restore an older language selection.
+      if((next.language_revision || 0)<(meeting.language_revision || 0)) {
+        for(const key of ['language','language_revision','language_from_sample'])next[key]=meeting[key];
+      }
+      next.language_acknowledged_revision=Math.max(next.language_acknowledged_revision || 0,meeting.language_acknowledged_revision || 0);
+    }
+    meeting=next;
     const active=liveStatuses.includes(meeting.status);
     $('capture-footer').hidden=!active;
+    renderLiveLanguage();
     $('new-meeting').disabled=active;
     $('start-hint').textContent=meeting.capture_available?'':'Live recording is not included in this build yet.';
     $('elapsed').textContent=time(meeting.duration);

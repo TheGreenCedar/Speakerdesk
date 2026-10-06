@@ -58,7 +58,7 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - if: steps.changes.outputs.source == 'true'
-        run: node --check speakerdesk/static/app.js && node --check speakerdesk/static/people.js && node --check speakerdesk/static/theme.js
+        run: node --check speakerdesk/static/app.js && node --check speakerdesk/static/live_editor.js && node --check speakerdesk/static/people.js && node --check speakerdesk/static/theme.js
       - name: Save trusted source dependencies
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.pip.outputs.cache-hit != 'true' && steps.changes.outputs.source == 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

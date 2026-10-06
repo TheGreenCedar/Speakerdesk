@@ -15,6 +15,9 @@ from pathlib import Path
 from flask import abort, jsonify, request
 from pipeline import model_config, preflight
 from language_detection import LANGUAGE_CHOICES, LID_CHECKPOINT
+from meeting_refinement import RefinementController
+from live_language import validate_language_segment
+from rolling_refinement import RollingPlan
 
 RATE = 16000
 BLOCK = 4000
@@ -94,6 +97,11 @@ class MeetingManager:
         self.error = None
         self.thread = None
         self.stop_timer = None
+        self.worker_controls = queue.Queue(maxsize=8)
+        self.two_pass = False
+        self.refining_saved = False
+        self.active_language = 'auto'; self.active_epoch = 0
+        self.refinement = RefinementController(self)
 
     def helper_path(self):
         configured = os.getenv('SPEAKERDESK_CAPTURE_HELPER')
@@ -105,7 +113,46 @@ class MeetingManager:
             return {'id':self.jid,'status':job['status'] if job else 'idle','sources':job.get('sources',[]) if job else [],
                     'duration':self.duration,'processed_seconds':self.processed,
                     'pending_seconds':max(0,self.duration-self.processed),'levels':self.levels,'error':self.error,
-                    'capture_available':self.helper_path().is_file()}
+                    'capture_available':self.helper_path().is_file(),
+                    'language':job.get('language') if job else None,
+                    'language_revision':job.get('language_revision',0) if job else 0,
+                    'language_acknowledged_revision':job.get('language_acknowledged_revision',0) if job else 0,
+                    'language_from_sample':job.get('language_history',[{'start_sample':0}])[-1]['start_sample'] if job else 0,
+                    'refinement_status':job.get('refinement_status','waiting') if job else 'idle'}
+
+    def queue_worker(self, message):
+        try:self.worker_controls.put_nowait(message);return True
+        except queue.Full:return False
+
+    def change_language(self, jid, language, revision):
+        if not isinstance(language,str) or language not in LANGUAGE_CHOICES or type(revision) is not int or revision<0:
+            raise ValueError('Choose a supported live language and its current revision.')
+        with self.lock:
+            if jid!=self.jid:abort(409,description='This meeting is no longer active.')
+            job=self.get(jid)
+            if job['status'] not in ('recording','paused') or self.stopped.is_set() or not self.worker or self.worker.poll() is not None:
+                abort(409,description='Language can change while recording or paused.')
+            if revision!=job['language_revision']:abort(409,description='The live language changed in another window. Try again with its current setting.')
+            if language==job['language']:return job
+            issues=preflight(model_config(),language)
+            if issues:abort(409,description=' '.join(issues))
+            if self.packets.full():abort(429,description='Live transcription is catching up. Try changing language again shortly.')
+            epoch={'epoch':revision+1,'generation':revision+1,'language':language,'start_sample':round(self.duration*RATE)}
+            job.update(language=language,language_revision=revision+1,language_epoch=revision+1,revision=job['revision']+1)
+            job['language_history'].append(epoch)
+            job['document']['provenance'].update(language='per_window',language_history=job['language_history'])
+            if language=='auto':job['document']['provenance']['language_detector']=LID_CHECKPOINT
+            plan=RollingPlan(job['rolling_refinement']);paused=plan.state['cancelled'];plan.cancel()
+            from meeting_refinement import remember_unresolved
+            remember_unresolved(job,plan.state['completed_sample'],epoch['start_sample'],'language_changed')
+            plan.state['completed_sample']=max(plan.state['completed_sample'],epoch['start_sample'])
+            if not paused:plan.resume()
+            job['rolling_refinement']=plan.snapshot();job.pop('rolling_inflight',None)
+            self.put(job)  # One transaction before either producer observes the boundary.
+            self.active_language=language;self.active_epoch=revision+1
+            self.packets.put_nowait({'type':'language','generation':revision+1,'language_epoch':revision+1,
+                                    'language':language,'start_sample':epoch['start_sample']})
+            return job
 
     def start(self, name, language, sources):
         with self.lock:
@@ -135,6 +182,7 @@ class MeetingManager:
                            'timing':'NVIDIA speech-region boundaries; Cohere phrase text. No word timestamps.'},
                        'warnings':['Phrase boundaries may cut words. Overlapping speech needs review.'] +
                            (['Automatic language detection leaves uncertain or unsupported speech blank for review; original audio is preserved. Language changes inside a probe may be missed.'] if language=='auto' else [])}}
+            self.refinement.initialize(job)
             try:self.put(job)
             except Exception:
                 dest.rmdir()
@@ -142,6 +190,9 @@ class MeetingManager:
             self.jid = jid
             self.duration = self.processed = 0.; self.levels = {}; self.error = None
             self.stopped = threading.Event(); self.packets = queue.Queue(maxsize=120)
+            self.worker_controls=queue.Queue(maxsize=8);self.two_pass=False
+            self.refining_saved=False
+            self.active_language=language;self.active_epoch=0
             self.thread = threading.Thread(target=self._run,args=(self.jid,language,sources),daemon=True)
             self.thread.start()
             return job
@@ -215,11 +266,30 @@ class MeetingManager:
                     with self.lock:
                         if result['type']=='segment':
                             job=self.get(jid);document=job['document']
+                            validate_language_segment(result['segment'],job['language_history'])
                             append_finalized_segment(document,result)
                             document['provenance']['kind']='local_inference'
                             job.update(revision=job['revision']+1);self.put(job)
                             if self.recognizer:self.recognizer.observe(jid,result['segment']['speaker'])
-                        elif result['type']=='progress':self.processed=result['processed_seconds']
+                        elif result['type']=='provisional_revision':
+                            self.refinement.provisional(jid,result)
+                            if self.recognizer:self.recognizer.observe(jid)
+                        elif result['type']=='language_registered':
+                            job=self.get(jid)
+                            epoch=next((e for e in job['language_history'] if e['generation']==result.get('generation')),None)
+                            if not epoch or any(result.get(key)!=epoch[key] for key in ('generation','language','start_sample')):
+                                raise ValueError('Invalid worker language acknowledgement.')
+                            job['language_acknowledged_revision']=max(job['language_acknowledged_revision'],epoch['generation']);self.put(job)
+                        elif result['type']=='refinement_result':self.refinement.result(jid,result)
+                        elif result['type']=='boundary_candidate':
+                            job=self.get(jid);job['boundary_candidate']=result
+                            key=f"{result['language_epoch']}:{result['start']}:{result['end']}"
+                            job.setdefault('boundary_candidates',{})[key]=result;self.put(job)
+                        elif result['type']=='capture_finished':
+                            if not worker_stop_sent.is_set():fail('Capture finalization arrived before Stop. Audio is preserved.')
+                            self.refinement.capture_done(jid)
+                        elif result['type']=='progress':
+                            self.processed=result['processed_seconds'];self.refinement.schedule(jid,force=bool(result.get('flush')))
                         elif result['type']=='error':fail(result['error']);break
                         elif result['type']=='finished':
                             if not worker_stop_sent.is_set():fail('Live inference finished before recording stopped. Captured audio has been saved.')
@@ -231,16 +301,18 @@ class MeetingManager:
         def send_audio():
             try:
                 while True:
-                    try:message=packets.get(timeout=1)
+                    try:message=self.worker_controls.get_nowait()
                     except queue.Empty:
-                        if transport_closed.is_set():return
-                        continue
+                        try:message=packets.get(timeout=.1)
+                        except queue.Empty:
+                            if transport_closed.is_set():return
+                            continue
                     if message['type']=='stop':worker_stop_sent.set()
                     self._send(self.worker,message)
-                    if message['type']=='stop':return
+                    if message['type']=='shutdown' or (message['type']=='stop' and not self.two_pass):return
             except (OSError,ValueError):fail('Live transcription stopped. Captured audio has been saved.')
         try:
-            cfg=model_config();cfg['language']=language
+            cfg=model_config();cfg.update(language=language,language_epoch=0,audio_path=str(dest/'audio.wav'))
             python=os.getenv('SPEAKERDESK_LIVE_PYTHON',str(Path(__file__).resolve().parents[1]/'.venv-package/bin/python'))
             command=([sys.executable,'--live-worker',json.dumps(cfg)] if getattr(sys,'frozen',False)
                      else [python,str(Path(__file__).with_name('live_worker.py')),json.dumps(cfg)])
@@ -262,6 +334,7 @@ class MeetingManager:
             try:ready=json.loads(line)
             except ValueError:raise RuntimeError('Local models could not start. Audio capture did not begin.')
             if ready.get('type')!='ready':raise RuntimeError(ready.get('error','Local models could not start.'))
+            self.two_pass=bool(ready.get('two_pass'));self.refinement.ready(jid,self.two_pass)
             if stop_event.is_set():return
             for target in (consume_results,send_audio):
                 thread=threading.Thread(target=target,daemon=True);thread.start();threads.append(thread)
@@ -272,13 +345,19 @@ class MeetingManager:
                 f=(dest/f'{source}.wav').open('w+b');handles.append(f)
                 track=wave.open(f,'wb');track.setnchannels(1);track.setsampwidth(2);track.setframerate(RATE);tracks[source]=track
             def sink(mixed, separate):
-                wav.writeframes((mixed*32767).astype('<i2').tobytes())
-                audio.flush()  # Finalized voice clips must already be readable by the identity worker.
-                for source,track in tracks.items():track.writeframes((np.clip(separate[source],-1,1)*32767).astype('<i2').tobytes())
-                self.duration=wav.getnframes()/RATE
-                if not failure:
-                    try:packets.put_nowait({'type':'audio','pcm':base64.b64encode(mixed.tobytes()).decode()})
-                    except queue.Full:fail('Transcription fell 30 seconds behind. Recording stopped; captured audio has been saved.')
+                with self.lock:
+                    start_sample=wav.getnframes()
+                    wav.writeframes((mixed*32767).astype('<i2').tobytes())
+                    audio.flush()  # Finalized voice clips must already be readable by the identity worker.
+                    for source,track in tracks.items():track.writeframes((np.clip(separate[source],-1,1)*32767).astype('<i2').tobytes())
+                    self.duration=wav.getnframes()/RATE
+                    if not failure:
+                        mode,epoch=self.active_language,self.active_epoch
+                        message={'type':'audio','start_sample':start_sample,'end_sample':wav.getnframes(),
+                                 'language':mode,'language_epoch':epoch}
+                        if not self.two_pass:message['pcm']=base64.b64encode(mixed.tobytes()).decode()
+                        try:packets.put_nowait(message)
+                        except queue.Full:fail('Transcription fell 30 seconds behind. Recording stopped; captured audio has been saved.')
             mixer=SourceMixer(sources,sink)
             capture_log=(dest/'capture.log').open('w');handles.append(capture_log)
             with self.lock:
@@ -299,7 +378,11 @@ class MeetingManager:
                     with self.lock:
                         if not stop_event.is_set():
                             self.patch(jid,status=kind,message='Recording' if kind=='recording' else 'Paused')
-                    if kind=='paused':mixer.flush(result['time'],final=True)
+                    if kind=='paused':
+                        mixer.flush(result['time'],final=True)
+                        self.patch(jid,duration=self.duration)
+                        if self.two_pass:self.refinement.force=True;packets.put({'type':'flush'},timeout=2)
+                    elif not self.refinement.final:self.refinement.force=False
                 elif kind=='stopped':
                     mixer.flush(result['time'],final=True);capture_finished=True
                 elif kind=='error':raise RuntimeError(result['error'])
@@ -310,7 +393,14 @@ class MeetingManager:
             for track in tracks.values():track.close()
             if failure:raise RuntimeError(failure[0])
             packets.put({'type':'stop'},timeout=10)
-            if not worker_finished.wait(timeout=60):raise RuntimeError('Transcription took too long to finish. Captured audio has been saved.')
+            finish_budget=None
+            if self.two_pass:
+                finish_budget=threading.Timer(45,lambda:self.refinement.pause(jid,final=True))
+                finish_budget.daemon=True;finish_budget.start()
+            try:
+                if not worker_finished.wait(timeout=60):raise RuntimeError('Transcription took too long to finish. Captured audio has been saved.')
+            finally:
+                if finish_budget:finish_budget.cancel()
             if failure:raise RuntimeError(failure[0])
             with self.lock:
                 job=self.get(jid)
@@ -357,6 +447,8 @@ class MeetingManager:
                     terminal.update(status='failed',message=self.error)
                 try:
                     job=self.get(jid)
+                    if self.two_pass and job.get('refinement_status') not in ('complete','paused','unresolved'):
+                        self.refinement.pause(jid,final=True);job=self.get(jid)
                     if self.duration>0 and job.get('document'):
                         from review import retain_unassigned_audio
                         retain_unassigned_audio(job['document'],self.duration)
@@ -372,6 +464,86 @@ class MeetingManager:
             thread=self.thread
         if thread and thread is not threading.current_thread():thread.join(timeout=5)
         if self.recognizer:self.recognizer.close()
+
+    def resume_refinement(self, jid):
+        with self.lock:
+            if self.jid==jid and self.worker and self.two_pass:
+                self.refinement.resume(jid);return self.get(jid)
+            if self.jid or self.capture or self.worker or self.inference_busy():abort(409,description='Wait for current local inference to finish.')
+            job=self.get(jid)
+            if job.get('kind')!='meeting' or not job.get('document') or not (self.folder(jid)/'audio.wav').is_file():
+                abort(409,description='This meeting has no saved audio to refine.')
+            if preflight(model_config(),job['language']):abort(409,description='Finish local model setup before refining saved audio.')
+            from rolling_refinement import RollingPlan
+            self.refinement.initialize(job);plan=RollingPlan(job['rolling_refinement'],recover=True)
+            plan.cancel();plan.resume();job['rolling_refinement']=plan.snapshot()
+            if job['refinement_unresolved']:
+                job['rolling_refinement']['completed_sample']=min(job['rolling_refinement']['completed_sample'],min(w['start_sample'] for w in job['refinement_unresolved']))
+            job['refinement_status']='waiting';job['message']='Refining saved passages…';self.put(job)
+            self.jid=jid;self.duration=job['duration'];self.processed=self.duration
+            self.stopped=threading.Event();self.worker_controls=queue.Queue(maxsize=8);self.two_pass=True
+            self.refining_saved=True
+            self.thread=threading.Thread(target=self._run_saved_refinement,args=(jid,),daemon=True);self.thread.start()
+            return job
+
+    def _run_saved_refinement(self,jid):
+        dest=self.folder(jid);process=None;timer=None;log=None;sender=None;closed=threading.Event()
+        try:
+            job=self.get(jid);cfg=model_config();cfg.update(language=job['language'],language_epoch=job.get('language_epoch',0),
+                audio_path=str(dest/'audio.wav'),refinement_only=True)
+            python=os.getenv('SPEAKERDESK_LIVE_PYTHON',str(Path(__file__).resolve().parents[1]/'.venv-package/bin/python'))
+            command=([sys.executable,'--live-worker',json.dumps(cfg)] if getattr(sys,'frozen',False)
+                     else [python,str(Path(__file__).with_name('live_worker.py')),json.dumps(cfg)])
+            log=(dest/'live-worker.log').open('a')
+            process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,text=True,bufsize=1,
+                env=dict(os.environ,HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',OMP_NUM_THREADS='2',TOKENIZERS_PARALLELISM='false'))
+            with self.lock:self.worker=process
+            def expire():
+                try:self.refinement.pause(jid,final=True)
+                finally:
+                    if process.poll() is None:process.terminate()
+            timer=threading.Timer(60,expire);timer.daemon=True;timer.start()
+            ready=json.loads(process.stdout.readline())
+            if ready.get('type')!='ready' or not ready.get('two_pass'):raise RuntimeError('Saved refinement worker could not start.')
+            self.refinement.ready(jid,True)
+            def send():
+                while not closed.is_set():
+                    try:message=self.worker_controls.get(timeout=.1)
+                    except queue.Empty:continue
+                    try:self._send(process,message)
+                    except (OSError,ValueError):return
+                    if message['type']=='shutdown':return
+            sender=threading.Thread(target=send,daemon=True);sender.start()
+            for line in process.stdout:
+                result=json.loads(line)
+                if result['type']=='capture_finished':self.refinement.capture_done(jid)
+                elif result['type']=='refinement_result':self.refinement.result(jid,result)
+                elif result['type']=='finished':break
+                elif result['type']=='error':raise RuntimeError(result.get('error','Saved refinement failed.'))
+        except Exception:
+            with self.lock:
+                job=self.get(jid);job.update(refinement_status='paused',refinement_error='Refinement paused. Previous words and saved audio are retained.');self.put(job)
+        finally:
+            try:
+                closed.set()
+                if timer:timer.cancel()
+                if process and process.poll() is None:
+                    process.terminate()
+                    try:process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:process.kill();process.wait(timeout=3)
+                if sender:sender.join(timeout=3)
+                if process:
+                    for stream in (process.stdin,process.stdout):
+                        try:stream.close()
+                        except (OSError,ValueError):pass
+                if log:log.close()
+                with self.lock:
+                    job=self.get(jid)
+                    if job.get('refinement_status') not in ('complete','unresolved'):job['refinement_status']='paused'
+                    job['message']='Meeting saved on this Mac.';self.put(job)
+            finally:
+                with self.lock:
+                    self.worker=None;self.jid=None;self.refining_saved=False
 
 
 def append_finalized_segment(document, result):
@@ -396,3 +568,33 @@ def register_meetings(app, get, put, patch, folder, lock, inference_busy, recogn
     def control_meeting(jid,action):
         if action not in ('pause','resume','stop'):abort(404)
         manager.control(jid,action);return jsonify(get(jid)),202
+
+    @app.patch('/api/meetings/<jid>/language')
+    def change_meeting_language(jid):
+        body=request.get_json()
+        if not isinstance(body,dict):raise ValueError('Choose a live language.')
+        return jsonify(manager.change_language(jid,body.get('language'),body.get('language_revision')))
+
+    @app.post('/api/jobs/<jid>/refinement/<action>')
+    def refinement_control(jid,action):
+        if action=='resume':return jsonify(manager.resume_refinement(jid)),202
+        if action!='pause':abort(404)
+        with lock:
+            if manager.jid!=jid:abort(409,description='This meeting is not being refined.')
+            manager.refinement.pause(jid,final=get(jid)['status'] not in LIVE)
+            return jsonify(get(jid)),202
+
+    @app.get('/api/jobs/<jid>/refinement/revisions/<window_id>')
+    def refinement_history(jid,window_id):
+        history=get(jid).get('refinement_history',{}).get(window_id)
+        if history is None:abort(404)
+        return jsonify(history)
+
+    @app.get('/api/jobs/<jid>/refinement/fast-revisions/<int:start_sample>')
+    def fast_history(jid,start_sample):
+        history=get(jid).get('fast_history',{}).get(str(start_sample))
+        if history is None:abort(404)
+        return jsonify(history)
+
+    @app.get('/api/jobs/<jid>/refinement/boundary-candidates')
+    def boundary_history(jid):return jsonify(candidates=list(get(jid).get('boundary_candidates',{}).values()))

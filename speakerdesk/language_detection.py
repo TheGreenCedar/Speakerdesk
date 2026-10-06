@@ -154,31 +154,36 @@ class LanguagePolicy:
 
 class SpeechTranscriber:
     """Shared import/live routing with bounded windows and original-language ASR."""
-    def __init__(self, asr, language, detector_path=None):
-        if language not in LANGUAGE_CHOICES:
-            raise ValueError('Unsupported language mode.')
-        self.asr, self.language = asr, language
-        self.detector = WhisperLanguageDetector(detector_path) if language == 'auto' else None
+    def __init__(self, asr, language, detector_path=None, *, detector=None):
+        self.asr,self.detector_path,self.detector=asr,detector_path,detector
+        self.set_language(language)
+
+    def set_language(self,language):
+        if language not in LANGUAGE_CHOICES:raise ValueError('Unsupported language mode.')
+        if language=='auto' and self.detector is None:self.detector=WhisperLanguageDetector(self.detector_path)
+        self.language=language
         self.policy = LanguagePolicy()
 
-    def transcribe(self, audio, sample_rate, speaker):
+    def transcribe(self, audio, sample_rate, speaker, *, max_asr_seconds=6, allow_overlap=False):
         import numpy as np
 
-        if sample_rate != 16000 or np.asarray(audio).ndim != 1 or not np.isfinite(audio).all():
+        if (not .75 <= max_asr_seconds <= 24.5 or len(audio) > 24.5*sample_rate
+                or sample_rate != 16000 or np.asarray(audio).ndim != 1 or not np.isfinite(audio).all()):
             raise ValueError('Language routing requires finite 16 kHz mono speech audio.')
-        count = max(1, math.ceil(len(audio)/(3*sample_rate))) if self.detector else 1
+        automatic=self.language=='auto'
+        count = max(1, math.ceil(len(audio)/(3*sample_rate))) if automatic else 1
         edges = np.linspace(0, len(audio), count+1, dtype=int)
         windows = []
         for begin, end in zip(edges, edges[1:]):
             pcm = audio[begin:end]
-            if not self.detector:
+            if not automatic:
                 decision = {'language': self.language, 'review': False,
                             'language_detection': {'mode': 'manual', 'reason': 'override'}}
             elif len(pcm) < .75*sample_rate or float(np.sqrt(np.mean(pcm.astype('float64')**2))) < .001:
                 self.policy.reset(speaker)
                 decision = {'language': None, 'review': True,
                             'language_detection': {'mode': 'auto', 'reason': 'insufficient_speech'}}
-            elif len(speaker) > 1:
+            elif len(speaker) > 1 and not allow_overlap:
                 self.policy.reset(speaker)
                 decision = {'language': None, 'review': True,
                             'language_detection': {'mode': 'auto', 'reason': 'overlapping_speech'}}
@@ -189,7 +194,7 @@ class SpeechTranscriber:
             # seconds, retaining the least confident language observation.
             if (windows and window['language'] and not window['review']
                     and not windows[-1]['review'] and windows[-1]['language'] == window['language']
-                    and end-windows[-1]['begin'] <= 6*sample_rate):
+                    and end-windows[-1]['begin'] <= max_asr_seconds*sample_rate):
                 previous = windows[-1]
                 previous['end_sample'] = int(end)
                 if window['language_detection'].get('probability', 1) < previous['language_detection'].get('probability', 1):
@@ -213,7 +218,7 @@ class SpeechTranscriber:
                     # Keep earlier successful passages. Hardware/resource guards remain
                     # outside this per-passage model boundary and stop owned workers.
                     transcription_review = {'reason': 'transcription_failed', 'partial_text': False}
-            if transcription_review:
+            if transcription_review or len(speaker) > 1:
                 window['review'] = True
             results.append({'start': window['begin']/sample_rate,
                             'end': window['end_sample']/sample_rate, 'text': text,

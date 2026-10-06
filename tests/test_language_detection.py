@@ -294,8 +294,9 @@ class WorkerLanguageTests(unittest.TestCase):
                 with patch.dict(sys.modules,model_modules(asr,Diarizer())),patch('inference_worker.check_memory'), \
                      patch('language_detection.WhisperLanguageDetector',return_value=detector), \
                      patch('sys.stdin',io.StringIO('\n'.join(lines)+'\n')),contextlib.redirect_stdout(output):
-                    live_worker.run({'diar_path':'unused','cohere_path':'unused','language':'auto','lid_path':'local-approved'})
-                events=[json.loads(line) for line in output.getvalue().splitlines()]
+                    from support.resident_fixture import run_messages
+                    fixture_events=run_messages({'diar_path':'unused','cohere_path':'unused','language':'auto','lid_path':'local-approved'},[json.loads(line) for line in lines])
+                events=fixture_events
                 segments=[e['segment'] for e in events if e['type']=='segment']
                 self.assertEqual([(s['start'],s['end']) for s in segments],[(0,3),(3,6)])
                 self.assertEqual([s['language'] for s in segments],languages)

@@ -13,4 +13,26 @@
 .people-dialog::backdrop{background:#1118}.person-form,.name-actions{display:flex;align-items:center;gap:10px}.person-form .field{flex:1}.person-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:16px 0;border-top:1px solid var(--line)}.person-row input{min-width:0;border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--paper)}.person-row .settings-note{margin:0}.people-dialog [role=status]{font-size:12px;line-height:1.6;color:var(--muted)}.voice-clip{display:flex;gap:9px;margin:12px 0;font-size:12px;line-height:1.6}.voice-clip input{flex-shrink:0;accent-color:var(--green)}#voice-clips{border:1px solid var(--line);border-radius:9px;margin:15px 0;padding:10px;max-height:220px;overflow:auto;font-size:12px;color:var(--muted)}#voice-consent-label{display:block;margin:16px 0;line-height:1.7}.name-speaker{border:0;background:transparent;min-height:25px;padding:2px 5px;color:var(--muted)}.name-speaker svg{width:15px;height:15px}.identity-suggestion{border:1px solid var(--line);border-radius:10px;background:var(--sidebar);padding:14px 16px;margin:0 0 16px;font-size:13px}.identity-suggestion p{color:var(--muted);line-height:1.6;overflow-wrap:anywhere}.identity-suggestion button{font-size:12px;margin-right:12px}.identity-suggestion .text-button{min-height:36px}
 
 .recognition-toggle{display:flex;align-items:center;gap:10px;min-height:42px;font-weight:550}.recognition-toggle input{width:18px;height:18px;accent-color:var(--green)}
+.speaker-name-action{border:1px solid var(--line);border-radius:6px;background:var(--paper);padding:5px 9px;font-size:12px;min-height:30px}
+.name-speaker{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:6px;min-height:30px;font-size:11px;white-space:nowrap}
+.segment-top{flex-wrap:wrap;gap:9px}
+.name-actions{flex-wrap:wrap}
+.voice-clip{align-items:flex-start;gap:8px}
+.voice-clip label{display:flex;align-items:flex-start;gap:9px;flex:1;min-width:0;overflow-wrap:anywhere}
+.voice-clip input{margin-top:4px}
+.voice-clip button{font-size:12px;min-height:30px;padding:3px 6px;white-space:nowrap}
+#voice-preview{margin:12px 0;height:40px}
+#voice-excluded{font-size:12px;line-height:1.7;color:var(--muted);margin:15px 0}
+#voice-excluded summary{cursor:pointer}
+#voice-excluded-list{padding-left:20px;max-height:150px;overflow:auto}
+#voice-excluded-list li{margin:9px 0}
+#name-done{margin-top:12px;font-size:12px}
 .passage-review{font-size:13px;line-height:1.6;color:var(--muted);margin:8px 0}.passage-retry{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.passage-retry select{border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--paper);max-width:100%}.passage-retry button,.retry-result button{font-size:12px}.retry-result{border-left:3px solid var(--green);padding:8px 14px;margin-top:10px;background:var(--sidebar);border-radius:6px}.retry-result p{line-height:1.6;margin:7px 0}
+
+.live-language-control{display:flex;flex-direction:column;gap:5px;min-width:125px;max-width:170px}.live-language-control label{font-size:11px;color:var(--muted)}#live-language{background:var(--paper);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:6px 9px;font-size:12px;max-width:100%}#live-language-status{font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}#capture-footer{flex-wrap:wrap}@media(max-width:1000px){.live-language-control{min-width:115px}#capture-footer{gap:10px}}
+
+.refinement-controls{display:flex;align-items:center;gap:16px;color:var(--muted);font-size:13px;padding:8px 30px;border-bottom:1px solid var(--line)}
+.refinement-controls[hidden]{display:none}.refinement-badge{font-size:11px;color:var(--muted);padding:3px 7px;border:1px solid var(--line);border-radius:6px;white-space:nowrap}.rolling-time{font-size:11px;color:var(--muted)}
+.rolling-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:5px}.rolling-actions button{font-size:12px}.passage-save-status{font-size:12px;color:var(--muted);max-width:100%;overflow-wrap:anywhere}.rolling-review{font-size:12px;color:var(--muted);margin-top:8px}.prior-words{white-space:pre-wrap}.rolling-segment textarea{width:100%;resize:vertical;min-height:54px}
+
+.transcript-pane:has(.rolling-segment){scroll-behavior:auto;overflow-anchor:none}

@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from flask import abort, jsonify, request
-from voice_profiles import clean_clips, extract, make_profile, propose_match
+from voice_profiles import clean_clips, extract, make_profile, propose_match, speaker_audio_reason, voice_clip_choices
 
 
 def person_name(value):
@@ -185,6 +185,63 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
         with lock:
             job = get(jid)
             return jsonify(revision=job['revision'], suggestions=suggestions(job))
+
+    @app.get('/api/jobs/<jid>/speakers/<track>/voice-clips')
+    def voice_clips(jid, track):
+        """Availability only. Never read waveforms, load a model, or enroll a person."""
+        with lock:
+            job = get(jid)
+            document = job.get('document') or {}
+            if track not in document.get('speakers', {}):
+                abort(404)
+            backend, calibration, available = voice_runtime()
+            minimum = calibration.minimum_clips if available else 2
+            source_verified = document.get('provenance', {}).get('kind') == 'local_inference'
+            audio_available = (folder(jid)/'audio.wav').is_file()
+            choices = voice_clip_choices(job, track) if source_verified else {}
+            segments = {s['id']: s for s in document.get('segments', [])}
+            clips = [dict(id=sid, **clip.payload(), text=segments[clip.segment_id]['text'])
+                     for sid, clip in choices.items()]
+            recommended, last_end = [], -1.
+            for sid, clip in sorted(choices.items(), key=lambda pair: (pair[1].end, pair[1].start)):
+                if clip.start >= last_end:
+                    recommended.append(sid); last_end = clip.end
+                    if len(recommended) == minimum:
+                        break
+            reasons = {
+                'unfinished': 'This passage is still being finalized. Finish the meeting, then refresh passages.',
+                'overlap': 'More than one speaker may be audible. Use a passage where this person speaks alone.',
+                'unverified_audio': 'The original speaker or timing is unverified or was edited. Use an unchanged locally transcribed passage.',
+                'too_short': 'Shorter than 2 seconds. Use a longer turn where this person speaks alone.',
+                'source_unverified': 'This transcript has no verified local speaker audio. Transcribe a recording locally or record another meeting.'}
+            excluded = []
+            for segment in segments.values():
+                if segment['speaker'] != track:
+                    continue
+                reason = 'source_unverified' if not source_verified else speaker_audio_reason(segment, track)
+                if not reason and segment['end']-segment['start'] < 2:
+                    reason = 'too_short'
+                if reason:
+                    excluded.append(dict(segment_id=segment['id'], start=segment['start'], end=segment['end'],
+                                         reason=reason, message=reasons[reason]))
+            if not available:
+                status, message = 'unavailable', app.extensions['speakerdesk'].get(
+                    'voice_message', 'Voice recognition is unavailable.') + ' Open Settings to finish local model setup, then refresh passages.'
+            elif voice_busy():
+                status, message = 'busy', 'Finish the active recording or transcription, then refresh passages. You can save the name now and return later.'
+            elif not source_verified:
+                status, message = 'source_unverified', reasons['source_unverified']
+            elif not audio_available:
+                status, message = 'no_audio', 'The original recording is unavailable. Open a meeting with saved audio or record another meeting.'
+            elif not clips:
+                status, message = 'no_clips', f'No usable passages yet. Voice setup needs {minimum} separate passages of 2–10 seconds. See the reasons below, or return after this person speaks alone for longer.'
+            elif len(recommended) < minimum:
+                status, message = 'insufficient_clips', f'Only {len(recommended)} separate usable passage(s). Voice setup needs {minimum}. Return after more clean speech, then refresh passages.'
+            else:
+                status, message = 'ready', 'Usable passages are ready. Preview them and choose which to use. No voice is saved until you give consent.'
+            return jsonify(revision=job['revision'], track_id=track, status=status, message=message,
+                           minimum_clips=minimum, audio_available=audio_available,
+                           clips=clips, recommended_ids=recommended, excluded=excluded)
 
     @app.post('/api/jobs/<jid>/identity-suggestions/<sid>/dismiss')
     def dismiss_suggestion(jid, sid):

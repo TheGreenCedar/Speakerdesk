@@ -21,7 +21,7 @@ hidden+=collect_submodules('mlx_audio.vad.models.nemotron_diarization')
 hidden+=collect_submodules('mlx_audio.vad.models.sortformer')
 hidden+=collect_submodules('mlx_audio.stt.models.whisper')
 hidden+=collect_submodules('mlx_speech.models.cohere_asr')
-hidden+=['mlx_speech.generation.cohere_asr','mlx_audio.vad','inference_worker','live_worker','live_meeting','model_setup','language_detection','app','pipeline','audio','transcript','review']
+hidden+=['mlx_speech.generation.cohere_asr','mlx_audio.vad','inference_worker','live_worker','live_refinement','live_language','meeting_refinement','rolling_refinement','live_meeting','model_setup','language_detection','app','pipeline','audio','transcript','review']
 # Desktop ships the voice runtime; users only download model data in Settings.
 assert importlib.metadata.version('coremltools')=='9.0', 'Install the pinned bundled voice runtime before packaging.'
 data+=copy_metadata('coremltools',recursive=True)

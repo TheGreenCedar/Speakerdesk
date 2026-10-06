@@ -6,7 +6,9 @@ import sys
 import time
 from pathlib import Path
 
-role, folder, scenario = sys.argv[1:]
+role, folder, scenario = sys.argv[1:4]
+language = sys.argv[4] if len(sys.argv)>4 else 'en'
+generation = 0
 folder = Path(folder)
 
 
@@ -39,18 +41,36 @@ if role == 'worker':
     received = 0
     for line in sys.stdin:
         message = json.loads(line)
-        record({'type': message['type']})
+        record({key:value for key,value in message.items() if key!='pcm'})
         if message['type'] == 'audio':
+            start=received
             received += len(base64.b64decode(message['pcm'])) // 4
+            if scenario in ('language_inflight','language_wrong_epoch','language_browser'):
+                if start==0 and scenario!='language_browser':
+                    (folder/'worker-inflight').touch()
+                    while not (folder/'worker-release').exists():time.sleep(.01)
+                emit({'type':'segment','speakers':{'speaker_0':'Speaker 1'},'segment':{
+                    'id':f'synthetic-{start}','start':start/16000,'end':received/16000,
+                    'speaker':'speaker_0','text':f'Synthetic {language} words.',
+                    'language':'en' if scenario=='language_wrong_epoch' and generation else language,
+                    'language_mode':language,'language_generation':generation}})
             emit({'type': 'progress', 'processed_seconds': received / 16000})
             if scenario in ('worker_error', 'worker_error_stalled'):
                 emit({'type': 'error', 'error': 'Synthetic worker failure.'})
                 break
+        elif message['type'] == 'language':
+            if scenario=='language_browser':
+                (folder/'language-inflight').touch()
+                while not (folder/'language-release').exists():time.sleep(.01)
+            language=message['language'];generation=message['generation']
+            emit({'type':'language_registered','language':language,'generation':generation,
+                  'start_sample':message['start_sample']})
         elif message['type'] == 'stop':
-            if received:
+            if received and scenario not in ('language_inflight','language_wrong_epoch','language_browser'):
                 emit({'type': 'segment', 'speakers': {'speaker_0': 'Speaker 1'},
                       'segment': {'id': 'synthetic', 'start': 0, 'end': received / 16000,
-                                  'speaker': 'speaker_0', 'text': 'Synthetic transport result.'}})
+                                  'speaker': 'speaker_0', 'text': 'Synthetic transport result.',
+                                  'language':language,'language_mode':language,'language_generation':generation}})
             emit({'type': 'finished'})
             break
 else:

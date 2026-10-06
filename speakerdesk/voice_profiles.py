@@ -91,10 +91,36 @@ def eligible_segment(segment, track_id):
 
 
 def speaker_audio_eligible(segment, track_id):
-    return (segment.get('speaker') == track_id and segment.get('finalized') is not False
-            and not track_id.startswith('overlap')
-            and len(segment.get('speaker_candidates', [track_id])) == 1
-            and segment.get('voice_eligible', not segment.get('review')) is True)
+    return speaker_audio_reason(segment, track_id) is None
+
+
+def speaker_audio_reason(segment, track_id):
+    """Why saved source audio cannot establish this track's identity."""
+    if segment.get('speaker') != track_id:
+        return 'different_speaker'
+    if segment.get('finalized') is False:
+        return 'unfinished'
+    candidates = segment.get('speaker_candidates', [track_id])
+    if track_id.startswith('overlap') or len(candidates) > 1:
+        return 'overlap'
+    if len(candidates) != 1 or segment.get('voice_eligible', not segment.get('review')) is not True:
+        return 'unverified_audio'
+    return None
+
+
+def voice_clip_choices(job, track_id):
+    """The exact selection IDs accepted for saved, source-owned audio windows."""
+    choices = {}
+    for segment in (job.get('document') or {}).get('segments', []):
+        if not speaker_audio_eligible(segment, track_id):
+            continue
+        start = segment['start']
+        while segment['end']-start >= 2:
+            end = min(start+6, segment['end']) if segment['end']-segment['start'] > 10 else segment['end']
+            sid = segment['id'] if segment['end']-segment['start'] <= 10 else f"{segment['id']}@{math.floor(start*16000)}:{math.floor(end*16000)}"
+            choices[sid] = VoiceClip(job['id'], track_id, segment['id'], start, end)
+            start = end
+    return choices
 
 
 def automatic_clips(job, track_id, minimum=2):
@@ -131,16 +157,7 @@ def clean_clips(job, track_id, segment_ids, minimum=2):
     if (not isinstance(segment_ids, list) or not minimum <= len(segment_ids) <= 12
             or any(not isinstance(s, str) for s in segment_ids) or len(set(segment_ids)) != len(segment_ids)):
         raise ValueError(f'Choose {minimum}–12 separate clean passages.')
-    choices = {}
-    for segment in document['segments']:
-        if not speaker_audio_eligible(segment, track_id):
-            continue
-        start = segment['start']
-        while segment['end']-start >= 2:
-            end = min(start+6, segment['end']) if segment['end']-segment['start'] > 10 else segment['end']
-            sid = segment['id'] if segment['end']-segment['start'] <= 10 else f"{segment['id']}@{math.floor(start*16000)}:{math.floor(end*16000)}"
-            choices[sid] = VoiceClip(job['id'], track_id, segment['id'], start, end)
-            start = end
+    choices = voice_clip_choices(job, track_id)
     clips = []
     for sid in segment_ids:
         if sid not in choices:
