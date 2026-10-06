@@ -37,7 +37,7 @@ class PassageReviewTests(unittest.TestCase):
                 self.assertEqual(rows[1]['transcription_review']['reason'],reason)
                 self.assertTrue(rows[1]['review']);self.assertFalse(rows[0]['review']);self.assertFalse(rows[2]['review'])
 
-    def test_unknown_overlap_partial_and_unassigned_are_explicit_in_each_export(self):
+    def test_text_exports_omit_blank_audio_but_json_retains_review_ranges(self):
         rows=[dict(id='known',start=0.,end=2.,speaker='speaker_0',text='Keep these words',review=False),
               dict(id='unknown',start=2.,end=4.,speaker='speaker_0',text='',language=None,
                    language_detection={'mode':'auto','reason':'uncertain'},review=True),
@@ -49,27 +49,38 @@ class PassageReviewTests(unittest.TestCase):
         before=copy.deepcopy(doc);retain_unassigned_audio(doc,10);self.assertEqual(doc,before)
         for kind in ('txt','srt','vtt'):
             text=export(doc,kind)[0]
-            for marker in ('Keep these words','Partial words','Language uncertain','Transcript may be incomplete',
-                           'voices are not separated','may be silence or missed speech'):
+            for marker in ('Keep these words','Partial words','Transcript may be incomplete'):
                 self.assertIn(marker,text)
-            self.assertIn('00:00:02',text)
+            for marker in ('Language uncertain','voices are not separated','may be silence or missed speech'):
+                self.assertNotIn(marker,text)
+            self.assertEqual(text.count('Speaker 1:'),2)
         self.assertEqual(json.loads(export(doc,'json')[0]),doc)
         doc['segments'][1].update(text='Manually checked words',review_resolution='words_reviewed')
         self.assertEqual(review_reason(doc['segments'][1]),'')
         mixed=next(s for s in doc['segments'] if s['id']=='mixed')
         mixed.update(text='Heard words',review_resolution='words_reviewed')
         self.assertIn('not separated',review_reason(mixed))
+        for reason in ('transcription_failed','empty_result','token_limit'):
+            repaired={**doc['segments'][1],'transcription_review':{'reason':reason}}
+            self.assertEqual(review_reason(repaired),'')
+            self.assertNotIn('Needs review',export({'speakers':doc['speakers'],'segments':[repaired]},'txt')[0])
 
-    def test_no_nvidia_turns_return_audio_review_without_calling_asr(self):
+    def test_no_nvidia_turns_still_attempt_asr_and_retain_unknown_speaker(self):
         with tempfile.TemporaryDirectory() as directory:
-            folder=Path(directory);audio=folder/'audio.wav';audio.write_bytes(b'not-read-with-no-crops')
-            cfg={'diar_kind':'nemotron','diar_path':'cpu-fixture','diar_python':sys.executable,'device':'mlx'}
-            with patch('pipeline.preflight',return_value=[]),patch('pipeline.run_worker',return_value={'turns':[]}) as worker:
+            folder=Path(directory);audio=folder/'audio.wav'
+            with wave.open(str(audio),'wb') as f:
+                f.setparams((1,2,16000,0,'NONE','not compressed'));f.writeframes(b'\x01\x00'*16000*70)
+            cfg={'diar_kind':'nemotron','diar_path':'cpu-fixture','diar_python':sys.executable,
+                'cohere_path':'cpu-fixture','asr_python':sys.executable,'device':'mlx'}
+            def worker_result(python,task,request,folder):
+                if task=='diarize':return {'turns':[]}
+                return {'regions':[[dict(start=0,end=c['end']-c['start'],text='Recovered speech',language='en',review=True)] for c in request['chunks']]}
+            with patch('pipeline.preflight',return_value=[]),patch('pipeline.run_worker',side_effect=worker_result) as worker:
                 doc=validate(infer(audio,70,'auto',folder,lambda _:None,cfg),70)
-            self.assertEqual(worker.call_count,1)
-            self.assertEqual([(s['start'],s['end']) for s in doc['segments']],[(0,30),(30,60),(60,70)])
+            self.assertEqual(worker.call_count,2)
+            self.assertEqual(sum(s['end']-s['start'] for s in doc['segments']),70)
             self.assertTrue(all(not s['voice_eligible'] and s['confidence'] is None for s in doc['segments']))
-            self.assertTrue(all('may be silence' in review_reason(s) for s in doc['segments']))
+            self.assertTrue(all(s['text']=='Recovered speech' and s['speaker']=='unassigned' for s in doc['segments']))
             self.assertFalse((folder/'crops').exists())
 
     def test_manual_retry_crops_only_requested_audio_and_bypasses_detector_and_diarizer(self):

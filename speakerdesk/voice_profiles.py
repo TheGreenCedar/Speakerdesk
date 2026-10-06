@@ -98,6 +98,8 @@ def speaker_audio_reason(segment, track_id):
     """Why saved source audio cannot establish this track's identity."""
     if segment.get('speaker') != track_id:
         return 'different_speaker'
+    if segment.get('audio_state')=='digital_silence':
+        return 'unverified_audio'
     if segment.get('finalized') is False:
         return 'unfinished'
     candidates = segment.get('speaker_candidates', [track_id])

@@ -67,7 +67,7 @@ function setStatus() {
   $('manual').hidden = !!doc || busy || !selected.duration;
   $('delete').disabled = busy || !!selected.inference_owned;
   $('duration').textContent = selected.duration ? time(selected.duration) : 'Preparing…';
-  $('segment-count').textContent = doc && !live ? `${doc.segments.length} passages` : '';
+  $('segment-count').textContent = doc && !live ? `${doc.segments.filter(showTranscriptPassage).length} passages` : '';
   $('save').hidden = !doc || live; $('search').disabled = !doc;
   $('player').hidden = !selected.duration || live;
   document.querySelector('.player-panel').hidden=live;
@@ -76,6 +76,7 @@ function setStatus() {
   $('speaker-tools').hidden=live;$('add').hidden=live;
   $('follow-live').hidden=!live;
   $('listening').hidden=!live || !!doc?.segments?.length;
+  renderLiveLanguage();
   renderRefinementStatus();
 }
 async function select(jid) {
@@ -105,7 +106,7 @@ function renderEditor() {
   $('inspector').hidden = true;
   $('editor').hidden = !doc; if (!doc) return;
   $('save').disabled = !dirty; $('save').textContent = dirty ? 'Save changes' : 'Saved';
-  $('segment-count').textContent = isLive() ? '' : `${doc.segments.length} passages`;
+  $('segment-count').textContent = isLive() ? '' : `${doc.segments.filter(showTranscriptPassage).length} passages`;
   $('speaker-list').replaceChildren();
   Object.entries(doc.speakers).forEach(([id, name], i) => {
     const row = node('div', undefined, 'speaker-name');
@@ -130,9 +131,10 @@ function renderSegments() {
   const query = $('search').value.toLowerCase();
   let visible = 0;
   for (const segment of doc.segments) {
+    if(!showTranscriptPassage(segment))continue;
     if (query && !(segment.text + ' ' + doc.speakers[segment.speaker]).toLowerCase().includes(query)) continue;
     visible++;
-    const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;
+    const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;card.dataset.speaker=segment.speaker;
     const index = Object.keys(doc.speakers).indexOf(segment.speaker);
     const avatar=node('span',`S${index+1}`,'speaker-avatar');avatar.setAttribute('aria-hidden','true');avatar.dataset.color=index%8;
     const body=node('div',undefined,'segment-body');
@@ -144,7 +146,7 @@ function renderSegments() {
     seek.disabled=!!isLive();
     speaker.addEventListener('change', () => { segment.speaker = speaker.value; segment.review = true; changed(); });
     top.append(speaker, seek);
-    const nameButton = node('button', undefined, 'name-speaker'); nameButton.append(icon('user-round-pen'),node('span','Name / remember voice'));
+    const nameButton = node('button', undefined, 'name-speaker'); nameButton.append(icon('user-round-pen'));nameButton.title='Name / remember voice';
     nameButton.setAttribute('aria-label', `Name or remember voice for ${doc.speakers[segment.speaker]}`);
     nameButton.addEventListener('click', () => openNamePicker(segment.speaker).catch(error => notice(error.message, true)));
     top.append(nameButton);
@@ -152,8 +154,7 @@ function renderSegments() {
       const recognized=node('span','Recognized','review-tag');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';top.append(recognized);
     }
     if (segment.review) top.append(node('span', 'Review', 'review-tag'));
-    if (segment.language) top.append(node('span', config.languages[segment.language] || segment.language, 'review-tag'));
-    else if (segment.language_detection?.mode === 'auto') top.append(node('span', 'Language needs review · audio retained', 'review-tag'));
+    if (!segment.language && segment.language_detection?.mode === 'auto') top.append(node('span', 'Language needs review', 'review-tag'));
     const remove = node('button', undefined, 'remove-segment'); remove.append(icon('x')); remove.setAttribute('aria-label', 'Remove segment');
     remove.addEventListener('click', () => { doc.segments = doc.segments.filter(s => s.id !== segment.id); changed(); renderEditor(); });
     remove.hidden=!!isLive();top.append(remove);
@@ -166,68 +167,75 @@ function renderSegments() {
     const reason=passageReviewReason(segment);
     if(reason)body.append(node('p',`${passageTime(segment.start)}–${passageTime(segment.end)} · ${reason}. Play this passage to review it.`, 'passage-review'));
     appendUncoveredAudio(body,segment);
-    if(!isLive()) {
-      const tools=node('div',undefined,'passage-retry'), language=node('select');
-      language.setAttribute('aria-label',`Choose language to retry passage at ${time(segment.start)}`);
-      const choose=node('option','Choose passage language');choose.value='';language.append(choose);
-      for(const [code,name] of Object.entries(config.languages)) {
-        if(code==='auto')continue;
-        const option=node('option',name);option.value=code;language.append(option);
-      }
-      language.value=segment.language || '';
-      const retry=node('button','Retry passage locally');
-      const busy=['preparing','processing','queued'].includes(selected.status);
-      retry.disabled=busy || segment.end-segment.start>30;language.disabled=busy;
-      retry.addEventListener('click',async()=>{
-        try {
-          if(dirty || saving)throw new Error('Save your edits before retrying this passage.');
-          if(!language.value)throw new Error('Choose the language spoken in this passage.');
-          const jid=selected.id,generation=++selectionGeneration;
-          retrying=true;retry.disabled=true;setStatus();
-          const next=await api(`/api/jobs/${jid}/retry`,{method:'POST',body:JSON.stringify({revision:selected.revision,segment_id:segment.id,language:language.value})});
-          if(selected?.id!==jid || generation!==selectionGeneration)return;
-          selected=next;doc=structuredClone(next.document);setStatus();renderEditor();
-          notice('Retrying this passage locally. Existing text is retained.');
-        } catch(error){retry.disabled=false;notice(error.message,true);}
-        finally{retrying=false;if(selected)setStatus();}
-      });
-      tools.append(language,retry);body.append(tools);
-      if(reason && segment.text.trim()) {
-        const reviewed=node('button','Mark words reviewed');reviewed.disabled=busy;
-        reviewed.addEventListener('click',()=>{segment.review_resolution='words_reviewed';segment.review=segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length>1;changed();renderSegments();});
-        tools.append(reviewed);
-      }
-      const candidate=segment.retry_candidate;
-      if(candidate) {
-        const result=node('div',undefined,'retry-result');
-        result.append(node('p',candidate.error || `Retry result (${config.languages[candidate.language]}). Listen before choosing this text.`));
-        if(candidate.text) {
-          result.append(node('p',candidate.text,'segment-text'));
-          if(candidate.transcription_review)result.append(node('p',reviewReasons[candidate.transcription_review.reason] || 'Retry needs review','passage-review'));
-          const currentCandidate=()=>candidate.start===segment.start && candidate.end===segment.end && candidate.speaker===segment.speaker;
-          const use=node('button','Use this text');use.disabled=busy || !currentCandidate();
-          use.addEventListener('click',()=>{
-            if(!currentCandidate()){notice('This retry belongs to earlier passage timing or a different speaker. Save and retry the current passage.',true);return;}
-            candidate.prior_language_detection=segment.language_detection;
-            segment.text=candidate.text;segment.language=candidate.language;
-            delete segment.review_resolution;
-            segment.language_detection={mode:'manual',reason:'passage_retry'};
-            segment.transcription_review=candidate.transcription_review || null;
-            segment.review=true;candidate.accepted_at=Date.now()/1000;
-            changed();renderSegments();notice('Retry text selected. Save changes to keep it.');
-          });
-          result.append(use);
-        } else if(!candidate.error)result.append(node('p','No transcript text returned. Original audio and existing words are retained.','passage-review'));
-        body.append(result);
-      }
-    }
+    appendPassageRepair(body,segment,reason);
     card.append(avatar,body);$('segments').append(card);
-    if(!isLive()){text.style.height='auto';text.style.height=`${text.scrollHeight}px`;}
   }
-  $('no-results').hidden = visible > 0 || (!!isLive() && !query);
+  groupConsecutivePassages($('segments'));
+  $('segments').querySelectorAll('textarea').forEach(fitPassageText);
+  renderRetainedAudioReview();
+  $('no-results').hidden = visible > 0 || !query;
   pane.scrollTop=isLive() && followingLive ? pane.scrollHeight : previousScroll;
   lucide.createIcons();
 }
+function appendPassageRepair(body,segment,reason) {
+  if(!isLive()) {
+    const repair=node('details',undefined,'passage-repair');repair.append(node('summary','Repair passage'));
+    const tools=node('div',undefined,'passage-retry'), language=node('select');
+    language.setAttribute('aria-label',`Choose language to retry passage at ${time(segment.start)}`);
+    const choose=node('option','Choose passage language');choose.value='';language.append(choose);
+    for(const [code,name] of Object.entries(config.languages)) {
+      if(code==='auto')continue;
+      const option=node('option',name);option.value=code;language.append(option);
+    }
+    language.value=segment.language || '';
+    const retry=node('button','Retry passage locally');
+    const busy=['preparing','processing','queued'].includes(selected.status);
+    retry.disabled=busy || segment.end-segment.start>30;language.disabled=busy;
+    retry.addEventListener('click',async()=>{
+      try {
+        if(dirty || saving)throw new Error('Save your edits before retrying this passage.');
+        if(!language.value)throw new Error('Choose the language spoken in this passage.');
+        const jid=selected.id,generation=++selectionGeneration;
+        retrying=true;retry.disabled=true;setStatus();
+        const next=await api(`/api/jobs/${jid}/retry`,{method:'POST',body:JSON.stringify({revision:selected.revision,segment_id:segment.id,language:language.value})});
+        if(selected?.id!==jid || generation!==selectionGeneration)return;
+        selected=next;doc=structuredClone(next.document);setStatus();renderEditor();
+        notice('Retrying this passage locally. Existing text is retained.');
+      } catch(error){retry.disabled=false;notice(error.message,true);}
+      finally{retrying=false;if(selected)setStatus();}
+    });
+    tools.append(language,retry);repair.append(tools);body.append(repair);
+    if(reason && segment.text.trim()) {
+      const reviewed=node('button','Mark words reviewed');reviewed.disabled=busy;
+      reviewed.addEventListener('click',()=>{segment.review_resolution='words_reviewed';segment.review=segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length>1;changed();renderSegments();});
+      tools.append(reviewed);
+    }
+    const candidate=segment.retry_candidate;
+    if(candidate) {
+      const result=node('div',undefined,'retry-result');
+      result.append(node('p',candidate.error || `Retry result (${config.languages[candidate.language]}). Listen before choosing this text.`));
+      if(candidate.text) {
+        result.append(node('p',candidate.text,'segment-text'));
+        if(candidate.transcription_review)result.append(node('p',reviewReasons[candidate.transcription_review.reason] || 'Retry needs review','passage-review'));
+        const currentCandidate=()=>candidate.start===segment.start && candidate.end===segment.end && candidate.speaker===segment.speaker;
+        const use=node('button','Use this text');use.disabled=busy || !currentCandidate();
+        use.addEventListener('click',()=>{
+          if(!currentCandidate()){notice('This retry belongs to earlier passage timing or a different speaker. Save and retry the current passage.',true);return;}
+          candidate.prior_language_detection=segment.language_detection;
+          segment.text=candidate.text;segment.language=candidate.language;
+          delete segment.review_resolution;
+          segment.language_detection={mode:'manual',reason:'passage_retry'};
+          segment.transcription_review=candidate.transcription_review || null;
+          segment.review=true;candidate.accepted_at=Date.now()/1000;
+          changed();renderSegments();notice('Retry text selected. Save changes to keep it.');
+        });
+        result.append(use);
+      } else if(!candidate.error)result.append(node('p','No transcript text returned. Original audio and existing words are retained.','passage-review'));
+      body.append(result);
+    }
+  }
+}
+
 const reviewReasons={uncertain:'Language uncertain; audio retained',change_pending:'Language change uncertain; audio retained',unsupported:'Detected language unsupported; audio retained',insufficient_speech:'Too little usable speech; audio retained',overlapping_speech:'Overlapping speakers; voices are not separated',refinement_incomplete:'Larger-context result was incomplete; previous words and audio retained',empty_result:'No transcript text returned; audio retained',transcription_failed:'Transcription failed for this passage; audio retained',token_limit:'Transcript may be incomplete; audio retained',unassigned_audio:'Audio outside detected speech; may be silence or missed speech'};
 function reviewSampleTime(sample) {
   const units=Math.round(sample*10000/16000),minutes=Math.floor(units/600000),rest=units%600000;
@@ -240,12 +248,55 @@ function appendUncoveredAudio(body,segment) {
   body.append(node('p',`Audio to review: ${ranges.join('; ')}. Current words and original audio retained.`,'review-audio-ranges'));
 }
 function passageReviewReason(segment) {
+  if(segment.review_resolution==='words_reviewed' && segment.text.trim())return segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length>1 ? reviewReasons.overlapping_speech : '';
   if(segment.transcription_review?.reason==='refinement_conflict')return 'Previous words retained because the new passage also covers another passage needing review.';
+  if(['transcription_failed','empty_result','token_limit'].includes(segment.transcription_review?.reason))return reviewReasons[segment.transcription_review.reason];
   if(segment.speaker.startsWith('overlap') || segment.speaker_candidates?.length>1)return reviewReasons.overlapping_speech;
-  if(segment.review_resolution==='words_reviewed' && segment.text.trim())return '';
   if(segment.transcription_review?.reason)return reviewReasons[segment.transcription_review.reason] || 'Passage needs review; audio retained';
+  if(segment.language_detection?.reason==='recent_context')return 'Language inferred from recent meeting context';
+  if(segment.language_detection?.reason==='best_effort')return 'Best-effort words; language needs review';
+  if(segment.language_detection?.reason==='needs_language')return 'Choose the meeting language; audio retained';
   if(segment.language_detection?.mode==='auto' && !segment.language)return reviewReasons[segment.language_detection.reason] || reviewReasons.uncertain;
   return segment.text.trim() ? '' : reviewReasons.empty_result;
+}
+function showTranscriptPassage(segment) {
+  return !!segment.text.trim() || passageDrafts.has(segment.id) || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
+}
+function renderRetainedAudioReview() {
+  const host=$('retained-audio-review'),open=host.open;
+  if(host.contains(document.activeElement))return;
+  const rows=doc.segments.filter(segment=>!showTranscriptPassage(segment) && segment.audio_state!=='digital_silence' &&
+    (segment.transcription_review?.reason || ['unsupported','uncertain','change_pending','needs_language','insufficient_speech'].includes(segment.language_detection?.reason) ||
+     (segment.refinement_state==='unresolved' && segment.language_detection?.reason!=='silence')));
+  host.hidden=!rows.length;host.replaceChildren();if(!rows.length)return;
+  host.append(node('summary',`${rows.length} retained audio ${rows.length===1?'range needs':'ranges need'} review`));
+  const list=node('div',undefined,'retained-audio-list');
+  for(const segment of rows) {
+    const row=node('div',undefined,'retained-audio-range');row.dataset.segmentId=segment.id;
+    row.append(node('p',`${passageTime(segment.start)}–${passageTime(segment.end)} · ${passageReviewReason(segment)}`));
+    if(!isLive()) {
+      const play=node('button','Play retained audio','text-button');
+      play.addEventListener('click',()=>{passageEnd=segment.end;$('player').currentTime=segment.start;$('player').play().catch(e=>notice(e.message,true));});
+      row.append(play);appendPassageRepair(row,segment,passageReviewReason(segment));
+    }
+    list.append(row);
+  }
+  host.append(list);host.open=open;
+}
+// Group presentation only: each passage keeps its own edit, timing, retry and
+// playback targets. Recompute after filtering/reconciliation without merging IDs.
+function groupConsecutivePassages(host) {
+  let previous;
+  for(const card of host.children) {
+    const continuation=previous && previous.dataset.speaker===card.dataset.speaker;
+    card.classList.toggle('speaker-continuation',!!continuation);
+    previous=card;
+  }
+}
+function fitPassageText(text) {
+  const key=JSON.stringify([text.clientWidth,getComputedStyle(text).paddingRight,text.value]);
+  if(text.dataset.fit===key)return;
+  text.style.height='auto';text.style.height=`${text.scrollHeight}px`;text.dataset.fit=key;
 }
 function icon(name) { const element=node('i');element.dataset.lucide=name;return element; }
 function showInspector(segment,card) {
@@ -477,10 +528,12 @@ function liveLanguageTime(samples) {
 }
 function renderLiveLanguage() {
   const control=$('live-language');
-  if(!changingLiveLanguage)control.value=meeting.language || 'auto';
-  control.disabled=changingLiveLanguage || !['recording','paused'].includes(meeting.status);
-  const pending=(meeting.language_acknowledged_revision || 0)<(meeting.language_revision || 0);
-  $('live-language-status').textContent=meeting.language_revision?
+  const current=meeting?.id===selected?.id && liveStatuses.includes(meeting?.status);
+  $('meeting-language-control').hidden=!current;
+  if(!changingLiveLanguage)control.value=meeting?.language || 'auto';
+  control.disabled=changingLiveLanguage || !current || !['recording','paused'].includes(meeting?.status);
+  const pending=(meeting?.language_acknowledged_revision || 0)<(meeting?.language_revision || 0);
+  $('live-language-status').textContent=meeting?.language_revision?
     `From ${liveLanguageTime(meeting.language_from_sample || 0)}${pending?' · Queued':''}`:'This meeting only';
 }
 async function changeLiveLanguage() {

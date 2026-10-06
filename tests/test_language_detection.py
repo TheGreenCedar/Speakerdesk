@@ -58,106 +58,137 @@ def model_modules(asr, diar=None):
 
 
 class LanguageRoutingTests(unittest.TestCase):
-    def transcriber(self, distributions):
-        detector = Mock()
-        detector.detect.side_effect = distributions
-        with patch('language_detection.WhisperLanguageDetector', return_value=detector):
-            result = SpeechTranscriber(cohere_model(), 'auto', '/local/approved')
-        return result
+    def transcriber(self, distributions, context=None):
+        detector=Mock();detector.detect.side_effect=distributions
+        return SpeechTranscriber(cohere_model(),'auto',detector=detector,context=context)
 
-    def test_same_speaker_can_change_english_to_french_inside_one_phrase(self):
-        transcriber = self.transcriber([scores('en'), scores('fr')])
-        pcm = np.full(6*16000, .1, dtype=np.float32)
-        passages = transcriber.transcribe(pcm, 16000, ('speaker_0',))
-        self.assertEqual([(p['start'], p['end'], p['language'], p['text']) for p in passages],
-                         [(0, 3, 'en', 'Original English'), (3, 6, 'fr', 'Français original')])
-        self.assertEqual([call.kwargs['language'] for call in transcriber.asr.transcribe.call_args_list], ['en', 'fr'])
-        for call in transcriber.asr.transcribe.call_args_list:
-            np.testing.assert_array_equal(call.args[0], pcm[:48000])
+    def test_confident_switch_routes_current_supported_language_immediately(self):
+        transcriber=self.transcriber([scores('en'),scores('fr',.92),scores('fr',.92)])
+        passages=transcriber.transcribe(np.full(9*16000,.1,dtype=np.float32),16000,('speaker_0',))
+        self.assertEqual([(p['start'],p['end'],p['language']) for p in passages],[(0,3,'en'),(3,9,'fr')])
+        self.assertEqual([c.kwargs['language'] for c in transcriber.asr.transcribe.call_args_list],['en','fr'])
+        self.assertTrue(all(p['text'] and not p['review'] for p in passages))
 
-    def test_hysteresis_abstains_on_first_disputed_window_and_does_not_force_previous_language(self):
-        transcriber = self.transcriber([scores('en'), scores('fr', .92), scores('fr', .92)])
-        pcm = np.full(9*16000, .1, dtype=np.float32)
-        passages = transcriber.transcribe(pcm, 16000, ('speaker_0',))
-        self.assertEqual([p['language'] for p in passages], ['en', None, 'fr'])
-        self.assertEqual(passages[1]['text'], '')
-        self.assertTrue(passages[1]['review'])
-        self.assertEqual(passages[1]['language_detection']['reason'], 'change_pending')
-        self.assertEqual([c.kwargs['language'] for c in transcriber.asr.transcribe.call_args_list], ['en', 'fr'])
+    def test_successful_prior_probe_rescues_weak_supported_and_unsupported_scores(self):
+        transcriber=self.transcriber([scores('en'),scores('fr',.65),{'ru':.55,'fr':.45}])
+        rows=transcriber.transcribe(np.full(9*16000,.1,dtype=np.float32),16000,('speaker_0',))
+        self.assertEqual([r['language'] for r in rows],['en','en','en'])
+        self.assertEqual([r['language_detection']['reason'] for r in rows],['detected','recent_context','recent_context'])
+        self.assertEqual(rows[1]['language_detection']['candidates'][0],{'language':'fr','probability':.65})
+        self.assertTrue(all(r['text'] and r['review'] for r in rows[1:]))
+        self.assertEqual(transcriber.context,{'language':'en','end_sample':3*16000})
 
-    def test_unsupported_and_ambiguous_speech_never_call_cohere_or_become_english(self):
-        for probabilities, reason in [(scores('ru'), 'unsupported'), ({'en': .51, 'fr': .49}, 'uncertain')]:
+    def test_no_context_supported_guess_runs_asr_marked_best_effort(self):
+        transcriber=self.transcriber([{'fr':.51,'en':.49}])
+        row=transcriber.transcribe(np.full(16000,.1,dtype=np.float32),16000,('speaker_0',))[0]
+        self.assertEqual((row['language'],row['text'],row['language_detection']['reason']),('fr','Français original','best_effort'))
+        self.assertTrue(row['review']);self.assertIsNone(transcriber.context)
+
+    def test_unsupported_evidence_without_context_is_visible_and_not_forced_english(self):
+        for probabilities,reason in [(scores('ru'),'unsupported'),({'ru':.51,'fr':.49},'needs_language')]:
             with self.subTest(reason=reason):
-                transcriber = self.transcriber([probabilities])
-                passage = transcriber.transcribe(np.full(16000, .1, dtype=np.float32), 16000, ('speaker_0',))[0]
-                self.assertIsNone(passage['language'])
-                self.assertEqual(passage['text'], '')
-                self.assertEqual(passage['language_detection']['reason'], reason)
-                self.assertEqual(passage['language_detection']['candidates'][0]['language'], max(probabilities, key=probabilities.get))
+                transcriber=self.transcriber([probabilities])
+                row=transcriber.transcribe(np.full(16000,.1,dtype=np.float32),16000,('speaker_0',))[0]
+                self.assertIsNone(row['language']);self.assertEqual(row['text'],'')
+                self.assertEqual(row['language_detection']['reason'],reason)
                 transcriber.asr.transcribe.assert_not_called()
 
-    def test_short_silent_and_overlapping_speech_abstain_before_detection(self):
-        for pcm, speaker in [(np.full(8000, .1, dtype=np.float32), ('speaker_0',)),
-                             (np.zeros(16000, dtype=np.float32), ('speaker_0',)),
-                             (np.full(16000, .1, dtype=np.float32), ('speaker_0', 'speaker_1'))]:
-            transcriber = self.transcriber([])
-            passage = transcriber.transcribe(pcm, 16000, speaker)[0]
-            self.assertIsNone(passage['language'])
-            self.assertEqual(passage['end'], len(pcm)/16000)
-            transcriber.detector.detect.assert_not_called()
-            transcriber.asr.transcribe.assert_not_called()
+    def test_clear_unsupported_language_resets_prior_context(self):
+        transcriber=self.transcriber([scores('ru'),{'fr':.51,'en':.49}],{'language':'en','end_sample':0})
+        rows=transcriber.transcribe(np.full(6*16000,.1,dtype=np.float32),16000,('speaker_0',))
+        self.assertEqual([r['language_detection']['reason'] for r in rows],['unsupported','best_effort'])
+        self.assertEqual(rows[1]['language'],'fr');self.assertIsNone(transcriber.context)
+
+    def test_short_quiet_and_overlap_audio_reach_asr(self):
+        for pcm,speakers in [(np.full(8000,.1,dtype=np.float32),('speaker_0',)),
+                             (np.full(16000,.0001,dtype=np.float32),('speaker_0',)),
+                             (np.full(16000,.1,dtype=np.float32),('speaker_0','speaker_1'))]:
+            with self.subTest(samples=len(pcm),speakers=speakers):
+                transcriber=self.transcriber([scores('en',.60)],{'language':'fr','end_sample':0})
+                row=transcriber.transcribe(pcm,16000,speakers)[0]
+                self.assertEqual((row['language'],row['text'],row['end']),('fr','Français original',len(pcm)/16000))
+                self.assertEqual(row['language_detection']['reason'],'recent_context')
+                self.assertTrue(row['review']);self.assertNotIn('audio_state',row)
+                transcriber.detector.detect.assert_called_once()
+                np.testing.assert_array_equal(transcriber.asr.transcribe.call_args.args[0],pcm)
+
+    def test_context_freshness_and_future_observations_use_audio_positions(self):
+        for start,reason,language in [(16000,'recent_context','fr'),(61*16000,'recent_context','fr'),
+                                      (61*16000+1,'best_effort','en'),(0,'best_effort','en')]:
+            with self.subTest(start=start):
+                transcriber=self.transcriber([scores('en',.60)],{'language':'fr','end_sample':16000})
+                row=transcriber.transcribe(np.full(16000,.1,dtype=np.float32),16000,('unknown',),start_sample=start)[0]
+                self.assertEqual((row['language_detection']['reason'],row['language']),(reason,language))
+
+    def test_blank_failed_partial_and_guessed_asr_never_establish_context(self):
+        for first in [types.SimpleNamespace(text='',tokens=[]),RuntimeError('Synthetic ASR failure'),
+                      types.SimpleNamespace(text='Partial',tokens=[1]*448)]:
+            with self.subTest(result=first):
+                transcriber=self.transcriber([scores('fr'),scores('en',.60)])
+                transcriber.asr.transcribe.side_effect=[first,types.SimpleNamespace(text='Second words',tokens=[1])]
+                rows=transcriber.transcribe(np.full(6*16000,.1,dtype=np.float32),16000,('speaker_0',))
+                self.assertEqual(rows[1]['language_detection']['reason'],'best_effort')
+                self.assertIsNone(transcriber.context)
+                self.assertTrue(rows[0]['transcription_review'])
+
+    def test_failed_confident_switch_cannot_reuse_contradicted_context(self):
+        transcriber=self.transcriber([scores('fr'),scores('en',.60)],{'language':'en','end_sample':0})
+        transcriber.asr.transcribe.side_effect=[RuntimeError('Synthetic ASR failure'),types.SimpleNamespace(text='Best effort',tokens=[1])]
+        rows=transcriber.transcribe(np.full(6*16000,.1,dtype=np.float32),16000,('speaker_0',))
+        self.assertEqual(rows[0]['transcription_review']['reason'],'transcription_failed')
+        self.assertEqual(rows[1]['language_detection']['reason'],'best_effort')
+        self.assertIsNone(transcriber.context)
+
+    def test_manual_overrides_short_quiet_overlap_and_never_loads_detector(self):
+        with patch('language_detection.WhisperLanguageDetector') as detector:
+            transcriber=SpeechTranscriber(cohere_model(),'fr')
+        for pcm in [np.full(1000,.0001,dtype=np.float32),np.full(24*16000,.1,dtype=np.float32)]:
+            row=transcriber.transcribe(pcm,16000,('speaker_0','speaker_1'))[0]
+            self.assertEqual((row['start'],row['end'],row['language'],row['text']),(0,len(pcm)/16000,'fr','Français original'))
+            np.testing.assert_array_equal(transcriber.asr.transcribe.call_args.args[0],pcm)
+        detector.assert_not_called()
+
+    def test_digital_silence_skips_models_and_preserves_explicit_manual_language(self):
+        for language in ['auto','fr']:
+            detector=Mock();transcriber=SpeechTranscriber(cohere_model(),language,detector=detector)
+            row=transcriber.transcribe(np.zeros(16000,dtype=np.float32),16000,('speaker_0',))[0]
+            self.assertEqual(row['language'],None if language=='auto' else 'fr')
+            self.assertEqual(row['language_detection']['reason'],'insufficient_speech')
+            self.assertEqual(row['audio_state'],'digital_silence')
+            self.assertEqual(row['text'],'');self.assertTrue(row['review'])
+            detector.detect.assert_not_called();transcriber.asr.transcribe.assert_not_called()
+
+    def test_setting_change_resets_context_but_same_setting_does_not(self):
+        transcriber=self.transcriber([] ,{'language':'fr','end_sample':0})
+        transcriber.set_language('auto');self.assertEqual(transcriber.context['language'],'fr')
+        transcriber.set_language('en');self.assertIsNone(transcriber.context)
+        transcriber.set_language('auto');self.assertIsNone(transcriber.context)
+
+    def test_detector_failure_can_use_context_without_inventing_scores(self):
+        transcriber=self.transcriber([RuntimeError('Synthetic detector failure')],{'language':'fr','end_sample':0})
+        row=transcriber.transcribe(np.full(16000,.1,dtype=np.float32),16000,('unknown',))[0]
+        self.assertEqual(row['text'],'Français original');self.assertTrue(row['review'])
+        self.assertEqual(row['language_detection'],{'mode':'auto','reason':'recent_context','detector_error':True,'context_end_sample':0})
 
     def test_confident_continuous_language_joins_probes_without_dropping_tail(self):
-        transcriber = self.transcriber([scores('fr'), scores('fr'), scores('fr')])
-        pcm = np.arange(100001, dtype=np.float32)/1000000
-        passages = transcriber.transcribe(pcm, 16000, ('speaker_0',))
-        self.assertEqual(passages[0]['start'], 0)
-        self.assertEqual(passages[-1]['end'], len(pcm)/16000)
-        self.assertTrue(all(p['language']=='fr' for p in passages))
-        reconstructed = np.concatenate([call.args[0] for call in transcriber.asr.transcribe.call_args_list])
-        np.testing.assert_array_equal(reconstructed, pcm)
-        self.assertTrue(all(len(call.args[0]) <= 96000 for call in transcriber.asr.transcribe.call_args_list))
+        transcriber=self.transcriber([scores('fr'),scores('fr'),scores('fr')])
+        pcm=np.arange(100001,dtype=np.float32)/1000000
+        passages=transcriber.transcribe(pcm,16000,('speaker_0',))
+        self.assertEqual(passages[0]['start'],0);self.assertEqual(passages[-1]['end'],len(pcm)/16000)
+        reconstructed=np.concatenate([call.args[0] for call in transcriber.asr.transcribe.call_args_list])
+        np.testing.assert_array_equal(reconstructed,pcm)
+        self.assertTrue(all(len(call.args[0])<=96000 for call in transcriber.asr.transcribe.call_args_list))
 
-    def test_language_state_is_separate_for_speakers_and_weak_continuity_abstains(self):
-        policy = LanguagePolicy()
-        self.assertEqual(policy.decide(scores('en'), ('speaker_0',))['language'], 'en')
-        self.assertEqual(policy.decide(scores('fr', .92), ('speaker_1',))['language'], 'fr')
-        self.assertIsNone(policy.decide(scores('fr', .92), ('speaker_0',))['language'])
-        continuation = policy.decide(scores('en', .65), ('speaker_0',))
-        self.assertIsNone(continuation['language'])
-        self.assertTrue(continuation['review'])
-
-    def test_measured_moderate_language_scores_never_force_asr_even_after_continuity(self):
-        transcriber=self.transcriber([scores('fr'),scores('fr',.793),scores('fr',.855)])
-        passages=transcriber.transcribe(np.full(9*16000,.1,dtype=np.float32),16000,('speaker_0',))
-        self.assertEqual([p['language'] for p in passages],['fr',None,None])
-        self.assertEqual([c.kwargs['language'] for c in transcriber.asr.transcribe.call_args_list],['fr'])
-        self.assertTrue(all(p['review'] and p['text']=='' for p in passages[1:]))
-
-    def test_manual_override_bypasses_detector_and_keeps_full_crop(self):
-        with patch('language_detection.WhisperLanguageDetector') as detector:
-            transcriber = SpeechTranscriber(cohere_model(), 'fr')
-        pcm = np.full(24*16000, .1, dtype=np.float32)
-        passages = transcriber.transcribe(pcm, 16000, ('speaker_0',))
-        detector.assert_not_called()
-        self.assertEqual([(p['start'],p['end'],p['language']) for p in passages], [(0,24,'fr')])
-        np.testing.assert_array_equal(transcriber.asr.transcribe.call_args.args[0], pcm)
-
-    def test_abstention_invalidates_prior_continuity_before_new_weak_evidence(self):
-        for contrary in [scores('ru'), {'fr':.55,'en':.45}]:
-            policy=LanguagePolicy();policy.decide(scores('en'),('speaker_0',))
-            self.assertIsNone(policy.decide(contrary,('speaker_0',))['language'])
-            self.assertIsNone(policy.decide(scores('en',.65),('speaker_0',))['language'])
-        policy=LanguagePolicy();policy.decide(scores('en'),('speaker_0',))
-        policy.decide(scores('fr',.92),('speaker_0',))
-        self.assertIsNone(policy.decide(scores('en',.65),('speaker_0',))['language'])
-
-    def test_invalid_audio_and_bad_distribution_fail_explicitly(self):
-        transcriber = self.transcriber([])
-        for pcm, rate in [(np.zeros(100), 48000), (np.zeros((100,2)),16000), (np.array([np.nan]),16000)]:
+    def test_invalid_audio_context_and_bad_distribution_fail_explicitly(self):
+        transcriber=self.transcriber([])
+        for pcm,rate in [(np.zeros(0),16000),(np.zeros(100),48000),(np.zeros((100,2)),16000),(np.array([np.nan]),16000)]:
             with self.assertRaises(ValueError):transcriber.transcribe(pcm,rate,('speaker_0',))
-        for probabilities in [{'en': float('nan')}, {'en': .8, 'fr': .8}, {}]:
-            with self.assertRaises(ValueError):LanguagePolicy().decide(probabilities, ('speaker_0',))
+        for start in [-1,True,1.5]:
+            with self.assertRaises(ValueError):transcriber.transcribe(np.ones(100),16000,('speaker_0',),start_sample=start)
+        for context in [{'language':[],'end_sample':0},{'language':'ru','end_sample':0},{'language':'en','end_sample':True},{'language':'en','end_sample':-1}]:
+            with self.assertRaises(ValueError):self.transcriber([],context)
+        for probabilities in [{'en':float('nan')},{'en':.8,'fr':.8},{}]:
+            with self.assertRaises(ValueError):LanguagePolicy().decide(probabilities,('speaker_0',))
 
 
 class DecoderContractTests(unittest.TestCase):
@@ -316,7 +347,7 @@ class WorkerLanguageTests(unittest.TestCase):
                     self.assertEqual(asr.transcribe.call_count,1)
 
 
-    def test_auto_overlap_stays_blank_and_cannot_supply_voice_enrollment_clips(self):
+    def test_auto_overlap_keeps_asr_words_without_voice_enrollment_clips(self):
         import inference_worker
         with tempfile.TemporaryDirectory() as temporary:
             folder=Path(temporary);audio=folder/'audio.wav'
@@ -325,7 +356,7 @@ class WorkerLanguageTests(unittest.TestCase):
                 wav.writeframes(np.full(6*16000,3276,dtype='<i2').tobytes())
             original=audio.read_bytes()
             model=folder/'cohere';model.mkdir();(model/'model.safetensors').touch()
-            asr=cohere_model();detector=Mock()
+            asr=cohere_model();detector=Mock();detector.detect.side_effect=[scores('en',.60),scores('en',.60)]
             def worker(python,task,request,destination):
                 if task=='diarize':return {'turns':['0 6 speaker_0','0 6 speaker_1']}
                 return inference_worker.run(task,request)
@@ -337,11 +368,11 @@ class WorkerLanguageTests(unittest.TestCase):
                  patch('pipeline.preflight',return_value=[]),patch('pipeline.run_worker',side_effect=worker):
                 document=validate(infer(audio,6,'auto',folder,lambda message:None,config),6)
             self.assertEqual([(s['start'],s['end']) for s in document['segments']],[(0,3),(3,6)])
-            self.assertTrue(all(s['text']=='' and s['review'] and not s['voice_eligible'] for s in document['segments']))
-            self.assertTrue(all(s['language_detection']['reason']=='overlapping_speech' for s in document['segments']))
+            self.assertTrue(all(s['text']=='Original English' and s['review'] and not s['voice_eligible'] for s in document['segments']))
+            self.assertTrue(all(s['language_detection']['reason']=='best_effort' for s in document['segments']))
             self.assertEqual(automatic_clips({'id':'overlap','document':document},'speaker_0'),[])
             self.assertEqual(automatic_clips({'id':'overlap','document':document},'overlap'),[])
-            detector.detect.assert_not_called();asr.transcribe.assert_not_called()
+            self.assertEqual(detector.detect.call_count,2);self.assertEqual(asr.transcribe.call_count,2)
             self.assertEqual(audio.read_bytes(),original)
 
 

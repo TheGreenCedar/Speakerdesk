@@ -50,7 +50,7 @@ try {
   };
   const errors=[];ws.addEventListener('message',event=>{const m=JSON.parse(event.data);if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text);});
   await send('Runtime.enable');await send('Page.enable');
-  await send('Emulation.setDeviceMetricsOverride',{width:1280,height:mode==='before'?1050:1200,deviceScaleFactor:1,mobile:false});
+  await send('Emulation.setDeviceMetricsOverride',{width:1280,height:mode==='before'?1050:800,deviceScaleFactor:1,mobile:false});
   await send('Page.navigate',{url:`${base}/?meeting=${'d'.repeat(32)}`});
   await wait('typeof selected !== "undefined" && selected?.id');
   await wait('!meetingPoll && !polling');
@@ -112,13 +112,15 @@ try {
   assert.match(ranges[0],/00:39\.8000–00:39\.8100 \(10 ms\)/);
   assert.match(ranges[1],/00:49\.5585–00:49\.5800 \(21\.5 ms\)/);
   assert.equal(await evaluate('doc.segments.find(s=>s.id === "unknown-audio").refinement_state'),'unresolved');
-  assert.equal(await evaluate('document.querySelector("[data-segment-id=unknown-audio] .rolling-review") !== null'),true);
-  await evaluate('document.querySelectorAll(".rolling-review").forEach(el=>el.open=true);$("transcript-pane").scrollTop=0');
+  assert.equal(await evaluate('document.querySelector("#segments [data-segment-id=unknown-audio]") === null'),true);
+  assert.equal(await evaluate('document.querySelector("#retained-audio-review [data-segment-id=unknown-audio]") !== null'),true);
+  await evaluate('document.querySelectorAll(".rolling-review").forEach(el=>el.open=true);$("retained-audio-review").open=true;$("transcript-pane").scrollTop=0');
   await screenshot('rolling-live-review-ranges.png');
   await evaluate('api("/fixture/review-edges",{method:"POST",body:JSON.stringify({live:false})}).then(()=>poll())');
   await wait('selected.status === "ready" && document.querySelectorAll(".rolling-segment").length === 0');
   assert.deepEqual(await evaluate('Array.from(document.querySelectorAll(".review-audio-ranges"),el=>el.textContent)'),ranges);
-  assert.equal(await evaluate('document.querySelector("[data-segment-id=unknown-audio] .passage-review") !== null'),true);
+  assert.equal(await evaluate('document.querySelector("#segments [data-segment-id=unknown-audio]") === null'),true);
+  assert.match(await evaluate('document.querySelector("#retained-audio-review [data-segment-id=unknown-audio]").textContent'),/Overlapping speakers/);
   await screenshot('rolling-review-ranges.png');
   assert.deepEqual(errors,[]);
   await writeFile(join(output,'browser-report.json'),JSON.stringify({kind:'synthetic_cpu_fixture',checks:['collapsed_pending_rows','compact_provisional_states','focused_unsaved_draft_survives_merge','stale_row_save_rejected','saved_edit_protected_from_late_pass','confirmed_name_retained','audio_anchor_scroll_survives_merge','pause_resume_refinement','live_language_boundary_separate_from_default','saved_refinement_ownership_disables_delete','precise_uncovered_ranges','unknown_audio_review_retained'],page_errors:errors},null,2));

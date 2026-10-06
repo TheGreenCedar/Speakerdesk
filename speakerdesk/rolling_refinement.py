@@ -199,7 +199,7 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
         if sid in used or (not old and sid in old_ids):raise ValueError('Refinement ID collision.')
         fast = window.get('kind') == 'fast_tail'
         candidate.update(id=sid,machine_revision=(old.get('machine_revision',0)+1 if old else 1),
-                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if candidate['text'].strip() and not candidate.get('transcription_review') else 'unresolved'),
+                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if (candidate['text'].strip() or candidate.get('audio_state')=='digital_silence') and not candidate.get('transcription_review') else 'unresolved'),
                          refinement_window=window['id'],finalized=bool(candidate.get('finalized')) if fast else True)
         candidate['audio_anchor'] = (copy.deepcopy(old.get('audio_anchor')) if old and old.get('audio_anchor')
                                      else {'start_sample':bounds(candidate)[0],'end_sample':bounds(candidate)[1]})

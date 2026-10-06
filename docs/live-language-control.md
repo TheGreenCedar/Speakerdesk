@@ -1,6 +1,6 @@
 # Changing language during a meeting
 
-The footer beside Pause/Resume now offers **Live language: Auto or a supported language**. It is available while recording or paused. Settings → Default language continues to govern new meetings and imports independently.
+The meeting header offers one **Language: Auto or a supported language** selector. It is available while recording or paused. Settings → Default language continues to govern new meetings and imports independently.
 
 Changing the live selection creates a sample boundary in the current recording. The footer shows `From mm:ss.xx`, with `Queued` until the worker registers that revision. Earlier transcript text remains unchanged. Existing passage retry remains the explicit way to reconsider earlier words.
 
@@ -30,7 +30,7 @@ Every emitted subpassage carries its own UUID, actual PCM start/end offsets, `la
 
 Rapid changes at the same sample position create zero-length intermediate generations; the last selection governs subsequent audio. A worker acknowledgement means the ordered update has been registered, rather than that all transcription has completed. Late status responses cannot restore a superseded language revision in the browser.
 
-On entry to each nonempty generation, routing resets language detection history for all speakers. The local detector is loaded lazily for Auto and reused across subsequent changes. Import routing uses the same transcriber with its original behavior. Phrase cuts at the language boundary remain marked for review. `voice_eligible` and `speaker_candidates` retain their separate single-speaker contract, so this ASR review flag does not prevent otherwise eligible voice clips.
+On entry to each nonempty generation, routing resets language detection history for all speakers. The local detector is loaded lazily for Auto and reused across subsequent changes. Import routing uses the same recent-context and best-effort policy described in [automatic language](automatic-language.md). Phrase cuts at the language boundary remain marked for review. `voice_eligible` and `speaker_candidates` retain their separate single-speaker contract, so this ASR review flag does not prevent otherwise eligible voice clips.
 
 ## Validation and handoff
 

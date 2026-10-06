@@ -2,6 +2,17 @@
 // Drafts are local until a passage revision is explicitly saved. Polling keeps
 // arriving words visible without replacing the focused textarea or its caret.
 const passageDrafts = new Map();
+// Reflow long passages when the window or details pane changes width. Cache
+// unchanged text sizes so an hour-long transcript does not relayout on each poll.
+const passageWidthObserver=new ResizeObserver(()=>{
+  const pane=$('transcript-pane'),host=$('segments');
+  const anchor=Array.from(host.children).find(card=>card.getBoundingClientRect().bottom>pane.getBoundingClientRect().top);
+  const before=anchor?.getBoundingClientRect().top;
+  $('segments').querySelectorAll('textarea').forEach(fitPassageText);
+  if(isLive() && followingLive && !host.contains(document.activeElement))pane.scrollTop=pane.scrollHeight;
+  else if(anchor?.isConnected)pane.scrollTop+=anchor.getBoundingClientRect().top-before;
+});
+passageWidthObserver.observe(document.getElementById('transcript-pane'));
 function hasPassageDrafts() { return passageDrafts.size > 0; }
 function renderRefinementStatus() {
   const status=selected?.refinement_status;
@@ -18,6 +29,7 @@ async function toggleRefinement() {
 function liveCard(segment) {
   const card=node('article',undefined,'segment rolling-segment');card.dataset.segmentId=segment.id;
   card.dataset.start=segment.start;card.dataset.end=segment.end;
+  card.dataset.speaker=segment.speaker;
   const avatar=node('span',`S${Object.keys(doc.speakers).indexOf(segment.speaker)+1}`,'speaker-avatar');
   avatar.dataset.color=Object.keys(doc.speakers).indexOf(segment.speaker)%8;avatar.setAttribute('aria-hidden','true');
   const body=node('div',undefined,'segment-body'),top=node('div',undefined,'segment-top');
@@ -26,18 +38,21 @@ function liveCard(segment) {
   identity.addEventListener('click',()=>openNamePicker(segment.speaker).catch(e=>notice(e.message,true)));
   const timing=node('span',`${passageTime(segment.start)}–${passageTime(segment.end)}`,'rolling-time');
   const state=segment.refinement_state || 'provisional';
-  const badge=node('span',({provisional:'Provisional',refined:'Refined',unresolved:'Needs review',edited:'Edited'})[state] || state,'refinement-badge');
+  const reviewed=segment.review_resolution==='words_reviewed' && segment.text.trim();
+  const badge=node('span',reviewed?'Words reviewed':({provisional:'Provisional',refined:'Refined',unresolved:'Needs review',edited:'Edited'})[state] || state,'refinement-badge');
   badge.title=state==='provisional'?'Words may change with more context.':passageReviewReason(segment);
   top.append(identity,timing,badge);body.append(top);
   const draft=passageDrafts.get(segment.id),text=node('textarea');
-  text.rows=2;text.value=draft?.text ?? segment.text;
+  text.rows=1;text.value=draft?.text ?? segment.text;
   text.setAttribute('aria-label',`Transcript at ${time(segment.start)}`);
   const actions=node('div',undefined,'rolling-actions'),save=node('button','Save passage','quiet');
   const message=node('span','','passage-save-status');message.setAttribute('role','status');
   save.disabled=!draft;
+  card.classList.toggle('has-draft',!!draft);
   text.addEventListener('input',()=>{
     const prior=passageDrafts.get(segment.id);
     passageDrafts.set(segment.id,{text:text.value,revision:prior?.revision ?? segment.machine_revision ?? 0,segment:structuredClone(segment)});
+    card.classList.add('has-draft');
     save.disabled=false;text.style.height='auto';text.style.height=`${text.scrollHeight}px`;
   });
   text.addEventListener('focus',()=>{followingLive=false;$('follow-live').textContent='Return to live';});
@@ -63,7 +78,9 @@ function liveCard(segment) {
     passageDrafts.delete(segment.id);latest.blur();text.blur();card.dataset.signature='';renderLiveSegments();
   });
   actions.append(save,latest,message);body.append(text,actions);
-  if(state==='unresolved') {
+  const reason=passageReviewReason(segment);
+  if(reason && state!=='unresolved')body.append(node('span',reason,'passage-context-note'));
+  if(state==='unresolved' && (!reviewed || reason)) {
     const details=node('details',undefined,'rolling-review');details.append(node('summary','Review details'));
     details.append(node('p',passageReviewReason(segment) || 'Previous words and original audio retained.','passage-review'));
     appendUncoveredAudio(details,segment);
@@ -91,7 +108,7 @@ function renderLiveSegments() {
   rows.sort((a,b)=>a.start-b.start || a.end-b.end);
   const retained=new Set();
   for(const segment of rows) {
-    if(!segment.text.trim() && segment.refinement_state==='provisional' && !passageDrafts.has(segment.id)){pending++;continue;}
+    if(!showTranscriptPassage(segment)){if(segment.refinement_state==='provisional' && segment.audio_state!=='digital_silence')pending++;continue;}
     if(query && !(segment.text+' '+doc.speakers[segment.speaker]).toLowerCase().includes(query) && !passageDrafts.has(segment.id))continue;
     const signature=JSON.stringify([segment,doc.speakers[segment.speaker]]);let card=existing.get(segment.id);
     if(!card || (card.dataset.signature!==signature && !card.contains(document.activeElement) && !passageDrafts.has(segment.id))) {
@@ -99,15 +116,24 @@ function renderLiveSegments() {
       if(card){if(cursor===card)cursor=next;card.replaceWith(next);}card=next;
     }
     retained.add(card);visible++;
+    card.dataset.speaker=segment.speaker;
     const name=card.querySelector('.name-speaker');name.textContent=doc.speakers[segment.speaker];
     name.setAttribute('aria-label',`Name or remember voice for ${doc.speakers[segment.speaker]}`);
     if(card!==cursor)host.insertBefore(card,cursor);cursor=card.nextSibling;
     const draft=passageDrafts.get(segment.id);
+    card.classList.toggle('has-draft',!!draft);
+    card.classList.toggle('has-new-words',!!draft && draft.revision!==segment.machine_revision);
     if(draft && draft.revision!==segment.machine_revision) {
       card.querySelector('.passage-save-status').textContent=`New words available: ${segment.text}. Your draft is retained; use latest words before editing the new version.`;
     }
   }
   for(const child of Array.from(host.children))if(!retained.has(child))child.remove();
+  renderRetainedAudioReview();
+  groupConsecutivePassages(host);
+  for(const card of host.children) {
+    const text=card.querySelector('textarea');
+    if(text && !card.contains(document.activeElement))fitPassageText(text);
+  }
   $('pending-phrases').hidden=!pending;$('pending-phrases').textContent=pending?'Listening · uncertain phrases are waiting for more context. Original audio retained.':'';
   $('listening').hidden=visible>0 || pending>0 || !isLive();
   $('no-results').hidden=visible>0 || !query;

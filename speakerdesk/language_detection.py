@@ -1,8 +1,8 @@
 """Local audio language routing. Only Cohere generates transcript text.
 
-Whisper's dedicated language-token pass scores all 99 languages. Unsupported
-or uncertain speech is retained for review instead of being forced to English.
-Policy thresholds are conservative defaults, pending real bilingual evaluation.
+Whisper's language-token pass scores all 99 languages. Uncertain supported
+speech is attempted with recent context or a marked best-effort language.
+Unsupported speech and genuine ASR failures retain audio for review.
 """
 import hashlib
 import json
@@ -104,15 +104,12 @@ class WhisperLanguageDetector:
 
 
 class LanguagePolicy:
-    """Track each diarization speaker separately; never reuse a disputed language."""
+    """Describe acoustic evidence without making speaker identity an ASR gate."""
     def __init__(self):
         self.current = {}
-        self.pending = {}
 
     def reset(self, speaker):
-        for name in speaker:
-            self.current.pop((name,), None)
-            self.pending.pop((name,), None)
+        self.current.pop(speaker, None)
 
     def decide(self, probabilities, speaker):
         if (not probabilities or any(not isinstance(code, str) or not math.isfinite(float(p))
@@ -122,106 +119,123 @@ class LanguagePolicy:
         ranked = sorted(probabilities.items(), key=lambda item: float(item[1]), reverse=True)
         winner, probability = ranked[0][0], float(ranked[0][1])
         margin = probability - (float(ranked[1][1]) if len(ranked) > 1 else 0.)
+        confident = probability >= .90 and margin >= .20
         decision = {'language': None, 'language_detection': {
             'mode': 'auto', 'probability': probability, 'margin': margin,
             'candidates': [{'language': code, 'probability': float(p)} for code, p in ranked[:3]],
-            'reason': 'uncertain'}, 'review': True}
+            'reason': 'needs_language'}, 'review': True}
         if winner not in LANGUAGES:
-            self.reset(speaker)
-            decision['language_detection']['reason'] = 'unsupported'
+            if confident:
+                self.reset(speaker)
+                decision['language_detection']['reason'] = 'unsupported'
             return decision
-        previous = self.current.get(speaker)
-        strong = probability >= .95 and margin >= .30
-        confident = probability >= .90 and margin >= .20
-        # A prior language does not rescue weak acoustic evidence. Real compact
-        # TTS probes exposed a moderate-confidence wrong-language admission.
-        if confident and previous and winner != previous and not strong:
-            candidate, count = self.pending.get(speaker, (None, 0))
-            count = count + 1 if candidate == winner else 1
-            self.pending[speaker] = (winner, count)
-            if count < 2:
-                decision['language_detection']['reason'] = 'change_pending'
-                return decision
-        elif not confident:
-            self.reset(speaker)
-            return decision
-        self.pending.pop(speaker, None)
-        self.current[speaker] = winner
-        decision.update(language=winner, review=False)
-        decision['language_detection']['reason'] = 'detected'
+        decision['language'] = winner
+        decision['language_detection']['reason'] = 'detected' if confident else 'best_effort'
+        decision['review'] = not confident
+        if confident:self.current[speaker] = winner
         return decision
 
 
 class SpeechTranscriber:
-    """Shared import/live routing with bounded windows and original-language ASR."""
-    def __init__(self, asr, language, detector_path=None, *, detector=None):
+    """Shared routing with successful, recent supported-language context.
+
+    Context is an explicit snapshot preceding this audio, not an ASR confidence
+    score. Callers processing historical audio must seed only preceding context
+    from the same language epoch. All positions are absolute 16 kHz samples.
+    """
+    CONTEXT_SAMPLES = 60 * 16000
+
+    def __init__(self, asr, language, detector_path=None, *, detector=None, context=None):
         self.asr,self.detector_path,self.detector=asr,detector_path,detector
         self.set_language(language)
+        if context is not None:
+            if (not isinstance(context,dict) or not isinstance(context.get('language'),str)
+                    or context['language'] not in LANGUAGES
+                    or type(context.get('end_sample')) is not int or context['end_sample']<0):
+                raise ValueError('Invalid preceding language context.')
+            self.context = {'language':context['language'],'end_sample':context['end_sample']}
 
     def set_language(self,language):
         if language not in LANGUAGE_CHOICES:raise ValueError('Unsupported language mode.')
         if language=='auto' and self.detector is None:self.detector=WhisperLanguageDetector(self.detector_path)
-        self.language=language
-        self.policy = LanguagePolicy()
+        if getattr(self,'language',None)!=language:
+            self.language=language
+            self.policy=LanguagePolicy()
+            self.context=None
 
-    def transcribe(self, audio, sample_rate, speaker, *, max_asr_seconds=6, allow_overlap=False):
+    def recent_context(self,start_sample):
+        if self.context and 0 <= start_sample-self.context['end_sample'] <= self.CONTEXT_SAMPLES:
+            return self.context
+        return None
+
+    def transcribe(self, audio, sample_rate, speaker, *, max_asr_seconds=6, allow_overlap=False, start_sample=0):
         import numpy as np
 
         if (not .75 <= max_asr_seconds <= 24.5 or len(audio) > 24.5*sample_rate
-                or sample_rate != 16000 or np.asarray(audio).ndim != 1 or not np.isfinite(audio).all()):
-            raise ValueError('Language routing requires finite 16 kHz mono speech audio.')
+                or not len(audio) or sample_rate != 16000 or np.asarray(audio).ndim != 1 or not np.isfinite(audio).all()
+                or type(start_sample) is not int or start_sample<0):
+            raise ValueError('Language routing requires finite 16 kHz mono speech audio and its sample position.')
         automatic=self.language=='auto'
         count = max(1, math.ceil(len(audio)/(3*sample_rate))) if automatic else 1
         edges = np.linspace(0, len(audio), count+1, dtype=int)
-        windows = []
-        for begin, end in zip(edges, edges[1:]):
-            pcm = audio[begin:end]
-            if not automatic:
-                decision = {'language': self.language, 'review': False,
-                            'language_detection': {'mode': 'manual', 'reason': 'override'}}
-            elif len(pcm) < .75*sample_rate or float(np.sqrt(np.mean(pcm.astype('float64')**2))) < .001:
-                self.policy.reset(speaker)
-                decision = {'language': None, 'review': True,
-                            'language_detection': {'mode': 'auto', 'reason': 'insufficient_speech'}}
-            elif len(speaker) > 1 and not allow_overlap:
-                self.policy.reset(speaker)
-                decision = {'language': None, 'review': True,
-                            'language_detection': {'mode': 'auto', 'reason': 'overlapping_speech'}}
+        probes=[]
+        for begin,end in zip(edges,edges[1:]):
+            pcm=audio[begin:end]
+            if not len(pcm) or not np.any(pcm):
+                decision={'language':None if automatic else self.language,'review':True,
+                          'language_detection':{'mode':'auto' if automatic else 'manual','reason':'insufficient_speech'},
+                          'audio_state':'digital_silence'}
+            elif not automatic:
+                decision={'language':self.language,'review':False,
+                          'language_detection':{'mode':'manual','reason':'override'}}
             else:
-                decision = self.policy.decide(self.detector.detect(pcm), speaker)
-            window = {'begin': int(begin), 'end_sample': int(end), **decision}
-            # Join adjacent confident windows of the same language up to six
-            # seconds, retaining the least confident language observation.
-            if (windows and window['language'] and not window['review']
-                    and not windows[-1]['review'] and windows[-1]['language'] == window['language']
-                    and end-windows[-1]['begin'] <= max_asr_seconds*sample_rate):
-                previous = windows[-1]
-                previous['end_sample'] = int(end)
-                if window['language_detection'].get('probability', 1) < previous['language_detection'].get('probability', 1):
-                    previous['language_detection'] = window['language_detection']
-            else:
-                windows.append(window)
-        results = []
-        for window in windows:
-            text = ''
-            transcription_review = None
-            if window['language']:
                 try:
-                    result = self.asr.transcribe(audio[window['begin']:window['end_sample']],
-                        sample_rate=sample_rate, language=window['language'], max_new_tokens=448)
-                    text = result.text.strip()
-                    if len(result.tokens) >= 448:
-                        transcription_review = {'reason': 'token_limit', 'partial_text': True}
+                    decision=self.policy.decide(self.detector.detect(pcm),speaker)
+                except (RuntimeError,ValueError,OSError):
+                    decision={'language':None,'review':True,
+                              'language_detection':{'mode':'auto','reason':'needs_language','detector_error':True}}
+            probes.append({'begin':int(begin),'end_sample':int(end),**decision})
+        results=[]
+        index=0
+        while index<len(probes):
+            window=probes[index];index+=1
+            detection=window['language_detection']
+            if automatic and detection['reason']=='unsupported':
+                self.context=None
+            elif (automatic and detection['reason']=='detected' and self.context
+                  and self.context['language']!=window['language']):
+                # A clear language change invalidates old context even if ASR
+                # fails; only successful new speech can establish its successor.
+                self.context=None
+            elif automatic and detection['reason'] in ('best_effort','needs_language'):
+                context=self.recent_context(start_sample+window['begin'])
+                if context:
+                    window['language']=context['language']
+                    detection.update(reason='recent_context',context_end_sample=context['end_sample'])
+            # Join adjacent confident windows while preserving whole audio crops.
+            while (not window['review'] and index<len(probes) and not probes[index]['review']
+                   and probes[index]['language']==window['language']
+                   and probes[index]['end_sample']-window['begin']<=max_asr_seconds*sample_rate):
+                following=probes[index];index+=1;window['end_sample']=following['end_sample']
+                if following['language_detection'].get('probability',1)<detection.get('probability',1):
+                    detection=following['language_detection'];window['language_detection']=detection
+            text='';transcription_review=None
+            if window['language'] and detection['reason']!='insufficient_speech':
+                try:
+                    result=self.asr.transcribe(audio[window['begin']:window['end_sample']],
+                        sample_rate=sample_rate,language=window['language'],max_new_tokens=448)
+                    text=result.text.strip()
+                    if len(result.tokens)>=448:
+                        transcription_review={'reason':'token_limit','partial_text':True}
                     elif not text:
-                        transcription_review = {'reason': 'empty_result', 'partial_text': False}
-                except (RuntimeError, ValueError, OSError):
-                    # Keep earlier successful passages. Hardware/resource guards remain
-                    # outside this per-passage model boundary and stop owned workers.
-                    transcription_review = {'reason': 'transcription_failed', 'partial_text': False}
-            if transcription_review or len(speaker) > 1:
-                window['review'] = True
-            results.append({'start': window['begin']/sample_rate,
-                            'end': window['end_sample']/sample_rate, 'text': text,
-                            **{key: window[key] for key in ('language', 'language_detection', 'review')},
-                            **({'transcription_review': transcription_review} if transcription_review else {})})
+                        transcription_review={'reason':'empty_result','partial_text':False}
+                except (RuntimeError,ValueError,OSError):
+                    transcription_review={'reason':'transcription_failed','partial_text':False}
+            if automatic and detection['reason']=='detected' and text and not transcription_review:
+                self.context={'language':window['language'],'end_sample':start_sample+window['end_sample']}
+            if transcription_review or len(speaker)>1:window['review']=True
+            results.append({'start':window['begin']/sample_rate,'end':window['end_sample']/sample_rate,'text':text,
+                            **{key:window[key] for key in ('language','language_detection','review')},
+                            **({'audio_state':window['audio_state']} if 'audio_state' in window else {}),
+                            **({'transcription_review':transcription_review} if transcription_review else {})})
         return results

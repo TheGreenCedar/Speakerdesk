@@ -57,7 +57,8 @@ def export(document, kind):
     if kind == 'json':
         return json.dumps(document, ensure_ascii=False, indent=2) + '\n', 'application/json'
     lines = ['WEBVTT', ''] if kind == 'vtt' else []
-    for n, s in enumerate(document['segments'], 1):
+    passages=[s for s in document['segments'] if s.get('text','').strip()]
+    for n, s in enumerate(passages, 1):
         speaker = document['speakers'][s['speaker']]
         # Plain subtitle text avoids VTT/HTML interpretation and cue injection.
         passage = export_text(s)

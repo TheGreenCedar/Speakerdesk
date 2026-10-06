@@ -36,3 +36,41 @@
 .rolling-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:5px}.rolling-actions button{font-size:12px}.passage-save-status{font-size:12px;color:var(--muted);max-width:100%;overflow-wrap:anywhere}.rolling-review{font-size:12px;color:var(--muted);margin-top:8px}.prior-words{white-space:pre-wrap}.rolling-segment textarea{width:100%;resize:vertical;min-height:54px}
 
 .transcript-pane:has(.rolling-segment){scroll-behavior:auto;overflow-anchor:none}
+
+/* A continuous meeting transcript; IDs and passage controls remain independent. */
+.recording-heading{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;padding:18px 26px 12px}
+.recording-title h1{font-size:24px}.subtitle{font-size:12px;margin-top:5px}.recording-actions{padding-top:0}
+.live-language-control{grid-column:1/-1;display:flex;flex-direction:row;align-items:center;gap:9px;min-width:0;max-width:none}
+.live-language-control label{font-size:12px;font-weight:600;color:var(--ink)}#live-language{font-size:13px;padding:5px 8px;min-width:140px}#live-language-status{font-size:11px}
+.processing-row{padding:8px 26px;min-height:34px}.refinement-controls{font-size:12px;padding:4px 26px;gap:12px}
+.refinement-controls button{font-size:12px;min-height:26px;padding:3px 0}
+.speaker-strip{padding:0 26px 6px;min-height:32px}.editor-layout{padding:0 26px 10px;gap:18px}
+.transcript-pane{padding:2px 6px 10px 0}.segment{grid-template-columns:26px minmax(0,1fr);gap:10px;padding:9px 0 8px;border-top:1px solid var(--line)}
+.segment:first-child{border-top:0}.speaker-avatar{width:26px;height:26px;font-size:10px}.segment-body{position:relative}
+.segment-top{gap:8px;margin:0 0 3px;min-height:20px;font-size:11px;padding-right:105px}
+.segment-top select,.speaker-label{font-size:13px}.name-speaker{min-height:20px;padding:0 3px;font-size:12px;border:0;background:transparent;color:var(--ink);font-weight:600}
+.segment-top .name-speaker svg{width:13px;height:13px}.segment-top .seek{min-height:20px;font-size:11px}
+.segment textarea,.segment-text,.rolling-segment textarea{font-size:16px;line-height:1.45;min-height:23px;resize:none;overflow:hidden}
+.segment textarea:focus{resize:vertical}.refinement-badge{font-size:10px;border:0;padding:1px 0;border-radius:0}
+.rolling-time{font-size:10px;font-variant-numeric:tabular-nums}.rolling-actions{display:none;gap:9px;margin-top:3px}
+.rolling-segment:focus-within .rolling-actions,.rolling-segment.has-draft .rolling-actions{display:flex}
+.rolling-actions button{min-height:25px;padding:2px 7px;font-size:11px}.rolling-actions .text-button{display:none}
+.rolling-segment.has-new-words .rolling-actions .text-button{display:inline-flex}.passage-save-status{font-size:11px}
+.speaker-continuation{border-top:0;padding-top:2px}.speaker-continuation .speaker-avatar{visibility:hidden}
+.speaker-continuation .segment-top{position:absolute;right:0;top:0;min-height:20px;padding-right:0;margin:0}.speaker-continuation textarea{padding-right:170px}
+.speaker-continuation:focus-within .segment-top{position:static;padding-right:105px}.speaker-continuation:focus-within textarea{padding-right:0}
+.speaker-continuation .segment-top>.name-speaker,.speaker-continuation .segment-top>select{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.speaker-continuation:focus-within .segment-top>.name-speaker,.speaker-continuation:focus-within .segment-top>select{position:static;width:auto;height:auto;clip-path:none}
+.passage-repair{font-size:11px;color:var(--muted)}.passage-repair:not([open]){position:absolute;right:25px;top:2px}
+.passage-repair summary{cursor:pointer;padding:2px 0;opacity:0}.segment:hover .passage-repair summary,.segment:focus-within .passage-repair summary{opacity:1}
+.passage-repair[open] summary{opacity:1;margin-top:5px}.passage-retry{gap:6px;margin:5px 0}.passage-retry select{font-size:12px;padding:5px;border-radius:5px}
+.passage-retry button,.retry-result button{font-size:11px;min-height:28px;padding:4px 8px}
+.passage-review,.rolling-review,.review-audio-ranges{font-size:11px;line-height:1.45;margin:4px 0}.passage-context-note{font-size:11px;color:var(--muted)}
+.retained-audio-review{font-size:11px;color:var(--muted);margin:3px 0 8px}.retained-audio-review>summary{cursor:pointer;padding:4px 0}
+.retained-audio-list{padding:3px 10px;border-left:2px solid var(--line)}.retained-audio-range{position:relative;padding:4px 0}.retained-audio-range p{margin:3px 0;line-height:1.5}
+.retained-audio-range .text-button{font-size:11px;min-height:24px;padding:2px 0}.retained-audio-range .passage-repair{position:static!important}.retained-audio-range .passage-repair summary{opacity:1}
+#capture-footer{min-height:62px;padding:10px 26px;gap:15px}#pause-meeting,#stop-meeting{min-height:34px;padding:7px 12px}.audio-meter{min-width:70px;gap:4px}
+.player-panel{min-height:58px;padding:10px 26px}.player-options{gap:9px}#elapsed{font-size:13px;padding-left:12px}
+#follow-live{right:26px;bottom:12px;min-height:30px;padding:4px 10px}
+@media(max-width:1000px){.recording-heading{padding:14px 18px 10px;gap:8px}.recording-title h1{font-size:21px}.processing-row,.refinement-controls{padding-left:18px;padding-right:18px}.editor-layout,.speaker-strip{padding-left:18px;padding-right:18px}#capture-footer{padding:9px 18px;gap:10px}.segment{gap:8px}.segment-top{gap:6px}.live-language-control{flex-wrap:wrap}}
+@media(max-width:700px){.recording-actions{gap:3px}.recording-actions button,.export-menu summary{padding:5px 8px;min-height:30px}.live-language-control label{font-size:11px}#live-language{min-width:110px}.segment-top{padding-right:0}.passage-repair:not([open]){position:static}.passage-repair summary{opacity:1}.segment textarea{font-size:15px}}

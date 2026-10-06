@@ -29,7 +29,10 @@ class RollingLifecycleTests(MeetingHarness,unittest.TestCase):
         self.control(jid,'resume');self.wait_for(lambda:self.job(jid)['status']=='recording')
         self.control(jid,'stop');self.wait_for(lambda:self.manager.jid is None)
         job=self.job(jid);self.assertEqual(job['status'],'ready',job)
-        self.assertEqual(job['refinement_status'],'complete')
+        # The previously discarded 100 ms phrase is now retained. Its old
+        # language epoch remains eligible for explicit saved-audio refinement.
+        self.assertEqual(job['refinement_status'],'unresolved')
+        self.assertEqual(job['refinement_unresolved'][0]['reason'],'language_changed')
         rows=[s for s in job['document']['segments'] if s['text']]
         self.assertEqual([(s['start'],s['end'],s['language']) for s in rows],[(0,.1,'en'),(.1,.35,'fr')])
         commands=[json.loads(x)['type'] for x in (self.root/jid/'worker-commands.jsonl').read_text().splitlines()]
