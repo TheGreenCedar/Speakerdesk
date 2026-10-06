@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from live_refinement import Engine,Inbox
-from speech_admission import SpeechFrames
+from speech_admission import SpeechFrames, INPUT_POLICY
 from app import create_app
 from meeting_refinement import activity_references
 from live_refinement import align_tracks
@@ -51,6 +51,35 @@ class CanonicalTests(unittest.TestCase):
     def feed(self,start,end,mode='en',epoch=0):
         for n in range(start,end):self.engine.handle({'type':'audio','start_sample':n*RATE,'end_sample':(n+1)*RATE,'language':mode,'language_epoch':epoch})
     def rows(self):return [event['candidate'] for event in self.events if event['type']=='canonical_revision']
+    def test_uncertain_only_audio_survives_final_receipt_without_asr_or_complete_claim(self):
+        def negative(audio,final=False):
+            self.peer.received+=len(audio);ledger=self.peer.speech_live.evidence
+            end=self.peer.received if final else self.peer.received//512*512
+            while ledger.end_sample<end:
+                a=ledger.end_sample;b=min(a+512,end)
+                ledger.append(a,b,.01,observation={'input_policy':INPUT_POLICY,'constant_value':None})
+            return [],end/RATE
+        self.peer.feed=negative;self.feed(0,1);self.engine.handle({'type':'stop'})
+        final=self.events[-1]
+        self.assertEqual(final['canonical_uncertain_samples'],RATE)
+        self.assertEqual(self.peer.calls,[]);self.assertEqual(self.rows(),[])
+        journal=[json.loads(line) for line in self.engine.canonical.archive.path.read_text().splitlines()]
+        self.assertEqual(sum(e['end_sample']-e['start_sample'] for e in journal
+            if e['type']=='speech_admission_uncertain'),RATE)
+        app=create_app(self.root/'uncertain-home');manager=app.extensions['speakerdesk']['meetings']
+        manager.duration=1
+        job={'id':self.jid,'created':1,'status':'refining','kind':'meeting','name':'CPU uncertain',
+             'language':'en','duration':1,'revision':0,'canonical_utterances':True,
+             'document':{'speakers':{},'segments':[],'provenance':{},'warnings':[]}}
+        try:
+            manager.refinement.initialize(job);manager.put(job);manager.refinement.ready(self.jid,True)
+            manager.refinement.capture_done(self.jid,observed_sample=RATE,uncertain_samples=RATE)
+            actual=manager.get(self.jid)
+            self.assertEqual(actual['canonical_uncertain_samples'],RATE)
+            self.assertEqual(actual['refinement_status'],'unresolved')
+            self.assertNotEqual(actual['rolling_refinement']['completed_sample'],RATE)
+        finally:
+            manager.close();app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
     def test_same_identity_raw_unicode_replacement_and_pause_remains_open(self):
         self.feed(0,7);first=self.rows()[-1];self.assertEqual(first['text'],self.peer.text)
         self.peer.text='  Please review the section together. 12.5 go go café 👩🏽‍💻  '
