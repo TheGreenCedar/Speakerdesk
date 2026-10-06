@@ -158,6 +158,53 @@ class CanonicalTests(unittest.TestCase):
                 self.assertEqual(peer.calls[-2:],[18*RATE,12*RATE])
                 self.assertLessEqual(max(peer.calls),392000)
 
+    def test_long_core_language_probes_replace_prior_confident_language_and_keep_review(self):
+        original=self.peer.transcribe
+        def routed(audio,language,names,overlap=False):
+            passage=original(audio,language,names,overlap=overlap)[0]
+            long=self.engine.canonical.book.rows and max(r['end_sample']-r['start_sample'] for r in self.engine.canonical.book.rows.values())>392000
+            passage.update(language='fr' if long else 'en',review=bool(long),
+                language_detection={'mode':'auto','reason':'best_effort' if long else 'detected','probability':.52 if long else .99})
+            return [passage]
+        self.peer.transcribe=routed;self.engine.timeline[0]['language']='auto'
+        self.feed(0,30,'auto');self.engine.handle({'type':'stop'})
+        row=self.rows()[-1]
+        self.assertEqual(row['language'],'fr');self.assertEqual(row['language_detection']['reason'],'best_effort')
+        self.assertTrue(row['review']);self.assertNotIn('canonical_unresolved',row)
+        probes=row['language_detection']['probes']
+        self.assertEqual([(p['start_sample'],p['end_sample']) for p in probes],[(0,18*RATE),(18*RATE,30*RATE)])
+        self.assertTrue(all(p['language']=='fr' and p['decision']['reason']=='best_effort' for p in probes))
+
+    def test_bounded_core_provenance_is_invalidated_by_machine_and_human_revisions(self):
+        self.feed(0,30);self.engine.handle({'type':'stop'});book=self.engine.canonical.book;row=book.snapshot()[0]
+        self.assertIn('bounded_decode_provenance',row)
+        edited=book.edit(row['id'],row['machine_revision'],'Human text')
+        self.assertNotIn('bounded_decode_provenance',edited)
+        row=book.rows[row['id']];row['protected_fields']=[];row['bounded_decode_provenance']={'old':True}
+        updated=book.apply_model(row['id'],row['machine_revision'],'Whole replacement',start_sample=row['start_sample'],end_sample=row['end_sample'],stage='refined',complete=True)
+        self.assertNotIn('bounded_decode_provenance',updated)
+
+    def test_client_cannot_inject_core_evidence_and_edits_remove_it(self):
+        self.feed(0,30);self.engine.handle({'type':'stop'});candidate=self.rows()[-1]
+        app=create_app(self.root/'evidence-home');manager=app.extensions['speakerdesk']['meetings'];manager.duration=30
+        job={'id':self.jid,'created':1,'status':'ready','kind':'meeting','name':'CPU','language':'en','duration':30,'revision':0,
+             'document':{'speakers':{'speaker_0':'Speaker1'},'segments':[],'provenance':{},'warnings':[]},'canonical_utterances':True}
+        try:
+            manager.refinement.initialize(job);manager.put(job);manager.refinement.canonical(self.jid,{'candidate':candidate,'fast_sequence':1})
+            client=app.test_client();import re
+            headers={'X-Speakerdesk-Token':re.search(r'name="speakerdesk-token" content="([^"]+)"',client.get('/').text)[1]}
+            saved=manager.get(self.jid);original=copy.deepcopy(saved['document']['segments'][0]['bounded_decode_provenance'])
+            forged=copy.deepcopy(saved['document']);forged['segments'][0]['bounded_decode_provenance']={'forged':True}
+            response=client.put('/api/jobs/'+self.jid+'/transcript',headers=headers,json={'revision':saved['revision'],'document':forged})
+            self.assertEqual(response.status_code,200,response.json)
+            saved=manager.get(self.jid);row=saved['document']['segments'][0]
+            self.assertEqual(row['bounded_decode_provenance'],original)
+            response=client.patch('/api/jobs/'+self.jid+'/segments/'+row['id'],headers=headers,json={'segment_revision':row['machine_revision'],'text':'Human correction'})
+            self.assertEqual(response.status_code,200,response.json)
+            self.assertNotIn('bounded_decode_provenance',manager.get(self.jid)['document']['segments'][0])
+        finally:
+            manager.close();app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
+
     def test_whole_utterance_refinement_replaces_same_id_and_preserves_anchor(self):
         self.feed(0,7);self.engine.handle({'type':'stop'});row=self.rows()[-1]
         request={'type':'refine','canonical':row,'operation_id':'one','language_epoch':0,

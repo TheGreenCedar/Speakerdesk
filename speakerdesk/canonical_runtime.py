@@ -65,7 +65,7 @@ class CanonicalRuntime:
                 start_sample=a,end_sample=b,stage=stage,complete=complete)
             updated=self.book.rows[row['id']]
             if len(passages)==1:
-                for key in ('language','language_detection','acoustic_evidence','transcription_review','audio_state'):
+                for key in ('language','language_detection','acoustic_evidence','transcription_review','audio_state','review'):
                     if key in passages[0]:updated[key]=copy.deepcopy(passages[0][key])
                     else:updated.pop(key,None)
             if not complete or not text.strip():updated['canonical_unresolved']='incomplete_cohere_revision'
@@ -87,6 +87,8 @@ class CanonicalRuntime:
                 if parts is False:return False
                 self.book.apply_core_parts(row['id'],parts,stage=stage)
                 updated=self.book.rows[row['id']]
+                if updated['machine_versions'][-1]['complete']:
+                    self.update_core_metadata(updated,parts,stamp['language'])
             last=updated['machine_versions'][-1]
             if not last['complete']:updated['canonical_unresolved']=last.get('reason') or 'incomplete_cohere_revision'
             else:updated.pop('canonical_unresolved',None)
@@ -127,6 +129,40 @@ class CanonicalRuntime:
                           'cohere_input_padding':[copy.deepcopy(p.get('cohere_input_padding')) for p in passages],
                           'passages':passages})
         return parts
+
+    @staticmethod
+    def update_core_metadata(row,parts,mode):
+        """Current disjoint decode decisions replace stale short-phrase labels.
+
+        Preserve every actual language probe at its absolute physical position;
+        a heterogeneous utterance has no single inferred language. Weak routing
+        remains reviewable without pretending ASR/alignment verified language.
+        """
+        probes=[];speech=[]
+        for part in parts:
+            origin=part['request']['start_sample']
+            for passage in part['passages']:
+                detection=copy.deepcopy(passage.get('language_detection') or {})
+                if detection.get('probes'):
+                    probes.extend(copy.deepcopy(detection['probes']))
+                else:
+                    probes.append({'start_sample':origin+round(passage['start']*RATE),
+                        'end_sample':origin+round(passage['end']*RATE),
+                        'language':passage.get('language'),'decision':detection,
+                        'review':bool(passage.get('review'))})
+                if passage['text'].strip():speech.append(passage)
+        languages={p.get('language') for p in speech}
+        row['language']=next(iter(languages)) if len(languages)==1 else None
+        weak=next((p for p in speech if p.get('review') or
+                   (p.get('language_detection') or {}).get('reason') not in ('detected','override')),None)
+        reason=('override' if mode!='auto' else 'mixed_languages' if len(languages)>1
+                else ((weak.get('language_detection') or {}).get('reason') or 'uncertain') if weak
+                else 'detected')
+        row['language_detection']={'mode':'manual' if mode!='auto' else 'auto','reason':reason,
+            'probes':probes,'source':'disjoint_core_language_decisions'}
+        row['review']=bool(weak) or (mode=='auto' and (len(languages)!=1 or None in languages))
+        # Earlier short-crop evidence does not describe the current whole audio.
+        for key in ('acoustic_evidence','transcription_review','audio_state'):row.pop(key,None)
 
     def refine(self,request):
         from live_refinement import read_audio,align_tracks
@@ -184,7 +220,7 @@ class CanonicalRuntime:
             canonical_state=row['state'],start=row['start_sample']/RATE,end=row['end_sample']/RATE,
             speaker=speaker,source_speaker_candidates=names,language_generation=row['language_epoch'],
             language_mode=stamp['language'],finalized=row['state']=='sealed',
-            review=len(names)!=1 or bool(row.get('canonical_unresolved')) or bool(row.get('transcription_review')),
+            review=len(names)!=1 or bool(row.get('review')) or bool(row.get('canonical_unresolved')) or bool(row.get('transcription_review')),
             timing='canonical_vad_audio_anchor',refinement_state=row.get('refinement_state','provisional'))
         if stamp['language']!='auto':result['language']=stamp['language']
         if row.get('canonical_unresolved'):

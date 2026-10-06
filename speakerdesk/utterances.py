@@ -162,6 +162,7 @@ class UtteranceBook:
         row['machine_revision'] += 1
         row.pop('alignment', None)
         row.pop('assembly_provenance',None)
+        row.pop('bounded_decode_provenance',None)
         return copy.deepcopy(row)
 
     def apply_model(self, identity, revision, text, *, start_sample, end_sample, stage, complete):
@@ -189,6 +190,7 @@ class UtteranceBook:
             row['refinement_state'] = 'refined' if stage == 'refined' and row['state'] == 'sealed' else 'provisional'
             row.pop('alignment', None)
             row.pop('assembly_provenance',None)
+            row.pop('bounded_decode_provenance',None)
         return copy.deepcopy(row)
 
     def decode_requests(self, identity):
@@ -268,6 +270,7 @@ class UtteranceBook:
             row['text_audio_anchor']=copy.deepcopy(version['audio_anchor'])
             row['refinement_state']='refined' if stage=='refined' and row['state']=='sealed' else 'provisional'
             row.pop('alignment',None)
+            row.pop('bounded_decode_provenance',None)
             row['assembly_provenance']={key:copy.deepcopy(assembled[key]) for key in
                 ('text_sha256','words','alignment_complete','model_sha256','timing_kind',
                  'frame_calibration_id','score_calibration_id','separator_policy')}
