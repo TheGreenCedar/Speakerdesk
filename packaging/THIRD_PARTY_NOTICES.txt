@@ -69574,3 +69574,9 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+Coarse alignment of unchanged Cohere text
+Pinned model: csukuangfj2/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12, revision 6fc542a3b0661c8278cca1230c34deb989f31202. Apache-2.0.
+Runtime: ONNX Runtime 1.30.0 (MIT and bundled third-party notices), CTC segmentation 1.7.4 (Apache-2.0), flatbuffers 25.12.19 (Apache-2.0). Build-only Cython 3.1.4 (Apache-2.0). Existing protobuf 7.36.2 remains unchanged.
+Complete approved model/runtime licenses and ONNX third-party notices are shipped under licenses/alignment-runtime. The model is downloaded locally by setup, not bundled in the installer.

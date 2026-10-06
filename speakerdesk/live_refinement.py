@@ -26,7 +26,7 @@ def read_audio(path, start, end):
         if end > source.getnframes():raise ValueError('Requested audio is not yet saved.')
         source.setpos(start);data=source.readframes(end-start)
     if len(data)!=(end-start)*2:raise ValueError('Incomplete saved audio.')
-    return np.frombuffer(data,dtype='<i2').astype('float32')/32767
+    return np.frombuffer(data,dtype='<i2').astype('float32')/32768
 
 
 class Inbox:
@@ -150,7 +150,37 @@ class Models:
         self.diar=load(Path(config['diar_path']),strict=True);self.diar.set_streaming_config('low')
         self.state=self.diar.init_streaming_state()
         self.asr=CohereAsrModel.from_path(Path(config['cohere_path']))
-        self.language_context=None;self.transcription_start_sample=0
+        from speech_admission import SileroModel, FrameArchive
+        import uuid
+        self.speech=SileroModel(config['speech_path'])
+        from admission_receipt import execution
+        self.admission_execution=(execution(config['job_id'],uuid.uuid4().hex)
+                                  if config.get('canonical_utterances') else None)
+        self.speech_live=self.speech.session(archive=FrameArchive(
+            Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'))
+        self.speech_historical=None
+        self.language_context=None;self.transcription_start_sample=0;self.coarse_aligner=None;self.asr_padding=(0,0)
+    def inspection_receipt(self,phase,request_id):
+        return {**self.admission_execution,**self.speech_live.inspection(),
+                'phase':phase,'request_id':request_id}
+    def set_decode_boundary_padding(self,left,right):
+        if type(left) is not int or type(right) is not int or left not in (0,3200) or right not in (0,3200):
+            raise ValueError('Invalid canonical decode boundary context.')
+        self.asr_padding=(left,right)
+    def align_canonical(self,request,text,*,language):
+        # No implicit download or non-English calibration extrapolation. The
+        # existing null/review path remains when the optional provider is absent.
+        if language!='en' or not self.config.get('alignment_path'):return None
+        self.check_memory()
+        try:
+            if self.coarse_aligner is None:
+                from coarse_alignment import CoarseAlignment
+                self.coarse_aligner=CoarseAlignment(self.config['alignment_path'])
+            return self.coarse_aligner.align(read_audio(self.config['audio_path'],
+                request['start_sample'],request['end_sample']),text,
+                start_sample=request['start_sample'],language=language)
+        except (ImportError,OSError,ValueError,RuntimeError):
+            return None
     def set_language_context(self,context,start_sample):
         self.language_context=copy.deepcopy(context);self.transcription_start_sample=start_sample
     def transcribe(self,audio,language,names,overlap=False):
@@ -158,17 +188,22 @@ class Models:
         from language_detection import SpeechTranscriber,WhisperLanguageDetector
         self.check_memory()
         if language=='auto' and self.detector is None:self.detector=WhisperLanguageDetector(self.config['lid_path'])
-        transcriber=SpeechTranscriber(self.asr,language,self.config.get('lid_path'),detector=self.detector,context=self.language_context)
+        transcriber=SpeechTranscriber(self.asr,language,self.config.get('lid_path'),detector=self.detector,
+            context=self.language_context,speech_evidence=(self.speech_historical
+                if self.speech_historical is not None else self.speech_live.evidence))
         with contextlib.redirect_stdout(sys.stderr):
             result=transcriber.transcribe(audio,RATE,tuple(names),max_asr_seconds=24.5,allow_overlap=overlap,
-                start_sample=self.transcription_start_sample)
+                start_sample=self.transcription_start_sample,asr_padding=self.asr_padding)
         self.detector=transcriber.detector
         self.mx.clear_cache();return result
     def feed(self,audio,final=False):
         import sys
         with contextlib.redirect_stdout(sys.stderr):
+            self.speech_live.feed(audio,self.speech_live.received,final=final)
             result,self.state=self.diar.feed(audio,self.state,sample_rate=RATE,final=final,threshold=.5,min_duration=0,merge_gap=0)
-        return [{'start':s.start,'end':s.end,'speaker':f'speaker_{s.speaker}'} for s in result.segments],self.state.frames_processed*.01
+        self.nvidia_observed_sample=round(self.state.frames_processed*.01*RATE)
+        return [{'start':s.start,'end':s.end,'speaker':f'speaker_{s.speaker}'} for s in result.segments],min(
+            self.state.frames_processed*.01,self.speech_live.evidence.end_sample/RATE)
     def batch_turns(self,audio):
         import sys
         self.check_memory()
@@ -182,6 +217,14 @@ class Models:
         return [{'start':s.start,'end':s.end,'speaker':f'speaker_{s.speaker}'} for s in result.segments]
     def metrics(self):
         return {'peak_mlx_bytes':self.mx.get_peak_memory(),'peak_process_rss_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}
+    def begin_refinement(self,audio,start_sample):
+        from speech_admission import FrameArchive
+        import uuid
+        self.speech_historical=None
+        self.speech_historical=self.speech.inspect_frames(audio,start_sample,archive=FrameArchive(
+            Path(self.config['audio_path']).parent/f'speech-refine-{uuid.uuid4().hex}.jsonl'))
+    def end_refinement(self):
+        self.speech_historical=None
 
 
 class Engine:
@@ -189,8 +232,14 @@ class Engine:
         self.config=config;self.models=models;self.emit=emit;self.inbox=inbox;self.path=Path(config['audio_path'])
         self.received=0;self.processed=0.;self.turns=[];self.cursor=0.;self.last_decode=0.
         self.timeline=[{'start_sample':0,'language':config['language'],'epoch':config.get('language_epoch',0)}]
-        self.document={'speakers':{},'segments':[]};self.capture_finished=False;self.fast_sequence=0
+        if config.get('language_history'):
+            self.timeline=copy.deepcopy(config['language_history'])
+        self.document={'speakers':{},'segments':[]};self.capture_finished=False;self.fast_sequence=config.get('fast_sequence',0)
         self.carry=None;self.language_observations=[]
+        self.canonical=None
+        if config.get('canonical_utterances'):
+            from canonical_runtime import CanonicalRuntime
+            self.canonical=CanonicalRuntime(self)
     def language_at(self,sample):
         return next(x for x in reversed(self.timeline) if x['start_sample']<=sample)
     def decode(self,pcm,language,names,start,epoch,*,overlap=False,context_seed=None,observations=None,prefix_context=None):
@@ -321,6 +370,7 @@ class Engine:
         return self.decorate([{'start':0,'end':end-start,'text':'','language':None,'review':True,
                               'transcription_review':{'reason':'refinement_incomplete'}}],start,end,names,config['epoch'])
     def commit(self,final=False):
+        if self.canonical:return self.canonical.commit(final)
         while True:
             before=self.cursor;self._commit_once(final)
             if self.cursor==before or self.cursor>=min(self.received/RATE,self.processed):break
@@ -398,9 +448,16 @@ class Engine:
             if self.cursor>=available:break
         self.turns=[dict(t,start=max(t['start'],self.cursor)) for t in self.turns if t['end']>self.cursor]
     def refine(self,request):
+        try:return self._refine(request)
+        finally:
+            if hasattr(self.models,'end_refinement'):self.models.end_refinement()
+    def _refine(self,request):
+        if self.canonical and request.get('canonical'):return self.canonical.refine(request)
         window=request['window'];a=window['context_start_sample'];b=window['context_end_sample']
         if self.inbox.cancelled_request(request):return {'type':'refinement_result',**{k:request[k] for k in ('operation_id','language_epoch','window')},'cancelled':True}
-        pcm=read_audio(self.path,a,b);turns=self.models.batch_turns(pcm)
+        pcm=read_audio(self.path,a,b)
+        if hasattr(self.models,'begin_refinement'):self.models.begin_refinement(pcm,a)
+        turns=self.models.batch_turns(pcm)
         absolute=[dict(t,start=t['start']+a/RATE,end=t['end']+a/RATE) for t in turns]
         diagnostics=[] if self.config.get('track_mapping_diagnostics') else None
         raw_turns=copy.deepcopy(absolute) if diagnostics is not None else None
@@ -455,17 +512,40 @@ class Engine:
             if self.capture_finished:raise ValueError('Audio arrived after capture finished.')
             stamp={'start_sample':message['start_sample'],'language':message['language'],'epoch':message['language_epoch']}
             if stamp['epoch']!=self.timeline[-1]['epoch']:self.timeline.append(stamp)
-            pcm=read_audio(self.path,message['start_sample'],message['end_sample'])
-            output,self.processed=self.models.feed(pcm);self.received=message['end_sample']
-            self.turns.extend(output)
-            self.commit()
+            # Inbox coalescing must not turn a queued recording range into an
+            # oversized model read or alter the one-second feeding cadence.
+            for a in range(message['start_sample'],message['end_sample'],RATE):
+                b=min(a+RATE,message['end_sample'])
+                pcm=read_audio(self.path,a,b)
+                output,self.processed=self.models.feed(pcm);self.received=b
+                self.turns.extend(output)
+                self.commit()
             self.emit({'type':'progress','processed_seconds':self.processed,'received_seconds':self.received/RATE,**self.models.metrics()})
         elif kind in ('flush','stop'):
+            if kind=='flush' and 'request_id' in message:
+                if (not isinstance(message['request_id'],str) or not message['request_id']
+                        or type(message.get('through_sample')) is not int or message['through_sample']!=self.received):
+                    raise ValueError('Pause flush must follow its exact captured audio endpoint.')
             if kind=='stop':
                 output,self.processed=self.models.feed(np.empty(0,dtype='float32'),final=True);self.turns.extend(output)
+                self.capture_finished=True
             self.commit(final=True)
             self.emit({'type':'progress','processed_seconds':self.processed,'received_seconds':self.received/RATE,'flush':True,**self.models.metrics()})
-            if kind=='stop':self.capture_finished=True;self.emit({'type':'capture_finished','duration':self.received/RATE})
+            if kind=='flush' and 'request_id' in message:
+                speech=getattr(self.models,'speech_live',None)
+                speech_sample=speech.evidence.end_sample if speech is not None else round(self.processed*RATE)
+                self.emit({'type':'flush_ack','request_id':message['request_id'],'received_sample':self.received,
+                    'available_sample':min(self.received,round(self.processed*RATE)),
+                    'speech_observed_sample':min(self.received,speech_sample),'fast_sequence':self.fast_sequence,
+                    **({'admission_receipt':self.models.inspection_receipt('pause',message['request_id'])}
+                       if self.canonical and hasattr(self.models,'inspection_receipt') else {})})
+            if kind=='stop':
+                self.capture_finished=True
+                self.emit({'type':'capture_finished','duration':self.received/RATE,
+                    **({'canonical_observed_sample':self.canonical.book.cursor,
+                        'canonical_uncertain_samples':self.canonical.book.uncertain_sample_count,
+                        **({'admission_receipt':self.models.inspection_receipt('stop',message.get('request_id'))}
+                           if hasattr(self.models,'inspection_receipt') else {})} if self.canonical else {})})
         elif kind=='language':
             generation=message.get('generation',message.get('language_epoch'))
             boundary=message.get('start_sample',message.get('apply_from_sample'))
@@ -487,7 +567,10 @@ def run(config,emit):
     with contextlib.redirect_stdout(sys.stderr):models=Models(config)
     inbox=Inbox();inbox.latest_epoch=config.get('language_epoch',0);inbox.historical=bool(config.get('refinement_only'))
     engine=Engine(config,models,emit,inbox)
-    emit({'type':'ready','two_pass':True,'asr':'growing_phrase_with_rolling_refinement',**models.metrics()})
+    emit({'type':'ready','two_pass':True,'canonical_utterances':bool(engine.canonical),
+          **({'admission_execution':models.admission_execution}
+             if engine.canonical and not config.get('refinement_only') and hasattr(models,'admission_execution') else {}),
+          'asr':'canonical_vad_utterances' if engine.canonical else 'growing_phrase_with_rolling_refinement',**models.metrics()})
     def read():
         try:
             for line in sys.stdin:inbox.push(json.loads(line))

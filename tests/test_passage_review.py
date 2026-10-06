@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 import wave
 
 import numpy as np
-from pcm_peer import varying_pcm
+from pcm_peer import varying_pcm, SpeechEvidencePeer
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
 from language_detection import SpeechTranscriber
@@ -31,7 +31,7 @@ class PassageReviewTests(unittest.TestCase):
                                                     types.SimpleNamespace(text='Reliable last passage',tokens=[1])]
                 detector=Mock();detector.detect.side_effect=[{'en':.99,'fr':.01},{'fr':.99,'en':.01},{'en':.99,'fr':.01}]
                 with patch('language_detection.WhisperLanguageDetector',return_value=detector):
-                    transcriber=SpeechTranscriber(asr,'auto','cpu-fixture')
+                    transcriber=SpeechTranscriber(asr,'auto','cpu-fixture',speech_evidence=SpeechEvidencePeer())
                 rows=transcriber.transcribe(varying_pcm(9*16000,.1,dtype=np.float32),16000,('speaker_0',))
                 self.assertEqual([(r['start'],r['end']) for r in rows],[(0,3),(3,6),(6,9)])
                 self.assertEqual([r['text'] for r in rows],['Reliable first passage',text,'Reliable last passage'])
@@ -72,7 +72,7 @@ class PassageReviewTests(unittest.TestCase):
             with wave.open(str(audio),'wb') as f:
                 f.setparams((1,2,16000,0,'NONE','not compressed'));f.writeframes(b'\x01\x00'*16000*70)
             cfg={'diar_kind':'nemotron','diar_path':'cpu-fixture','diar_python':sys.executable,
-                'cohere_path':'cpu-fixture','asr_python':sys.executable,'device':'mlx'}
+                'cohere_path':'cpu-fixture','asr_python':sys.executable,'device':'mlx','speech_path':'cpu-peer'}
             def worker_result(python,task,request,folder):
                 if task=='diarize':return {'turns':[]}
                 return {'regions':[[dict(start=0,end=c['end']-c['start'],text='Recovered speech',language='en',review=True)] for c in request['chunks']]}
@@ -90,14 +90,14 @@ class PassageReviewTests(unittest.TestCase):
             with wave.open(str(audio),'wb') as f:
                 f.setnchannels(1);f.setsampwidth(2);f.setframerate(16000);f.writeframes(b'\x01\x00'*16000*10)
             model=folder/'cohere';model.mkdir();(model/'config.json').write_text('{"model_type":"cohere_asr"}');(model/'model.safetensors').touch()
-            cfg={'cohere_path':str(model),'asr_python':sys.executable,'device':'mlx'}
+            cfg={'cohere_path':str(model),'asr_python':sys.executable,'device':'mlx','speech_path':'cpu-peer'}
             def worker(python,task,request,destination):
                 self.assertEqual(task,'transcribe');self.assertEqual(request['language'],'fr')
                 self.assertNotIn('lid_path',request)
                 with wave.open(request['chunks'][0]['audio']) as f:self.assertEqual(f.getnframes(),16000*3)
                 return {'regions':[[dict(start=0.,end=3.,text='Original French words',language='fr',review=False)]]}
             original=audio.read_bytes()
-            with patch('pipeline.run_worker',side_effect=worker):
+            with patch('pipeline.run_worker',side_effect=worker),patch('pipeline.speech_issues',return_value=[]):
                 result=retry_passage(audio,4.,7.,'fr',folder,cfg)
             self.assertEqual((result['start'],result['end']),(4.,7.));self.assertEqual(audio.read_bytes(),original)
             self.assertEqual(list(folder.glob('passage-retry-*')),[])
@@ -133,6 +133,26 @@ class PassageRetryAPITests(unittest.TestCase):
                 self.assertEqual(self.client.post('/api/jobs/'+self.jid+'/retry',headers=self.headers,json=body).status_code,code)
                 worker.assert_not_called()
         (self.root/self.jid/'audio.wav').unlink();self.assertEqual(self.post().status_code,409)
+
+    def test_oversized_retry_rejects_before_scheduling_or_changing_job(self):
+        for seconds in (24.5000625,25.,30.):
+            with self.subTest(seconds=seconds):
+                job=copy.deepcopy(self.original);job['duration']=40.
+                job['document']['segments'][0]['end']=seconds
+                job['document']['segments'][1].update(start=31.,end=34.)
+                self.ext['recognition'].put(job)
+                before=self.job()
+                with patch.object(self.ext['executor'],'submit') as schedule:
+                    response=self.post()
+                    self.assertEqual(response.status_code,400)
+                    self.assertIn('24.5 seconds',response.json['error'])
+                    schedule.assert_not_called()
+                self.assertEqual(self.job(),before)
+        job=copy.deepcopy(job);job['document']['segments'][0]['end']=24.5
+        self.ext['recognition'].put(job)
+        with patch.object(self.ext['executor'],'submit') as schedule:
+            self.assertEqual(self.post().status_code,202)
+            schedule.assert_called_once()
 
     def test_retry_candidate_is_persisted_without_replacing_user_or_neighbor_text(self):
         started=threading.Event();release=threading.Event()

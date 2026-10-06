@@ -1,0 +1,165 @@
+{
+  "scope": "Actual Flask test-client responses from fabricated metadata. No audio/model/browser/listener.",
+  "list": {
+    "path": "/api/jobs",
+    "status": 200,
+    "body": [
+      {
+        "created": 1.0,
+        "duration": 10.0,
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "meeting",
+        "language": "en",
+        "message": "Saved.",
+        "name": "Synthetic meeting",
+        "revision": 7,
+        "status": "ready",
+        "updated": 1.0
+      }
+    ]
+  },
+  "legacy_detail": {
+    "path": "/api/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": 200,
+    "body": {
+      "created": 1.0,
+      "document": {
+        "provenance": {
+          "kind": "local_inference"
+        },
+        "schema_version": 1,
+        "segments": [
+          {
+            "audio_revision": 4,
+            "canonical_utterance_id": "canonical-one",
+            "end": 1.0,
+            "end_sample": 16000,
+            "id": "one",
+            "machine_revision": 2,
+            "protected_fields": [
+              "text"
+            ],
+            "speaker": "speaker_0",
+            "start": 0.0,
+            "start_sample": 0,
+            "text": "Keep these words."
+          }
+        ],
+        "speakers": {
+          "speaker_0": "Speaker 1"
+        },
+        "warnings": []
+      },
+      "duration": 10.0,
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inference_owned": false,
+      "kind": "meeting",
+      "language": "en",
+      "message": "Saved.",
+      "name": "Synthetic meeting",
+      "revision": 7,
+      "status": "ready",
+      "updated": 1.0
+    }
+  },
+  "matching_revision": {
+    "path": "/api/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?known_revision=7",
+    "status": 200,
+    "body": {
+      "created": 1.0,
+      "duration": 12.25,
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inference_owned": true,
+      "kind": "meeting",
+      "language": "fr",
+      "language_revision": 3,
+      "message": "Saved.",
+      "name": "Synthetic meeting",
+      "pause_flush": {
+        "request_id": "request-one",
+        "state": "pending"
+      },
+      "revision": 7,
+      "status": "paused",
+      "unchanged": true,
+      "updated": 1791315944.022891
+    }
+  },
+  "changed_revision": {
+    "path": "/api/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?known_revision=7",
+    "status": 200,
+    "body": {
+      "created": 1.0,
+      "document": {
+        "edited_at": 1791315944.023568,
+        "provenance": {
+          "kind": "local_inference"
+        },
+        "schema_version": 1,
+        "segments": [
+          {
+            "audio_revision": 4,
+            "canonical_utterance_id": "canonical-one",
+            "end": 1.0,
+            "end_sample": 16000,
+            "id": "one",
+            "machine_revision": 3,
+            "protected_fields": [
+              "text"
+            ],
+            "refinement_state": "edited",
+            "review": false,
+            "review_resolution": "words_reviewed",
+            "speaker": "speaker_0",
+            "start": 0.0,
+            "start_sample": 0,
+            "text": "My correction."
+          }
+        ],
+        "speakers": {
+          "speaker_0": "Speaker 1"
+        },
+        "warnings": []
+      },
+      "duration": 12.25,
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inference_owned": false,
+      "kind": "meeting",
+      "language": "fr",
+      "language_revision": 3,
+      "message": "Saved.",
+      "name": "Synthetic meeting",
+      "pause_flush": {
+        "request_id": "request-one",
+        "state": "pending"
+      },
+      "revision": 8,
+      "status": "paused",
+      "unchanged": false,
+      "updated": 1791315944.023637
+    }
+  },
+  "matching_after_edit": {
+    "path": "/api/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?known_revision=8",
+    "status": 200,
+    "body": {
+      "created": 1.0,
+      "duration": 12.25,
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inference_owned": false,
+      "kind": "meeting",
+      "language": "fr",
+      "language_revision": 3,
+      "message": "Saved.",
+      "name": "Synthetic meeting",
+      "pause_flush": {
+        "request_id": "request-one",
+        "state": "pending"
+      },
+      "revision": 8,
+      "status": "paused",
+      "unchanged": true,
+      "updated": 1791315944.023637
+    }
+  }
+}

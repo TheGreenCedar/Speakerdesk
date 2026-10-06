@@ -4,6 +4,7 @@ from pathlib import Path
 import sys,tempfile,types,unittest,wave
 from unittest.mock import Mock
 import numpy as np
+from pcm_peer import SpeechEvidencePeer
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from live_refinement import Engine,Inbox,coalesce_blanks
 from language_detection import SpeechTranscriber
@@ -87,7 +88,7 @@ class RefinementTailContextTests(unittest.TestCase):
             def set_language_context(self,context,start):
                 self.context=context;self.start=start;self.contexts=getattr(self,'contexts',[])+[(context,start)]
             def transcribe(self,pcm,language,names,overlap=False):
-                return SpeechTranscriber(self.asr,language,detector=Detector(),context=self.context).transcribe(
+                return SpeechTranscriber(self.asr,language,detector=Detector(),context=self.context,speech_evidence=SpeechEvidencePeer()).transcribe(
                     pcm,RATE,tuple(names),start_sample=self.start,max_asr_seconds=24.5)
         models=Models();engine=Engine({'audio_path':str(self.path),'language':'auto'},models,self.events.append,Inbox())
         row=engine.transcribe_owned(4,4.2,{'epoch':0,'language':'auto'},['speaker_0'])[0]

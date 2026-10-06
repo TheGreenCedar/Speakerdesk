@@ -24,6 +24,7 @@ from live_meeting import register_meetings, LIVE
 from people import register_people, reconcile_assignments
 from voice_profiles import speaker_audio_eligible
 from voice_recognition import RecognitionPreference, VoiceRecognition
+from job_store import JobStore, PRIVATE_FIELDS
 
 ROOT=Path(__file__).resolve().parent
 ACTIVE=('preparing','queued','processing')+LIVE
@@ -48,40 +49,38 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             with conn:yield conn
         finally:conn.close()
 
-    with db() as conn:
-        conn.execute('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
-        for row in conn.execute('SELECT * FROM jobs').fetchall():
-            job=json.loads(row['payload'])
-            if job['status'] in ACTIVE:
-                job.update(status='failed',message=('The meeting was interrupted. Captured audio and transcript were preserved.' if job.get('kind')=='meeting' else 'The app stopped during processing. Retry this job.'),updated=time.time())
-                conn.execute('UPDATE jobs SET payload=? WHERE id=?',(json.dumps(job),job['id']))
-            if job.get('rolling_refinement') and job.get('refinement_status') in ('waiting','refining'):
-                from rolling_refinement import RollingPlan
-                job['rolling_refinement']=RollingPlan(job['rolling_refinement'],recover=True).snapshot()
-                job['refinement_status']='paused';job.pop('rolling_inflight',None)
-                conn.execute('UPDATE jobs SET payload=? WHERE id=?',(json.dumps(job),job['id']))
+    from language_preferences import initialize as initialize_preferences
+    with db() as conn:initialize_preferences(conn)
+    store=JobStore(db)
+    store.initialize()
+    store.recover(ACTIVE)
 
-    def get(jid):
+
+    def get(jid, *, metadata=False):
         if len(jid)!=32 or any(c not in '0123456789abcdef' for c in jid):abort(404)
-        with db() as conn:row=conn.execute('SELECT payload FROM jobs WHERE id=?',(jid,)).fetchone()
-        if not row:abort(404)
-        return json.loads(row['payload'])
+        job=store.get(jid,metadata=metadata)
+        if job is None:abort(404)
+        return job
 
-    def put(job):
-        job['updated']=time.time()
-        with db() as conn:
-            conn.execute('INSERT OR REPLACE INTO jobs VALUES (?,?)',(job['id'],json.dumps(job,ensure_ascii=False)))
+    def put(job, *, default_language=None):
+        store.put(job,default_language=default_language)
+
+    def get_default_language():
+        from language_preferences import default_language
+        with lock,db() as conn:return default_language(conn)
+
 
     def patch(jid,**changes):
         with lock:
+            if set(changes)=={'duration'}:
+                if not store.checkpoint_duration(jid,changes['duration']):abort(404)
+                return
             job=get(jid);job.update(**changes);put(job)
 
     def folder(jid):return data/jid
 
     def inference_busy():
-        with db() as conn:
-            return any(json.loads(row['payload'])['status'] in ('queued','processing')
-                       for row in conn.execute('SELECT payload FROM jobs'))
+        return bool(store.count_status(('queued','processing')))
 
     def prepare(jid):
         try:
@@ -162,17 +161,30 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     @app.get('/api/config')
     def config():
         cfg=model_config();issues=preflight(cfg)
-        return jsonify(languages=LANGUAGE_CHOICES,default_language='auto',readiness={'configured':not issues,'issues':issues,
+        return jsonify(languages=LANGUAGE_CHOICES,default_language=get_default_language(),readiness={'configured':not issues,'issues':issues,
             'automatic_language':not detector_issues(cfg['lid_path']),
             'model':MODELS.get(cfg['diar_kind'],('unknown',0))[0],
             'speaker_limit':MODELS.get(cfg['diar_kind'],('',0))[1],
             'device':cfg['device'],'note':'Model execution is checked when inference starts. Configuration is not proof of working inference.'},
             decoder='FFmpeg' if shutil.which('ffmpeg') else ('macOS AudioToolbox' if shutil.which('afconvert') else 'PCM WAV only'))
 
+    @app.patch('/api/preferences/language')
+    def change_default_language():
+        body=request.get_json()
+        if not isinstance(body,dict):raise ValueError('Choose a supported language mode.')
+        language=body.get('language')
+        from language_preferences import save_default_language
+        with lock:
+            manager=app.extensions['speakerdesk']['meetings']
+            if manager.jid and get(manager.jid)['status'] in LIVE:
+                job=get(manager.jid)
+                changed=manager.change_language(manager.jid,language,body.get('language_revision',job['language_revision']))
+                return jsonify(default_language=changed['default_language'],meeting=changed)
+            with db() as conn:save_default_language(conn,language)
+        return jsonify(default_language=language)
+
     @app.get('/api/jobs')
-    def jobs():
-        with db() as conn:items=[json.loads(row['payload']) for row in conn.execute('SELECT payload FROM jobs')]
-        return jsonify(sorted([{k:v for k,v in j.items() if k!='document'} for j in items],key=lambda j:j['created'],reverse=True))
+    def jobs():return jsonify(store.summaries())
 
     @app.post('/api/jobs')
     def upload():
@@ -183,7 +195,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             if Path(item.filename or '').suffix.lower() not in ('.wav','.mp3','.m4a','.flac','.ogg','.aiff','.aif','.mp4','.aac','.webm'):
                 raise ValueError('Supported formats: WAV, MP3, M4A, FLAC, OGG, AIFF, MP4, AAC and WebM.')
         with lock:
-            with db() as conn:active=sum(json.loads(row['payload'])['status'] in ACTIVE for row in conn.execute('SELECT payload FROM jobs'))
+            active=store.count_status(ACTIVE)
             if active+len(files)>16:abort(429,description='The local queue is full. Wait for current jobs to finish.')
             created=[]
             staged=[]
@@ -206,10 +218,17 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
 
     @app.get('/api/jobs/<jid>')
     def job_detail(jid):
+        known=request.args.get('known_revision')
+        if known is not None and (not known.isascii() or not known.isdigit() or len(known)>20):
+            raise ValueError('Supply a nonnegative integer known_revision.')
         with lock:
-            job=get(jid)
+            job=get(jid,metadata=True) if known is not None else get(jid)
+            if known is not None:
+                unchanged=int(known)==job['revision']
+                if not unchanged:job=get(jid)
+                job['unchanged']=unchanged
             job['inference_owned']=app.extensions['speakerdesk']['meetings'].jid==jid
-        for key in ('rolling_sources','refinement_history','fast_history','fast_previous_revision','boundary_candidate','boundary_candidates','rolling_inflight','fast_retained_candidate'):job.pop(key,None)
+        for key in PRIVATE_FIELDS:job.pop(key,None)
         return jsonify(job)
 
     @app.patch('/api/jobs/<jid>/segments/<sid>')
@@ -229,6 +248,11 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             row=next(s for s in document['segments'] if s['id']==sid)
             row['protected_fields']=sorted(set(prior.get('protected_fields',[]))|set(changes))
             row.update(machine_revision=prior.get('machine_revision',0)+1,refinement_state='edited')
+            # Every attachment binds the old machine revision, including a
+            # speaker-only edit. A client cannot reuse it for the new revision.
+            row.pop('alignment',None)
+            row.pop('assembly_provenance',None)
+            if any(row[k]!=prior[k] for k in ('start','end')):row.pop('text_audio_anchor',None)
             if any(row[k]!=prior[k] for k in ('speaker','start','end')):
                 row.update(voice_eligible=False,speaker_candidates=[]);row.pop('retry_candidate',None)
             if row['text'].strip() and not row['speaker'].startswith('overlap'):
@@ -270,7 +294,9 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                 prior=original.get(segment['id'])
                 protected=set(prior.get('protected_fields',[])) if prior else set()
                 edited={k for k in ('text','speaker','start','end') if prior and segment[k]!=prior[k]}
-                for key in ('audio_anchor','source_start','source_end','source_speaker_candidates','activity_regions','language_epoch','finalized','refinement_window','fast_origin_sample','language_generation','language_mode'):
+                for key in ('audio_anchor','source_start','source_end','source_speaker_candidates','activity_regions','language_epoch','finalized','refinement_window','fast_origin_sample','language_generation','language_mode',
+                            'canonical_utterance_id','canonical_machine_revision','canonical_state','start_sample','end_sample','audio_revision',
+                            'text_audio_anchor','alignment','speech_regions','speaker_activity','assembly_provenance'):
                     segment.pop(key,None)
                     if prior and key in prior:segment[key]=copy.deepcopy(prior[key])
                 if prior and ('machine_revision' in prior or protected or edited):
@@ -279,6 +305,9 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                     segment['refinement_state']='edited' if protected or edited else prior.get('refinement_state')
                 else:
                     for key in ('protected_fields','machine_revision','refinement_state'):segment.pop(key,None)
+                if edited or body.get('imported'):
+                    segment.pop('alignment',None);segment.pop('assembly_provenance',None)
+                if edited & {'start','end'} or body.get('imported'):segment.pop('text_audio_anchor',None)
                 # Client edits/imports cannot manufacture server-owned clean-audio evidence.
                 unchanged=bool(prior and not body.get('imported') and all(segment[k]==prior[k] for k in ('speaker','start','end')))
                 segment['voice_eligible']=bool(unchanged and speaker_audio_eligible(prior,prior['speaker']))
@@ -323,8 +352,8 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                 abort(409,description='This transcript changed. Save or reload before retrying.')
             segment=next((s for s in (job.get('document') or {}).get('segments',[]) if s['id']==body.get('segment_id')),None)
             if not segment:abort(404)
-            if segment['end']-segment['start'] > 30:
-                raise ValueError('Choose a passage of at most 30 seconds before retrying.')
+            if segment['end']-segment['start'] > 24.5:
+                raise ValueError('Choose a passage of at most 24.5 seconds before retrying.')
             if not (folder(jid)/'audio.wav').is_file():abort(409,description='This passage needs its original saved audio.')
             operation=uuid.uuid4().hex
             job.update(status='processing',message='Retrying this passage locally; existing words are retained.',
@@ -371,8 +400,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             app.logger.warning('Voice setup is unavailable: %s',exc)
     app.extensions['speakerdesk']['voice_message']=voice_message
     def voice_busy():
-        with db() as conn:
-            return any(json.loads(row['payload'])['status'] in ACTIVE for row in conn.execute('SELECT payload FROM jobs'))
+        return bool(store.count_status(ACTIVE))
     register_people(app,db,get,put,lock,folder,voice_backend,voice_calibration,voice_busy)
     preference=RecognitionPreference(db)
     recognizer=VoiceRecognition(get,put,folder,lock,lambda:app.extensions['speakerdesk']['voice_runtime'],
@@ -406,7 +434,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     if voice_backend is None and managed_voice.released() and managed_voice.supported() and managed_voice.installed():
         try:activate_voice(managed_voice.root,managed_voice.calibration_path)
         except (ValueError,OSError,KeyError,TypeError) as exc:app.logger.warning('Managed voice setup is unavailable: %s',exc)
-    register_meetings(app,get,put,patch,folder,lock,inference_busy,recognizer)
+    register_meetings(app,get,put,patch,folder,lock,inference_busy,recognizer,default_language=get_default_language)
     return app
 
 

@@ -44,6 +44,33 @@ class EngineTests(unittest.TestCase):
     def tearDown(self):self.temp.cleanup()
     def feed(self,start,end,mode='en',epoch=0):
         for n in range(start,end):self.engine.handle({'type':'audio','start_sample':n*RATE,'end_sample':(n+1)*RATE,'language':mode,'language_epoch':epoch})
+    def test_pause_ack_follows_publish_and_preserves_real_lookahead(self):
+        original=self.models.feed
+        def lagged(audio,final=False):
+            turns,end=original(audio,final);return turns,max(0,end-.2)
+        self.models.feed=lagged;self.feed(0,1)
+        self.engine.handle({'type':'flush','request_id':'pause-a','through_sample':RATE})
+        ack=self.events[-1];self.assertEqual(ack,{'type':'flush_ack','request_id':'pause-a','received_sample':RATE,
+            'available_sample':12800,'speech_observed_sample':12800,'fast_sequence':self.engine.fast_sequence})
+        self.assertTrue(any(e['type']=='provisional_revision' for e in self.events[:-1]))
+        self.assertFalse(self.engine.capture_finished)
+        with self.assertRaisesRegex(ValueError,'exact captured audio endpoint'):
+            self.engine.handle({'type':'flush','request_id':'wrong','through_sample':RATE+1})
+    def test_historical_evidence_clears_after_success_cancel_and_error(self):
+        self.models.end_refinement=Mock()
+        for result in ({'status':'complete'},{'status':'cancelled'}):
+            with patch.object(self.engine,'_refine',return_value=result):
+                self.assertEqual(self.engine.refine({}),result)
+            self.models.end_refinement.assert_called_once_with();self.models.end_refinement.reset_mock()
+        with patch.object(self.engine,'_refine',side_effect=ValueError('inspection failed')):
+            with self.assertRaisesRegex(ValueError,'inspection failed'):self.engine.refine({})
+        self.models.end_refinement.assert_called_once_with()
+    def test_new_historical_inspection_failure_cannot_leave_prior_evidence(self):
+        models=Models.__new__(Models);models.config={'audio_path':str(self.path)}
+        models.speech_historical=object();models.speech=Mock()
+        models.speech.inspect_frames.side_effect=ValueError('neural peer failed')
+        with self.assertRaisesRegex(ValueError,'neural peer failed'):models.begin_refinement([],0)
+        self.assertIsNone(models.speech_historical)
     def test_six_second_midword_is_replaced_at_same_audio_origin(self):
         def transcribe(audio,language,names,overlap=False):
             duration=len(audio)/RATE
@@ -153,6 +180,34 @@ class HostTests(unittest.TestCase):
                 'candidates':[{'start':0,'end':end,'text':text,'speaker':'speaker_0','language':'en','language_epoch':0,
                                'language_generation':0,'language_mode':'en','fast_origin_sample':0,'refinement_state':'provisional'}]}
         self.manager.refinement.provisional(self.jid,result);return result
+    def test_duplicate_pause_before_capture_ack_keeps_original_request_and_command(self):
+        job=self.manager.get(self.jid);job['status']='recording';self.manager.put(job)
+        self.manager.jid=self.jid;self.manager.capture=Mock()
+        with patch.object(self.manager,'_send') as send:
+            first=self.client.post(f'/api/meetings/{self.jid}/pause',headers=self.headers,json={})
+            self.assertEqual(first.status_code,202,first.json)
+            request_id=first.json['pause_flush']['request_id']
+            second=self.client.post(f'/api/meetings/{self.jid}/pause',headers=self.headers,json={})
+            self.assertEqual(second.status_code,202,second.json)
+            self.assertEqual(second.json['pause_flush']['request_id'],request_id)
+            send.assert_called_once_with(self.manager.capture,{'type':'pause'})
+            request=self.manager.pause_flush_request(self.jid,16000)
+            self.assertEqual(request['request_id'],request_id)
+            self.assertTrue(self.manager.acknowledge_pause_flush(self.jid,{
+                'request_id':request_id,'received_sample':16000,'available_sample':12000,
+                'speech_observed_sample':15872,'fast_sequence':0}))
+        self.manager.capture=None
+    def test_pause_ack_persists_exact_endpoint_rejects_stale_ids_and_invalid_horizon(self):
+        job=self.manager.get(self.jid);job['pause_flush']={'request_id':'a','state':'awaiting_capture'};self.manager.put(job)
+        request=self.manager.pause_flush_request(self.jid,16000)
+        self.assertEqual(request,{'type':'flush','request_id':'a','through_sample':16000})
+        receipt={'request_id':'a','received_sample':16000,'available_sample':12000,'speech_observed_sample':15872,'fast_sequence':0}
+        self.assertFalse(self.manager.acknowledge_pause_flush(self.jid,{**receipt,'request_id':'stale'}))
+        with self.assertRaisesRegex(ValueError,'differs'):self.manager.acknowledge_pause_flush(self.jid,{**receipt,'available_sample':16001})
+        self.assertTrue(self.manager.acknowledge_pause_flush(self.jid,receipt))
+        actual=self.manager.get(self.jid)['pause_flush'];self.assertEqual(actual['state'],'complete')
+        self.assertEqual(actual['deferred_audio'],[{'start_sample':12000,'end_sample':16000}])
+        self.assertFalse(self.manager.acknowledge_pause_flush(self.jid,receipt))
     def test_saved_prefix_does_not_block_new_tail_or_get_overwritten(self):
         self.provisional(6,'Please review the secs');row=self.manager.get(self.jid)['document']['segments'][0]
         response=self.client.patch(f'/api/jobs/{self.jid}/segments/{row["id"]}',headers=self.headers,
@@ -169,6 +224,45 @@ class HostTests(unittest.TestCase):
         history=self.client.get(f'/api/jobs/{self.jid}/refinement/fast-revisions/0').json
         self.assertTrue(history['versions']);self.assertEqual(history['versions'][0]['segments'][0]['text'],'My saved correction')
         self.assertEqual(history['versions'][0]['candidates'][0]['text'],'Please review the section together.')
+    def canonical_fixture(self):
+        self.provisional(6,'Raw Cohere words')
+        job=self.manager.get(self.jid);row=job['document']['segments'][0]
+        row.update(text='Raw Cohere words',protected_fields=[],canonical_utterance_id=row['id'],canonical_machine_revision=1,canonical_state='sealed',
+            start_sample=0,end_sample=96000,audio_revision=2,
+            text_audio_anchor={'start_sample':0,'end_sample':96000},
+            alignment={'machine_revision':row['machine_revision'],'audio_revision':2,'text_sha256':'fixture-only'},
+            speech_regions=[{'start_sample':1000,'end_sample':90000}])
+        job['status']='ready';self.manager.put(job);return job,row
+    def test_save_preserves_server_canonical_evidence_and_cannot_inject_alignment(self):
+        job,row=self.canonical_fixture();incoming=copy.deepcopy(job['document'])
+        incoming['segments'][0].update(audio_revision=999,alignment={'forged':True},start_sample=999)
+        response=self.client.put(f'/api/jobs/{self.jid}/transcript',headers=self.headers,
+            json={'revision':job['revision'],'document':incoming})
+        self.assertEqual(response.status_code,200,response.json)
+        saved=response.json['document']['segments'][0]
+        for key in ('audio_revision','alignment','start_sample','text_audio_anchor','speech_regions'):
+            self.assertEqual(saved[key],row[key])
+    def test_targeted_edit_and_whole_document_edit_invalidate_old_alignment(self):
+        for whole in (False,True):
+            job,row=self.canonical_fixture()
+            if whole:
+                incoming=copy.deepcopy(job['document']);incoming['segments'][0]['text']='My correction'
+                response=self.client.put(f'/api/jobs/{self.jid}/transcript',headers=self.headers,
+                    json={'revision':job['revision'],'document':incoming})
+                saved=response.json['document']['segments'][0]
+            else:
+                response=self.client.patch(f'/api/jobs/{self.jid}/segments/{row["id"]}',headers=self.headers,
+                    json={'segment_revision':row['machine_revision'],'changes':{'text':'My correction'}})
+                saved=response.json['segment']
+            self.assertEqual(response.status_code,200,response.json);self.assertNotIn('alignment',saved)
+            self.assertEqual(saved['audio_revision'],2);self.assertIn('text',saved['protected_fields'])
+    def test_changed_display_bounds_remove_text_anchor_but_keep_original_audio_evidence(self):
+        job,row=self.canonical_fixture()
+        response=self.client.patch(f'/api/jobs/{self.jid}/segments/{row["id"]}',headers=self.headers,
+            json={'segment_revision':row['machine_revision'],'changes':{'start':.5}})
+        self.assertEqual(response.status_code,200,response.json);saved=response.json['segment']
+        self.assertNotIn('alignment',saved);self.assertNotIn('text_audio_anchor',saved)
+        self.assertEqual(saved['start_sample'],0);self.assertFalse(saved['voice_eligible'])
     def test_targeted_edit_cas_csrf_and_whole_save_cannot_clear_protection(self):
         self.provisional(6,'First words');job=self.manager.get(self.jid);row=job['document']['segments'][0];url=f'/api/jobs/{self.jid}/segments/{row["id"]}'
         body={'segment_revision':row['machine_revision'],'changes':{'text':'saved edit'}}

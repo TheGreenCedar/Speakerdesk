@@ -53,10 +53,11 @@ async function main() {
       await evaluate('(async()=>{releaseStatus();await oldStatus;await languageChange;api=originalApi})()');
       assert.equal(await evaluate("$('live-language').value"),'fr');
       assert.equal(await evaluate('JSON.stringify(doc.segments)===initialWords'),true);
-      assert.equal(await evaluate("$('language').value"),'auto');
+      assert.equal(await evaluate("$('language').value"),'fr');
       await evaluate("(async()=>{$('live-language').value='auto';await changeLiveLanguage()})()");
       assert.equal(await evaluate("$('live-language').value"),'auto');
-      checks.push('Real current-meeting PATCH changes language and Auto while a late status cannot restore the old epoch; earlier words and the persistent default remain unchanged.');
+      assert.equal(await evaluate("$('language').value"),'auto');
+      checks.push('Real current-meeting PATCH changes language and Auto while a late status cannot restore the old epoch; earlier words remain unchanged and Settings adopts each persisted default.');
     }
     await evaluate('meetingPoll=true;polling=true;followingLive=false;passageDrafts.clear();speakerdeskTheme.set("light");notice("")');
     const hourSetup=`(()=>{

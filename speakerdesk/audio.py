@@ -7,6 +7,17 @@ from pathlib import Path
 MAX_DURATION = 7200
 
 
+def pcm16_bytes(audio):
+    """Quantize float capture to PCM16 without attenuating quiet integer samples."""
+    import numpy as np
+    values = np.asarray(audio)
+    if values.ndim != 1 or not np.isfinite(values).all():
+        raise ValueError('Capture requires finite mono audio.')
+    # PCM16 decoding divides by32768. Round the inverse before saturation;
+    # truncating x*32767 changes almost every nonzero quiet integer sample.
+    return np.clip(np.rint(values.astype(np.float64)*32768), -32768, 32767).astype('<i2').tobytes()
+
+
 def wav_duration(path):
     try:
         with wave.open(str(path), 'rb') as audio:

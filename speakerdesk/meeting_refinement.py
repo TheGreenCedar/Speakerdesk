@@ -11,6 +11,24 @@ def activity_references(sources, start_sample, end_sample):
     """Raw activity only; an ASR envelope does not claim its internal gaps."""
     references=[]
     for row in sources:
+        if row.get('canonical_utterance_id'):
+            activity=row.get('speaker_activity') or {}
+            parts=activity.get('regions',[])
+            cursor=row.get('start_sample');valid=(type(cursor) is int
+                and type(activity.get('audio_revision')) is int
+                and activity['audio_revision']==row.get('audio_revision') and isinstance(parts,list))
+            for part in parts if isinstance(parts,list) else []:
+                a,b=part.get('start_sample'),part.get('end_sample');names=part.get('speakers')
+                if (type(a) is not int or type(b) is not int or a!=cursor or not a<b
+                        or not isinstance(names,list) or any(not isinstance(name,str) or not name for name in names)
+                        or len(names)!=len(set(names))):valid=False;break
+                cursor=b
+            if not valid or cursor!=row.get('end_sample'):continue
+            for part in parts:
+                a=max(part['start_sample'],row['start_sample'],start_sample)
+                b=min(part['end_sample'],row['end_sample'],end_sample)
+                if a<b:references.append({'start':a/RATE,'end':b/RATE,'speaker_candidates':list(part['speakers'])})
+            continue
         parts=row.get('activity_regions')
         if parts:
             for part in parts:
@@ -67,6 +85,10 @@ class RefinementController:
         if not self.enabled:return
         with self.manager.lock:
             job=self.manager.get(jid);self.initialize(job);plan=RollingPlan(job['rolling_refinement'])
+            if job.get('canonical_utterances'):
+                # Canonical objects cannot be dispatched through disjoint18s
+                # row-containment windows. Their whole anchor is the CAS unit.
+                return self.schedule_canonical(jid,job,plan)
             available=job.get('duration',0) if self.force or force else min(job.get('duration',0),self.manager.processed)
             sources=list(job['rolling_sources'].values())
             settled=[s for s in sources if s.get('finalized') and s['text'].strip()]
@@ -115,6 +137,101 @@ class RefinementController:
                 job['refinement_status']='unresolved' if job['refinement_unresolved'] else 'complete'
                 if not self.shutdown_sent:self.shutdown_sent=self.send({'type':'shutdown'})
             self.store(job,plan)
+    def canonical(self,jid,result):
+        import hashlib
+        with self.manager.lock:
+            job=self.manager.get(jid);self.initialize(job)
+            sequence=result.get('fast_sequence')
+            if type(sequence) is not int or sequence<=0:raise ValueError('Invalid canonical sequence.')
+            if sequence<=job.get('last_fast_sequence',0):return
+            row=copy.deepcopy(result['candidate']);sid=row['id']
+            for key in ('start_sample','end_sample','audio_revision','canonical_machine_revision','language_epoch'):
+                if type(row.get(key)) is not int or row[key]<0:raise ValueError('Invalid canonical revision.')
+            expected='utterance-'+hashlib.sha256(f"{jid}:{row['language_epoch']}:{row['start_sample']}".encode()).hexdigest()[:24]
+            if (sid!=expected or row.get('canonical_utterance_id')!=sid or
+                    row.get('canonical_state') not in ('open','sealed') or
+                    (round(row['start']*RATE),round(row['end']*RATE))!=(row['start_sample'],row['end_sample'])):
+                raise ValueError('Invalid canonical identity or audio anchor.')
+            validate_language_segment(row,job['language_history'])
+            source=job['rolling_sources'].get(sid)
+            if source and (row['audio_revision']<source['audio_revision']
+                    or row['canonical_machine_revision']<source['canonical_machine_revision']
+                    or (row['canonical_machine_revision']==source['canonical_machine_revision'] and row['text']!=source['text'])
+                    or (row['audio_revision']==source['audio_revision'] and
+                        row['end_sample']!=source['end_sample'])):
+                raise ValueError('Stale canonical output.')
+            prior=next((s for s in job['document']['segments'] if s['id']==sid),None)
+            job['rolling_sources'][sid]=copy.deepcopy(row)
+            job['last_fast_sequence']=sequence
+            if source and prior is None:
+                # A removed saved passage stays removed; raw machine revisions
+                # remain in the worker's durable journal and source ledger.
+                self.manager.put(job);self.schedule(jid);return
+            if prior:
+                protected=set(prior.get('protected_fields',[]))
+                row['protected_fields']=sorted(protected)
+                row['machine_revision']=prior.get('machine_revision',0)+(row!=source)
+                for key in protected & {'text','speaker','start','end'}:row[key]=prior[key]
+                if 'text' in protected:
+                    row.pop('text_audio_anchor',None)
+                    if prior.get('text_audio_anchor'):row['text_audio_anchor']=copy.deepcopy(prior['text_audio_anchor'])
+                if protected:
+                    row['refinement_state']='edited';row['voice_eligible']=False
+                    row.pop('alignment',None)
+                    row.pop('assembly_provenance',None)
+                    if protected & {'start','end'}:row.pop('text_audio_anchor',None)
+                if not row['text'].strip() and prior['text'].strip():
+                    row['text']=prior['text'];row['review']=True;row.pop('alignment',None);row.pop('assembly_provenance',None)
+                    row.pop('text_audio_anchor',None)
+                    if prior.get('text_audio_anchor') and not protected & {'start','end'}:
+                        row['text_audio_anchor']=copy.deepcopy(prior['text_audio_anchor'])
+                job['document']['segments']=[row if s['id']==sid else s for s in job['document']['segments']]
+            else:
+                row['machine_revision']=0;job['document']['segments'].append(row)
+            names=result.get('speakers') or {}
+            for name in {row['speaker'],*row.get('speaker_candidates',[])}:
+                job['document']['speakers'].setdefault(name,names.get(name,
+                    'Speaker '+str(int(name.split('_')[-1])+1) if name.startswith('speaker_') else
+                    'Unknown speaker' if name=='unassigned' else 'Mixed audio'))
+            job['duration']=max(job.get('duration',0),self.manager.duration)
+            job['document']=validate(job['document'],job['duration'])
+            job['document']['provenance'].update(kind='local_inference',mode='canonical_vad_utterances',
+                timing='Original VAD audio anchors; NVIDIA activity is independent. No word timestamps without calibrated alignment.')
+            job['revision']+=1;self.manager.put(job)
+        self.schedule(jid)
+
+    def schedule_canonical(self,jid,job,plan):
+        if job.get('rolling_inflight'):return
+        if plan.state['cancelled']:
+            job['refinement_status']='paused'
+            if self.final and not self.shutdown_sent:self.shutdown_sent=self.send({'type':'shutdown'})
+            self.manager.put(job);return
+        done=job.setdefault('canonical_refined',{})
+        sources=sorted(job['rolling_sources'].values(),key=lambda row:row['start_sample'])
+        row=next((row for row in sources if row.get('canonical_state')=='sealed'
+            and done.get(row['id'])!=row['audio_revision']),None)
+        if row is not None:
+            import uuid
+            current=next((s for s in job['document']['segments'] if s['id']==row['id']),None)
+            if current is None:
+                done[row['id']]=row['audio_revision'];self.manager.put(job);return self.schedule(jid)
+            request={'type':'refine','canonical':copy.deepcopy(row),'operation_id':uuid.uuid4().hex,
+                'language_epoch':row['language_epoch'],'language':row['language_mode'],
+                'window':{'id':row['id'],'start_sample':row['start_sample'],'end_sample':row['end_sample'],
+                    'context_start_sample':row['start_sample'],'context_end_sample':row['end_sample']},
+                'expected':{row['id']:segment_version(current)},'references':activity_references(
+                    sources,row['start_sample'],row['end_sample'])}
+            if self.send(request):job['rolling_inflight']=request;job['refinement_status']='refining'
+        elif self.final:
+            unresolved=(any(row.get('canonical_unresolved') or row.get('canonical_state')!='sealed' for row in sources)
+                or job.get('canonical_observed_sample')!=round(job.get('duration',0)*RATE)
+                or bool(job.get('canonical_uncertain_samples',0)))
+            job['refinement_status']='unresolved' if unresolved else 'complete'
+            if not unresolved:
+                plan.state['completed_sample']=round(job.get('duration',0)*RATE)
+                job['rolling_refinement']=plan.snapshot()
+            if not self.shutdown_sent:self.shutdown_sent=self.send({'type':'shutdown'})
+        self.manager.put(job)
     def provisional(self,jid,result):
         with self.manager.lock:
             job=self.manager.get(jid);self.initialize(job)
@@ -156,6 +273,7 @@ class RefinementController:
     def result(self,jid,result):
         with self.manager.lock:
             job=self.manager.get(jid);self.initialize(job);plan=RollingPlan(job['rolling_refinement'])
+            if job.get('canonical_utterances'):return self.canonical_result(jid,job,result)
             operation=result['operation_id'];window=result['window'];request=job.get('rolling_inflight') or {}
             if (request.get('operation_id')!=operation or not plan.state['pending']
                     or plan.state['pending'][0].get('operation_id')!=operation):return
@@ -203,7 +321,49 @@ class RefinementController:
             job.pop('rolling_inflight',None);self.store(job,plan)
             if self.manager.recognizer:self.manager.recognizer.observe(jid)
         self.schedule(jid)
-    def capture_done(self,jid):
+    def canonical_result(self,jid,job,result):
+        request=job.get('rolling_inflight') or {}
+        if result.get('operation_id')!=request.get('operation_id') or not request:return
+        if result.get('window')!=request['window'] or result.get('language_epoch')!=request['language_epoch']:
+            raise ValueError('Canonical refinement does not match its dispatch.')
+        row=request['canonical'];candidate=result.get('canonical_candidate')
+        job.pop('rolling_inflight',None)
+        # One failed attempt remains explicit instead of an infinite retry loop.
+        job.setdefault('canonical_refined',{})[row['id']]=row['audio_revision']
+        if result.get('error') or result.get('cancelled') or candidate is None:
+            source=job['rolling_sources'].get(row['id'])
+            if source:source['canonical_unresolved']='refinement_incomplete'
+            job['refinement_error']=result.get('error','Refinement incomplete; previous words and audio retained.')
+            job['refinement_status']='unresolved';self.manager.put(job);self.schedule(jid);return
+        source=job['rolling_sources'].get(row['id'])
+        if not source or source['audio_revision']!=row['audio_revision']:
+            self.manager.put(job);self.schedule(jid);return
+        if (candidate.get('id')!=row['id'] or candidate.get('audio_revision')!=row['audio_revision']
+                or candidate.get('start_sample')!=row['start_sample'] or candidate.get('end_sample')!=row['end_sample']):
+            raise ValueError('Canonical refinement changed its original anchor.')
+        self.manager.put(job)
+        self.canonical(jid,{'candidate':candidate,'fast_sequence':result['fast_sequence']})
+    def capture_done(self,jid,*,observed_sample=None,uncertain_samples=None,admission=None):
+        if observed_sample is not None:
+            with self.manager.lock:
+                job=self.manager.get(jid)
+                if job.get('admission_execution') and not self.manager.refining_saved:
+                    from admission_receipt import validate_receipt,retained_pcm_digest
+                    request=job.get('capture_inspection_request') or {}
+                    received=request.get('through_sample')
+                    if received!=round(job.get('duration',0)*RATE):
+                        raise ValueError('Unbound canonical Stop inspection endpoint.')
+                    job['capture_admission']=validate_receipt(admission,job['admission_execution'],
+                        phase='stop',request_id=request.get('request_id'),received_sample=received,
+                        observed_sample=observed_sample,uncertain_samples=uncertain_samples,
+                        pcm_sha256=retained_pcm_digest(self.manager.folder(jid)/'audio.wav',observed_sample))
+                if type(observed_sample) is not int or not 0<=observed_sample<=round(job.get('duration',0)*RATE):
+                    raise ValueError('Invalid canonical capture horizon.')
+                if uncertain_samples is not None:
+                    if type(uncertain_samples) is not int or not 0<=uncertain_samples<=observed_sample:
+                        raise ValueError('Invalid canonical uncertain-audio count.')
+                    job['canonical_uncertain_samples']=uncertain_samples
+                job['canonical_observed_sample']=observed_sample;self.manager.put(job)
         self.force=self.final=True;self.schedule(jid,force=True)
     def pause(self,jid,final=False):
         with self.manager.lock:
@@ -215,6 +375,10 @@ class RefinementController:
     def resume(self,jid):
         with self.manager.lock:
             job=self.manager.get(jid);self.initialize(job);plan=RollingPlan(job['rolling_refinement']);plan.resume()
+            if job.get('canonical_utterances'):
+                for row in job['rolling_sources'].values():
+                    if row.get('canonical_unresolved'):
+                        job.setdefault('canonical_refined',{}).pop(row['id'],None)
             if job['refinement_unresolved']:
                 plan.state['completed_sample']=min(plan.state['completed_sample'],min(w['start_sample'] for w in job['refinement_unresolved']))
                 plan.state['pending']=[]

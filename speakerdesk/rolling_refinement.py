@@ -144,12 +144,16 @@ def successful_non_speech(row):
     """Independent successful audio admission, never empty/failed ASR alone."""
     if row.get('text','').strip() or row.get('transcription_review'):return False
     state=row.get('audio_state');evidence=row.get('acoustic_evidence') or {}
-    if state=='digital_silence':return True
-    if state=='constant_signal':
-        return evidence.get('source')=='pcm_constant' and type(evidence.get('sample_count')) is int and evidence['sample_count']>=320 and isinstance(evidence.get('constant_value'),(int,float)) and math.isfinite(evidence['constant_value'])
     if state=='model_non_speech':
-        value=evidence.get('no_speech_probability')
-        return evidence.get('source')=='whisper_sot' and isinstance(value,(int,float)) and math.isfinite(value) and .95<=value<=1
+        from speech_admission import SILERO_SPEC
+        a,b=bounds(row)
+        probability=evidence.get('maximum_probability')
+        return (evidence.get('source')=='silero_v6' and evidence.get('model_revision')==SILERO_SPEC['revision']
+                and evidence.get('complete') is True and evidence.get('decision')=='no_speech'
+                and evidence.get('speech_regions')==[]
+                and type(probability) in (int,float) and math.isfinite(probability) and 0<=probability<.5
+                and type(evidence.get('start_sample')) is int and type(evidence.get('end_sample')) is int
+                and evidence['start_sample']<=a<b<=evidence['end_sample'])
     return False
 
 def successful_coverage(row):

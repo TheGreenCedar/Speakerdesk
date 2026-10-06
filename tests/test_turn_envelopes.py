@@ -12,7 +12,7 @@ from language_detection import SpeechTranscriber
 from unittest.mock import Mock
 from types import SimpleNamespace
 import numpy as np
-from pcm_peer import varying_pcm
+from pcm_peer import varying_pcm, SpeechEvidencePeer
 
 
 class TurnEnvelopeTests(unittest.TestCase):
@@ -65,7 +65,7 @@ class TurnEnvelopeTests(unittest.TestCase):
     def test_weak_same_language_probes_decode_whole_sentence_keep_uncertainty(self):
         detector=Mock();detector.detect.side_effect=[{'en':.6,'fr':.4}]*3
         asr=Mock();asr.transcribe.return_value=SimpleNamespace(text='So tell me, how are you going to be fixing transcription?',tokens=[1,2])
-        rows=SpeechTranscriber(asr,'auto',detector=detector,context={'language':'en','end_sample':0}).transcribe(
+        rows=SpeechTranscriber(asr,'auto',detector=detector,context={'language':'en','end_sample':0},speech_evidence=SpeechEvidencePeer()).transcribe(
             varying_pcm(9*RATE,.1),RATE,('speaker_0',),max_asr_seconds=18)
         self.assertEqual(len(rows),1);asr.transcribe.assert_called_once()
         self.assertEqual(len(asr.transcribe.call_args.args[0]),9*RATE)
@@ -99,7 +99,7 @@ class TurnEnvelopeTests(unittest.TestCase):
     def test_merged_warning_preserves_successful_probe_context_and_failed_switch_barrier(self):
         detector=Mock();detector.detect.side_effect=[{'en':.99,'fr':.01},{'en':.6,'fr':.4},{'fr':.6,'en':.4}]
         asr=Mock();asr.transcribe.return_value=SimpleNamespace(text='English words.',tokens=[1,2])
-        transcriber=SpeechTranscriber(asr,'auto',detector=detector)
+        transcriber=SpeechTranscriber(asr,'auto',detector=detector,speech_evidence=SpeechEvidencePeer())
         pcm=varying_pcm(9*RATE,.1)
         rows=transcriber.transcribe(pcm,RATE,('speaker_0',),max_asr_seconds=18)
         self.assertEqual([c.kwargs['language'] for c in asr.transcribe.call_args_list],['en','en'])

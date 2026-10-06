@@ -4,7 +4,7 @@
   <key>CFBundleIdentifier</key><string>com.speakerdesk.desktop.capture</string>
   <key>CFBundleName</key><string>Speakerdesk</string>
   <key>CFBundleDisplayName</key><string>Speakerdesk</string>
-  <key>CFBundleVersion</key><string>0.5.1</string>
+  <key>CFBundleVersion</key><string>0.6.0</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Speakerdesk records your microphone when you start a meeting so it can save and transcribe your conversation on this Mac.</string>
   <key>NSScreenCaptureUsageDescription</key>

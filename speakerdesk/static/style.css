@@ -156,3 +156,10 @@
   .segment-body{grid-template-columns:60px minmax(0,1fr);column-gap:6px}
   .segment-actions{flex-wrap:wrap}
 }
+
+/* One live heading and a quiet tint; words, timing and targets keep their size. */
+.segment.live-provisional{background:#eef4ef}
+.live-section-label{font-size:12px;line-height:1.45;font-weight:600;color:#28583d;white-space:nowrap}
+.speaker-continuation.live-section-start:not(:focus-within) .segment-top{display:flex}
+[data-theme=dark] .segment.live-provisional{background:#23322b}
+[data-theme=dark] .live-section-label{color:#b4dbc1}

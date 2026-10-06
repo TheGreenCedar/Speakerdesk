@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 from audio import crop
 from language_detection import detector_issues, LID_CHECKPOINT
+from speech_admission import speech_issues, SILERO_SPEC
 from transcript import LANGUAGES
 from review import retain_unassigned_audio
 
@@ -41,6 +42,8 @@ def model_config():
     return {'diar_path':os.getenv('DIAR_MODEL_PATH',str(models/'nemotron')),
             'cohere_path':os.getenv('COHERE_MODEL_PATH',str(models/'cohere-speech')),
             'lid_path':os.getenv('LID_MODEL_PATH',str(models/'whisper-language')),
+            'speech_path':os.getenv('SPEECH_MODEL_PATH',str(models/'silero-speech')),
+            'alignment_path':os.getenv('ALIGNMENT_MODEL_PATH',str(models/'coarse-alignment')),
             'diar_python':os.getenv('DIAR_PYTHON',str(home/'.venv/bin/python')),
             'asr_python':os.getenv('ASR_PYTHON',str(home/'.venv-asr/bin/python')),
             'diar_kind':'nemotron', 'device':'mlx'}
@@ -61,6 +64,7 @@ def preflight(config, language=None):
             issues.append(f'Set {name.upper()} to an inference environment Python executable.')
     if config['device'] != 'mlx':
         issues.append('This Mac setup uses MLX on Apple Silicon.')
+    issues.extend(speech_issues(config.get('speech_path','')))
     if language == 'auto':
         issues.extend(detector_issues(config.get('lid_path', '')))
     return issues
@@ -218,6 +222,7 @@ def infer(audio_path, duration, language, folder, progress, config=None):
             path=crop_dir/f'{i}.wav';crop(audio_path,path,chunk['audio_start'],chunk['audio_end']);chunk['audio']=str(path)
         asr=run_worker(config['asr_python'],'transcribe',{'model_path':config['cohere_path'],
             'chunks':chunks,'language':language,'lid_path':config.get('lid_path'),
+            'speech_path':config.get('speech_path'),'audio':str(audio_path),
             'device':config['device']},folder) if chunks else {'regions':[],'metrics':{}}
     finally:
         for path in crop_dir.glob('*.wav'):path.unlink()
@@ -244,6 +249,7 @@ def infer(audio_path, duration, language, folder, progress, config=None):
             'provenance':{'kind':'local_inference','asr_model':'CohereLabs/cohere-transcribe-03-2026',
                           'diarization_model':model_id,'language':language,'device':config['device'],
                           'language_detector':LID_CHECKPOINT if language=='auto' else None,
+                          'speech_detector':SILERO_SPEC['repo']+'@'+SILERO_SPEC['revision'],
                           'timing':('Retained audio with ≤3-second language probes and ≤6-second ASR crops; no word alignment' if language=='auto' else 'Retained audio split into ≤25-second crops; no word alignment'),
                           'speaker_limit':limit,
                           'diarization_checkpoint':'mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f',
@@ -258,21 +264,24 @@ def infer(audio_path, duration, language, folder, progress, config=None):
 
 def retry_passage(audio_path, start, end, language, folder, config=None):
     """One explicitly chosen language/crop; no speaker relabeling or full rerun."""
-    if language not in LANGUAGES or not all(map(math.isfinite, (start,end))) or not 0 <= start < end or end-start > 30:
-        raise ValueError('Choose a supported language and a passage of at most 30 seconds.')
+    if language not in LANGUAGES or not all(map(math.isfinite, (start,end))) or not 0 <= start < end or end-start > 24.5:
+        raise ValueError('Choose a supported language and a passage of at most 24.5 seconds.')
     config = config or model_config()
     metadata = json.loads((Path(config['cohere_path'])/'config.json').read_text())
     if (metadata.get('model_type') != 'cohere_asr'
             or not (Path(config['cohere_path'])/'model.safetensors').is_file()
             or not Path(config['asr_python']).is_file() or config['device'] != 'mlx'):
         raise ValueError('Finish local transcription model setup before retrying this passage.')
+    if speech_issues(config.get('speech_path','')):
+        raise ValueError('Finish local speech detection model setup before retrying this passage.')
     import tempfile
     with tempfile.TemporaryDirectory(prefix='passage-retry-', dir=folder) as temporary:
         target = Path(temporary); audio = target/'passage.wav'
         crop(audio_path,audio,start,end)
         result = run_worker(config['asr_python'],'transcribe',{'model_path':config['cohere_path'],
             'chunks':[{'audio':str(audio),'speakers':['manual_retry']}],
-            'language':language,'device':'mlx'},target)
+            'language':language,'device':'mlx','speech_path':config['speech_path'],
+            'audio':str(audio)},target)
         regions = result['regions']
         if len(regions) != 1 or len(regions[0]) != 1:
             raise RuntimeError('The retry returned an incomplete passage result.')

@@ -14,7 +14,8 @@ import struct
 import sys
 
 ROOT=Path(__file__).resolve().parents[1]
-HARNESSES=('scripts/packaged_replay.py','scripts/replay_capture.py','scripts/acceptance_fixtures.py','scripts/core_acceptance.py')
+HARNESSES=('scripts/packaged_replay.py','scripts/replay_capture.py','scripts/acceptance_fixtures.py','scripts/core_acceptance.py',
+           'speakerdesk/admission_receipt.py','speakerdesk/speech_admission.py')
 GROUPS={'silence','background_noise','quiet_speech','brief_speech','genuine_thanks','sentence_continuity','overlap','language_fallback','protected_corrections'}
 
 def require(value,message):
@@ -33,15 +34,22 @@ def assignment(path,name):
 
 def models(root=ROOT):
     values=assignment(root/'speakerdesk/model_setup.py','SPECS')
-    specs=[ast.literal_eval(value) for value in values.elts if isinstance(value,ast.Dict)]
-    specs.append(ast.literal_eval(assignment(root/'speakerdesk/language_detection.py','LID_SPEC')))
-    return {s['directory']:{k:s[k] for k in ('repo','revision','bytes','sha256','files')} for s in specs}
+    imported={'LID_SPEC':'language_detection.py','SILERO_SPEC':'speech_admission.py',
+              'ALIGNMENT_SPEC':'alignment_artifact.py'}
+    specs=[]
+    for value in values.elts:
+        if isinstance(value,ast.Name):
+            require(value.id in imported,'Unresolved model identity: '+value.id)
+            value=assignment(root/'speakerdesk'/imported[value.id],value.id)
+        specs.append(ast.literal_eval(value))
+    return {s['directory']:{**{k:s[k] for k in ('repo','revision','bytes','sha256','files')},
+                           **({'weight_file':s['weight_file']} if 'weight_file' in s else {})} for s in specs}
 
 def model_file_pins(root=ROOT):
     pinned=json.loads((root/'tests/acceptance/model-metadata.json').read_text())['models'];result={}
     for name,spec in models(root).items():
         require(pinned[name]['repo']==spec['repo'] and pinned[name]['revision']==spec['revision'],'Model metadata revision differs')
-        hashes=dict(pinned[name]['file_sha256']);hashes['model.safetensors']=spec['sha256']
+        hashes=dict(pinned[name]['file_sha256']);hashes[spec.get('weight_file','model.safetensors')]=spec['sha256']
         require(set(hashes)==set(spec['files']),'Model metadata inventory differs')
         result[name]=hashes
     return result
@@ -75,15 +83,27 @@ def words(text):
 def transport_pcm(path):
     with wave.open(str(path),'rb') as stream:
         require((stream.getnchannels(),stream.getsampwidth(),stream.getframerate())==(1,2,16000),'Invalid replay PCM')
-        samples=array.array('h',stream.readframes(stream.getnframes()))
-    if sys.byteorder!='little':samples.byteswap()
-    return b''.join(struct.pack('<h',int(sample*32767/32768)) for sample in samples)
+        # Replay emits exactly representable PCM16/32768 float32. The capture
+        # writer now rounds the inverse and saturates; every source PCM16 bit
+        # survives. Keep the original0.5.1 evaluator/results unchanged elsewhere.
+        return stream.readframes(stream.getnframes())
 
 def established_context(observed,boundary_sample):
     # Pure production reconciliation policy: no app, model, or MLX import.
     sys.path.insert(0,str(ROOT/'speakerdesk'))
     from meeting_refinement import preceding_language_context
     return preceding_language_context(observed.get('document',{}).get('segments',[]),boundary_sample,observed.get('language_epoch',0))
+
+def pause_acknowledged(job,request_id,through_sample):
+    receipt=job.get('pause_flush') or {}
+    available=receipt.get('available_sample');speech=receipt.get('speech_observed_sample')
+    return (isinstance(request_id,str) and bool(request_id) and receipt.get('request_id')==request_id
+        and type(through_sample) is int and through_sample>=0
+        and receipt.get('state')=='complete' and type(receipt.get('through_sample')) is int and receipt['through_sample']==through_sample
+        and type(receipt.get('received_sample')) is int and receipt['received_sample']==through_sample
+        and type(available) is int and type(speech) is int and 0<=available<=speech<=through_sample
+        and receipt.get('deferred_audio')==([{'start_sample':available,'end_sample':through_sample}] if available<through_sample else [])
+        and type(receipt.get('fast_sequence')) is int and receipt['fast_sequence']==job.get('last_fast_sequence',0))
 
 def evaluate(recipe, trace):
     """Recompute mandatory assertions from primary production documents."""
@@ -94,8 +114,14 @@ def evaluate(recipe, trace):
         primary=[row for row in rows if row.get('text','').strip()]
         tokens=words(' '.join(row['text'] for row in primary))
         if 'exact_text' in expected:checks[stage+'_exact_text']=tokens==words(expected['exact_text'])
-        checks[stage+'_observed']=isinstance(job.get('id'),str) and bool(job.get('last_fast_sequence'))
-        checks[stage+'_local_models']=job.get('document',{}).get('provenance',{}).get('kind')=='local_inference'
+        negative=bool(expected.get('no_words') and job.get('canonical_utterances'))
+        if negative:
+            inspected=canonical_admission(trace,stage)
+            checks[stage+'_observed']=isinstance(job.get('id'),str) and inspected
+            checks[stage+'_local_models']=inspected
+        else:
+            checks[stage+'_observed']=isinstance(job.get('id'),str) and bool(job.get('last_fast_sequence'))
+            checks[stage+'_local_models']=job.get('document',{}).get('provenance',{}).get('kind')=='local_inference'
         if expected.get('no_words'):checks[stage+'_no_words']=not tokens
         if expected.get('terms'):
             offset=0;complete=True
@@ -126,8 +152,19 @@ def evaluate(recipe, trace):
             checks[stage+'_actual_context_fallback']=any(p.get('decision',p).get('reason')=='recent_context' for p in probes)
     final=trace.get('refined',{})
     checks['provisional_paused_before_refinement']=trace.get('provisional',{}).get('status')=='paused' and trace.get('provisional',{}).get('rolling_refinement',{}).get('cancelled') is True
+    paused=trace.get('provisional',{})
+    checks['provisional_pause_acknowledged']=pause_acknowledged(paused,trace.get('pause_request_id'),trace.get('input_frames',-1))
     checks['same_job']=final.get('id')==trace.get('job_id')==trace.get('provisional',{}).get('id')
-    checks['refinement_executed']=final.get('status')=='ready' and final.get('refinement_status')=='complete' and not final.get('refinement_unresolved') and final.get('rolling_refinement',{}).get('completed_sample',0)>=trace.get('input_frames',float('inf'))
+    if expected.get('no_words') and final.get('canonical_utterances'):
+        uncertainty=final.get('canonical_uncertain_samples')
+        checks['negative_audio_inspected']=(canonical_admission(trace,'refined') and final.get('status')=='ready'
+            and not final.get('rolling_sources') and not final.get('refinement_unresolved')
+            and ((uncertainty==0 and final.get('refinement_status')=='complete'
+                  and final.get('rolling_refinement',{}).get('completed_sample',0)>=trace.get('input_frames',float('inf')))
+                 or (type(uncertainty) is int and uncertainty>0 and final.get('refinement_status')=='unresolved'
+                     and final.get('rolling_refinement',{}).get('completed_sample',0)<trace.get('input_frames',0))))
+    else:
+        checks['refinement_executed']=final.get('status')=='ready' and final.get('refinement_status')=='complete' and not final.get('refinement_unresolved') and final.get('rolling_refinement',{}).get('completed_sample',0)>=trace.get('input_frames',float('inf'))
     saved=trace.get('saved_audio',{})
     checks['audio_preserved']=saved.get('frames')==trace.get('input_frames') and isinstance(saved.get('pcm_sha256'),str) and saved['pcm_sha256']==saved.get('expected_pcm_sha256')
     if expected.get('protected_correction'):
@@ -142,6 +179,37 @@ def evaluate(recipe, trace):
         events=[(p.get('decision',p),p.get('language',r.get('language'))) for r in rows for p in r.get('language_detection',{}).get('probes',[r.get('language_detection',{})])]
         checks['actual_language_contradiction']=any(e.get('reason')=='detected' and language==expected['language'] for e,language in events)
     return checks
+
+
+def canonical_admission(trace,stage):
+    """Only a bound actual-inspection receipt can qualify canonical no-word audio.
+
+    A Pause may leave an explicit sub-frame tail; Stop must inspect every sample.
+    Uncertainty remains uncertainty. This never substitutes for speech assertions.
+    """
+    sys.path.insert(0,str(ROOT/'speakerdesk'))
+    from admission_receipt import validate_receipt
+    job=trace.get(stage,{})
+    try:
+        if stage=='provisional':
+            pause=job.get('pause_flush') or {};receipt=pause.get('admission_receipt')
+            if not pause_acknowledged(job,trace.get('pause_request_id'),trace.get('input_frames')):return False
+            validate_receipt(receipt,job.get('admission_execution') or {},phase='pause',
+                request_id=trace.get('pause_request_id'),received_sample=trace['input_frames'],
+                observed_sample=pause.get('speech_observed_sample'),
+                pcm_sha256=trace.get('admission_pcm',{}).get(stage))
+        else:
+            receipt=job.get('capture_admission');request=job.get('capture_inspection_request') or {}
+            if request.get('through_sample')!=trace.get('input_frames'):return False
+            validate_receipt(receipt,job.get('admission_execution') or {},phase='stop',
+                request_id=request.get('request_id'),received_sample=trace['input_frames'],
+                observed_sample=job.get('canonical_observed_sample'),
+                uncertain_samples=job.get('canonical_uncertain_samples'),
+                pcm_sha256=trace.get('admission_pcm',{}).get(stage))
+            if job.get('admission_execution')!=trace.get('provisional',{}).get('admission_execution'):return False
+        return (job.get('id')==trace.get('job_id') and isinstance(trace.get('admission_pcm',{}).get(stage),str)
+                and receipt['speech_samples']==0 and receipt['decision'] in ('no_speech','uncertain'))
+    except (ValueError,TypeError,KeyError,AttributeError):return False
 
 def artifact(path,expected):
     require(path.is_file() and not path.is_symlink(),'Evidence file unavailable: '+path.name)
@@ -220,6 +288,14 @@ def validate(report_path,manifest_path,*,root=ROOT):
             actual=hashlib.sha256(pcm.readframes(pcm.getnframes())).hexdigest()
         expected=hashlib.sha256(transport_pcm(report_path.parent/case['input_wav']['file'])).hexdigest()
         require(actual==expected==raw['saved_audio'].get('pcm_sha256')==raw['saved_audio'].get('expected_pcm_sha256'),'Saved production audio differs from input transport')
+        if recipe['expect'].get('no_words') and raw.get('refined',{}).get('canonical_utterances'):
+            sys.path.insert(0,str(root/'speakerdesk'))
+            from admission_receipt import retained_pcm_digest
+            for stage in ('provisional','refined'):
+                end=(raw[stage].get('pause_flush',{}).get('speech_observed_sample') if stage=='provisional'
+                     else raw[stage].get('canonical_observed_sample'))
+                require(raw.get('admission_pcm',{}).get(stage)==retained_pcm_digest(
+                    report_path.parent/case['saved_wav']['file'],end),'Admission receipt PCM differs from retained input')
         recomputed=evaluate(recipe,raw)
         require(case['assertions']==recomputed and all(v is True for v in recomputed.values()),'Raw core evidence fails: '+recipe['id'])
     require(report.get('owned_processes_stopped') is True,'Packaged replay processes not cleaned up')

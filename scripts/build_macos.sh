@@ -16,6 +16,7 @@ mkdir -p "$CARGO_TARGET_DIR" .cache release
 if [[ ! -x .venv-package/bin/python ]]; then ./scripts/setup.sh; else
   uv pip install --python .venv-package/bin/python -r requirements-packaging.lock.txt
   uv pip install --python .venv-package/bin/python --no-deps --require-hashes -r requirements-voice.lock.txt
+  bash scripts/setup_alignment.sh
   .venv-package/bin/python - <<'PY'
 import shutil,site
 from pathlib import Path

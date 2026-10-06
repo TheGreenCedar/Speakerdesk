@@ -23,7 +23,7 @@ import urllib.request
 import wave
 import zipfile
 from acceptance_fixtures import generate, read_wav, write_wav
-from core_acceptance import ROOT, HARNESSES, artifact, bundle_identity, digest_file, established_context, evaluate, model_file_pins, models, require, suite, transport_pcm, zip_bundle
+from core_acceptance import ROOT, HARNESSES, artifact, bundle_identity, digest_file, established_context, evaluate, model_file_pins, models, pause_acknowledged, require, suite, transport_pcm, zip_bundle
 
 def write(path,value):path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')
 
@@ -199,11 +199,11 @@ def case_run(recipe,all_recipes,backend,home,directory,budget):
     edit=None
     if recipe.get('correction') or start_sample:
         budget.wait(lambda:(replay/'stage-edit').exists(),60)
-        backend.api('/api/meetings/'+jid+'/pause',{},'POST')
+        pause_request=backend.api('/api/meetings/'+jid+'/pause',{},'POST')['pause_flush']['request_id']
         def flushed():
-            observed=get();state=backend.api('/api/meeting')
+            observed=get()
             point=json.loads((replay/'replay.json').read_text())['hold_sample']
-            return observed if observed.get('last_fast_sequence') and observed['status']=='paused' and state['processed_seconds']>=point/16000-.001 else None
+            return observed if observed['status']=='paused' and pause_acknowledged(observed,pause_request,point) else None
         observed=budget.wait(flushed,40)
         if start_sample:
             context=established_context(observed,start_sample)
@@ -215,10 +215,10 @@ def case_run(recipe,all_recipes,backend,home,directory,budget):
             edit=result['segment']
         backend.api('/api/meetings/'+jid+'/resume',{},'POST')
     budget.wait(lambda:(replay/'stage-end').exists(),80)
-    backend.api('/api/meetings/'+jid+'/pause',{},'POST')
+    pause_request=backend.api('/api/meetings/'+jid+'/pause',{},'POST')['pause_flush']['request_id']
     def settled():
-        current=get();state=backend.api('/api/meeting')
-        return current if current.get('last_fast_sequence') and state.get('processed_seconds',0)>=frames/16000-.001 and current['status']=='paused' else None
+        current=get()
+        return current if current['status']=='paused' and pause_acknowledged(current,pause_request,frames) else None
     provisional=budget.wait(settled,40)
     backend.api('/api/jobs/'+jid+'/refinement/resume',{},'POST')
     backend.api('/api/meetings/'+jid+'/stop',{},'POST')
@@ -232,13 +232,21 @@ def case_run(recipe,all_recipes,backend,home,directory,budget):
         final=budget.wait(lambda:get() if get().get('refinement_status') in ('complete','unresolved') and backend.api('/api/meeting')['status']=='idle' else None,70)
     with wave.open(str(home/'recordings'/jid/'audio.wav'),'rb') as recorded:
         recorded_frames=recorded.getnframes();saved_pcm=recorded.readframes(recorded_frames)
-    # Production mixer receives PCM16/32768 as float32, then truncates x*32767.
-    # Recompute that exact transport conversion; equal frame count is insufficient.
+    # Production mixer receives exactly representable PCM16/32768 as float32.
+    # Check every saved PCM byte; equal frame count is insufficient.
     expected_pcm=transport_pcm(directory/'replay.wav')
-    trace={'job_id':jid,'input_frames':frames,'slice_start_sample':start_sample,'synthesis':json.loads((directory/'synthesis.json').read_text()),'provisional':document_slice(provisional,start_sample),
+    trace={'job_id':jid,'pause_request_id':pause_request,'input_frames':frames,'slice_start_sample':start_sample,'synthesis':json.loads((directory/'synthesis.json').read_text()),'provisional':document_slice(provisional,start_sample),
            'refined':document_slice(final,start_sample),'edit':edit,'preceding':preceding,
            'saved_audio':{'frames':recorded_frames,'sha256':digest_file(home/'recordings'/jid/'audio.wav'),
                           'pcm_sha256':hashlib.sha256(saved_pcm).hexdigest(),'expected_pcm_sha256':hashlib.sha256(expected_pcm).hexdigest()}}
+    if recipe['expect'].get('no_words') and final.get('canonical_utterances'):
+        sys.path.insert(0,str(ROOT/'speakerdesk'))
+        from admission_receipt import retained_pcm_digest
+        trace['admission_pcm']={
+            'provisional':retained_pcm_digest(home/'recordings'/jid/'audio.wav',
+                provisional.get('pause_flush',{}).get('speech_observed_sample')),
+            'refined':retained_pcm_digest(home/'recordings'/jid/'audio.wav',
+                final.get('canonical_observed_sample'))}
     write(directory/'trace.json',trace)
     assertions=evaluate(recipe,trace)
     return {'id':recipe['id'],'partition':recipe['partition'],'groups':recipe['groups'],'status':'passed' if all(assertions.values()) else 'failed',
@@ -281,7 +289,7 @@ def main(args):
         budget.start();expected_metadata=model_file_pins()
         for directory,spec in pins.items():
             folder=args.models/directory;require(folder.is_dir(),'Cached pinned model missing: '+directory)
-            artifact(folder/'model.safetensors',spec)
+            artifact(folder/spec.get('weight_file','model.safetensors'),spec)
             hashes={name:digest_file(folder/name) for name in spec['files']}
             require(hashes==expected_metadata[directory],'Loaded model/configuration differs: '+directory)
             report['model_files'][directory]=hashes;(home/'models'/directory).symlink_to(folder.resolve(),target_is_directory=True)
