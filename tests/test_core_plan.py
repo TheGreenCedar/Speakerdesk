@@ -50,7 +50,7 @@ class CorePlanTests(unittest.TestCase):
                 self.assertEqual(p['edges'],[0,15*RATE,30*RATE])
                 self.assertIsNone(p['cuts'][0]['negative_receipt'])
     def test_at_most_three_reads_for_each_boundary_and_deterministic_tie(self):
-        calls=[];r=row(30,[(13,13.2),(14,14.2),(16,16.2),(17,17.2)])
+        calls=[];r=row(30,[(14,14.2),(14.4,14.6),(15.1,15.3),(15.7,15.9)])
         def pending(a,b):calls.append((a,b));return dict(negative(a,b),complete=False)
         p=plan(r,pending);self.assertEqual(len(calls),3)
         self.assertEqual(p['edges'][1],15*RATE)
@@ -89,3 +89,19 @@ class CorePlanTests(unittest.TestCase):
         self.assertEqual(result['text'],'My words')
         self.assertNotIn('bounded_decode_provenance',result)
         self.assertEqual(result['machine_versions'][-1]['text'],'Trump Trump  café 👩🏽‍💻 ')
+
+    def test_far_pause_does_not_move_original_balanced_target(self):
+        r=row(30,[(11.4,11.7)])
+        p=plan(r,lambda a,b:self.fail('Far pause should not even be queried'))
+        self.assertEqual(p['edges'],[0,15*RATE,30*RATE])
+        self.assertEqual(validate(p,r),p['edges'])
+        r=row(30,[(14,14.4)]);p=plan(r,negative)
+        p['radius_samples']+=1
+        with self.assertRaises(ValueError):validate(p,r)
+    def test_receipt_cannot_accumulate_movement_from_clamped_targets(self):
+        r=row(195,[(18.4,18.6),(37.4,37.6),(56.4,56.6)])
+        p=plan(r,negative)
+        # The third midpoint56.5 would be near a feasible target clamped to57.5,
+        # but is2s from the original58.5 boundary. It must remain a fallback.
+        self.assertEqual(p['cuts'][2]['method'],'balanced_bounded_fallback')
+        self.assertEqual(validate(p,r),p['edges'])
