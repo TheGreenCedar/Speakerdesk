@@ -1,9 +1,10 @@
 # Rolling live refinement
 
-Status: scheduling/reconciliation foundation implemented and CPU tested in an
-isolated branch based on released source `846286eed2f358d3dfc6afced8ecf8b0cef2a96a`.
-Worker, persistence/API and UI integration remain to be implemented. This is not
-a released feature or evidence that a trained model's overlap accuracy improved.
+Status: worker, SQLite persistence, targeted passage edits, language controls,
+enrollment UI and browser reconciliation are implemented together in the isolated
+`codex/rolling-live-refinement` branch based on released source
+`846286eed2f358d3dfc6afced8ecf8b0cef2a96a`. CPU and installed-browser checks pass.
+This is not a released feature or evidence of improved trained-model accuracy.
 
 ## Diagnosis from 0.3.0 source
 
@@ -29,6 +30,10 @@ The resident worker keeps provisional phrase output for low latency. Provisional
 rows get one compact state label; warning paragraphs and manual review badges
 wait until refinement leaves a passage unresolved. A six-second transport/phrase
 limit alone will no longer be a review reason. Mixed audio remains mixed audio.
+
+NVIDIA uses its official `low` preset for streaming and temporarily selects
+`offline` for each bounded refinement call. That call creates a separate model
+state; `finally` restores `low` before streaming continues.
 
 A separate reader drains commands while the same model executor serializes
 streaming and refinement work. Capture and the UI continue asynchronously;
@@ -75,7 +80,7 @@ previous legible words; protection propagates across shared candidates so a
 neighbor cannot lose part of its source audio. Confirmed/custom names use
 `setdefault`, never replacement by guessed names.
 
-Integration will persist the plan, result and previous revision atomically under
+Integration persists the plan, result and previous revision atomically under
 the existing job lock/SQLite transaction. Each provisional row gets a deterministic
 audio anchor plus a machine revision. A targeted passage-edit endpoint records
 server-owned protected fields and uses the row revision, allowing edits without
@@ -91,16 +96,89 @@ the last persisted transcript, prior revision and audio; recovery never resumes
 device capture automatically. Failed refinement leaves usable provisional words
 and one compact unresolved state instead of repeated warning rows.
 
-## Validation so far and next step
+## Fast-path boundary continuity
 
-Sixteen CPU tests cover bounded backlog, disjoint ownership, section/delay triggers,
-pause/stop tail planning, crash recovery, cancellation and late results, bounded
-failures, source-row boundaries, split/merge IDs, confirmed names, edits/stale
-results, blank/partial preservation, protection closure and context duplication.
-They execute no trained models, GPU, capture device or permission prompt.
+The first unfinished decode appears after six seconds, then revisits the same
+saved-audio origin at three-second intervals. It replaces the provisional tail
+rather than appending another six-second fragment. Speech boundaries are preferred;
+a continuous phrase owns at most 18 seconds, with up to three seconds of right
+context. The next core carries three seconds of left audio. A reference decode
+and extended decode share that left-audio origin; only a verified lexical prefix
+is removed. Real repeated tokens remain repeated. This is lexical continuity,
+not word timestamps. All native ASR reads stay at most 24.5 seconds.
 
-Next: wire the resident-worker protocol, atomic persistence and targeted edits;
-then test the complete host/worker protocol with substituted CPU outputs and real
-headless UI updates. Actual model comparison on synthetic overlap needs a newly
-coordinated resource budget. No big build or native inference is authorized by
-the first source-only phase, and 0.3.0 release assets remain unchanged.
+If a context hypothesis cannot be reconciled conservatively, the full candidate,
+previous usable words and original WAV remain available. The uncertain tail waits
+for refinement rather than introducing a guessed suffix. This fallback can still
+leave incomplete text and requires trained-model evaluation for natural speech,
+accents, within-probe language switches and overlapping voices.
+
+Brief activity changes are grouped for ASR while retaining the union of all
+speaker candidates. Grouping uses a 1.5-second presentation/ASR threshold and a
+.20-second gap; it does not declare short activations false. Mixed regions stay
+mixed and cannot become clean enrollment audio. Confident local language routing
+may admit Cohere text from the mix; it does not separate the voices.
+
+## Persistence and controls
+
+`live_refinement.py` keeps model execution serial and coalesces PCM notifications
+into source-WAV ranges. `meeting_refinement.py` stores operation IDs, source
+snapshots, protected fields, candidates and prior revisions atomically in the
+job payload. Each failed operation gets at most two attempts; unresolved windows
+are bookmarked for an explicit retry. Stop has a 45-second refinement budget
+inside the existing 60-second completion bound. Unfinished work remains paused
+and resumable. Explicit recovery starts only the inference worker over saved WAV
+and never starts capture. Historical recovery routes each owned window through
+its original language generation. Ordinary live language changes preserve earlier
+words and invalidate stale queued replacements.
+
+A live passage uses `PATCH /api/jobs/<id>/segments/<segment-id>` with
+`segment_revision` and `changes`. The server protects edited fields. Whole-project
+saves cannot clear those fields or manufacture clean audio/source metadata.
+`POST /api/jobs/<id>/refinement/pause|resume` controls background refinement;
+`GET /api/jobs/<id>/refinement/revisions/<window-id>` reads retained prior words.
+`fast-revisions/<start-sample>` and `boundary-candidates` under the same refinement
+API expose retained fast revisions and ambiguous full-context candidates. Repeated
+window retries append history versions rather than erasing older snapshots.
+Focused local drafts survive polling and changed passage bounds. A stale Save is
+rejected with the draft retained and latest words shown. Unchanged DOM nodes stay
+in place; explicit audio-anchor scroll compensation handles merged rows.
+
+## Validation and release boundary
+
+The full integrated CPU suite passes: **159 tests in 20.051 seconds**. It exercises
+production scheduling, the resident engine and real JSONL/pipes/SQLite/WAV with
+explicit synthetic model substitutes. New cases include a through-word six-second
+cut, sentence punctuation, genuine repetition, lexical code switching, 80 seconds
+of continuous speech, short final context, pause/resume/stop, micro overlap,
+conservative slot mapping, saved-prefix edits, stale operations, failed retries,
+placeholder recovery and restart without capture. Existing import, language,
+voice eligibility, enrollment and error-cleanup regressions also pass.
+
+Nine installed headless Chrome checks pass with zero page errors on the production
+HTML/JS/API and an explicitly synthetic fixture. They cover compact pending rows,
+focused drafts, stale-save rejection, protected saved edits, confirmed names,
+scroll preservation, refinement controls and the live language/default boundary.
+The enrollment lane's browser flow also passes after integration, including
+bounded preview, consent reset and actionable empty-clip reasons.
+
+Reproduce using an existing Python environment and installed Chrome:
+
+```sh
+<python> -m unittest discover -s tests -v
+<python> tests/rolling_browser_fixture.py <evidence-directory>
+node tests/rolling_browser.mjs <printed-url> <installed-chrome> <evidence-directory>
+<python> tests/people_browser_fixture.py <people-evidence-directory>
+node tests/people_browser.mjs <printed-url> <installed-chrome> <people-evidence-directory>
+```
+
+Screenshots contain synthetic CPU outputs:
+
+![Compact provisional phrases and saved edit](screenshots/rolling-context-light.png)
+
+![Dark appearance](screenshots/rolling-context-dark.png)
+
+No trained model/GPU pass, real device capture, native package build or acoustic
+accuracy comparison was run for this 0.4 change. The parent must coordinate the
+next native resource window with CodeStory before that evaluation. Keep 0.3.0
+release assets and website publication separate from this source branch.

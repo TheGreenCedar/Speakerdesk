@@ -9,6 +9,7 @@ REASONS = {
     'transcription_failed': 'Transcription failed for this passage; audio retained',
     'token_limit': 'Transcript may be incomplete; audio retained',
     'unassigned_audio': 'Audio outside detected speech; may be silence or missed speech',
+    'refinement_incomplete': 'Refinement incomplete; previous words and audio retained',
 }
 
 

@@ -1,5 +1,7 @@
 'use strict';
 let people = [], voiceAvailable = false, nameContext = null, identityBusy = false;
+let nameClipState = null, nameLoadGeneration = 0, nameOpenGeneration = 0, nameLoading = false;
+let voicePreviewStart = null, voicePreviewEnd = null, voicePreviewGeneration = 0;
 
 async function loadPeople() {
   const state = await api('/api/people');
@@ -12,9 +14,9 @@ function acceptIdentityJob(result) {
 }
 async function identityAction(action) {
   if (saving || identityBusy || dirty) throw new Error('Save transcript edits before naming a speaker.');
-  identityBusy = true; $('editor').inert = true;
+  identityBusy = true; $('editor').inert = true; updateNameControls();
   try { return await action(); }
-  finally { identityBusy = false; $('editor').inert = false; }
+  finally { identityBusy = false; $('editor').inert = false; updateNameControls(); }
 }
 function renderPeople() {
   $('people-list').replaceChildren();
@@ -25,8 +27,9 @@ function renderPeople() {
     input.setAttribute('aria-label', `Saved name for ${person.name}`);
     const saveName = node('button', 'Save name', 'quiet'); saveName.type = 'submit';
     form.append(input, saveName);
-    if (person.voice_saved) form.append(node('span', voiceAvailable && !person.voice_compatible
-      ? 'Save this voice again to use recognition' : 'Voice saved on this Mac', 'settings-note'));
+    form.append(node('span', person.voice_saved ? voiceAvailable && !person.voice_compatible
+      ? 'Save this voice again to use recognition' : 'Voice saved on this Mac'
+      : 'Name saved. Open a meeting and choose Name / remember voice beside this person’s speech.', 'settings-note'));
     form.addEventListener('submit', async event => {
       event.preventDefault(); saveName.disabled = true;
       try {
@@ -59,41 +62,107 @@ function personOptions(current = '') {
 }
 async function openNamePicker(track) {
   if (saving || identityBusy || dirty) throw new Error('Save transcript edits before naming a speaker.');
-  const jid = selected.id;
+  const jid = selected.id, generation = ++nameOpenGeneration;
   await loadPeople();
-  if (selected?.id !== jid || !doc?.speakers[track]) return;
+  if (generation !== nameOpenGeneration || selected?.id !== jid || !doc?.speakers[track] || dirty || identityBusy) return;
   nameContext = {jid, track, revision: selected.revision};
   const assignment=selected.speaker_assignments?.[track];
   const assigned = assignment?.person_id || '';
-  const confirmed=assigned && assignment.source!=='automatic_voice' && assignment.confirmed!==false;
   personOptions(assigned); $('name-value').value = doc.speakers[track];
-  $('name-title').textContent = `Name ${doc.speakers[track]}`;
+  $('name-title').textContent = 'Name & remember voice';
   $('name-message').textContent = ''; $('voice-consent').checked = false;
-  $('voice-clip-list').replaceChildren();
-  for (const segment of doc.segments.filter(s => s.speaker === track && (s.voice_eligible ?? !s.review) && s.finalized !== false
-      && !track.startsWith('overlap') && (s.speaker_candidates || [track]).length === 1
-      && s.end-s.start >= 2)) {
-    for(let start=segment.start;segment.end-start>=2;) {
-      const end=segment.end-segment.start>10?Math.min(start+6,segment.end):segment.end;
-      const label = node('label', undefined, 'voice-clip');
-      const check = node('input'); check.type = 'checkbox';
-      check.value=segment.end-segment.start>10?`${segment.id}@${Math.floor(start*16000)}:${Math.floor(end*16000)}`:segment.id;
-      const description=segment.end-segment.start>10?'Audio clip from this speaker’s longer passage':segment.text;
-      label.append(check, node('span', `${time(start)}–${time(end)} · ${description}`));
-      $('voice-clip-list').append(label);start=end;
-    }
-  }
-  const usable = voiceAvailable && doc.provenance?.kind === 'local_inference';
-  $('name-voice-section').hidden = !voiceAvailable;
-  $('voice-clips').hidden = !usable;
-  $('voice-consent-label').hidden = !usable || !confirmed;
-  $('remember-voice').hidden = !usable || !confirmed;
-  $('check-voice').hidden = !usable || !!selected.speaker_assignments?.[track];
-  $('voice-note').textContent = !usable ? 'Voice recognition needs finalized local transcription passages.'
-    : confirmed ? 'Only the passages you select are used. Saving a voice requires your consent.'
-    : assignment?.source==='automatic_voice' ? 'Recognized from a saved voice. Apply the name to confirm it before saving new voice passages.'
-    : 'Apply a saved person first to remember their voice. Uncertain speakers keep their current label.';
+  nameClipState = null; $('voice-clip-list').replaceChildren(); $('voice-excluded-list').replaceChildren();
+  $('voice-preview').pause(); $('voice-preview').removeAttribute('src'); $('voice-preview').hidden = true;
   $('name-dialog').showModal(); $('name-value').focus(); $('name-value').select();
+  await refreshVoiceClips();
+}
+
+function selectedVoiceClips() {
+  return Array.from($('voice-clip-list').querySelectorAll('input:checked'), input => input.value);
+}
+function updateNameControls() {
+  if (!nameContext || !$('name-dialog').open) return;
+  const assignment = selected?.speaker_assignments?.[nameContext.track];
+  const confirmed = assignment?.person_id && assignment.source !== 'automatic_voice' && assignment.confirmed !== false
+    && $('name-person').value === assignment.person_id;
+  const current = selected?.id === nameContext.jid && selected.revision === nameContext.revision && !dirty;
+  const ids = selectedVoiceClips(), clips = (nameClipState?.clips || []).filter(c => ids.includes(c.id)).sort((a,b)=>a.start-b.start);
+  const enough = ids.length >= (nameClipState?.minimum_clips || 2) && ids.length <= 12
+    && clips.every((c,i)=>!i || clips[i-1].end <= c.start);
+  const busy = identityBusy || nameLoading || saving;
+  const usable = nameClipState?.status === 'ready' && current && !busy;
+  $('name-apply').disabled = busy || !current;
+  $('name-add-person').disabled = busy;
+  $('refresh-voice-clips').disabled = busy;
+  $('remember-voice').disabled = !usable || !confirmed || !enough || !$('voice-consent').checked;
+  $('check-voice').hidden = !!assignment;
+  $('check-voice').disabled = !usable || !enough;
+  $('voice-consent').disabled = !usable || !confirmed || !enough;
+  $('voice-note').textContent = !current ? 'The transcript changed. Refresh passages before continuing.'
+    : confirmed ? 'Name confirmed for this meeting. Remembering the voice is optional.'
+    : assignment?.source === 'automatic_voice' ? 'Apply the name to confirm this recognized person before remembering new voice passages.'
+    : 'Save this name in People, then apply it to remember the voice. You can also keep this name in the meeting only.';
+  $('name-voice-section').hidden = false;
+}
+async function refreshVoiceClips() {
+  const context = nameContext, generation = ++nameLoadGeneration;
+  if (!context) return;
+  const previousIds = nameClipState ? selectedVoiceClips() : null;
+  $('voice-preview').pause(); voicePreviewStart = voicePreviewEnd = null; ++voicePreviewGeneration;
+  nameLoading = true; nameClipState = null; $('voice-consent').checked = false;
+  $('voice-availability').textContent = 'Checking saved passages…'; updateNameControls();
+  try {
+    const state = await api(`/api/jobs/${context.jid}/speakers/${encodeURIComponent(context.track)}/voice-clips`);
+    if (generation !== nameLoadGeneration || nameContext !== context || !$('name-dialog').open
+        || selected?.id !== context.jid || selected.revision !== context.revision || state.revision !== context.revision || dirty) {
+      if (nameContext === context && $('name-dialog').open) $('voice-availability').textContent = 'The transcript changed. Refresh passages to use the current audio.';
+      return;
+    }
+    nameClipState = state;
+    $('voice-availability').textContent = state.message;
+    $('voice-clips-legend').textContent = `Use ${state.minimum_clips}–12 separate passages, 2–10 seconds each`;
+    $('voice-clip-list').replaceChildren();
+    $('voice-clips').hidden = !state.clips.length;
+    for (const clip of state.clips) {
+      const row = node('div', undefined, 'voice-clip'), label = node('label'), check = node('input');
+      check.type = 'checkbox'; check.value = clip.id;
+      check.checked = (previousIds || state.recommended_ids).includes(clip.id); check.disabled = state.status !== 'ready';
+      check.addEventListener('change', () => { $('voice-consent').checked = false; updateNameControls(); });
+      const description = clip.id === clip.segment_id ? clip.text || 'Audio from this speaker; transcript needs review'
+        : 'Audio clip from this speaker’s longer passage';
+      label.append(check, node('span', `${passageTime(clip.start)}–${passageTime(clip.end)} · ${description}`));
+      const preview = node('button', 'Preview', 'text-button'); preview.type = 'button';
+      preview.disabled = !state.audio_available || state.status === 'busy';
+      preview.setAttribute('aria-label', `Preview passage from ${passageTime(clip.start)} to ${passageTime(clip.end)}`);
+      preview.addEventListener('click', () => previewVoiceClip(clip, context).catch(error => { $('name-message').textContent = error.message; }));
+      row.append(label, preview); $('voice-clip-list').append(row);
+    }
+    $('voice-excluded-list').replaceChildren(); $('voice-excluded').hidden = !state.excluded.length;
+    $('voice-excluded-summary').textContent = `${state.excluded.length} unavailable passage${state.excluded.length === 1 ? '' : 's'} — see why`;
+    for (const clip of state.excluded) $('voice-excluded-list').append(node('li', `${passageTime(clip.start)}–${passageTime(clip.end)} · ${clip.message}`));
+    $('voice-excluded').open = !state.clips.length;
+  } catch (error) { if (nameContext === context) $('voice-availability').textContent = `${error.message} Refresh passages to try again.`; }
+  finally { if (generation === nameLoadGeneration) { nameLoading = false; updateNameControls(); } }
+}
+async function previewVoiceClip(clip, context) {
+  if (nameContext !== context || selected?.id !== context.jid || selected.revision !== context.revision)
+    throw new Error('Refresh passages before previewing this audio.');
+  const player = $('voice-preview'); $('player').pause(); player.pause();
+  player.hidden = false; voicePreviewEnd = clip.end;
+  const src = `/api/jobs/${context.jid}/audio`;
+  const generation = ++voicePreviewGeneration;
+  if (player.getAttribute('src') !== src) player.src = src;
+  if (player.readyState < 1) {
+    await new Promise((resolve,reject) => {
+      const cleanup = () => { player.removeEventListener('loadedmetadata', ready); player.removeEventListener('error', failed); };
+      const ready = () => { cleanup(); resolve(); };
+      const failed = () => { cleanup(); reject(new Error('The original recording is unavailable. Refresh passages or choose another meeting.')); };
+      player.addEventListener('loadedmetadata', ready); player.addEventListener('error', failed);
+    });
+  }
+  if (!$('name-dialog').open || nameContext !== context || generation !== voicePreviewGeneration
+      || selected?.id !== context.jid || selected.revision !== context.revision) return;
+  voicePreviewStart = clip.start; voicePreviewEnd = clip.end; player.currentTime = clip.start; await player.play();
 }
 async function refreshIdentitySuggestions() {
   const host = $('identity-suggestions');
@@ -134,6 +203,29 @@ function wirePeople() {
   });
   $('people-close').addEventListener('click', () => $('people-dialog').close());
   $('name-close').addEventListener('click', () => $('name-dialog').close());
+  $('name-done').addEventListener('click', () => $('name-dialog').close());
+  $('name-dialog').addEventListener('close', () => {
+    nameContext = null; nameClipState = null; ++nameLoadGeneration; ++nameOpenGeneration; nameLoading = false;
+    $('voice-preview').pause(); voicePreviewStart = voicePreviewEnd = null; ++voicePreviewGeneration;
+    $('voice-preview').removeAttribute('src');
+  });
+  $('voice-preview').addEventListener('timeupdate', () => {
+    if (voicePreviewEnd !== null && !$('voice-preview').paused && $('voice-preview').currentTime >= voicePreviewEnd) {
+      $('voice-preview').pause(); $('voice-preview').currentTime = voicePreviewEnd;
+    }
+  });
+  $('voice-preview').addEventListener('seeking', () => {
+    const player = $('voice-preview');
+    if (voicePreviewStart !== null && (player.currentTime < voicePreviewStart || player.currentTime > voicePreviewEnd))
+      player.currentTime = Math.max(voicePreviewStart, Math.min(voicePreviewEnd, player.currentTime));
+  });
+  $('refresh-voice-clips').addEventListener('click', () => identityAction(async () => {
+    const context = nameContext;
+    const result = await api(`/api/jobs/${context.jid}`);
+    if (nameContext !== context || selected?.id !== context.jid) return;
+    acceptIdentityJob(result); context.revision = result.revision;
+    await refreshVoiceClips();
+  }).catch(error => { $('name-message').textContent = error.message; }));
   $('person-form').addEventListener('submit', async event => {
     event.preventDefault(); const button = event.submitter; button.disabled = true;
     try {
@@ -145,15 +237,19 @@ function wirePeople() {
   $('name-person').addEventListener('change', () => {
     const person = people.find(p => p.id === $('name-person').value);
     if (person) $('name-value').value = person.name;
+    $('voice-consent').checked = false; updateNameControls();
   });
-  $('name-value').addEventListener('input', () => { $('name-person').value = ''; });
-  $('name-add-person').addEventListener('click', async () => {
-    $('name-add-person').disabled = true;
-    try {
-      const person = await api('/api/people', {method: 'POST', body: JSON.stringify({name: $('name-value').value})});
-      await loadPeople(); personOptions(person.id); $('name-message').textContent = 'Name saved. Apply it to this meeting when ready.';
-    } catch (error) { $('name-message').textContent = error.message; }
-    finally { $('name-add-person').disabled = false; }
+  $('name-value').addEventListener('input', () => { $('name-person').value = ''; $('voice-consent').checked = false; updateNameControls(); });
+  $('voice-consent').addEventListener('change', updateNameControls);
+  $('name-add-person').addEventListener('click', () => {
+    const context = nameContext, name = $('name-value').value;
+    identityAction(async () => {
+      const person = await api('/api/people', {method: 'POST', body: JSON.stringify({name})});
+      await loadPeople();
+      if (nameContext !== context || !$('name-dialog').open || selected?.id !== context.jid) return;
+      personOptions(person.id); $('voice-consent').checked = false;
+      $('name-message').textContent = 'Name saved. Apply it to this speaker to continue with voice setup.';
+    }).catch(error => { if (nameContext === context) $('name-message').textContent = error.message; });
   });
   $('name-form').addEventListener('submit', event => {
     event.preventDefault(); const context = nameContext;
@@ -161,14 +257,18 @@ function wirePeople() {
       if (selected?.id !== context.jid) throw new Error('Open this meeting again to name the speaker.');
       const result = await api(`/api/jobs/${context.jid}/speakers/${encodeURIComponent(context.track)}/identity`, {
         method: 'POST', body: JSON.stringify({revision: context.revision, person_id: $('name-person').value || null, name: $('name-value').value})});
-      $('name-dialog').close(); acceptIdentityJob(result); notice('Name confirmed for this meeting.');
+      if (nameContext !== context || !$('name-dialog').open) return;
+      acceptIdentityJob(result); context.revision = result.revision;
+      $('voice-consent').checked = false;
+      $('name-message').textContent = 'Name applied to this meeting.';
+      await refreshVoiceClips();
     }).catch(error => { $('name-message').textContent = error.message; });
   });
   for (const kind of ['remember', 'check']) $(`${kind}-voice`).addEventListener('click', () => {
     const context = nameContext;
     identityAction(async () => {
       if (selected?.id !== context.jid) throw new Error('Open this meeting again to choose passages.');
-      const segment_ids = Array.from($('voice-clip-list').querySelectorAll('input:checked'), input => input.value);
+      const segment_ids = selectedVoiceClips();
       const body = {revision: context.revision, segment_ids};
       if (kind === 'remember') {
         const pid = selected.speaker_assignments?.[context.track]?.person_id;

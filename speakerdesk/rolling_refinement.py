@@ -10,6 +10,7 @@ import uuid
 
 RATE = 16000
 CORE_SAMPLES = 18 * RATE
+FAST_MAX_SAMPLES = int(24.5 * RATE)
 CONTEXT_SAMPLES = 3 * RATE
 MAX_PENDING = 2
 
@@ -136,7 +137,8 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
     ownership windows or assigned by invented word timestamps.
     """
     owned = (window['start_sample'], window['end_sample'])
-    if not 0 <= owned[0] < owned[1] or owned[1]-owned[0] > CORE_SAMPLES:
+    maximum = FAST_MAX_SAMPLES if window.get('kind') == 'fast_tail' else CORE_SAMPLES
+    if not 0 <= owned[0] < owned[1] or owned[1]-owned[0] > maximum:
         raise ValueError('Invalid refinement ownership window.')
     previous = [copy.deepcopy(s) for s in document['segments'] if intersects(bounds(s),owned)]
     output = copy.deepcopy(document)
@@ -183,9 +185,10 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
         sid = old['id'] if old else anchor_id(*bounds(candidate),'refined')
         # Distinct ownership windows cannot manufacture a collision with another row.
         if sid in used or (not old and sid in old_ids):raise ValueError('Refinement ID collision.')
+        fast = window.get('kind') == 'fast_tail'
         candidate.update(id=sid,machine_revision=(old.get('machine_revision',0)+1 if old else 1),
-                         refinement_state='refined' if candidate['text'].strip() else 'unresolved',
-                         refinement_window=window['id'],finalized=True)
+                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if candidate['text'].strip() else 'unresolved'),
+                         refinement_window=window['id'],finalized=bool(candidate.get('finalized')) if fast else True)
         candidate['audio_anchor'] = (copy.deepcopy(old.get('audio_anchor')) if old and old.get('audio_anchor')
                                      else {'start_sample':bounds(candidate)[0],'end_sample':bounds(candidate)[1]})
         output['segments'].append(candidate);used.add(sid)
@@ -193,3 +196,37 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
     output['segments'].sort(key=lambda s:bounds(s))
     return {'document':output,'previous_revision':{'window_id':window['id'],'segments':previous},
             'protected_ids':sorted(blocked_ids),'changed':output!=document}
+
+
+def split_same_origin(previous_text, extended_text):
+    """Split a growing decode by matching its SAME audio-origin text prefix.
+
+    This is lexical continuity, not word timestamps. A moving-window suffix
+    match is deliberately forbidden: it can delete genuinely repeated phrases.
+    Uncertain matching returns None; the full candidate remains available.
+    """
+    import difflib
+    import re
+    previous = list(re.finditer(r'\w+|[^\w\s]', previous_text))
+    extended = list(re.finditer(r'\w+|[^\w\s]', extended_text))
+    if not previous or not extended:return None
+    old = [m.group().casefold() for m in previous]
+    new = [m.group().casefold() for m in extended]
+    lexical=next((i for i in range(len(old)-1,-1,-1) if re.search(r'\w',old[i])),None)
+    if lexical is None:return None
+    punctuation=old[lexical+1:];old=old[:lexical+1]
+    same = 0
+    while same < min(len(old),len(new)) and old[same] == new[same]:same += 1
+    cut = same
+    if same < len(old):
+        # Only the unfinished last lexical token may be expanded/corrected.
+        if (same != len(old)-1 or same >= len(new)
+                or len(old[same]) < 3 or old[same][:3] != new[same][:3]
+                or difflib.SequenceMatcher(None,old[same],new[same]).ratio() < .5):return None
+        cut += 1
+    if cut == 0:return None
+    for token in punctuation:
+        if cut<len(new) and new[cut]==token:cut+=1
+        else:break
+    position = extended[cut-1].end()
+    return extended_text[:position].strip(), extended_text[position:].strip()

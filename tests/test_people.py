@@ -193,6 +193,91 @@ class PeopleTests(unittest.TestCase):
         self.assertEqual(len(self.backend.calls), 2)
         self.assertNotIn('centroid', self.client.get('/api/people').get_data(as_text=True))
 
+    def clip_state(self):
+        return self.client.get(f'/api/jobs/{self.jid}/speakers/speaker_0/voice-clips')
+
+    def replace_document(self, doc, **changes):
+        job = self.job(); job.update(document=doc, **changes)
+        with closing(sqlite3.connect(self.root/'jobs.sqlite')) as db:
+            db.execute('UPDATE jobs SET payload=? WHERE id=?', (json.dumps(job), self.jid))
+            db.commit()
+
+    def test_clip_availability_explains_short_turns_without_extracting_audio(self):
+        doc = document()
+        for segment in doc['segments']:
+            segment.update(end=segment['start']+.9, review=True, voice_eligible=True)
+        self.replace_document(doc)
+        response = self.clip_state()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['status'], 'no_clips')
+        self.assertEqual(response.json['clips'], [])
+        self.assertEqual([e['reason'] for e in response.json['excluded']], ['too_short', 'too_short'])
+        self.assertIn('2', response.json['message'])
+        self.assertEqual(self.backend.calls, [])
+
+    def test_offered_long_windows_are_enrollable_and_text_review_does_not_exclude_audio(self):
+        doc = document()
+        doc['segments'] = [{'id': 'long', 'speaker': 'speaker_0', 'start': 0., 'end': 25.,
+                            'text': '', 'review': True, 'voice_eligible': True,
+                            'speaker_candidates': ['speaker_0']}]
+        self.replace_document(doc, duration=25.)
+        state = self.clip_state().json
+        self.assertEqual(state['status'], 'ready')
+        self.assertEqual([(c['start'], c['end']) for c in state['clips']], [(0., 6.), (6., 12.), (12., 18.), (18., 24.)])
+        self.assertEqual(state['minimum_clips'], 2)
+        self.assertEqual(len(state['recommended_ids']), 2)
+        self.assertEqual(self.backend.calls, [])
+        pid = self.person(); self.assign(pid)
+        self.assertEqual(self.enroll(pid, segment_ids=state['recommended_ids']).status_code, 200)
+        self.assertEqual([(c.start, c.end) for _, c in self.backend.calls], [(0., 6.), (6., 12.)])
+
+    def test_clip_availability_reports_audio_runtime_source_busy_and_insufficient_reasons(self):
+        original = document()
+        cases = [('no_audio', original, {}),
+                 ('unavailable', original, {}),
+                 ('source_unverified', dict(original, provenance={'kind': 'imported'}), {}),
+                 ('busy', original, {'status': 'recording'}),
+                 ('insufficient_clips', dict(original, segments=original['segments'][:1]), {})]
+        audio = self.root/self.jid/'audio.wav'
+        for expected, doc, changes in cases:
+            with self.subTest(expected=expected):
+                self.replace_document(doc, **{'status': 'ready', **changes})
+                audio.write_bytes(b'fixture')
+                self.app.extensions['speakerdesk']['voice_runtime'] = (self.backend, POLICY)
+                if expected == 'no_audio': audio.unlink()
+                if expected == 'unavailable': self.app.extensions['speakerdesk']['voice_runtime'] = (None, None)
+                state = self.clip_state().json
+                self.assertEqual(state['status'], expected)
+                self.assertTrue(state['message'])
+                self.assertEqual(state['revision'], self.job()['revision'])
+        self.assertEqual(self.backend.calls, [])
+
+    def test_clip_reasons_distinguish_unfinished_overlap_and_edited_audio(self):
+        doc = document()
+        doc['segments'] = [dict(doc['segments'][0], id='pending', finalized=False),
+                           dict(doc['segments'][0], id='overlap', speaker_candidates=['speaker_0', 'speaker_1']),
+                           dict(doc['segments'][0], id='edited', voice_eligible=False, speaker_candidates=[])]
+        self.replace_document(doc)
+        state = self.clip_state().json
+        self.assertEqual(state['clips'], [])
+        self.assertEqual([c['reason'] for c in state['excluded']], ['unfinished', 'overlap', 'unverified_audio'])
+        self.assertEqual(self.backend.calls, [])
+
+    def test_default_clips_respect_policy_and_nonoverlap_and_old_revision_is_rejected(self):
+        doc = document()
+        doc['segments'] = [dict(doc['segments'][0], id='first'),
+                           dict(doc['segments'][0], id='duplicate-time'),
+                           dict(doc['segments'][1], id='second'),
+                           dict(doc['segments'][1], id='third', start=8., end=11.)]
+        self.replace_document(doc)
+        self.app.extensions['speakerdesk']['voice_runtime'] = (self.backend, replace(POLICY, minimum_clips=3))
+        state = self.clip_state().json
+        self.assertEqual(state['recommended_ids'], ['first', 'second', 'third'])
+        self.assertEqual(state['minimum_clips'], 3)
+        pid = self.person(); self.assign(pid)
+        self.assertEqual(self.enroll(pid, segment_ids=state['recommended_ids'], revision=state['revision']).status_code, 409)
+        self.assertEqual(self.backend.calls, [])
+
     def test_backend_quality_failure_saves_no_partial_profile(self):
         pid = self.person(); self.assign(pid)
         self.backend.clean = False

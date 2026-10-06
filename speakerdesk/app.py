@@ -55,6 +55,11 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             if job['status'] in ACTIVE:
                 job.update(status='failed',message=('The meeting was interrupted. Captured audio and transcript were preserved.' if job.get('kind')=='meeting' else 'The app stopped during processing. Retry this job.'),updated=time.time())
                 conn.execute('UPDATE jobs SET payload=? WHERE id=?',(json.dumps(job),job['id']))
+            if job.get('rolling_refinement') and job.get('refinement_status') in ('waiting','refining'):
+                from rolling_refinement import RollingPlan
+                job['rolling_refinement']=RollingPlan(job['rolling_refinement'],recover=True).snapshot()
+                job['refinement_status']='paused';job.pop('rolling_inflight',None)
+                conn.execute('UPDATE jobs SET payload=? WHERE id=?',(json.dumps(job),job['id']))
 
     def get(jid):
         if len(jid)!=32 or any(c not in '0123456789abcdef' for c in jid):abort(404)
@@ -200,7 +205,35 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
         return jsonify(created),201
 
     @app.get('/api/jobs/<jid>')
-    def job_detail(jid):return jsonify(get(jid))
+    def job_detail(jid):
+        job=get(jid)
+        for key in ('rolling_sources','refinement_history','fast_history','fast_previous_revision','boundary_candidate','boundary_candidates','rolling_inflight','fast_retained_candidate'):job.pop(key,None)
+        return jsonify(job)
+
+    @app.patch('/api/jobs/<jid>/segments/<sid>')
+    def edit_passage(jid,sid):
+        body=request.get_json()
+        if not isinstance(body,dict) or not isinstance(body.get('changes'),dict):raise ValueError('Supply passage edits.')
+        changes=body['changes']
+        if not changes or set(changes)-{'text','speaker','start','end'}:raise ValueError('Only words, speaker and passage bounds can be edited.')
+        with lock:
+            job=get(jid)
+            if not job.get('document') or job['status'] in ('preparing','queued','processing'):abort(409,description='Wait for transcript passages.')
+            row=next((s for s in job['document']['segments'] if s['id']==sid),None)
+            if row is None:abort(404)
+            if body.get('segment_revision')!=row.get('machine_revision',0):abort(409,description='This passage changed. Review its latest words before saving.')
+            prior=copy.deepcopy(row);row.update(changes)
+            document=validate(job['document'],job['duration'])
+            row=next(s for s in document['segments'] if s['id']==sid)
+            row['protected_fields']=sorted(set(prior.get('protected_fields',[]))|set(changes))
+            row.update(machine_revision=prior.get('machine_revision',0)+1,refinement_state='edited')
+            if any(row[k]!=prior[k] for k in ('speaker','start','end')):
+                row.update(voice_eligible=False,speaker_candidates=[]);row.pop('retry_candidate',None)
+            if row['text'].strip() and not row['speaker'].startswith('overlap'):
+                row.update(review_resolution='words_reviewed',review=False)
+            document['edited_at']=time.time()
+            job.update(document=document,revision=job['revision']+1);put(job)
+            return jsonify(segment=row,revision=job['revision'])
 
     @app.get('/api/jobs/<jid>/audio')
     def audio(jid):
@@ -233,6 +266,17 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             original={s['id']:s for s in (job.get('document') or {}).get('segments',[])}
             for segment in incoming['segments']:
                 prior=original.get(segment['id'])
+                protected=set(prior.get('protected_fields',[])) if prior else set()
+                edited={k for k in ('text','speaker','start','end') if prior and segment[k]!=prior[k]}
+                for key in ('audio_anchor','source_start','source_end','source_speaker_candidates','language_epoch','finalized','refinement_window','fast_origin_sample','language_generation','language_mode'):
+                    segment.pop(key,None)
+                    if prior and key in prior:segment[key]=copy.deepcopy(prior[key])
+                if prior and ('machine_revision' in prior or protected or edited):
+                    segment['protected_fields']=sorted(protected|edited)
+                    segment['machine_revision']=prior.get('machine_revision',0)+(1 if edited else 0)
+                    segment['refinement_state']='edited' if protected or edited else prior.get('refinement_state')
+                else:
+                    for key in ('protected_fields','machine_revision','refinement_state'):segment.pop(key,None)
                 # Client edits/imports cannot manufacture server-owned clean-audio evidence.
                 unchanged=bool(prior and not body.get('imported') and all(segment[k]==prior[k] for k in ('speaker','start','end')))
                 segment['voice_eligible']=bool(unchanged and speaker_audio_eligible(prior,prior['speaker']))
