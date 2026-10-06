@@ -188,7 +188,7 @@ def infer(audio_path, duration, language, folder, progress, config=None):
             end=min(chunk['end'],chunk['audio_start']+region['end'])
             if end <= start:continue
             segments.append({**region,'id':f'seg-{len(segments)}','start':start,'end':end,'speaker':speaker,
-                             'speaker_candidates':chunk['speakers'],'voice_eligible':len(chunk['speakers'])==1 and region.get('audio_state')!='digital_silence',
+                             'speaker_candidates':chunk['speakers'],'voice_eligible':len(chunk['speakers'])==1 and not region.get('audio_state'),
                              'review':region['review'] or len(chunk['speakers'])!=1 or end-start<.5,
                              'timing':'audio_crop','confidence':None})
     return retain_unassigned_audio({'schema_version':1,'speakers':speakers,'segments':segments,'diarization':turns,

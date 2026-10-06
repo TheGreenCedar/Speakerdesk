@@ -175,6 +175,7 @@ class Models:
         with contextlib.redirect_stdout(sys.stderr):
             result=transcriber.transcribe(audio,RATE,tuple(names),max_asr_seconds=24.5,allow_overlap=overlap,
                 start_sample=self.transcription_start_sample)
+        self.detector=transcriber.detector
         self.mx.clear_cache();return result
     def feed(self,audio,final=False):
         import sys
@@ -249,7 +250,7 @@ class Engine:
                          'source_speaker_candidates':list(names),'source_start':a,'source_end':b,
                          'language_epoch':epoch,'confidence':None,'timing':'contextual_audio_regions',
                          'language_generation':epoch,'language_mode':self.language_at(round(a*RATE))['language'],
-                         'voice_eligible':finalized and len(names)==1 and p.get('audio_state')!='digital_silence','finalized':finalized,
+                         'voice_eligible':finalized and len(names)==1 and not p.get('audio_state'),'finalized':finalized,
                          'review':p.get('review',False) or len(names)!=1,'refinement_state':'provisional'})
         return rows
     def publish(self,start,end,rows,names):
@@ -277,6 +278,15 @@ class Engine:
         lexical, never a moving suffix dedup or an assertion of word timestamps.
         """
         carry=self.carry if self.carry and self.carry['end']==start and self.carry['epoch']==config['epoch'] else None
+        if carry is None and end-start<.5:
+            # Reuse causal waveform context within this language epoch, with
+            # SAME-origin prefix comparison; never moving-window suffix dedup.
+            epoch_start=next(x['start_sample']/RATE for x in self.timeline if x['epoch']==config['epoch'])
+            context_start=max(epoch_start,start-3)
+            if start-context_start>=.5:
+                prefix=read_audio(self.path,round(context_start*RATE),round(start*RATE))
+                reference=self.decode(prefix,config['language'],names,context_start,config['epoch'],overlap=len(names)>1)
+                carry={'start':context_start,'end':start,'epoch':config['epoch'],'passages':reference}
         begin=carry['start'] if carry else start
         pcm=read_audio(self.path,round(begin*RATE),round(end*RATE))
         if carry and not pcm[round((start-begin)*RATE):].any():
@@ -285,9 +295,16 @@ class Engine:
         passages=self.decode(pcm,config['language'],names,begin,config['epoch'],overlap=len(names)>1)
         if not carry:return self.decorate(passages,start,end,names,config['epoch'])
         reference=carry['passages']
-        split=split_same_origin(reference[0]['text'],passages[0]['text']) if len(reference)==len(passages)==1 and reference[0].get('language')==passages[0].get('language') else None
+        split=split_same_origin(reference[0]['text'],passages[0]['text']) if (len(reference)==len(passages)==1
+            and reference[0].get('language')==passages[0].get('language')
+            and not reference[0].get('transcription_review') and not passages[0].get('transcription_review')) else None
         if split:
-            return self.decorate([{**passages[0],'start':0,'end':end-start,'text':split[1]}],start,end,names,config['epoch'])
+            result={**passages[0],'start':0,'end':end-start,'text':split[1]}
+            if not split[1]:result.update(audio_state='context_no_new_words',review=False)
+            elif end-start<.2:
+                result.update(text='',review=True,audio_state='insufficient_acoustic_context',
+                              transcription_review={'reason':'short_acoustic_context','partial_text':False,'candidate_text':split[1]})
+            return self.decorate([result],start,end,names,config['epoch'])
         self.emit({'type':'boundary_candidate','start':begin,'end':end,'language_epoch':config['epoch'],'candidates':passages})
         return self.decorate([{'start':0,'end':end-start,'text':'','language':None,'review':True,
                               'transcription_review':{'reason':'refinement_incomplete'}}],start,end,names,config['epoch'])
@@ -312,7 +329,7 @@ class Engine:
             if settled and end==self.last_decode:
                 previous=[copy.deepcopy(s) for s in self.document['segments'] if start<=s['start']<s['end']<=end]
                 if previous:
-                    for row in previous:row.update(finalized=True,voice_eligible=len(region['speakers'])==1 and row.get('audio_state')!='digital_silence')
+                    for row in previous:row.update(finalized=True,voice_eligible=len(region['speakers'])==1 and not row.get('audio_state'))
                     self.publish(start,end,previous,region['speakers']);self.cursor=end;continue
             if not settled and end-start<6:break
             context_ready=end>=start+18 and available>=end+3
@@ -322,7 +339,7 @@ class Engine:
             decode_end=min(limit,end+3) if end>=start+18 and (settled or available>=end+3) else end
             names=region['speakers']
             rows=self.transcribe_owned(start,decode_end,config,names)
-            for row in rows:row.update(finalized=settled,voice_eligible=settled and len(names)==1 and row.get('audio_state')!='digital_silence')
+            for row in rows:row.update(finalized=settled,voice_eligible=settled and len(names)==1 and not row.get('audio_state'))
             if decode_end>end:
                 if rows and all(s.get('audio_state')=='digital_silence' for s in rows):
                     self.publish(start,decode_end,rows,names);self.cursor=end;self.last_decode=end;self.carry=None
@@ -332,7 +349,7 @@ class Engine:
                     previous=self.transcribe_owned(start,end,config,names)
                 split=split_same_origin(previous[0]['text'],rows[0]['text']) if len(previous)==len(rows)==1 and previous[0].get('language')==rows[0].get('language') else None
                 if split:
-                    prefix=copy.deepcopy(rows[0]);prefix.update(end=end,text=split[0],finalized=True,voice_eligible=len(names)==1 and prefix.get('audio_state')!='digital_silence')
+                    prefix=copy.deepcopy(rows[0]);prefix.update(end=end,text=split[0],finalized=True,voice_eligible=len(names)==1 and not prefix.get('audio_state'))
                     tail=copy.deepcopy(rows[0]);tail.update(start=end,text=split[1],finalized=False,voice_eligible=False)
                     rows=[prefix,tail]
                 else:

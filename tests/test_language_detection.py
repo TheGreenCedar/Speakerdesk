@@ -144,7 +144,12 @@ class LanguageRoutingTests(unittest.TestCase):
             transcriber=SpeechTranscriber(cohere_model(),'fr')
         for pcm in [np.full(1000,.0001,dtype=np.float32),np.full(24*16000,.1,dtype=np.float32)]:
             row=transcriber.transcribe(pcm,16000,('speaker_0','speaker_1'))[0]
-            self.assertEqual((row['start'],row['end'],row['language'],row['text']),(0,len(pcm)/16000,'fr','Français original'))
+            self.assertEqual((row['start'],row['end'],row['language']),(0,len(pcm)/16000,'fr'))
+            if len(pcm)<3200:
+                self.assertEqual(row['text'],'')
+                self.assertEqual(row['transcription_review']['candidate_text'],'Français original')
+                self.assertTrue(row['review'])
+            else:self.assertEqual(row['text'],'Français original')
             np.testing.assert_array_equal(transcriber.asr.transcribe.call_args.args[0],pcm)
         detector.assert_not_called()
 

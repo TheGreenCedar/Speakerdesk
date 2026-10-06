@@ -65,18 +65,40 @@ is synthetic and is not asserted identical to the independent audit's baseline.
 CPU tests exercise production routing, import workers, sample ranges, subprocess
 protocols, persistence, epochs, failure barriers, exports and protected edits with
 explicit acoustic/model peers. They do not measure acoustic accuracy or native
-performance. All **205 CPU tests passed**; independent source review found no
-remaining actionable backend issue after correcting historical context and
-review-resolution regressions. This correction has not yet received new real NVIDIA/Whisper/Cohere
-validation. No native model run or package build was started. The latest resource
-checkpoint recovered above the shared floor, but full-build admission and CodeStory
-resource coordination are pending. Existing installed models
-and the signed 0.4.0 release are preserved. No new release is published.
+performance. The original corrective head passed 205 CPU tests, 38 browser checks,
+8 standalone Rust helper tests and hosted full pinned Rust/Tauri compilation.
+Actual offline NVIDIA/Cohere/Whisper GPU checks recovered quiet and short speech
+and verified the real meeting API's English/French language epoch boundary.
+They also exposed hallucinated words on tiny nonzero tails, prompting the
+additional acoustic-context correction below. The enlarged CPU suite passes
+214 tests. Packaged Save/Cancel/retry requires the final signed candidate; the
+ad-hoc test sidecar cannot load embedded Python under existing hardened runtime
+protections. No platform or signer policy is relaxed for this check.
 
 Cohere supplies no word timestamps or trustworthy no-speech score. Nonzero room
-noise and overlapping voices may still yield incorrect text; this change does
-not invent confidence or discard returned words based on amplitude. Empty/failed
-results remain available for audio review and an explicit language retry.
+noise and overlapping voices can still yield incorrect text. Returned words
+are never discarded by a blanket amplitude or language-confidence gate.
+
+## Tiny fragments and acoustic review
+
+The pinned Cohere frontend uses 160-sample hops. Fewer than two valid frames
+(320 samples at 16kHz) cannot supply usable normalized acoustic features, so
+standalone decoding is skipped while the source audio remains retained.
+Brief live tails reuse up to three seconds of causal waveform context within
+the same language epoch. Complete prefix and extended decodes from the **same
+origin** establish a lexical suffix; uncertain comparisons retain the full
+candidate. This does not align individual words or remove moving-window repeats.
+
+An isolated sub-200ms decode remains an unconfirmed, copyable candidate in audio
+review and JSON rather than becoming primary transcript text or enrollment audio.
+The existing optional Whisper head supplies its separate unmasked SOT no-speech
+score. Only missing-speaker audio with a finite score at least .95 receives the
+same conservative candidate treatment. That score, and the short/context duration
+rules, indicate uncertainty; they are not calibrated proof of silence. Manual
+language remains unchanged and needs no new model/download. Exact-zero PCM is
+still explicitly silent. Quiet and short plausible speech continue to reach
+Cohere; partial/token-limit metadata and original samples are preserved.
+
 
 ## Recovering a correction after new machine words
 
@@ -114,6 +136,6 @@ Three CPU export tests cover inclusive UTF-8 bounds and actual GET/HEAD refusals
 Eight browser checks cover the busy guard, matching/stale native status peers,
 save/switch/edit races, error responses and an actual Chromium text download.
 Native statuses in those browser checks are explicit test peers: no native dialog
-or packaged Save/Cancel/retry was executed. Full pinned Tauri compilation and the
-packaged native dialog checks await coordinated native build admission. The
+or packaged Save/Cancel/retry was executed. Full pinned Tauri compilation passed at the original corrective head. Final
+packaged native dialog checks require the Developer ID signed 0.4.1 candidate. The
 installed application and published 0.4.0 artifacts have not been replaced.
