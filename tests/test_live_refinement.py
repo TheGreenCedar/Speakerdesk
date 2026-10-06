@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
 from live_refinement import Engine, Inbox, Models, align_tracks, context_regions, read_audio
-from meeting_refinement import RefinementController, split_blank_placeholders
+from meeting_refinement import RefinementController, split_blank_placeholders, remember_unresolved, resolve_unresolved
 from rolling_refinement import RATE, RollingPlan, reconcile_window, segment_version, split_same_origin
 
 
@@ -207,6 +207,59 @@ class HostTests(unittest.TestCase):
         with patch('meeting_refinement.time.monotonic',return_value=108):self.manager.refinement.schedule(self.jid)
         self.assertEqual(self.manager.worker_controls.get_nowait()['window']['end_sample'],8*RATE)
 
+    def test_shorter_successful_candidate_keeps_words_and_exposes_saved_audio_retry(self):
+        self.provisional(6,'Retain the complete previous phrase')
+        job=self.manager.get(self.jid);job['duration']=6;self.manager.put(job)
+        self.manager.duration=self.manager.processed=6
+        self.manager.refinement.enabled=self.manager.refinement.force=self.manager.refinement.final=True
+        self.manager.refinement.schedule(self.jid)
+        request=self.manager.worker_controls.get_nowait()
+        self.manager.refinement.result(self.jid,{'operation_id':request['operation_id'],'language_epoch':0,'window':request['window'],
+            'candidates':[{'start':0,'end':5.98,'text':'A shorter model hypothesis','speaker':'speaker_0',
+                           'language_generation':0,'language_mode':'en','language':'en'}]})
+        job=self.manager.get(self.jid)
+        self.assertEqual(job['refinement_status'],'unresolved')
+        self.assertEqual(job['refinement_unresolved'][0]['start_sample'],0)
+        self.assertEqual(job['document']['segments'][0]['text'],'Retain the complete previous phrase')
+        self.assertTrue(job['document']['segments'][0]['review'])
+        self.assertEqual(job['document']['segments'][0]['refinement_state'],'unresolved')
+        self.manager.refinement.shutdown_sent=False;self.manager.refinement.resume(self.jid)
+        self.assertEqual(self.manager.get(self.jid)['rolling_refinement']['completed_sample'],0)
+
+    def test_recovery_clears_covered_ranges_when_new_window_ids_differ(self):
+        job=self.manager.get(self.jid)
+        remember_unresolved(job,0,12*RATE,'language_changed')
+        resolve_unresolved(job,0,6*RATE)
+        self.assertEqual([(w['start_sample'],w['end_sample']) for w in job['refinement_unresolved']],[(6*RATE,12*RATE)])
+        resolve_unresolved(job,6*RATE,12*RATE)
+        self.assertEqual(job['refinement_unresolved'],[])
+
+    def test_skipped_historical_core_is_retained_as_unresolved(self):
+        job=self.manager.get(self.jid);job.update(language='fr',language_epoch=1,duration=6)
+        job['language_history'].append({'epoch':1,'generation':1,'language':'fr','start_sample':6*RATE})
+        self.manager.put(job);self.manager.duration=self.manager.processed=6
+        self.manager.refinement.enabled=self.manager.refinement.force=self.manager.refinement.final=True
+        self.manager.refinement.schedule(self.jid)
+        job=self.manager.get(self.jid)
+        self.assertEqual(job['refinement_status'],'unresolved')
+        self.assertEqual([(w['start_sample'],w['end_sample']) for w in job['refinement_unresolved']],[(0,6*RATE)])
+
+    def test_live_language_change_bookmarks_unfinished_previous_audio(self):
+        job=self.manager.get(self.jid);job.update(status='paused',duration=6)
+        job['rolling_refinement']['completed_sample']=2*RATE;self.manager.put(job)
+        self.manager.jid=self.jid;self.manager.duration=6;self.manager.worker=Mock()
+        self.manager.worker.poll.return_value=None
+        try:
+            with patch('live_meeting.preflight',return_value=[]):
+                response=self.client.patch(f'/api/meetings/{self.jid}/language',headers=self.headers,
+                    json={'language':'fr','language_revision':0})
+            self.assertEqual(response.status_code,200,response.json)
+            job=self.manager.get(self.jid)
+            self.assertEqual(job['rolling_refinement']['completed_sample'],6*RATE)
+            self.assertEqual([(w['start_sample'],w['end_sample']) for w in job['refinement_unresolved']],[(2*RATE,6*RATE)])
+            self.assertEqual(job['language_history'][-1]['start_sample'],6*RATE)
+        finally:self.manager.worker=None;self.manager.jid=None
+
     def test_delayed_historical_phrase_can_finish_before_its_language_boundary(self):
         self.provisional(6,'Please review the secs')
         job=self.manager.get(self.jid)
@@ -250,6 +303,52 @@ class HostTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError,'disk failure'):self.manager._run_saved_refinement(self.jid)
         self.assertIsNone(self.manager.jid);self.assertIsNone(self.manager.worker);self.assertFalse(self.manager.refining_saved)
         self.assertTrue(process.stdin.closed);self.assertTrue(process.stdout.closed)
+
+    def test_failed_or_partial_candidate_keeps_saved_audio_retry_unresolved(self):
+        self.provisional(6,'')
+        for text,reason in [('', 'transcription_failed'),('Partial words', 'token_limit')]:
+            with self.subTest(reason=reason):
+                while not self.manager.worker_controls.empty():self.manager.worker_controls.get_nowait()
+                self.manager.refinement.shutdown_sent=False
+                job=self.manager.get(self.jid);job['duration']=6
+                job['document']['segments']=[]
+                job['rolling_refinement']['completed_sample']=0
+                job['rolling_refinement']['pending']=[]
+                remember_unresolved(job,0,6*RATE,'candidate_incomplete');self.manager.put(job)
+                self.manager.duration=self.manager.processed=6
+                self.manager.refinement.enabled=self.manager.refinement.force=self.manager.refinement.final=True
+                self.manager.refinement.schedule(self.jid)
+                request=self.manager.worker_controls.get_nowait()
+                self.manager.refinement.result(self.jid,{'operation_id':request['operation_id'],'language_epoch':0,'window':request['window'],
+                    'candidates':[{'start':0,'end':6,'text':text,'speaker':'speaker_0',
+                                   'language_generation':0,'language_mode':'en','language':'en','review':True,
+                                   'transcription_review':{'reason':reason,'partial_text':bool(text)}}]})
+                job=self.manager.get(self.jid)
+                self.assertEqual(job['refinement_status'],'unresolved')
+                self.assertEqual([(w['start_sample'],w['end_sample']) for w in job['refinement_unresolved']],[(0,6*RATE)])
+                self.assertEqual(job['document']['segments'][0]['text'],text)
+                self.assertEqual(job['document']['segments'][0]['refinement_state'],'unresolved')
+                self.assertTrue(job['document']['segments'][0]['review'])
+
+    def test_token_limited_candidate_keeps_prior_usable_words_and_retry(self):
+        self.provisional(6,'Earlier full usable words')
+        job=self.manager.get(self.jid);job['duration']=6
+        remember_unresolved(job,0,6*RATE,'candidate_incomplete');self.manager.put(job)
+        self.manager.duration=self.manager.processed=6
+        self.manager.refinement.enabled=self.manager.refinement.force=self.manager.refinement.final=True
+        self.manager.refinement.schedule(self.jid)
+        request=self.manager.worker_controls.get_nowait()
+        self.manager.refinement.result(self.jid,{'operation_id':request['operation_id'],'language_epoch':0,'window':request['window'],
+            'candidates':[{'start':0,'end':6,'text':'Partial','speaker':'speaker_0',
+                           'language_generation':0,'language_mode':'en','language':'en','review':True,
+                           'transcription_review':{'reason':'token_limit','partial_text':True}}]})
+        job=self.manager.get(self.jid)
+        self.assertEqual(job['document']['segments'][0]['text'],'Earlier full usable words')
+        self.assertEqual(job['document']['segments'][0]['refinement_state'],'unresolved')
+        self.assertTrue(job['document']['segments'][0]['review'])
+        self.assertEqual(job['refinement_status'],'unresolved')
+        self.assertEqual([(w['start_sample'],w['end_sample']) for w in job['refinement_unresolved']],[(0,6*RATE)])
+        self.assertEqual(job['refinement_history'][request['window']['id']]['candidates'][0]['text'],'Partial')
 
 
 if __name__=='__main__':unittest.main()

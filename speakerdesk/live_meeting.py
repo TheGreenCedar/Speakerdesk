@@ -143,6 +143,8 @@ class MeetingManager:
             job['document']['provenance'].update(language='per_window',language_history=job['language_history'])
             if language=='auto':job['document']['provenance']['language_detector']=LID_CHECKPOINT
             plan=RollingPlan(job['rolling_refinement']);paused=plan.state['cancelled'];plan.cancel()
+            from meeting_refinement import remember_unresolved
+            remember_unresolved(job,plan.state['completed_sample'],epoch['start_sample'],'language_changed')
             plan.state['completed_sample']=max(plan.state['completed_sample'],epoch['start_sample'])
             if not paused:plan.resume()
             job['rolling_refinement']=plan.snapshot();job.pop('rolling_inflight',None)

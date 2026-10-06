@@ -1,7 +1,7 @@
 """Atomic host reconciliation and resumable refinement of the existing local WAV."""
 import copy
 import time
-from rolling_refinement import RATE, RollingPlan, anchor_id, bounds, reconcile_window, segment_version, split_same_origin
+from rolling_refinement import RATE, CORE_SAMPLES, RollingPlan, anchor_id, bounds, reconcile_window, segment_version, split_same_origin
 from transcript import validate
 from live_language import validate_language_segment
 
@@ -52,6 +52,7 @@ class RefinementController:
             while dispatched:
                 stamp=next(x for x in reversed(job['language_history']) if x['start_sample']<=dispatched['start_sample'])
                 if stamp['epoch']==job['language_epoch'] or self.manager.refining_saved:break
+                remember_unresolved(job,dispatched['start_sample'],dispatched['end_sample'],'language_changed')
                 plan.acknowledge(dispatched['id'],dispatched['operation_id'])
                 dispatched=plan.dispatch(0 if self.force or force else backlog)
             if dispatched:
@@ -142,17 +143,22 @@ class RefinementController:
                 for row in result.get('candidates',[]):validate_language_segment(row,job['language_history'])
                 merged=reconcile_window(job['document'],window,request['expected'],result.get('candidates',[]),result.get('speakers'))
                 document=validate(merged['document'],job['duration'])
+                incomplete=False
                 for row in document['segments']:
+                    if row.get('refinement_window')==window['id'] and row.get('refinement_state')=='unresolved' and not row.get('protected_fields'):
+                        incomplete=True;row['review']=True
                     if (row['id'] in merged['protected_ids'] and not row.get('protected_fields')
                             and request['expected'].get(row['id'])==segment_version(row)
                             and window['start_sample']/RATE<=row['start']<row['end']<=window['end_sample']/RATE):
-                        row.update(refinement_state='unresolved',finalized=True,
+                        incomplete=True
+                        row.update(refinement_state='unresolved',finalized=True,review=True,
                                    transcription_review={'reason':'refinement_incomplete','partial_text':bool(row['text'].strip())})
                 save_history(job['refinement_history'],window['id'],{'language_epoch':result['language_epoch'],'created':time.time(),
                     **merged['previous_revision'],'candidates':result.get('candidates',[])})
                 job.update(document=document,revision=job['revision']+1)
                 plan.acknowledge(window['id'],operation);job['refinement_status']='waiting'
-                job['refinement_unresolved']=[w for w in job['refinement_unresolved'] if w['id']!=window['id']]
+                resolve_unresolved(job,window['start_sample'],window['end_sample'])
+                if incomplete:remember_unresolved(job,window['start_sample'],window['end_sample'],'candidate_incomplete')
                 job.pop('refinement_error',None)
             job.pop('rolling_inflight',None);self.store(job,plan)
             if self.manager.recognizer:self.manager.recognizer.observe(jid)
@@ -174,6 +180,32 @@ class RefinementController:
                 plan.state['pending']=[]
             job['refinement_status']='waiting';self.store(job,plan)
         self.schedule(jid,force=self.force)
+
+
+def remember_unresolved(job,start,end,reason):
+    """Retain skipped/incomplete audio ranges for an explicit saved-audio retry."""
+    if start>=end:return
+    # A retry may choose different utterance boundaries. Track coverage rather
+    # than assuming its window ID will be identical to the original request.
+    resolve_unresolved(job,start,end)
+    while start<end:
+        stop=min(end,start+CORE_SAMPLES)
+        job['refinement_unresolved'].append({'id':anchor_id(start,stop,'refine'),
+            'start_sample':start,'end_sample':stop,'reason':reason})
+        start=stop
+    job['refinement_unresolved'].sort(key=lambda w:w['start_sample'])
+
+
+def resolve_unresolved(job,start,end):
+    retained=[]
+    for window in job['refinement_unresolved']:
+        a,b=window['start_sample'],window['end_sample']
+        if b<=start or a>=end:retained.append(window);continue
+        for first,last in ((a,min(b,start)),(max(a,end),b)):
+            if first<last:
+                piece=copy.deepcopy(window);piece.update(id=anchor_id(first,last,'refine'),start_sample=first,end_sample=last)
+                retained.append(piece)
+    job['refinement_unresolved']=retained
 
 
 def split_blank_placeholders(document,window):

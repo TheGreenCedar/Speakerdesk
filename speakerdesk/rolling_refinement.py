@@ -156,7 +156,8 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
                or not owned[0] <= bounds(s)[0] < bounds(s)[1] <= owned[1]]
     # A failed/blank/incomplete candidate does not discard previous usable words.
     def covers(old, replacements):
-        replacements = [s for s in replacements if intersects(bounds(s),bounds(old)) and s['text'].strip()]
+        replacements = [s for s in replacements if intersects(bounds(s),bounds(old)) and s['text'].strip()
+                        and not s.get('transcription_review')]
         intervals = sorted(bounds(s) for s in replacements)
         cursor = bounds(old)[0]
         for start,end in intervals:
@@ -187,7 +188,7 @@ def reconcile_window(document, window, expected, candidates, speakers=None):
         if sid in used or (not old and sid in old_ids):raise ValueError('Refinement ID collision.')
         fast = window.get('kind') == 'fast_tail'
         candidate.update(id=sid,machine_revision=(old.get('machine_revision',0)+1 if old else 1),
-                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if candidate['text'].strip() else 'unresolved'),
+                         refinement_state=candidate.get('refinement_state','provisional') if fast else ('refined' if candidate['text'].strip() and not candidate.get('transcription_review') else 'unresolved'),
                          refinement_window=window['id'],finalized=bool(candidate.get('finalized')) if fast else True)
         candidate['audio_anchor'] = (copy.deepcopy(old.get('audio_anchor')) if old and old.get('audio_anchor')
                                      else {'start_sample':bounds(candidate)[0],'end_sample':bounds(candidate)[1]})

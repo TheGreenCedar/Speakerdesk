@@ -124,8 +124,11 @@ may admit Cohere text from the mix; it does not separate the voices.
 `live_refinement.py` keeps model execution serial and coalesces PCM notifications
 into source-WAV ranges. `meeting_refinement.py` stores operation IDs, source
 snapshots, protected fields, candidates and prior revisions atomically in the
-job payload. Each failed operation gets at most two attempts; unresolved windows
-are bookmarked for an explicit retry. Stop has a 45-second refinement budget
+job payload. Each failed operation gets at most two attempts; skipped older-language audio,
+shorter candidates, empty ASR and token-limited output retain unresolved ranges
+for an explicit retry. Recovery clears covered sample ranges even when utterance
+boundaries change their window IDs. Incomplete candidates cannot replace earlier
+usable words or make the job report complete. Stop has a 45-second refinement budget
 inside the existing 60-second completion bound. Unfinished work remains paused
 and resumable. Explicit recovery starts only the inference worker over saved WAV
 and never starts capture. Historical recovery routes each owned window through
@@ -146,7 +149,7 @@ in place; explicit audio-anchor scroll compensation handles merged rows.
 
 ## Validation and release boundary
 
-The full integrated CPU suite passes: **165 tests in 20.061 seconds**. It exercises
+The full integrated CPU suite passes: **181 tests**. It exercises
 production scheduling, the resident engine and real JSONL/pipes/SQLite/WAV with
 explicit synthetic model substitutes. New cases include a through-word six-second
 cut, sentence punctuation, genuine repetition, lexical code switching, 80 seconds
@@ -179,7 +182,20 @@ Screenshots contain synthetic CPU outputs:
 
 ![Dark appearance](screenshots/rolling-context-dark.png)
 
-No trained model/GPU pass, real device capture, native package build or acoustic
-accuracy comparison was run for this 0.4 change. The parent must coordinate the
-next native resource window with CodeStory before that evaluation. Keep 0.3.0
-release assets and website publication separate from this source branch.
+A real local MLX NVIDIA/Cohere synthetic replay ran at commit `00d6615`: 49.758
+seconds of installed-voice audio saved sample-exactly, 15 provisional revisions,
+three successful contextual results, Auto English to French at sample 664136,
+and a protected edit retained through pause/resume and Stop. One French phrase
+grew from 6.48 to 7.10 seconds at the same audio origin and added “les noms.”
+The bounded process exited 0 after 55.66 seconds, with 1.95 GB peak process-tree RSS
+and 2.145 GB reported peak MLX allocation. The corresponding hosted ad-hoc Mac
+package build succeeded; it was not downloaded or launched.
+
+That replay exposed falsely complete refinement bookkeeping, corrected by this
+follow-up. Retest of the corrected source and its explicit saved-audio recovery
+is pending a fresh parent-coordinated CodeStory resource window. The previous
+successful run does not verify this follow-up. Speaker mapping still left several
+clean synthetic regions mixed/unknown; brief uncertain Auto regions remained
+blank review placeholders. Real microphone/system capture and natural-meeting
+acoustic accuracy are unverified. Keep 0.3.0 release assets and website publication
+separate from this source branch.
