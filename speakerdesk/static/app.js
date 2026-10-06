@@ -632,7 +632,7 @@ function wire() {
       await api(`/api/jobs/${selected.id}`, {method: 'DELETE'}); passageDrafts.clear();selected = doc = null; dirty = false;
       $('player').pause(); $('player').removeAttribute('src'); $('workspace').hidden = true; $('empty').hidden = false;
       jobs = await api('/api/jobs'); renderJobs(); notice('Recording deleted from local storage.');
-    } catch (e) { notice(e.message, true); }
+    } catch (e) { notice(e.message, true); if (dirty) scheduleAutosave(); }
   });
   window.addEventListener('beforeunload', e => { if (dirty || hasPassageDrafts()) { e.preventDefault(); e.returnValue = ''; } });
 }
