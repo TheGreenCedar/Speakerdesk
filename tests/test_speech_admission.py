@@ -15,6 +15,21 @@ from language_detection import SpeechTranscriber
 
 
 class SpeechAdmissionTests(unittest.TestCase):
+    def test_decoder_attempt_counter_excludes_negative_audio_and_counts_failure(self):
+        audio=np.linspace(-.01,.01,4000,dtype=np.float32)
+        asr=Mock();asr.transcribe.side_effect=RuntimeError('decoder failed')
+        negative=SpeechFrames();positive=SpeechFrames()
+        for a in range(0,len(audio),FRAME):
+            negative.append(a,min(a+FRAME,len(audio)),.01)
+            positive.append(a,min(a+FRAME,len(audio)),.8)
+        transcriber=SpeechTranscriber(asr,'en',speech_evidence=negative)
+        transcriber.transcribe(audio,16000,('speaker_0',))
+        self.assertEqual(transcriber.cohere_calls,0);asr.transcribe.assert_not_called()
+        transcriber.speech_evidence=positive
+        rows=transcriber.transcribe(audio,16000,('speaker_0',))
+        self.assertEqual(transcriber.cohere_calls,1);asr.transcribe.assert_called_once()
+        self.assertEqual(rows[0]['transcription_review']['reason'],'transcription_failed')
+
     def test_virtual_asr_boundary_context_preserves_physical_pcm_anchor_and_admission(self):
         audio=np.linspace(-.01,.01,4000,dtype=np.float32);original=audio.copy()
         frames=SpeechFrames()

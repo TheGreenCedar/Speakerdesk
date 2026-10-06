@@ -21,6 +21,13 @@ language probes, raw activity, source ownership, unchanged saved PCM and
 synthesis metadata. This proves the packaged backend's production audio route;
 native microphone/system capture and natural-room quality require separate QA.
 
+Negative canonical recipes require complete refinement, exact inspected PCM and
+an integer zero Cohere-attempt counter in both Pause and Stop receipts. Missing
+counter evidence or unresolved audio fails release qualification. The counter
+increments immediately before the real decoder call, including failed calls.
+The protected-correction recipe includes a nonconstant noise gap, preserving
+the same edit/CAS and completion assertions.
+
 Tracked recipe JSON includes silence, seeded stationary/colored noise, quiet and
 brief speech, genuinely repeated “thank you”, continuous sentences, mixed
 voices, real preceding-language context and protected corrections. Independent

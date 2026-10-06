@@ -150,6 +150,7 @@ class Models:
         self.diar=load(Path(config['diar_path']),strict=True);self.diar.set_streaming_config('low')
         self.state=self.diar.init_streaming_state()
         self.asr=CohereAsrModel.from_path(Path(config['cohere_path']))
+        self.cohere_calls=0
         from speech_admission import SileroModel, FrameArchive
         import uuid
         self.speech=SileroModel(config['speech_path'])
@@ -162,7 +163,7 @@ class Models:
         self.language_context=None;self.transcription_start_sample=0;self.coarse_aligner=None;self.asr_padding=(0,0)
     def inspection_receipt(self,phase,request_id):
         return {**self.admission_execution,**self.speech_live.inspection(),
-                'phase':phase,'request_id':request_id}
+                'phase':phase,'request_id':request_id,'cohere_calls':self.cohere_calls}
     def set_decode_boundary_padding(self,left,right):
         if type(left) is not int or type(right) is not int or left not in (0,3200) or right not in (0,3200):
             raise ValueError('Invalid canonical decode boundary context.')
@@ -195,9 +196,14 @@ class Models:
         transcriber=SpeechTranscriber(self.asr,language,self.config.get('lid_path'),detector=self.detector,
             context=self.language_context,speech_evidence=(self.speech_historical
                 if self.speech_historical is not None else self.speech_live.evidence))
-        with contextlib.redirect_stdout(sys.stderr):
-            result=transcriber.transcribe(audio,RATE,tuple(names),max_asr_seconds=24.5,allow_overlap=overlap,
-                start_sample=self.transcription_start_sample,asr_padding=self.asr_padding)
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                result=transcriber.transcribe(audio,RATE,tuple(names),max_asr_seconds=24.5,allow_overlap=overlap,
+                    start_sample=self.transcription_start_sample,asr_padding=self.asr_padding)
+        finally:
+            # Count actual decoder attempts, including failures, rather than
+            # routing windows or transcript rows. No transcript is substituted.
+            self.cohere_calls+=transcriber.cohere_calls
         self.detector=transcriber.detector
         self.mx.clear_cache();return result
     def feed(self,audio,final=False):

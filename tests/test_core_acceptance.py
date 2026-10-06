@@ -102,14 +102,14 @@ class CoreAcceptanceTests(unittest.TestCase):
         pause['admission_receipt']={**identity,'phase':'pause','request_id':trace['pause_request_id'],
             'inspection_state':'observed_prefix','start_sample':0,'end_sample':0,'received_sample':1,
             'closed':False,'audio_encoding':'pcm_s16le','pcm_sha256':empty,
-            'speech_samples':0,'uncertain_samples':0,'negative_constant_samples':0,'model_negative_samples':0,'decision':'no_speech'}
+            'speech_samples':0,'uncertain_samples':0,'negative_constant_samples':0,'model_negative_samples':0,'decision':'no_speech','cohere_calls':0}
         final=trace['refined'];final.update(canonical_observed_sample=1,canonical_uncertain_samples=uncertain,
             capture_inspection_request={'through_sample':1,'request_id':'fixture-stop'},rolling_sources={})
         final['capture_admission']={**identity,'phase':'stop','request_id':'fixture-stop',
             'inspection_state':'observed_prefix','start_sample':0,'end_sample':1,'received_sample':1,
             'closed':True,'audio_encoding':'pcm_s16le','pcm_sha256':whole,
             'speech_samples':0,'uncertain_samples':uncertain,'negative_constant_samples':1-uncertain,'model_negative_samples':0,
-            'decision':'uncertain' if uncertain else 'no_speech'}
+            'decision':'uncertain' if uncertain else 'no_speech','cohere_calls':0}
         if uncertain:final['refinement_status']='unresolved';final['rolling_refinement']['completed_sample']=0
         return recipe,trace
     def test_canonical_no_words_requires_bound_inspection_instead_of_fake_text_revision(self):
@@ -129,13 +129,24 @@ class CoreAcceptanceTests(unittest.TestCase):
         self.assertFalse(core.evaluate(recipe,trace)['refined_no_words'])
     def test_uncertain_negative_receipt_can_never_claim_complete_or_bypass_speech_gate(self):
         recipe,trace=self.canonical_negative_trace(1)
-        self.assertTrue(core.evaluate(recipe,trace)['negative_audio_inspected'])
+        self.assertFalse(core.evaluate(recipe,trace)['negative_audio_inspected'])
         trace['refined']['refinement_status']='complete'
         self.assertFalse(core.evaluate(recipe,trace)['negative_audio_inspected'])
         trace['refined']['refinement_status']='unresolved'
         speech_recipe=copy.deepcopy(recipe);speech_recipe['expect']={'terms':['blue']}
         checks=core.evaluate(speech_recipe,trace)
         self.assertFalse(checks['refinement_executed']);self.assertFalse(checks['refined_coverage'])
+    def test_negative_release_gate_requires_actual_zero_decoder_counter(self):
+        recipe,trace=self.canonical_negative_trace()
+        for stage in ('provisional','refined'):
+            for value in (None,True,-1,1,'0'):
+                broken=copy.deepcopy(trace)
+                receipt=(broken[stage]['pause_flush']['admission_receipt'] if stage=='provisional'
+                         else broken[stage]['capture_admission'])
+                if value is None:receipt.pop('cohere_calls')
+                else:receipt['cohere_calls']=value
+                with self.subTest(stage=stage,value=value):
+                    self.assertFalse(core.evaluate(recipe,broken)[stage+'_zero_cohere_calls'])
     def test_rehashed_canonical_receipt_pcm_is_rechecked_from_saved_audio(self):
         recipe,trace=self.canonical_negative_trace()
         directory=self.evidence/recipe['id'];(directory/'trace.json').write_text(json.dumps(trace))

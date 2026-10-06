@@ -164,6 +164,7 @@ class SpeechTranscriber:
 
     def __init__(self, asr, language, detector_path=None, *, detector=None, context=None, speech_evidence=None):
         self.asr,self.detector_path,self.detector=asr,detector_path,detector
+        self.cohere_calls=0
         self.speech_evidence = speech_evidence
         self.set_language(language)
         if context is not None:
@@ -321,6 +322,7 @@ class SpeechTranscriber:
                             'leading_samples':left,'trailing_samples':right,
                             'physical_start_sample':start_sample+window['begin'],
                             'physical_end_sample':start_sample+window['end_sample']}
+                    self.cohere_calls+=1
                     result=self.asr.transcribe(pcm,
                         sample_rate=sample_rate,language=window['language'],max_new_tokens=448)
                     raw_text=result.text
