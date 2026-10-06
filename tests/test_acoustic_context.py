@@ -1,11 +1,13 @@
 """Prevent promoted tail hallucinations while retaining real quiet/short speech."""
 import tempfile
+import sys
 import types
 import unittest
 import wave
 from pathlib import Path
 from unittest.mock import Mock
 import numpy as np
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from language_detection import SpeechTranscriber
 from live_refinement import Engine,Inbox
 from transcript import export

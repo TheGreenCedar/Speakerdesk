@@ -79,3 +79,5 @@
 #follow-live{right:26px;bottom:12px;min-height:30px;padding:4px 10px}
 @media(max-width:1000px){.recording-heading{padding:14px 18px 10px;gap:8px}.recording-title h1{font-size:21px}.processing-row,.refinement-controls{padding-left:18px;padding-right:18px}.editor-layout,.speaker-strip{padding-left:18px;padding-right:18px}#capture-footer{padding:9px 18px;gap:10px}.segment{gap:8px}.segment-top{gap:6px}.live-language-control{flex-wrap:wrap}}
 @media(max-width:700px){.recording-actions{gap:3px}.recording-actions button,.export-menu summary{padding:5px 8px;min-height:30px}.live-language-control label{font-size:11px}#live-language{min-width:110px}.segment-top{padding-right:0}.passage-repair:not([open]){position:static}.passage-repair summary{opacity:1}.segment textarea{font-size:15px}}
+
+.retained-audio-review textarea[aria-label="Unconfirmed model words"]{display:block;width:100%;min-height:72px;font-size:16px;line-height:1.5;padding:10px;resize:vertical;background:var(--paper);border:1px solid var(--line);border-radius:6px}
