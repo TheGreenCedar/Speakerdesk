@@ -64,7 +64,7 @@ class UtteranceTests(unittest.TestCase):
         row = book.apply_model(row['id'], 0, 'Hello', start_sample=0, end_sample=8000, stage='live', complete=True)
         revision, audio_revision = row['machine_revision'], row['audio_revision']
         digest = hashlib.sha256(b'Hello').hexdigest()
-        words = [{'text': 'Hello', 'start_sample': 1000, 'end_sample': 4500}]
+        words = [{'text': 'Hello', 'start_char':0,'end_char':5,'start_sample': 1000, 'end_sample': 4500}]
         book.attach_alignment(row['id'], revision, digest, words, audio_revision=audio_revision)
         row = book.observe(observed(8000, 16000, [(9000, 15000)]))[0]
         self.assertNotIn('alignment', row)

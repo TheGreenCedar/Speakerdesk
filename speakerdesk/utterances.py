@@ -182,6 +182,33 @@ class UtteranceBook:
                 'start_sample':a,'end_sample':b})
         return requests
 
+    def apply_decode_parts(self, identity, parts, *, stage):
+        """CAS-bound bounded decoding; no lexical stitching of context windows."""
+        from canonical_assembly import assemble_parts
+        if stage not in ('live','refined'):raise ValueError('Invalid canonical decode stage.')
+        row=self.rows[identity]
+        assembled=assemble_parts(row,self.decode_requests(identity),parts)
+        version={'text':assembled['text'],'stage':stage,'complete':assembled['complete'],
+            'reason':assembled['reason'],'base_revision':row['machine_revision'],
+            'audio_revision':row['audio_revision'],
+            'audio_anchor':{'start_sample':row['start_sample'],'end_sample':row['end_sample']}}
+        # Keep every raw full-context text/alignment in the durable journal.
+        # Hot history contains the assembly result, not duplicate raw contexts.
+        if self.archive:self.archive.append({'type':'bounded_machine_version','utterance_id':identity,
+            'version':version,'parts':parts})
+        else:version['parts']=copy.deepcopy(parts)
+        row['machine_versions'].append(copy.deepcopy(version))
+        if self.history_limit is not None:row['machine_versions']=row['machine_versions'][-self.history_limit:]
+        if assembled['complete'] and 'text' not in row['protected_fields']:
+            row['text']=assembled['text'];row['machine_revision']+=1
+            row['text_audio_anchor']=copy.deepcopy(version['audio_anchor'])
+            row['refinement_state']='refined' if stage=='refined' and row['state']=='sealed' else 'provisional'
+            self.attach_alignment(identity,row['machine_revision'],assembled['text_sha256'],
+                assembled['words'],audio_revision=row['audio_revision'])
+            row['alignment'].update({key:assembled[key] for key in
+                ('model_sha256','timing_kind','frame_calibration_id','score_calibration_id','separator_policy')})
+        return copy.deepcopy(row)
+
     def attach_alignment(self, identity, revision, text_sha256, words, *, audio_revision):
         row = self.rows[identity]
         if (type(revision) is not int or revision != row['machine_revision']
@@ -190,11 +217,17 @@ class UtteranceBook:
             raise ValueError('Alignment belongs to a different transcript revision.')
         if not isinstance(words, list) or not words:
             raise ValueError('Alignment did not provide word positions.')
+        if row.get('text_audio_anchor')!={'start_sample':row['start_sample'],'end_sample':row['end_sample']}:
+            raise ValueError('Alignment requires the exact current text audio anchor.')
+        raw_units=list(re.finditer(r'\S+',row['text']))
+        if len(words)!=len(raw_units):raise ValueError('Alignment does not cover the complete raw text.')
         previous = row['start_sample']
-        for word in words:
+        for word,raw in zip(words,raw_units):
             a, b = word['start_sample'], word['end_sample']
             if (type(a) is not int or type(b) is not int or not previous <= a < b <= row['end_sample']
-                    or not isinstance(word.get('text'), str) or not word['text'].strip()):
+                    or word.get('text')!=raw.group()
+                    or type(word.get('start_char')) is not int or type(word.get('end_char')) is not int
+                    or (word.get('start_char'),word.get('end_char'))!=raw.span()):
                 raise ValueError('Alignment is outside original utterance audio.')
             previous = b
         row['alignment'] = {'machine_revision': revision, 'audio_revision': audio_revision,

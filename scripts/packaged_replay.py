@@ -235,7 +235,7 @@ def case_run(recipe,all_recipes,backend,home,directory,budget):
     # Production mixer receives exactly representable PCM16/32768 as float32.
     # Check every saved PCM byte; equal frame count is insufficient.
     expected_pcm=transport_pcm(directory/'replay.wav')
-    trace={'job_id':jid,'input_frames':frames,'slice_start_sample':start_sample,'synthesis':json.loads((directory/'synthesis.json').read_text()),'provisional':document_slice(provisional,start_sample),
+    trace={'job_id':jid,'pause_request_id':pause_request,'input_frames':frames,'slice_start_sample':start_sample,'synthesis':json.loads((directory/'synthesis.json').read_text()),'provisional':document_slice(provisional,start_sample),
            'refined':document_slice(final,start_sample),'edit':edit,'preceding':preceding,
            'saved_audio':{'frames':recorded_frames,'sha256':digest_file(home/'recordings'/jid/'audio.wav'),
                           'pcm_sha256':hashlib.sha256(saved_pcm).hexdigest(),'expected_pcm_sha256':hashlib.sha256(expected_pcm).hexdigest()}}

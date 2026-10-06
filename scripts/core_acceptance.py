@@ -144,7 +144,7 @@ def evaluate(recipe, trace):
     final=trace.get('refined',{})
     checks['provisional_paused_before_refinement']=trace.get('provisional',{}).get('status')=='paused' and trace.get('provisional',{}).get('rolling_refinement',{}).get('cancelled') is True
     paused=trace.get('provisional',{})
-    checks['provisional_pause_acknowledged']=pause_acknowledged(paused,(paused.get('pause_flush') or {}).get('request_id'),trace.get('input_frames',-1))
+    checks['provisional_pause_acknowledged']=pause_acknowledged(paused,trace.get('pause_request_id'),trace.get('input_frames',-1))
     checks['same_job']=final.get('id')==trace.get('job_id')==trace.get('provisional',{}).get('id')
     checks['refinement_executed']=final.get('status')=='ready' and final.get('refinement_status')=='complete' and not final.get('refinement_unresolved') and final.get('rolling_refinement',{}).get('completed_sample',0)>=trace.get('input_frames',float('inf'))
     saved=trace.get('saved_audio',{})

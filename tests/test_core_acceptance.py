@@ -70,7 +70,7 @@ class CoreAcceptanceTests(unittest.TestCase):
             synthesis={'recipe_id':recipe['id']}
             pcm_hash=hashlib.sha256(b'\0\0').hexdigest()
             preceding={'id':job['id'],'language_epoch':0,'document':{'segments':[{'start':0,'end':1,'language_epoch':0,'language':'en','text':'Successful English predecessor','language_detection':{'reason':'detected'}}]}}
-            trace={'job_id':job['id'],'input_frames':1,'slice_start_sample':32000,'saved_audio':{'frames':1,'pcm_sha256':pcm_hash,'expected_pcm_sha256':pcm_hash},'synthesis':synthesis,'provisional':provisional,'refined':job,
+            trace={'job_id':job['id'],'pause_request_id':'synthetic-pause','input_frames':1,'slice_start_sample':32000,'saved_audio':{'frames':1,'pcm_sha256':pcm_hash,'expected_pcm_sha256':pcm_hash},'synthesis':synthesis,'provisional':provisional,'refined':job,
                    'edit':{'id':'row-0','machine_revision':1},'preceding':{'case':recipe.get('preceding_context_case'),'job_id':job['id'],'context':{'language':'en','end_sample':16000},'observed':preceding}}
             folder=self.evidence/recipe['id'];folder.mkdir();(folder/'trace.json').write_text(json.dumps(trace));(folder/'synthesis.json').write_text(json.dumps(synthesis))
             with wave.open(str(folder/'input.wav'),'wb') as pcm:pcm.setnchannels(1);pcm.setsampwidth(2);pcm.setframerate(16000);pcm.writeframes(b'\0\0')
@@ -95,6 +95,13 @@ class CoreAcceptanceTests(unittest.TestCase):
         for field,value in [('state','pending'),('available_sample',16001),('speech_observed_sample',11000),('deferred_audio',[]),('fast_sequence',1)]:
             changed=copy.deepcopy(job);changed['pause_flush'][field]=value
             self.assertFalse(core.pause_acknowledged(changed,'current',16000))
+    def test_raw_evaluation_binds_pause_to_the_post_request(self):
+        recipe=core.suite()[0][0]
+        trace=json.loads((self.evidence/recipe['id']/'trace.json').read_text())
+        self.assertTrue(core.evaluate(recipe,trace)['provisional_pause_acknowledged'])
+        for identity in (None,'different-post'):
+            trace['pause_request_id']=identity
+            self.assertFalse(core.evaluate(recipe,trace)['provisional_pause_acknowledged'])
     def test_missing_report_blocks_before_external_request(self):
         self.report_path.unlink()
         with patch.object(promote_release,'api') as network:

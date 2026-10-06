@@ -215,7 +215,12 @@ class MeetingManager:
                 self._stop_capture()
             else:
                 if action=='pause':
-                    job=self.get(jid);job['pause_flush']={'request_id':uuid.uuid4().hex,'state':'awaiting_capture'};self.put(job)
+                    job=self.get(jid)
+                    if (job.get('pause_flush') or {}).get('state')=='awaiting_capture':
+                        # The helper has not acknowledged the first command yet.
+                        # Keep its identity and endpoint binding stable.
+                        return
+                    job['pause_flush']={'request_id':uuid.uuid4().hex,'state':'awaiting_capture'};self.put(job)
                 try:self._send(self.capture,{'type':action})
                 except (OSError,ValueError):
                     self.stopped.set()
@@ -405,15 +410,25 @@ class MeetingManager:
                     for handle in handles:handle.flush()
                     if shutil.disk_usage(dest).free < 256*1024**2:raise RuntimeError('Recording stopped because disk space is low. Audio has been saved.')
                 elif kind in ('recording','paused'):
+                    flush=None
                     with self.lock:
+                        if kind=='paused':
+                            mixer.flush(result['time'],final=True)
+                            self.patch(jid,duration=self.duration)
+                            if self.two_pass:
+                                self.refinement.force=True;flush=self.pause_flush_request(jid,mixer.cursor)
+                            else:
+                                # Legacy one-pass workers have no flush ACK.
+                                # Capture acknowledgement still ends the
+                                # duplicate-command guard, without claiming a
+                                # processed horizon or completed worker receipt.
+                                job=self.get(jid);receipt=job.get('pause_flush') or {}
+                                if receipt.get('state')!='awaiting_capture':raise ValueError('Unrequested capture Pause.')
+                                receipt.update(state='capture_complete',through_sample=mixer.cursor);self.put(job)
                         if not stop_event.is_set():
                             self.patch(jid,status=kind,message='Recording' if kind=='recording' else 'Paused')
-                    if kind=='paused':
-                        mixer.flush(result['time'],final=True)
-                        self.patch(jid,duration=self.duration)
-                        if self.two_pass:
-                            self.refinement.force=True;packets.put(self.pause_flush_request(jid,mixer.cursor),timeout=2)
-                    elif not self.refinement.final:self.refinement.force=False
+                    if flush:packets.put(flush,timeout=2)
+                    if kind=='recording' and not self.refinement.final:self.refinement.force=False
                 elif kind=='stopped':
                     mixer.flush(result['time'],final=True);capture_finished=True
                 elif kind=='error':raise RuntimeError(result['error'])
