@@ -42,6 +42,14 @@ def repeated_parts(book,row):
 
 
 class AssemblyTests(unittest.TestCase):
+    def test_one_coarse_unit_cannot_be_emitted_at_two_adjacent_seams(self):
+        book,row=book_for(seconds=54);requests=book.decode_requests(row['id'])
+        parts=[part(requests[0],'before left bridge',[(1000,2000),(250000,255000),(285000,290000)]),
+               part(requests[1],'left bridge right',[(250000,255000),(285000,579000),(600000,610000)]),
+               part(requests[2],'bridge right after',[(573000,579000),(600000,610000),(800000,810000)])]
+        result=assemble_parts(row,requests,parts)
+        self.assertFalse(result['complete']);self.assertEqual(result['reason'],'multiple_seam_emission_unresolved')
+        self.assertIsNone(result['text'])
     def test_coarse_envelope_near_seam_cannot_claim_exact_core_ownership(self):
         # Documented AMI 'designing' counterexample translated to the 18s
         # fixture seam: emission end is 560 samples before the seam, while

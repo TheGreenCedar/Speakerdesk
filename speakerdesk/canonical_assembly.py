@@ -105,6 +105,10 @@ def assemble_parts(row, requests, parts):
         elif provenance!=calibration:return unresolved('inconsistent_alignment_provenance')
         attachments.append(attachment)
     if cursor!=row['end_sample']:raise ValueError('Decode cores do not cover the canonical utterance.')
+    seams=[request['core_end_sample'] for request in requests[:-1]]
+    if any(sum(near_seam(word,seam) for seam in seams)>1
+           for attachment in attachments for word in attachment['words']):
+        return unresolved('multiple_seam_emission_unresolved')
     seam_units={}
     for index in range(len(requests)-1):
         left,right=requests[index:index+2];seam=left['core_end_sample']
