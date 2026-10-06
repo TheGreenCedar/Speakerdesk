@@ -231,6 +231,8 @@ class SpeechSession:
         self.closed = False
         self.failed = False
         self.previous_sample = None
+        self.inspected_pcm = hashlib.sha256()
+        self.inspected_counts = {'speech_samples':0,'uncertain_samples':0,'negative_constant_samples':0}
 
     def feed(self, audio, start_sample, *, final=False):
         import numpy as np
@@ -265,6 +267,14 @@ class SpeechSession:
                     probability=max(probability,normalized_probability)
                     self.normalized_state=normalized_state
                 self.evidence.append(begin, begin+count, probability,observation=observation)
+                # Hash only original physical samples after successful neural
+                # inspection. Virtual final-frame padding/normalized VAD input
+                # never enters the retained-PCM identity.
+                self.inspected_pcm.update(np.clip(np.rint(chunk[:count]*32768),-32768,32767).astype('<i2').tobytes())
+                speaking=self.evidence.speaking
+                key=('speech_samples' if speaking else 'uncertain_samples'
+                     if observation is None or observation.get('constant_value') is None else 'negative_constant_samples')
+                self.inspected_counts[key]+=count
             except Exception:
                 # Recurrent state may have advanced inside the neural adapter.
                 # Do not retry this packet or label the unobserved tail silent.
@@ -280,3 +290,13 @@ class SpeechSession:
                 raise
             self.closed = True
         return self.evidence
+
+    def inspection(self):
+        if self.failed or not getattr(self.model,'normalized_view',False):
+            raise ValueError('Verified neural inspection is unavailable.')
+        return {'inspection_state':'observed_prefix','start_sample':self.evidence.origin_sample,
+                'end_sample':self.evidence.end_sample,'received_sample':self.received,'closed':self.closed,
+                'audio_encoding':'pcm_s16le','pcm_sha256':self.inspected_pcm.hexdigest(),
+                **self.inspected_counts,
+                'decision':'speech' if self.inspected_counts['speech_samples'] else
+                    'uncertain' if self.inspected_counts['uncertain_samples'] else 'no_speech'}

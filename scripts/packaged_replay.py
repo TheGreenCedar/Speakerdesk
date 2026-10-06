@@ -239,6 +239,14 @@ def case_run(recipe,all_recipes,backend,home,directory,budget):
            'refined':document_slice(final,start_sample),'edit':edit,'preceding':preceding,
            'saved_audio':{'frames':recorded_frames,'sha256':digest_file(home/'recordings'/jid/'audio.wav'),
                           'pcm_sha256':hashlib.sha256(saved_pcm).hexdigest(),'expected_pcm_sha256':hashlib.sha256(expected_pcm).hexdigest()}}
+    if recipe['expect'].get('no_words') and final.get('canonical_utterances'):
+        sys.path.insert(0,str(ROOT/'speakerdesk'))
+        from admission_receipt import retained_pcm_digest
+        trace['admission_pcm']={
+            'provisional':retained_pcm_digest(home/'recordings'/jid/'audio.wav',
+                provisional.get('pause_flush',{}).get('speech_observed_sample')),
+            'refined':retained_pcm_digest(home/'recordings'/jid/'audio.wav',
+                final.get('canonical_observed_sample'))}
     write(directory/'trace.json',trace)
     assertions=evaluate(recipe,trace)
     return {'id':recipe['id'],'partition':recipe['partition'],'groups':recipe['groups'],'status':'passed' if all(assertions.values()) else 'failed',

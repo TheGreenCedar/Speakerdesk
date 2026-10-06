@@ -253,6 +253,12 @@ class MeetingManager:
             pending.update(state='complete',received_sample=received,available_sample=available,
                 speech_observed_sample=speech,fast_sequence=result['fast_sequence'],
                 deferred_audio=([{'start_sample':available,'end_sample':received}] if available<received else []))
+            if job.get('admission_execution'):
+                from admission_receipt import validate_receipt,retained_pcm_digest
+                pending['admission_receipt']=validate_receipt(result.get('admission_receipt'),
+                    job['admission_execution'],phase='pause',request_id=pending['request_id'],
+                    received_sample=received,observed_sample=speech,
+                    pcm_sha256=retained_pcm_digest(self.folder(jid)/'audio.wav',speech))
             self.put(job);return True
 
     def _stop_capture(self):
@@ -328,7 +334,8 @@ class MeetingManager:
                         elif result['type']=='capture_finished':
                             if not worker_stop_sent.is_set():fail('Capture finalization arrived before Stop. Audio is preserved.')
                             self.refinement.capture_done(jid,observed_sample=result.get('canonical_observed_sample'),
-                                uncertain_samples=result.get('canonical_uncertain_samples'))
+                                uncertain_samples=result.get('canonical_uncertain_samples'),
+                                admission=result.get('admission_receipt'))
                         elif result['type']=='progress':
                             self.processed=result['processed_seconds'];self.refinement.schedule(jid,force=bool(result.get('flush')))
                         elif result['type']=='flush_ack':self.acknowledge_pause_flush(jid,result)
@@ -380,7 +387,10 @@ class MeetingManager:
             self.two_pass=bool(ready.get('two_pass'))
             if ready.get('canonical_utterances'):
                 with self.lock:
-                    job=self.get(jid);job['canonical_utterances']=True;self.put(job)
+                    from admission_receipt import validate_execution
+                    job=self.get(jid);job['canonical_utterances']=True
+                    job['admission_execution']=validate_execution(ready.get('admission_execution'),jid)
+                    self.put(job)
             self.refinement.ready(jid,self.two_pass)
             if stop_event.is_set():return
             for target in (consume_results,send_audio):
@@ -450,7 +460,15 @@ class MeetingManager:
             wav.close()
             for track in tracks.values():track.close()
             if failure:raise RuntimeError(failure[0])
-            packets.put({'type':'stop'},timeout=10)
+            stop_request={'type':'stop'}
+            with self.lock:
+                job=self.get(jid)
+                if job.get('admission_execution'):
+                    stop_request['request_id']=uuid.uuid4().hex
+                    job['capture_inspection_request']={'request_id':stop_request['request_id'],
+                        'through_sample':mixer.cursor}
+                    self.put(job)
+            packets.put(stop_request,timeout=10)
             finish_budget=None
             if self.two_pass:
                 finish_budget=threading.Timer(45,lambda:self.refinement.pause(jid,final=True))

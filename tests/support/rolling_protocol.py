@@ -23,7 +23,21 @@ sys.stdin=RecordingInput()
 live_refinement.Models=CPUModels
 if config.get('test_canonical_peer'):
     from test_canonical_runtime import Peer
-    live_refinement.Models=lambda cfg:Peer()
+    def canonical_cpu_models(cfg):
+        # Fabricated typed receipts exercise JSONL/host validation only. This
+        # explicitly substituted CPU peer never qualifies acoustic acceptance.
+        import uuid
+        from admission_receipt import execution,retained_pcm_digest
+        peer=Peer();peer.admission_execution=execution(cfg['job_id'],uuid.uuid4().hex)
+        def inspection(phase,request_id):
+            end=peer.speech_live.evidence.end_sample
+            return {**peer.admission_execution,'phase':phase,'request_id':request_id,
+                'inspection_state':'observed_prefix','start_sample':0,'end_sample':end,
+                'received_sample':peer.received,'closed':phase=='stop',
+                'audio_encoding':'pcm_s16le','pcm_sha256':retained_pcm_digest(cfg['audio_path'],end),
+                'speech_samples':end,'uncertain_samples':0,'negative_constant_samples':0,'decision':'speech'}
+        peer.inspection_receipt=inspection;return peer
+    live_refinement.Models=canonical_cpu_models
 else:
     # Retain the explicit legacy rolling-window regression contracts. The new
     # canonical peer lane below exercises the production activation separately.

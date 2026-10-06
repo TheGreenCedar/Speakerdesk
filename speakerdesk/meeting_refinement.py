@@ -343,10 +343,20 @@ class RefinementController:
             raise ValueError('Canonical refinement changed its original anchor.')
         self.manager.put(job)
         self.canonical(jid,{'candidate':candidate,'fast_sequence':result['fast_sequence']})
-    def capture_done(self,jid,*,observed_sample=None,uncertain_samples=None):
+    def capture_done(self,jid,*,observed_sample=None,uncertain_samples=None,admission=None):
         if observed_sample is not None:
             with self.manager.lock:
                 job=self.manager.get(jid)
+                if job.get('admission_execution') and not self.manager.refining_saved:
+                    from admission_receipt import validate_receipt,retained_pcm_digest
+                    request=job.get('capture_inspection_request') or {}
+                    received=request.get('through_sample')
+                    if received!=round(job.get('duration',0)*RATE):
+                        raise ValueError('Unbound canonical Stop inspection endpoint.')
+                    job['capture_admission']=validate_receipt(admission,job['admission_execution'],
+                        phase='stop',request_id=request.get('request_id'),received_sample=received,
+                        observed_sample=observed_sample,uncertain_samples=uncertain_samples,
+                        pcm_sha256=retained_pcm_digest(self.manager.folder(jid)/'audio.wav',observed_sample))
                 if type(observed_sample) is not int or not 0<=observed_sample<=round(job.get('duration',0)*RATE):
                     raise ValueError('Invalid canonical capture horizon.')
                 if uncertain_samples is not None:

@@ -35,6 +35,9 @@ class CanonicalLifecycle(MeetingHarness,unittest.TestCase):
         self.assertEqual(row['canonical_state'],'sealed');self.assertEqual(row['refinement_state'],'refined')
         self.assertEqual(row['end_sample'],5600);self.assertEqual(job['refinement_status'],'complete')
         self.assertEqual(len(self.samples(jid,'audio.wav')),5600)
+        inspection=job['capture_admission']
+        self.assertEqual(inspection['end_sample'],5600)
+        self.assertEqual(inspection['execution_id'],paused['pause_flush']['admission_receipt']['execution_id'])
         commands=[json.loads(line) for line in (self.root/jid/'worker-commands.jsonl').read_text().splitlines()]
         refinement=next(item for item in commands if item['type']=='refine')
         self.assertEqual(refinement['canonical']['id'],row['id'])
@@ -52,6 +55,7 @@ class CanonicalLifecycle(MeetingHarness,unittest.TestCase):
         after=[json.loads(line) for line in (self.root/jid/'worker-commands.jsonl').read_text().splitlines()]
         self.assertEqual(sum(item['type']=='refine' for item in after),before+1)
         self.assertEqual(self.job(jid)['refinement_status'],'complete')
+        self.assertEqual(self.job(jid)['capture_admission'],inspection)
 
 
 if __name__=='__main__':unittest.main()

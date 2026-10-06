@@ -153,10 +153,16 @@ class Models:
         from speech_admission import SileroModel, FrameArchive
         import uuid
         self.speech=SileroModel(config['speech_path'])
+        from admission_receipt import execution
+        self.admission_execution=(execution(config['job_id'],uuid.uuid4().hex)
+                                  if config.get('canonical_utterances') else None)
         self.speech_live=self.speech.session(archive=FrameArchive(
             Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'))
         self.speech_historical=None
         self.language_context=None;self.transcription_start_sample=0;self.coarse_aligner=None;self.asr_padding=(0,0)
+    def inspection_receipt(self,phase,request_id):
+        return {**self.admission_execution,**self.speech_live.inspection(),
+                'phase':phase,'request_id':request_id}
     def set_decode_boundary_padding(self,left,right):
         if type(left) is not int or type(right) is not int or left not in (0,3200) or right not in (0,3200):
             raise ValueError('Invalid canonical decode boundary context.')
@@ -530,12 +536,16 @@ class Engine:
                 speech_sample=speech.evidence.end_sample if speech is not None else round(self.processed*RATE)
                 self.emit({'type':'flush_ack','request_id':message['request_id'],'received_sample':self.received,
                     'available_sample':min(self.received,round(self.processed*RATE)),
-                    'speech_observed_sample':min(self.received,speech_sample),'fast_sequence':self.fast_sequence})
+                    'speech_observed_sample':min(self.received,speech_sample),'fast_sequence':self.fast_sequence,
+                    **({'admission_receipt':self.models.inspection_receipt('pause',message['request_id'])}
+                       if self.canonical and hasattr(self.models,'inspection_receipt') else {})})
             if kind=='stop':
                 self.capture_finished=True
                 self.emit({'type':'capture_finished','duration':self.received/RATE,
                     **({'canonical_observed_sample':self.canonical.book.cursor,
-                        'canonical_uncertain_samples':self.canonical.book.uncertain_sample_count} if self.canonical else {})})
+                        'canonical_uncertain_samples':self.canonical.book.uncertain_sample_count,
+                        **({'admission_receipt':self.models.inspection_receipt('stop',message.get('request_id'))}
+                           if hasattr(self.models,'inspection_receipt') else {})} if self.canonical else {})})
         elif kind=='language':
             generation=message.get('generation',message.get('language_epoch'))
             boundary=message.get('start_sample',message.get('apply_from_sample'))
@@ -558,6 +568,8 @@ def run(config,emit):
     inbox=Inbox();inbox.latest_epoch=config.get('language_epoch',0);inbox.historical=bool(config.get('refinement_only'))
     engine=Engine(config,models,emit,inbox)
     emit({'type':'ready','two_pass':True,'canonical_utterances':bool(engine.canonical),
+          **({'admission_execution':models.admission_execution}
+             if engine.canonical and not config.get('refinement_only') and hasattr(models,'admission_execution') else {}),
           'asr':'canonical_vad_utterances' if engine.canonical else 'growing_phrase_with_rolling_refinement',**models.metrics()})
     def read():
         try:

@@ -86,6 +86,69 @@ class CoreAcceptanceTests(unittest.TestCase):
     def validate(self):self.save();return core.validate(self.report_path,self.manifest_path,root=self.root)
     def test_complete_contract_is_accepted_not_model_accuracy(self):
         self.assertEqual(len(self.validate()['cases']),15)
+    def canonical_negative_trace(self,uncertain=0):
+        # Entirely fabricated receipt contract, never model/candidate evidence.
+        sys.path.insert(0,str(SOURCE/'speakerdesk'))
+        from admission_receipt import execution
+        recipe=core.suite()[0][0]
+        trace=json.loads((self.evidence/recipe['id']/'trace.json').read_text())
+        identity=execution(trace['job_id'],'b'*32)
+        empty=hashlib.sha256(b'').hexdigest();whole=hashlib.sha256(b'\0\0').hexdigest()
+        trace['admission_pcm']={'provisional':empty,'refined':whole}
+        for stage in ('provisional','refined'):
+            job=trace[stage];job.update(canonical_utterances=True,last_fast_sequence=0,admission_execution=identity)
+            job['document']['provenance']['kind']='pending_inference'
+        pause=trace['provisional']['pause_flush'];pause['fast_sequence']=0
+        pause['admission_receipt']={**identity,'phase':'pause','request_id':trace['pause_request_id'],
+            'inspection_state':'observed_prefix','start_sample':0,'end_sample':0,'received_sample':1,
+            'closed':False,'audio_encoding':'pcm_s16le','pcm_sha256':empty,
+            'speech_samples':0,'uncertain_samples':0,'negative_constant_samples':0,'decision':'no_speech'}
+        final=trace['refined'];final.update(canonical_observed_sample=1,canonical_uncertain_samples=uncertain,
+            capture_inspection_request={'through_sample':1,'request_id':'fixture-stop'},rolling_sources={})
+        final['capture_admission']={**identity,'phase':'stop','request_id':'fixture-stop',
+            'inspection_state':'observed_prefix','start_sample':0,'end_sample':1,'received_sample':1,
+            'closed':True,'audio_encoding':'pcm_s16le','pcm_sha256':whole,
+            'speech_samples':0,'uncertain_samples':uncertain,'negative_constant_samples':1-uncertain,
+            'decision':'uncertain' if uncertain else 'no_speech'}
+        if uncertain:final['refinement_status']='unresolved';final['rolling_refinement']['completed_sample']=0
+        return recipe,trace
+    def test_canonical_no_words_requires_bound_inspection_instead_of_fake_text_revision(self):
+        recipe,trace=self.canonical_negative_trace()
+        self.assertTrue(all(core.evaluate(recipe,trace).values()))
+        for stage,receipt_key in [('provisional','pause_flush'),('refined','capture_admission')]:
+            broken=copy.deepcopy(trace)
+            if stage=='provisional':broken[stage][receipt_key].pop('admission_receipt')
+            else:broken[stage].pop(receipt_key)
+            self.assertFalse(core.evaluate(recipe,broken)[stage+'_observed'])
+        for key,value in [('inspection_state','failed'),('model_revision','wrong'),('execution_id','c'*32),
+                          ('pcm_sha256','0'*64),('end_sample',0),('closed',False),
+                          ('negative_constant_samples',2),('decision','speech'),('schema_version',True)]:
+            broken=copy.deepcopy(trace);broken['refined']['capture_admission'][key]=value
+            with self.subTest(key=key):self.assertFalse(core.evaluate(recipe,broken)['negative_audio_inspected'])
+        trace['refined']['document']['segments']=[{'text':'Invented thank you'}]
+        self.assertFalse(core.evaluate(recipe,trace)['refined_no_words'])
+    def test_uncertain_negative_receipt_can_never_claim_complete_or_bypass_speech_gate(self):
+        recipe,trace=self.canonical_negative_trace(1)
+        self.assertTrue(core.evaluate(recipe,trace)['negative_audio_inspected'])
+        trace['refined']['refinement_status']='complete'
+        self.assertFalse(core.evaluate(recipe,trace)['negative_audio_inspected'])
+        trace['refined']['refinement_status']='unresolved'
+        speech_recipe=copy.deepcopy(recipe);speech_recipe['expect']={'terms':['blue']}
+        checks=core.evaluate(speech_recipe,trace)
+        self.assertFalse(checks['refinement_executed']);self.assertFalse(checks['refined_coverage'])
+    def test_rehashed_canonical_receipt_pcm_is_rechecked_from_saved_audio(self):
+        recipe,trace=self.canonical_negative_trace()
+        directory=self.evidence/recipe['id'];(directory/'trace.json').write_text(json.dumps(trace))
+        case=self.report['cases'][0];case['assertions']=core.evaluate(recipe,trace)
+        case['trace']['bytes']=(directory/'trace.json').stat().st_size
+        case['trace']['sha256']=core.digest_file(directory/'trace.json')
+        self.assertTrue(self.validate())
+        trace['admission_pcm']['refined']='1'*64;trace['refined']['capture_admission']['pcm_sha256']='1'*64
+        (directory/'trace.json').write_text(json.dumps(trace));case['assertions']=core.evaluate(recipe,trace)
+        case['trace']['bytes']=(directory/'trace.json').stat().st_size
+        case['trace']['sha256']=core.digest_file(directory/'trace.json')
+        with self.assertRaisesRegex(ValueError,'Admission receipt PCM'):self.validate()
+
     def test_pause_receipt_accepts_actual_lookahead_but_rejects_stale_or_unobserved_endpoint(self):
         job={'last_fast_sequence':2,'pause_flush':{'request_id':'current','state':'complete','through_sample':16000,
             'received_sample':16000,'available_sample':12000,'speech_observed_sample':15872,'fast_sequence':2,
