@@ -24,6 +24,7 @@ from live_meeting import register_meetings, LIVE
 from people import register_people, reconcile_assignments
 from voice_profiles import speaker_audio_eligible
 from voice_recognition import RecognitionPreference, VoiceRecognition
+from job_store import JobStore, PRIVATE_FIELDS
 
 ROOT=Path(__file__).resolve().parent
 ACTIVE=('preparing','queued','processing')+LIVE
@@ -48,49 +49,38 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             with conn:yield conn
         finally:conn.close()
 
-    with db() as conn:
-        conn.execute('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
-        from language_preferences import initialize as initialize_preferences
-        initialize_preferences(conn)
-        for row in conn.execute('SELECT * FROM jobs').fetchall():
-            job=json.loads(row['payload'])
-            if job['status'] in ACTIVE:
-                job.update(status='failed',message=('The meeting was interrupted. Captured audio and transcript were preserved.' if job.get('kind')=='meeting' else 'The app stopped during processing. Retry this job.'),updated=time.time())
-                conn.execute('UPDATE jobs SET payload=? WHERE id=?',(json.dumps(job),job['id']))
-            if job.get('rolling_refinement') and job.get('refinement_status') in ('waiting','refining'):
-                from rolling_refinement import RollingPlan
-                job['rolling_refinement']=RollingPlan(job['rolling_refinement'],recover=True).snapshot()
-                job['refinement_status']='paused';job.pop('rolling_inflight',None)
-                conn.execute('UPDATE jobs SET payload=? WHERE id=?',(json.dumps(job),job['id']))
+    from language_preferences import initialize as initialize_preferences
+    with db() as conn:initialize_preferences(conn)
+    store=JobStore(db)
+    store.initialize()
+    store.recover(ACTIVE)
 
-    def get(jid):
+
+    def get(jid, *, metadata=False):
         if len(jid)!=32 or any(c not in '0123456789abcdef' for c in jid):abort(404)
-        with db() as conn:row=conn.execute('SELECT payload FROM jobs WHERE id=?',(jid,)).fetchone()
-        if not row:abort(404)
-        return json.loads(row['payload'])
+        job=store.get(jid,metadata=metadata)
+        if job is None:abort(404)
+        return job
 
     def put(job, *, default_language=None):
-        job['updated']=time.time()
-        with db() as conn:
-            conn.execute('INSERT OR REPLACE INTO jobs VALUES (?,?)',(job['id'],json.dumps(job,ensure_ascii=False)))
-            if default_language is not None:
-                from language_preferences import save_default_language
-                save_default_language(conn,default_language)
+        store.put(job,default_language=default_language)
 
     def get_default_language():
         from language_preferences import default_language
         with lock,db() as conn:return default_language(conn)
 
+
     def patch(jid,**changes):
         with lock:
+            if set(changes)=={'duration'}:
+                if not store.checkpoint_duration(jid,changes['duration']):abort(404)
+                return
             job=get(jid);job.update(**changes);put(job)
 
     def folder(jid):return data/jid
 
     def inference_busy():
-        with db() as conn:
-            return any(json.loads(row['payload'])['status'] in ('queued','processing')
-                       for row in conn.execute('SELECT payload FROM jobs'))
+        return bool(store.count_status(('queued','processing')))
 
     def prepare(jid):
         try:
@@ -194,9 +184,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
         return jsonify(default_language=language)
 
     @app.get('/api/jobs')
-    def jobs():
-        with db() as conn:items=[json.loads(row['payload']) for row in conn.execute('SELECT payload FROM jobs')]
-        return jsonify(sorted([{k:v for k,v in j.items() if k!='document'} for j in items],key=lambda j:j['created'],reverse=True))
+    def jobs():return jsonify(store.summaries())
 
     @app.post('/api/jobs')
     def upload():
@@ -207,7 +195,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             if Path(item.filename or '').suffix.lower() not in ('.wav','.mp3','.m4a','.flac','.ogg','.aiff','.aif','.mp4','.aac','.webm'):
                 raise ValueError('Supported formats: WAV, MP3, M4A, FLAC, OGG, AIFF, MP4, AAC and WebM.')
         with lock:
-            with db() as conn:active=sum(json.loads(row['payload'])['status'] in ACTIVE for row in conn.execute('SELECT payload FROM jobs'))
+            active=store.count_status(ACTIVE)
             if active+len(files)>16:abort(429,description='The local queue is full. Wait for current jobs to finish.')
             created=[]
             staged=[]
@@ -230,10 +218,17 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
 
     @app.get('/api/jobs/<jid>')
     def job_detail(jid):
+        known=request.args.get('known_revision')
+        if known is not None and (not known.isascii() or not known.isdigit() or len(known)>20):
+            raise ValueError('Supply a nonnegative integer known_revision.')
         with lock:
-            job=get(jid)
+            job=get(jid,metadata=True) if known is not None else get(jid)
+            if known is not None:
+                unchanged=int(known)==job['revision']
+                if not unchanged:job=get(jid)
+                job['unchanged']=unchanged
             job['inference_owned']=app.extensions['speakerdesk']['meetings'].jid==jid
-        for key in ('rolling_sources','refinement_history','fast_history','fast_previous_revision','boundary_candidate','boundary_candidates','rolling_inflight','fast_retained_candidate'):job.pop(key,None)
+        for key in PRIVATE_FIELDS:job.pop(key,None)
         return jsonify(job)
 
     @app.patch('/api/jobs/<jid>/segments/<sid>')
@@ -403,8 +398,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             app.logger.warning('Voice setup is unavailable: %s',exc)
     app.extensions['speakerdesk']['voice_message']=voice_message
     def voice_busy():
-        with db() as conn:
-            return any(json.loads(row['payload'])['status'] in ACTIVE for row in conn.execute('SELECT payload FROM jobs'))
+        return bool(store.count_status(ACTIVE))
     register_people(app,db,get,put,lock,folder,voice_backend,voice_calibration,voice_busy)
     preference=RecognitionPreference(db)
     recognizer=VoiceRecognition(get,put,folder,lock,lambda:app.extensions['speakerdesk']['voice_runtime'],

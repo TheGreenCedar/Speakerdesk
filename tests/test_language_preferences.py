@@ -64,6 +64,25 @@ class PreferenceTests(MeetingHarness,unittest.TestCase):
         self.assertEqual(response.status_code,500);self.assertEqual(self.job(jid),before);self.assertEqual(self.default(),language)
         self.assertEqual((self.manager.active_language,self.manager.active_epoch),('en',0))
         (self.root/jid/'worker-release').touch();self.stop(jid)
+    def test_failed_preference_preserves_progress_checkpoint_and_metadata_projection(self):
+        jid=self.paused_inflight()
+        self.manager.patch(jid,duration=.125)
+        before=self.job(jid)
+        def storage():
+            with closing(sqlite3.connect(self.root/'jobs.sqlite')) as conn:
+                return [conn.execute('SELECT * FROM '+table+' ORDER BY id').fetchall()
+                        for table in ('jobs','job_metadata','job_progress')]
+        durable=storage()
+        self.assertTrue(durable[2])
+        with closing(sqlite3.connect(self.root/'jobs.sqlite')) as conn,conn:
+            conn.execute("CREATE TRIGGER reject_preference BEFORE INSERT ON preferences BEGIN SELECT RAISE(ABORT,'synthetic preference failure'); END")
+        with self.assertLogs(self.app.logger,level='ERROR'):response=self.choose('fr')
+        self.assertEqual(response.status_code,500)
+        self.assertEqual(storage(),durable)
+        self.assertEqual(self.job(jid),before)
+        self.assertEqual((self.manager.active_language,self.manager.active_epoch),('en',0))
+        (self.root/jid/'worker-release').touch();self.stop(jid)
+
     def test_rejected_validation_cas_preflight_and_queue_leave_default_and_epoch_unchanged(self):
         self.assertEqual(self.client.patch('/api/preferences/language',json={'language':'fr'}).status_code,403)
         self.assertEqual(self.choose('unsupported').status_code,400);self.assertEqual(self.default(),'auto')
