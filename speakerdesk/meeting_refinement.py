@@ -104,7 +104,7 @@ class RefinementController:
             if merged['changed']:
                 job['document']=document;job['document']['provenance']['kind']='local_inference';job['revision']+=1
             for s in document['segments']:
-                if result['window']['start_sample']/RATE<=s['start']<s['end']<=result['window']['end_sample']/RATE and not s.get('protected_fields'):
+                if result['window']['start_sample']<=bounds(s)[0]<bounds(s)[1]<=result['window']['end_sample'] and not s.get('protected_fields'):
                     job['rolling_sources'][s['id']]=copy.deepcopy(s)
             if merged['previous_revision']['segments']:
                 job['fast_previous_revision']=merged['previous_revision']
@@ -149,7 +149,7 @@ class RefinementController:
                         incomplete=True;row['review']=True
                     if (row['id'] in merged['protected_ids'] and not row.get('protected_fields')
                             and request['expected'].get(row['id'])==segment_version(row)
-                            and window['start_sample']/RATE<=row['start']<row['end']<=window['end_sample']/RATE):
+                            and window['start_sample']<=bounds(row)[0]<bounds(row)[1]<=window['end_sample']):
                         incomplete=True
                         row.update(refinement_state='unresolved',finalized=True,review=True,
                                    transcription_review={'reason':'refinement_incomplete','partial_text':bool(row['text'].strip())})

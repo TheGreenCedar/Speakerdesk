@@ -149,7 +149,7 @@ in place; explicit audio-anchor scroll compensation handles merged rows.
 
 ## Validation and release boundary
 
-The full integrated CPU suite passes: **181 tests**. It exercises
+The full integrated CPU suite passes: **183 tests**. It exercises
 production scheduling, the resident engine and real JSONL/pipes/SQLite/WAV with
 explicit synthetic model substitutes. New cases include a through-word six-second
 cut, sentence punctuation, genuine repetition, lexical code switching, 80 seconds
@@ -209,3 +209,9 @@ clean synthetic regions mixed/unknown; brief uncertain Auto regions remained
 blank review placeholders. Real microphone/system capture and natural-meeting
 acoustic accuracy are unverified. Keep 0.3.0 release assets and website publication
 separate from this source branch.
+
+Source-only follow-up uses integer sample bounds to retain speaker references
+when a float endpoint such as `19.560000000000002` represents sample 312960.
+The same contract marks retained incomplete rows inside their owned window.
+A one-sample ownership overrun and genuine missing frame remain rejected or
+unresolved. No timing tolerance is widened; native effect awaits coordination.

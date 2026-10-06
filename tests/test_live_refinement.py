@@ -260,6 +260,40 @@ class HostTests(unittest.TestCase):
             self.assertEqual(job['language_history'][-1]['start_sample'],6*RATE)
         finally:self.manager.worker=None;self.manager.jid=None
 
+    def test_float_frame_endpoint_keeps_sample_owned_speaker_reference(self):
+        result={'window':{'id':'frame-end','kind':'fast_tail','start_sample':233280,'end_sample':312960},
+            'fast_sequence':1,'language_epoch':0,'expected':{},'speakers':{'speaker_0':'Speaker 1'},
+            'candidates':[{'start':14.58,'end':19.560000000000002,'text':'Complete frame-owned speech',
+                'speaker':'speaker_0','speaker_candidates':['speaker_0'],'source_speaker_candidates':['speaker_0'],
+                'language':'en','language_epoch':0,'language_generation':0,'language_mode':'en','finalized':True}]}
+        self.manager.refinement.provisional(self.jid,result)
+        job=self.manager.get(self.jid);row=job['document']['segments'][0]
+        self.assertIn(row['id'],job['rolling_sources'])
+        self.assertEqual(job['rolling_sources'][row['id']]['source_speaker_candidates'],['speaker_0'])
+        # One genuinely additional sample remains outside ownership.
+        job['document']['segments']=[];job['rolling_sources']={};self.manager.put(job)
+        result['fast_sequence']=2;result['candidates'][0]['end']=312961/RATE
+        with self.assertRaisesRegex(ValueError,'audio window'):
+            self.manager.refinement.provisional(self.jid,result)
+
+    def test_float_endpoint_does_not_hide_a_real_missing_frame_on_refinement(self):
+        job=self.manager.get(self.jid)
+        row={'id':'sample-owned','start':14.58,'end':19.560000000000002,'text':'Complete previous words',
+            'speaker':'speaker_0','language':'en','language_generation':0,'language_epoch':0,'language_mode':'en'}
+        job['document']['segments']=[row]
+        plan=RollingPlan();plan.state['completed_sample']=233280
+        plan.state['pending']=[{'id':'frame-core','start_sample':233280,'end_sample':312960,
+            'context_start_sample':185280,'context_end_sample':360960,'status':'queued','attempts':0}]
+        window=plan.dispatch();job['rolling_refinement']=plan.snapshot()
+        job['rolling_inflight']={'window':window,'operation_id':window['operation_id'],'language_epoch':0,
+            'expected':{row['id']:segment_version(row)}};self.manager.put(job)
+        self.manager.refinement.result(self.jid,{'window':window,'operation_id':window['operation_id'],'language_epoch':0,
+            'candidates':[dict(row,id='candidate',end=19.55)]})
+        job=self.manager.get(self.jid)
+        self.assertEqual(job['document']['segments'][0]['refinement_state'],'unresolved')
+        self.assertEqual(job['document']['segments'][0]['text'],'Complete previous words')
+        self.assertEqual(job['refinement_unresolved'][0]['end_sample'],312960)
+
     def test_delayed_historical_phrase_can_finish_before_its_language_boundary(self):
         self.provisional(6,'Please review the secs')
         job=self.manager.get(self.jid)
