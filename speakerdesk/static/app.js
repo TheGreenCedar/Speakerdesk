@@ -324,19 +324,51 @@ function refreshReadingTurnView(card,segment) {
     for(const turn of turns || []) {
       const previous=groups.at(-1);
       if(previous && previous.speaker===turn.speaker && previous.attribution===turn.attribution) {
-        previous.text+=turn.text;
+        previous.text+=turn.text;previous.slices.push(turn);
         if(previous.start!==null && turn.start!==null && turn.end!==null)previous.end=turn.end;
         else previous.start=previous.end=null;
       }else {
         const timed=turn.start!==null && turn.end!==null;
-        groups.push({...turn,start:timed?turn.start:null,end:timed?turn.end:null});
+        groups.push({...turn,slices:[turn],start:timed?turn.start:null,end:timed?turn.end:null});
       }
     }
-    for(const turn of groups) {
-      const row=node('section',undefined,'reading-turn');row.dataset.attribution=turn.attribution;
+    // Bridge only brief unassigned text between the same singleton owner.
+    // This is paragraph layout, never an ownership or timing reassignment.
+    const paragraphs=[];
+    const shortUnknown=turn=>turn?.attribution==='unknown' && turn.text.trim() &&
+      turn.text.trim().split(/\s+/u).length<=6 && Array.from(turn.text.trim()).length<=80;
+    for(let index=0;index<groups.length;index++) {
+      const turn=groups[index];
+      while(turn.attribution==='single' && shortUnknown(groups[index+1]) &&
+            groups[index+2]?.attribution==='single' && groups[index+2].speaker===turn.speaker) {
+        const unknown=groups[index+1],following=groups[index+2];
+        turn.text+=unknown.text+following.text;turn.slices.push(...unknown.slices,...following.slices);
+        turn.includesUnassigned=true;
+        if(turn.start!==null && unknown.start!==null && following.start!==null)turn.end=following.end;
+        else turn.start=turn.end=null;
+        index+=2;
+      }
+      paragraphs.push(turn);
+    }
+    for(const turn of paragraphs) {
+      const row=node('section',undefined,'reading-turn');
+      row.dataset.attribution=turn.includesUnassigned?'single_with_unassigned':turn.attribution;
       const label=node('div',undefined,'reading-turn-meta');label.append(node('span',readingTurnLabel(turn),'reading-turn-speaker'));
+      if(turn.includesUnassigned)label.append(node('span','Includes unassigned words','reading-unassigned-note'));
       if(turn.start!==null)label.append(node('span',passageTime(turn.start),'reading-turn-time'));
-      row.append(label,node('p',turn.text,'reading-turn-words'));host.append(row);
+      const words=node('p',undefined,'reading-turn-words');
+      if(turn.includesUnassigned) {
+        for(const slice of turn.slices) {
+          if(slice.attribution!=='unknown'){words.append(slice.text);continue;}
+          const unassigned=node('span',slice.text,'reading-turn-unassigned');
+          unassigned.title='Unassigned words; speaker attribution unavailable.';unassigned.setAttribute('role','note');
+          unassigned.setAttribute('aria-label',`Unassigned words: ${slice.text}`);
+          unassigned.dataset.attribution=slice.attribution;unassigned.dataset.speaker=slice.speaker;
+          unassigned.dataset.startOffset=slice.start_offset;unassigned.dataset.endOffset=slice.end_offset;
+          words.append(unassigned);
+        }
+      }else words.textContent=turn.text;
+      row.append(label,words);host.append(row);
     }
   }
   const blocked=passageDrafts.has(segment.id) || recoverablePassageDrafts.has(segment.id) || isPassageSaving(segment.id);

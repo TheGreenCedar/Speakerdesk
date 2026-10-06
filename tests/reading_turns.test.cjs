@@ -2,6 +2,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const path=require('node:path');
+const fs=require('node:fs');
 const {frontend}=require('./support/frontend_dom.cjs');
 const root=process.env.FRONTEND_SOURCE_ROOT||path.resolve(__dirname,'..');
 function projection(parts) {
@@ -122,3 +123,70 @@ test('parent playback and explicit review do not reinterpret temporal speaker un
   f.run("doc.segments[0].review_resolution='words_reviewed'");assert.equal(f.run('passageReviewReason(doc.segments[0])'),'');
   f.run('delete doc.segments[0].reading_turns');assert.equal(f.run('hasOverlappingSpeakers(doc.segments[0])'),false);
 });
+
+test('A/unknown/A reads as one explicitly partly unassigned paragraph without timing or altered words',()=>{
+  const parts=[{text:'First words.  ',speaker:'speaker_0',start:0,end:2},
+    {text:'uncertain 🙂 ',speaker:'unassigned',attribution:'unknown'},
+    {text:'Same speaker continues.',speaker:'speaker_0',start:4,end:7}];
+  const f=fixture(parts),rows=card(f).querySelectorAll('.reading-turn');
+  assert.equal(rows.length,1);assert.equal(rows[0].dataset.attribution,'single_with_unassigned');
+  assert.equal(rows[0].querySelector('.reading-turn-speaker').textContent,'Albert');
+  assert.equal(rows[0].querySelector('.reading-unassigned-note').textContent,'Includes unassigned words');
+  assert.equal(rows[0].querySelector('.reading-turn-words').textContent,parts.map(t=>t.text).join(''));
+  assert.equal(rows[0].querySelector('.reading-turn-time'),null);
+  const span=rows[0].querySelector('.reading-turn-unassigned');
+  assert.equal(span.textContent,parts[1].text);assert.equal(span.dataset.speaker,'unassigned');
+  assert.equal(span.dataset.startOffset,String(Array.from(parts[0].text).length));
+  assert.match(span.title,/Unassigned words/);assert.equal(span.getAttribute('aria-label'),'Unassigned words: '+parts[1].text);
+  assert.equal(f.run('JSON.stringify(doc)===original'),true);
+  card(f).querySelector('.edit-whole-passage').click();
+  assert.equal(card(f).querySelector('textarea').value,parts.map(t=>t.text).join(''));
+});
+
+test('A/unknown/B, long unknown, standalone unknown and actual overlap remain separate',()=>{
+  for(const middle of [{text:'Unknown words. ',speaker:'unassigned',attribution:'unknown'},
+    {text:'Simultaneous words. ',speaker:'overlap_speaker_0_speaker_1',attribution:'overlap',start:2,end:3}]){
+    const f=fixture([{text:'First. ',speaker:'speaker_0',start:0,end:2},middle,
+      {text:'Following words.',speaker:middle.attribution==='overlap'?'speaker_0':'speaker_1',start:3,end:6}]);
+    assert.equal(card(f).querySelectorAll('.reading-turn').length,3);
+    assert.equal(card(f).querySelectorAll('.reading-unassigned-note').length,0);
+    assert.equal(f.run('JSON.stringify(doc)===original'),true);
+  }
+  const f=fixture([{text:'First. ',speaker:'speaker_0',start:0,end:2},
+    {text:'This longer unassigned passage has more than six words. ',speaker:'unassigned',attribution:'unknown'},
+    {text:'Same owner.',speaker:'speaker_0',start:6,end:8}]);
+  assert.equal(card(f).querySelectorAll('.reading-turn').length,3);
+  assert.equal(card(f).querySelectorAll('.reading-turn-speaker')[1].textContent,'Unknown speaker');
+  const alone=fixture([{text:'Unassigned alone.',speaker:'unassigned',attribution:'unknown'}]);
+  assert.equal(card(alone).querySelector('.reading-turn-speaker').textContent,'Unknown speaker');
+});
+
+test('repeated brief unknown bridges retain every uncertainty span and suppress incomplete timing',()=>{
+  const f=fixture([{text:'A ',speaker:'speaker_0',start:0,end:1},
+    {text:'u ',speaker:'unassigned',attribution:'unknown',start:1,end:2},
+    {text:'B ',speaker:'speaker_0',start:2,end:3},
+    {text:'v ',speaker:'unassigned',attribution:'unknown',start:3,end:null},
+    {text:'C',speaker:'speaker_0',start:4,end:5}]);
+  assert.equal(card(f).querySelectorAll('.reading-turn').length,1);
+  assert.equal(card(f).querySelectorAll('.reading-turn-unassigned').length,2);
+  assert.equal(card(f).querySelector('.reading-turn-time'),null);
+  assert.equal(card(f).querySelector('.reading-turn-words').textContent,'A u B v C');
+  assert.equal(f.run('JSON.stringify(doc)===original'),true);
+});
+
+test('read-only actual source projection reduces presentation fragmentation without changing any canonical word or slice',
+  {skip:!process.env.READING_TURN_JOB},()=>{
+    const job=JSON.parse(fs.readFileSync(process.env.READING_TURN_JOB,'utf8'));
+    const f=frontend(root);f.seed();f.context.actualJob=job;
+    f.run('selected=structuredClone(actualJob);doc=structuredClone(selected.document);window.original=JSON.stringify(doc);renderSegments()');
+    const segment=job.document.segments.reduce((largest,row)=>(row.reading_turns?.length||0)>(largest.reading_turns?.length||0)?row:largest);
+    const c=f.document.getElementById('segments').children.find(c=>c.dataset.segmentId===segment.id);
+    assert.equal(segment.reading_turns.length,112);assert.equal(segment.text.split(/\s+/).length,1061);
+    const paragraphs=c.querySelectorAll('.reading-turn'),notes=c.querySelectorAll('.reading-unassigned-note');
+    assert.ok(paragraphs.length<112);assert.ok(notes.length>0);
+    assert.equal(c.querySelectorAll('.reading-turn-words').map(e=>e.textContent).join(''),segment.text);
+    assert.equal(c.querySelectorAll('.edit-whole-passage').length,1);
+    assert.equal(f.run('JSON.stringify(doc)===original'),true);
+    console.log(JSON.stringify({actualCanonicalSlices:112,readingParagraphs:paragraphs.length,paragraphsWithUnassignedWords:notes.length,
+      inlineUnassignedSpans:c.querySelectorAll('.reading-turn-unassigned').length,words:1061}));
+  });

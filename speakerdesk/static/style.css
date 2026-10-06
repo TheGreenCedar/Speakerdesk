@@ -172,8 +172,11 @@
 .reading-turn-view{min-width:0}
 .reading-turn{margin:0 0 8px}
 .reading-turn:last-child{margin-bottom:0}
-.reading-turn-meta{display:flex;align-items:baseline;gap:9px;min-height:20px;font-size:12px;color:var(--muted)}
+.reading-turn-meta{display:flex;flex-wrap:wrap;align-items:baseline;gap:9px;min-height:20px;font-size:12px;color:var(--muted)}
 .reading-turn-speaker{font-size:13px;font-weight:600;color:var(--ink)}
 .reading-turn-time{font-variant-numeric:tabular-nums}
 .reading-turn-words{margin:0;font-size:16px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
 .edit-whole-passage{font-size:12px;min-height:28px}
+
+.reading-unassigned-note{font-size:12px;font-weight:600;color:var(--ink);background:var(--accent);padding:1px 4px;border-radius:3px}
+.reading-turn-unassigned{color:var(--ink);background:var(--accent);text-decoration:underline dashed var(--ink);text-underline-offset:3px}
