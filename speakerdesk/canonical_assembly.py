@@ -28,41 +28,61 @@ def corroborated_seam(left_request,left,right_request,right):
     """Require both contexts to agree on every shared observed display unit.
 
     This is a rejection guard, not lexical deduplication: it searches for no
-    matching prefix/suffix and rewrites no text. Exact ordered units, intersecting
-    emission envelopes and the same disjoint-core owner must all corroborate.
-    A word shifted out of both cores cannot silently disappear as context.
+    matching prefix/suffix and rewrites no text. Stable interior raw units and
+    intersecting envelopes corroborate identity. Only far-from-seam units claim
+    a core owner; near-seam units are retained once with unknown timing/owner.
     """
     a=max(left_request['start_sample'],right_request['start_sample'])
     b=min(left_request['end_sample'],right_request['end_sample'])
     seam=left_request['core_end_sample']
     if not a<seam<b or seam!=right_request['core_start_sample']:return False
     def shared(attachment):
-        words=[word for word in attachment['words'] if word['start_sample']<b and word['end_sample']>a]
-        if any(not a<=word['start_sample']<word['end_sample']<=b for word in words):return None
+        # Decode edges can legitimately cut a word or change its capitalization.
+        # Corroboration covers the stable interior, not those context-only edges.
+        words=[word for word in attachment['words']
+               if a+SEAM_UNCERTAINTY_SAMPLES<=word['start_sample']<word['end_sample']<=b-SEAM_UNCERTAINTY_SAMPLES]
         return words
     x,y=shared(left),shared(right)
     if not x or y is None or len(x)!=len(y):return False
     for first,second in zip(x,y):
         if (first['text']!=second['text']
                 or max(first['start_sample'],second['start_sample'])>=min(first['end_sample'],second['end_sample'])
-                or (first['end_sample']<=seam)!=(second['end_sample']<=seam)
-                or (first['start_sample']>=seam)!=(second['start_sample']>=seam)):
+                or (not near_seam(first,seam) and not near_seam(second,seam)
+                    and ((first['end_sample']<=seam)!=(second['end_sample']<=seam)
+                         or (first['start_sample']>=seam)!=(second['start_sample']>=seam)))):
             return False
     return True
 
 
-def assemble_parts(row, requests, parts):
-    """Return one replacement only when every bounded part has usable evidence.
+def near_seam(word,seam):
+    return (word['start_sample']<seam+SEAM_UNCERTAINTY_SAMPLES
+            and word['end_sample']>seam-SEAM_UNCERTAINTY_SAMPLES)
 
-    Callers supply the book's current requests, rather than trusting requests in
-    asynchronous results. Only full emission envelopes inside a disjoint core
-    own display units. Raw substrings preserve internal whitespace and Unicode;
-    one explicit space separates substrings from different decode contexts.
-    Raw full-context texts remain in the durable version journal.
+
+def shared_unknown_words(left,right,seam):
+    """One raw copy per corroborated unit; no core/timing ownership claimed."""
+    first=[word for word in left['words'] if near_seam(word,seam)]
+    second=[word for word in right['words'] if near_seam(word,seam)]
+    if len(first)!=len(second):return None
+    for x,y in zip(first,second):
+        if x['text']!=y['text'] or max(x['start_sample'],y['start_sample'])>=min(x['end_sample'],y['end_sample']):
+            return None
+    return first
+
+
+def assemble_parts(row, requests, parts):
+    """Assemble exact raw substrings; near-seam word timing remains unknown.
+
+    All source alignments must be complete and revision-bound. Stable interior
+    context units corroborate identity, and each near-seam unit must independently
+    agree in both contexts. Those units appear once in the canonical text but are
+    not assigned to either core and cannot form a complete timing attachment.
+    This establishes candidate conservation, not recognition truth.
     """
+    def unresolved(reason):return {'complete':False,'reason':reason,'text':None,'words':[]}
     if not isinstance(parts,list) or not parts or len(parts)!=len(requests):
-        return {'complete':False,'reason':'missing_decode_parts','text':None,'words':[]}
-    fragments=[];words=[];cursor=row['start_sample'];calibration=None;previous=None
+        return unresolved('missing_decode_parts')
+    attachments=[];cursor=row['start_sample'];calibration=None
     for request,part in zip(requests,parts):
         if (request['utterance_id']!=row['id'] or request['machine_revision']!=row['machine_revision']
                 or request['audio_revision']!=row['audio_revision']
@@ -76,51 +96,53 @@ def assemble_parts(row, requests, parts):
             raise ValueError('Decode belongs to a different canonical audio or text revision.')
         text=part.get('text')
         if not isinstance(text,str) or not text.strip() or part.get('complete') is not True:
-            return {'complete':False,'reason':'incomplete_decode','text':None,'words':[]}
+            return unresolved('incomplete_decode')
         current=part_utterance(request,text)
-        try:
-            attachment=attachment_for(part.get('alignment') or {},AlignmentRequest.from_utterance(current),current)
-        except (ValueError,KeyError,TypeError):
-            return {'complete':False,'reason':'unresolved_alignment','text':None,'words':[]}
+        try:attachment=attachment_for(part.get('alignment') or {},AlignmentRequest.from_utterance(current),current)
+        except (ValueError,KeyError,TypeError):return unresolved('unresolved_alignment')
         provenance=tuple(attachment[k] for k in ('model_sha256','timing_kind','frame_calibration_id','score_calibration_id'))
         if calibration is None:calibration=provenance
-        elif provenance!=calibration:
-            return {'complete':False,'reason':'inconsistent_alignment_provenance','text':None,'words':[]}
-        if previous and not corroborated_seam(previous[0],previous[1],request,attachment):
-            return {'complete':False,'reason':'context_ownership_unresolved','text':None,'words':[]}
-        previous=(request,attachment)
-        owned=[];a,b=request['core_start_sample'],request['core_end_sample']
-        for word in attachment['words']:
-            x,y=word['start_sample'],word['end_sample']
-            if y<=a or x>=b:continue
-            if x<a or y>b:
-                return {'complete':False,'reason':'boundary_emission_unresolved','text':None,'words':[]}
-            if ((a>row['start_sample'] and x<a+SEAM_UNCERTAINTY_SAMPLES)
-                    or (b<row['end_sample'] and y>b-SEAM_UNCERTAINTY_SAMPLES)):
-                return {'complete':False,'reason':'boundary_uncertainty_unresolved','text':None,'words':[]}
-            owned.append(word)
-        # An empty text ownership result is not proof that the speech core was
-        # silent. Keep the prior words and the entire supplied candidate.
-        if not owned:
-            return {'complete':False,'reason':'empty_core_ownership','text':None,'words':[]}
-        first,last=owned[0]['start_char'],owned[-1]['end_char']
-        fragment=text[first:last]
-        offset=sum(len(value) for value in fragments)+len(fragments)
-        for word in owned:
+        elif provenance!=calibration:return unresolved('inconsistent_alignment_provenance')
+        attachments.append(attachment)
+    if cursor!=row['end_sample']:raise ValueError('Decode cores do not cover the canonical utterance.')
+    seam_units={}
+    for index in range(len(requests)-1):
+        left,right=requests[index:index+2];seam=left['core_end_sample']
+        if not corroborated_seam(left,attachments[index],right,attachments[index+1]):
+            return unresolved('context_ownership_unresolved')
+        unknown=shared_unknown_words(attachments[index],attachments[index+1],seam)
+        if unknown is None:return unresolved('boundary_uncertainty_unresolved')
+        seam_units[index]=unknown
+    fragments=[];words=[]
+    for index,(request,part,attachment) in enumerate(zip(requests,parts,attachments)):
+        a,b=request['core_start_sample'],request['core_end_sample']
+        lower=a+(SEAM_UNCERTAINTY_SAMPLES if index else 0)
+        upper=b-(SEAM_UNCERTAINTY_SAMPLES if index<len(requests)-1 else 0)
+        owned=[word for word in attachment['words'] if lower<=word['start_sample']<word['end_sample']<=upper]
+        unknown=seam_units.get(index,[])
+        selected=owned+unknown
+        if not selected:return unresolved('empty_core_ownership')
+        # Never remove an uncorroborated word from inside a retained substring.
+        indices=[attachment['words'].index(word) for word in selected]
+        if indices!=list(range(indices[0],indices[-1]+1)):
+            return unresolved('noncontiguous_raw_ownership')
+        first,last=selected[0]['start_char'],selected[-1]['end_char'];text=part['text']
+        fragment=text[first:last];offset=sum(map(len,fragments))+len(fragments)
+        for word in selected:
             materialized=copy.deepcopy(word)
             materialized.update(start_char=offset+word['start_char']-first,end_char=offset+word['end_char']-first,
-                decode_id=current['id'],raw_start_char=word['start_char'],raw_end_char=word['end_char'],
-                raw_text_sha256=attachment['text_sha256'])
+                decode_id=part_utterance(request,text)['id'],raw_start_char=word['start_char'],raw_end_char=word['end_char'],
+                raw_text_sha256=attachment['text_sha256'],core_ownership='unknown' if word in unknown else 'owned')
+            if word in unknown:
+                materialized.update(start_sample=None,end_sample=None,status='unresolved_boundary')
             words.append(materialized)
         fragments.append(fragment)
-    if cursor!=row['end_sample']:
-        raise ValueError('Decode cores do not cover the canonical utterance.')
     text=' '.join(fragments)
     for word in words:
         word['start_utf16']=len(text[:word['start_char']].encode('utf-16-le'))//2
         word['end_utf16']=len(text[:word['end_char']].encode('utf-16-le'))//2
-    return {'complete':True,'reason':None,'text':text,'words':words,
-            'text_sha256':hashlib.sha256(text.encode()).hexdigest(),
+    return {'complete':True,'alignment_complete':all(w['start_sample'] is not None for w in words),
+            'reason':None,'text':text,'words':words,'text_sha256':hashlib.sha256(text.encode()).hexdigest(),
             'separator_policy':'one_space_between_owned_raw_context_substrings',
             'model_sha256':calibration[0],'timing_kind':calibration[1],
             'frame_calibration_id':calibration[2],'score_calibration_id':calibration[3]}

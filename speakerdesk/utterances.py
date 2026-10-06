@@ -58,6 +58,7 @@ class UtteranceBook:
             row['end_sample'] = end
             row['audio_revision'] += 1
             row.pop('alignment', None)
+            row.pop('assembly_provenance',None)
             row.pop('speaker_activity', None)
             row['voice_eligible'] = False
 
@@ -159,6 +160,7 @@ class UtteranceBook:
         row['protected_fields'] = sorted(set(row['protected_fields']) | {'text'})
         row['machine_revision'] += 1
         row.pop('alignment', None)
+        row.pop('assembly_provenance',None)
         return copy.deepcopy(row)
 
     def apply_model(self, identity, revision, text, *, start_sample, end_sample, stage, complete):
@@ -185,6 +187,7 @@ class UtteranceBook:
             row['machine_revision'] += 1
             row['refinement_state'] = 'refined' if stage == 'refined' and row['state'] == 'sealed' else 'provisional'
             row.pop('alignment', None)
+            row.pop('assembly_provenance',None)
         return copy.deepcopy(row)
 
     def decode_requests(self, identity):
@@ -222,10 +225,17 @@ class UtteranceBook:
             row['text']=assembled['text'];row['machine_revision']+=1
             row['text_audio_anchor']=copy.deepcopy(version['audio_anchor'])
             row['refinement_state']='refined' if stage=='refined' and row['state']=='sealed' else 'provisional'
-            self.attach_alignment(identity,row['machine_revision'],assembled['text_sha256'],
-                assembled['words'],audio_revision=row['audio_revision'])
-            row['alignment'].update({key:assembled[key] for key in
-                ('model_sha256','timing_kind','frame_calibration_id','score_calibration_id','separator_policy')})
+            row.pop('alignment',None)
+            row['assembly_provenance']={key:copy.deepcopy(assembled[key]) for key in
+                ('text_sha256','words','alignment_complete','model_sha256','timing_kind',
+                 'frame_calibration_id','score_calibration_id','separator_policy')}
+            row['assembly_provenance'].update(machine_revision=row['machine_revision'],
+                audio_revision=row['audio_revision'],audio_anchor=copy.deepcopy(version['audio_anchor']))
+            if assembled['alignment_complete']:
+                self.attach_alignment(identity,row['machine_revision'],assembled['text_sha256'],
+                    assembled['words'],audio_revision=row['audio_revision'])
+                row['alignment'].update({key:assembled[key] for key in
+                    ('model_sha256','timing_kind','frame_calibration_id','score_calibration_id','separator_policy')})
         return copy.deepcopy(row)
 
     def attach_alignment(self, identity, revision, text_sha256, words, *, audio_revision):

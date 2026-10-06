@@ -50,9 +50,28 @@ class AssemblyTests(unittest.TestCase):
         parts=[part(requests[0],'before designing',[(250000,255000),(280000,287440)]),
                part(requests[1],'before designing after',[(250000,255000),(280000,287440),(400000,410000)])]
         result=assemble_parts(row,requests,parts)
-        self.assertFalse(result['complete'])
-        self.assertEqual(result['reason'],'boundary_uncertainty_unresolved')
-        self.assertIsNone(result['text']);self.assertEqual(result['words'],[])
+        self.assertTrue(result['complete'])
+        self.assertFalse(result['alignment_complete'])
+        self.assertEqual(result['text'],'before designing after')
+        word=next(w for w in result['words'] if w['text']=='designing')
+        self.assertEqual(word['core_ownership'],'unknown')
+        self.assertIsNone(word['start_sample']);self.assertIsNone(word['end_sample'])
+        applied=book.apply_decode_parts(row['id'],parts,stage='refined')
+        self.assertNotIn('alignment',applied)
+        self.assertFalse(applied['assembly_provenance']['alignment_complete'])
+
+    def test_cut_context_edges_do_not_duplicate_or_drop_corroborated_seam_units(self):
+        book,row=book_for();requests=book.decode_requests(row['id'])
+        spans=[(239680,243840),(250000,255000),(283840,288000),(288960,290240),(291200,295040),(333760,335360)]
+        other=[(240960,244480),*spans[1:5],(400000,410000)]
+        parts=[part(requests[0],'flows before past the green tail',spans),
+               part(requests[1],'Flows before past the green after',other)]
+        result=assemble_parts(row,requests,parts)
+        self.assertTrue(result['complete']);self.assertFalse(result['alignment_complete'])
+        self.assertEqual(result['text'],'flows before past the green after')
+        self.assertEqual([w['text'] for w in result['words'] if w['core_ownership']=='unknown'],['past','the','green'])
+        parts[1]=part(requests[1],'Flows before Past the green after',other)
+        self.assertFalse(assemble_parts(row,requests,parts)['complete'])
 
     def test_opposing_context_ownership_cannot_silently_omit_or_duplicate_a_word(self):
         for opposing in ('omit','duplicate'):

@@ -251,6 +251,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             # Every attachment binds the old machine revision, including a
             # speaker-only edit. A client cannot reuse it for the new revision.
             row.pop('alignment',None)
+            row.pop('assembly_provenance',None)
             if any(row[k]!=prior[k] for k in ('start','end')):row.pop('text_audio_anchor',None)
             if any(row[k]!=prior[k] for k in ('speaker','start','end')):
                 row.update(voice_eligible=False,speaker_candidates=[]);row.pop('retry_candidate',None)
@@ -304,7 +305,8 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                     segment['refinement_state']='edited' if protected or edited else prior.get('refinement_state')
                 else:
                     for key in ('protected_fields','machine_revision','refinement_state'):segment.pop(key,None)
-                if edited or body.get('imported'):segment.pop('alignment',None)
+                if edited or body.get('imported'):
+                    segment.pop('alignment',None);segment.pop('assembly_provenance',None)
                 if edited & {'start','end'} or body.get('imported'):segment.pop('text_audio_anchor',None)
                 # Client edits/imports cannot manufacture server-owned clean-audio evidence.
                 unchanged=bool(prior and not body.get('imported') and all(segment[k]==prior[k] for k in ('speaker','start','end')))

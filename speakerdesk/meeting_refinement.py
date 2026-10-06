@@ -178,9 +178,10 @@ class RefinementController:
                 if protected:
                     row['refinement_state']='edited';row['voice_eligible']=False
                     row.pop('alignment',None)
+                    row.pop('assembly_provenance',None)
                     if protected & {'start','end'}:row.pop('text_audio_anchor',None)
                 if not row['text'].strip() and prior['text'].strip():
-                    row['text']=prior['text'];row['review']=True;row.pop('alignment',None)
+                    row['text']=prior['text'];row['review']=True;row.pop('alignment',None);row.pop('assembly_provenance',None)
                     row.pop('text_audio_anchor',None)
                     if prior.get('text_audio_anchor') and not protected & {'start','end'}:
                         row['text_audio_anchor']=copy.deepcopy(prior['text_audio_anchor'])
