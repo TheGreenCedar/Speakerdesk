@@ -451,7 +451,8 @@ class CanonicalRuntime:
                 'audio_anchor':copy.deepcopy(row['text_audio_anchor']),
                 'activity_sha256':hashlib.sha256(json.dumps(row['speaker_activity'],sort_keys=True,separators=(',',':')).encode()).hexdigest(),
                 'turns_sha256':hashlib.sha256(json.dumps(turns,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest(),
-                'method':'english_coarse_emissions_temporal_nvidia_v1','transition_margin_samples':4000,
+                'method':'english_coarse_emissions_temporal_nvidia_v2','transition_margin_samples':4000,
+                'uncertainty_policy':'emission_inside_activity_no_competing_owner_in_margin',
                 'calibration_id':row['reading_word_evidence']['calibration_id'],
                 'model_sha256':row['reading_word_evidence']['model_sha256']}
         if row.get('canonical_unresolved'):

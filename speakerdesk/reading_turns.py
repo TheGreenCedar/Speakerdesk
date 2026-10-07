@@ -38,8 +38,7 @@ def alignment_words(result, text, start, end):
             return []
         a, b = word.get('start_sample'), word.get('end_sample')
         timed = (word.get('status') == 'aligned' and type(a) is int and type(b) is int
-                 and previous <= a < b <= end
-                 and start + MARGIN <= a and b <= end - MARGIN)
+                 and previous <= a < b <= end)
         output.append({'text': unit.group(), 'start_char': unit.start(), 'end_char': unit.end(),
                        'start_sample': a if timed else None, 'end_sample': b if timed else None})
         if timed:
@@ -106,12 +105,18 @@ def project_turns(row):
         if timed:
             previous_sample = b
             for i, region in enumerate(regions):
-                # The frozen 250ms guard applies at every activity transition,
-                # including gaps and overlap onset, not artificial feed cells.
-                left = region['start_sample'] + (MARGIN if i else 0)
-                right = region['end_sample'] - (MARGIN if i + 1 < len(regions) else 0)
                 names = region['speakers']
-                if left <= a < b <= right and names and all(re.fullmatch(r'speaker_\d+', n) for n in names):
+                # Keep the full calibrated uncertainty window. Empty activity
+                # supplies no competing voice; a different owner set does.
+                # The emission itself must remain within nonempty activity;
+                # words in a gap never acquire a voice from their neighbours.
+                left = max(row['start_sample'], a - MARGIN)
+                right = min(row['end_sample'], b + MARGIN)
+                if (region['start_sample'] <= a < b <= region['end_sample'] and names
+                        and all(re.fullmatch(r'speaker_\d+', n) for n in names)
+                        and all(not other['speakers'] or other['speakers'] == names
+                                for other in regions
+                                if other['start_sample'] < right and left < other['end_sample'])):
                     speaker = names[0] if len(names) == 1 else 'overlap_' + '_'.join(names)
                     state = 'single' if len(names) == 1 else 'overlap'
                     break
