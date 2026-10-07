@@ -8,6 +8,7 @@ raw core text without pretending to know individual word boundaries.
 import copy
 import hashlib
 from pathlib import Path
+import re
 import uuid
 
 from utterances import UtteranceBook, RevisionArchive, MAX_DECODE_SAMPLES, RATE
@@ -208,7 +209,9 @@ class CanonicalRuntime:
 
     def reading_alignment_enabled(self,row):
         models=self.engine.models
-        return (row['state']=='sealed' and len(row.get('speaker_candidates',[]))>1
+        # Open revisions already have an exact text/audio anchor. Waiting for
+        # a VAD seal hides sequential speaker turns during continuous speech.
+        return (len(row.get('speaker_candidates',[]))>1
             and hasattr(models,'align_canonical') and hasattr(models,'alignment_supported')
             and models.alignment_supported('en'))
 
@@ -400,17 +403,21 @@ class CanonicalRuntime:
 
     def project(self,row):
         e=self.engine;stamp=e.language_at(row['start_sample']);names=row.get('speaker_candidates',[])
-        speaker=names[0] if len(names)==1 else 'multiple_speakers' if names else 'unassigned'
+        turns=project_turns(row)
+        attributed=any(turn['attribution']!='unknown' for turn in turns)
+        # A union over an utterance is activity evidence, not attribution of
+        # its unsplit words. Missing timing preserves raw text as unassigned.
+        single=len(names)==1 and bool(re.fullmatch(r'speaker_\d+',names[0]))
+        speaker=names[0] if single else 'multiple_speakers' if attributed else 'unassigned'
         result={key:copy.deepcopy(value) for key,value in row.items()
                 if key not in ('machine_versions','protected_fields','last_speech_sample','state','machine_revision','reading_word_evidence','reading_turns','reading_turn_provenance','decode_core_plan')}
         result.update(canonical_utterance_id=row['id'],canonical_machine_revision=row['machine_revision'],
             canonical_state=row['state'],start=row['start_sample']/RATE,end=row['end_sample']/RATE,
             speaker=speaker,source_speaker_candidates=names,language_generation=row['language_epoch'],
             language_mode=stamp['language'],finalized=row['state']=='sealed',
-            review=len(names)!=1 or bool(row.get('review')) or bool(row.get('canonical_unresolved')) or bool(row.get('transcription_review')),
+            review=not single or bool(row.get('review')) or bool(row.get('canonical_unresolved')) or bool(row.get('transcription_review')),
             timing='canonical_vad_audio_anchor',refinement_state=row.get('refinement_state','provisional'))
         if stamp['language']!='auto':result['language']=stamp['language']
-        turns=project_turns(row)
         if turns:
             import hashlib,json
             result['reading_turns']=turns

@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "purpose": "Synthetic actual-model attribution replay proposal; no prerecorded user audio",
+  "cases": [
+    {
+      "id": "a-b",
+      "language": "en",
+      "parts": [
+        {"kind": "speech", "voice": "com.apple.voice.super-compact.en-US.Samantha", "rate": 145, "text": "The blue folder is ready for the meeting this morning."},
+        {"kind": "speech", "voice": "com.apple.voice.super-compact.en-GB.Daniel", "rate": 145, "text": "The red notebook contains the numbers we will review together."}
+      ],
+      "expect": {"owner_pattern": ["A", "B"], "simultaneous_recipe_activity": false}
+    },
+    {
+      "id": "a-b-a",
+      "language": "en",
+      "parts": [
+        {"kind": "speech", "voice": "com.apple.voice.super-compact.en-US.Samantha", "rate": 145, "text": "The blue folder is ready for the meeting this morning."},
+        {"kind": "speech", "voice": "com.apple.voice.super-compact.en-GB.Daniel", "rate": 145, "text": "The red notebook contains the numbers we will review together."},
+        {"kind": "speech", "voice": "com.apple.voice.super-compact.en-US.Samantha", "rate": 145, "text": "Please keep the blue folder beside the small green calendar."}
+      ],
+      "expect": {"owner_pattern": ["A", "B", "A"], "simultaneous_recipe_activity": false}
+    },
+    {
+      "id": "overlap",
+      "language": "en",
+      "parts": [
+        {"kind": "overlap", "right_offset_seconds": 2,
+          "left": {"kind": "speech", "voice": "com.apple.voice.super-compact.en-US.Samantha", "rate": 145, "text": "The blue folder is ready for the meeting this morning."},
+          "right": {"kind": "speech", "voice": "com.apple.voice.super-compact.en-GB.Daniel", "rate": 145, "text": "The red notebook contains the numbers we will review together."}}
+      ],
+      "expect": {"simultaneous_recipe_activity": true}
+    },
+    {
+      "id": "gap",
+      "language": "en",
+      "parts": [
+        {"kind": "speech", "voice": "com.apple.voice.super-compact.en-US.Samantha", "rate": 145, "text": "The blue folder is ready for the meeting this morning."},
+        {"kind": "zero", "seconds": 0.3},
+        {"kind": "speech", "voice": "com.apple.voice.super-compact.en-GB.Daniel", "rate": 145, "text": "The red notebook contains the numbers we will review together."}
+      ],
+      "expect": {"owner_pattern": ["A", "B"], "simultaneous_recipe_activity": false, "gap_seconds": 0.3}
+    }
+  ]
+}
