@@ -176,6 +176,50 @@ def crop_context(chunks,duration,padding=0.22):
         chunk['audio_end']=min(duration,chunk['end']+padding,(following+chunk['end'])/2)
 
 
+def attach_import_reading_turns(segment):
+    """Project qualified continuous-decode timings through original activity.
+
+    The provider owns neural execution. This adapter never loads an aligner;
+    absent, stale or unqualified timing keeps the parent text unassigned.
+    """
+    import hashlib
+    from reading_turns import alignment_words, bind_words, project_turns
+    if not segment.get('decode_context') or segment.get('language') != 'en':return
+    alignment=segment.get('reading_alignment')
+    audio_hash=segment.get('audio_float32_sha256')
+    if (not isinstance(alignment,dict) or not isinstance(audio_hash,str)
+            or not re.fullmatch(r'[0-9a-f]{64}',audio_hash)
+            or alignment.get('audio_float32_sha256') != audio_hash):return
+    if not isinstance(alignment.get('words'),list) or any(
+            not isinstance(word,dict) for word in alignment['words']):return
+    a,b=round(segment['start']*16000),round(segment['end']*16000)
+    words=alignment_words(alignment,segment['text'],a,b)
+    if not words:return
+    anchor={'start_sample':a,'end_sample':b}
+    activity={'audio_revision':0,'observed_end_sample':b,'regions':[
+        {'start_sample':round(part['start']*16000),'end_sample':round(part['end']*16000),
+         'speakers':list(part['speakers'])} for part in segment.get('activity_regions',[])]}
+    row={**segment,'start_sample':a,'end_sample':b,'machine_revision':0,
+         'audio_revision':0,'language_epoch':0,'text_audio_anchor':anchor,'speaker_activity':activity}
+    bind_words(row,words)
+    turns=project_turns(row)
+    if not turns:return
+    segment.update(canonical_utterance_id=segment['id'],canonical_machine_revision=0,
+        machine_revision=0,audio_revision=0,language_epoch=0,text_audio_anchor=anchor,
+        speaker_activity=activity,reading_turns=turns)
+    segment['reading_turn_provenance']={
+        'utterance_id':segment['id'],'canonical_machine_revision':0,'machine_revision':0,
+        'audio_revision':0,'language_epoch':0,'text_sha256':hashlib.sha256(segment['text'].encode()).hexdigest(),
+        'audio_anchor':anchor,'activity_sha256':hashlib.sha256(json.dumps(activity,
+            sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+        'turns_sha256':hashlib.sha256(json.dumps(turns,
+            sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest(),
+        'method':'english_coarse_emissions_temporal_nvidia_v2','transition_margin_samples':4000,
+        'uncertainty_policy':'emission_inside_activity_no_competing_owner_in_margin',
+        'calibration_id':row['reading_word_evidence']['calibration_id'],
+        'model_sha256':row['reading_word_evidence']['model_sha256']}
+
+
 def run_worker(python, task, request, folder):
     request_path=folder/f'{task}-request.json'; output_path=folder/f'{task}-output.json'
     request_path.write_text(json.dumps(request))
@@ -229,11 +273,12 @@ def infer(audio_path, duration, language, folder, progress, config=None):
             path=crop_dir/f'{i}.wav';crop(audio_path,path,chunk['audio_start'],chunk['audio_end']);chunk['audio']=str(path)
         asr=run_worker(config['asr_python'],'transcribe',{'model_path':config['cohere_path'],
             'chunks':chunks,'language':language,'lid_path':config.get('lid_path'),
-            'speech_path':config.get('speech_path'),'audio':str(audio_path),
+            'speech_path':config.get('speech_path'),'alignment_path':config.get('alignment_path'),'audio':str(audio_path),
             'device':config['device']},folder) if chunks else {'regions':[],'metrics':{}}
     finally:
         for path in crop_dir.glob('*.wav'):path.unlink()
         crop_dir.rmdir()
+    chunks=asr.get('chunks',chunks)
     if len(asr['regions']) != len(chunks):
         raise RuntimeError('Cohere returned an incomplete transcript.')
     speakers={s:f'Speaker {int(s.split("_")[1])+1}' for s in sorted({t['speaker'] for t in turns})}
@@ -247,11 +292,18 @@ def infer(audio_path, duration, language, folder, progress, config=None):
             start=max(chunk['start'],chunk['audio_start']+region['start'])
             end=min(chunk['end'],chunk['audio_start']+region['end'])
             if end <= start:continue
-            segments.append({**region,'id':f'seg-{len(segments)}','start':start,'end':end,'speaker':speaker,
+            segment_speaker=speaker
+            if chunk.get('decode_context') and any(not part['speakers']
+                    for part in activity_slice(chunk['activity_regions'],start,end)):
+                # Context across an unknown activity edge is not word timing.
+                segment_speaker='unassigned';speakers[segment_speaker]='Unknown speaker'
+            segments.append({**region,'id':f'seg-{len(segments)}','start':start,'end':end,'speaker':segment_speaker,
                              'speaker_candidates':chunk['speakers'],'voice_eligible':len(chunk['speakers'])==1 and not region.get('audio_state') and not chunk.get('activity_regions'),
                              **({'activity_regions':activity_slice(chunk['activity_regions'],start,end)} if chunk.get('activity_regions') else {}),
-                             'review':region['review'] or len(chunk['speakers'])!=1 or end-start<.5,
+                             **({'decode_context':chunk['decode_context']} if segment_speaker=='unassigned' and chunk.get('decode_context') else {}),
+                             'review':region['review'] or segment_speaker=='unassigned' or len(chunk['speakers'])!=1 or end-start<.5,
                              'timing':'audio_crop','confidence':None})
+            attach_import_reading_turns(segments[-1])
     return retain_unassigned_audio({'schema_version':1,'speakers':speakers,'segments':segments,'diarization':turns,
             'provenance':{'kind':'local_inference','asr_model':'CohereLabs/cohere-transcribe-03-2026',
                           'diarization_model':model_id,'language':language,'device':config['device'],

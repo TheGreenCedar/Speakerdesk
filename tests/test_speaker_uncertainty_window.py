@@ -31,6 +31,8 @@ class SpeakerUncertaintyWindowTests(unittest.TestCase):
         row = data['segment']
         words = alignment_words(data['alignment'], row['text'], row['start_sample'], row['end_sample'])
         bind_words(row, words)
+        self.assertEqual(row['reading_word_evidence']['model_sha256'],data['alignment']['model_sha256'])
+        self.assertEqual(row['reading_word_evidence']['calibration_id'],data['alignment']['frame_calibration_id'])
         turns = project_turns(row)
         self.assertEqual(''.join(t['text'] for t in turns), row['text'])
         self.assertEqual([t['speaker'] for t in turns], ['speaker_0', 'speaker_1'])

@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from transcript import LANGUAGES
+from language_probe_cache import LanguageProbeCache, validate_language_scores
 
 LANGUAGE_CHOICES = {'auto': 'Automatic', **LANGUAGES}
 
@@ -45,6 +46,10 @@ LID_SPEC = {
         'README.md': 'd68f867f75885b5fb22073dee9befb9bcb5586a4ba1cdfe39153f0335b2ca9e4'},
 }
 LID_CHECKPOINT = LID_SPEC['repo'] + '@' + LID_SPEC['revision']
+# Weights, token/config bytes, and the reviewed preprocessing/decoder contract.
+LID_PROBE_IDENTITY = (LID_CHECKPOINT, LID_SPEC['sha256'],
+    LID_SPEC['file_sha256']['config.json'], LID_SPEC['file_sha256']['added_tokens.json'],
+    'whisper_tiny_mel_pad_trim_language_sot_v1')
 
 
 def language_tokens(tokens, vocab_size):
@@ -129,10 +134,7 @@ class LanguagePolicy:
         self.current.pop(speaker, None)
 
     def decide(self, probabilities, speaker):
-        if (not probabilities or any(not isinstance(code, str) or not math.isfinite(float(p))
-                                    or not 0 <= float(p) <= 1 for code, p in probabilities.items())
-                or not .98 <= sum(float(p) for p in probabilities.values()) <= 1.02):
-            raise ValueError('Invalid language detection probabilities.')
+        validate_language_scores(probabilities)
         ranked = sorted(probabilities.items(), key=lambda item: float(item[1]), reverse=True)
         winner, probability = ranked[0][0], float(ranked[0][1])
         margin = probability - (float(ranked[1][1]) if len(ranked) > 1 else 0.)
@@ -162,8 +164,10 @@ class SpeechTranscriber:
     """
     CONTEXT_SAMPLES = 60 * 16000
 
-    def __init__(self, asr, language, detector_path=None, *, detector=None, context=None, speech_evidence=None):
+    def __init__(self, asr, language, detector_path=None, *, detector=None, context=None, speech_evidence=None,
+                 probe_cache=None, language_epoch=0):
         self.asr,self.detector_path,self.detector=asr,detector_path,detector
+        self.probe_cache=probe_cache;self.language_epoch=language_epoch
         self.cohere_calls=0
         self.speech_evidence = speech_evidence
         self.set_language(language)
@@ -263,7 +267,11 @@ class SpeechTranscriber:
                           'language_detection':{'mode':'manual','reason':'override'}}
             else:
                 try:
-                    decision=self.policy.decide(self.detector.detect(pcm),speaker)
+                    probabilities=(self.probe_cache.detect(self.detector,pcm,
+                        start_sample=start_sample+int(begin),language_epoch=self.language_epoch,
+                        model_identity=LID_PROBE_IDENTITY)
+                        if self.probe_cache is not None else self.detector.detect(pcm))
+                    decision=self.policy.decide(probabilities,speaker)
                 except (RuntimeError,ValueError,OSError):
                     decision={'language':None,'review':True,
                               'language_detection':{'mode':'auto','reason':'needs_language','detector_error':True}}

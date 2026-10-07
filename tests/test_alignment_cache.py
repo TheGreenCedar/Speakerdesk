@@ -11,7 +11,7 @@ from alignment_cache import AlignmentCache
 from coarse_alignment import CoarseAlignment,CALIBRATION_ID,TOKEN_SHA256
 from word_alignment import MODEL_SHA256
 
-IDENTITY=(MODEL_SHA256,TOKEN_SHA256,CALIBRATION_ID,'ctc_emission_cell_envelope',320,0,-20,'onnxruntime-1.30.0','ctc-segmentation-1.7.4')
+IDENTITY=(MODEL_SHA256,TOKEN_SHA256,CALIBRATION_ID,'ctc_emission_cell_envelope',320,0,-20,'mlx-0.32.2-cached-float32-gpu','ctc-segmentation-1.7.4')
 
 def evidence(key):
     _,text,audio,start,end,_=key
@@ -130,29 +130,29 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(small.bytes,sum(len(v) for v in small.entries.values()))
     def test_actual_provider_wrapper_hits_before_session_and_returns_fresh_result(self):
         import numpy as np
-        class Session:
+        class ForwardPeer:
             def __init__(self):self.calls=0
-            def run(self,*args):self.calls+=1;return [np.zeros((1,3,4),dtype=np.float32)]
-        provider=CoarseAlignment.__new__(CoarseAlignment);provider.session=Session();provider.vocabulary={};provider.cache=AlignmentCache(IDENTITY)
+            def __call__(self,*args):self.calls+=1;return np.zeros((3,4),dtype=np.float32)
+        forward=ForwardPeer();provider=CoarseAlignment.__new__(CoarseAlignment);provider.model=object();provider.actual_gpu_forwards=0;provider.vocabulary={};provider.cache=AlignmentCache(IDENTITY)
         audio=np.array([.1,.2,.3],dtype=np.float32)
         key=provider.cache.key('café',audio.astype('<f4').tobytes(),100,103,'en')
         result=evidence(key)
-        with patch('coarse_alignment.align_ctc_scores',return_value=result):
+        with patch('mlx_ctc_forward.forward_scores',side_effect=forward), patch('coarse_alignment.align_ctc_scores',return_value=result):
             first=provider.align(audio,'café',start_sample=100,language='en')
             first['words'][0]['start_sample']=None
             second=provider.align(audio,'café',start_sample=100,language='en')
-        self.assertEqual(provider.session.calls,1);self.assertEqual(second['words'][0]['start_sample'],100)
+        self.assertEqual(forward.calls,1);self.assertEqual(second['words'][0]['start_sample'],100)
         self.assertEqual(provider.cache.metrics()['provider_calls'],1)
         self.assertEqual(provider.cache.metrics()['cache_hits'],1)
     def test_partial_provider_results_repeat_and_unsupported_language_never_runs(self):
         import numpy as np
-        class Session:
+        class ForwardPeer:
             def __init__(self):self.calls=0
-            def run(self,*args):self.calls+=1;return [np.zeros((1,3,4),dtype=np.float32)]
-        p=CoarseAlignment.__new__(CoarseAlignment);p.session=Session();p.vocabulary={};p.cache=AlignmentCache(IDENTITY)
+            def __call__(self,*args):self.calls+=1;return np.zeros((3,4),dtype=np.float32)
+        forward=ForwardPeer();p=CoarseAlignment.__new__(CoarseAlignment);p.model=object();p.actual_gpu_forwards=0;p.vocabulary={};p.cache=AlignmentCache(IDENTITY)
         audio=np.array([.1,.2,.3],dtype=np.float32)
         key=p.cache.key('words',audio.astype('<f4').tobytes(),0,3,'en')
-        with patch('coarse_alignment.align_ctc_scores',return_value=dict(evidence(key),status='partial',complete=False)):
+        with patch('mlx_ctc_forward.forward_scores',side_effect=forward), patch('coarse_alignment.align_ctc_scores',return_value=dict(evidence(key),status='partial',complete=False)):
             p.align(audio,'words',start_sample=0,language='en');p.align(audio,'words',start_sample=0,language='en')
-        self.assertEqual(p.session.calls,2);self.assertEqual(p.cache.bytes,0)
-        self.assertIsNone(p.align(audio,'words',start_sample=0,language='fr'));self.assertEqual(p.session.calls,2)
+        self.assertEqual(forward.calls,2);self.assertEqual(p.cache.bytes,0)
+        self.assertIsNone(p.align(audio,'words',start_sample=0,language='fr'));self.assertEqual(forward.calls,2)

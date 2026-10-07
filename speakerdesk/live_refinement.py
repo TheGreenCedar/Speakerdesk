@@ -180,6 +180,8 @@ class Models:
         from mlx_audio.vad import load
         from mlx_speech.generation.cohere_asr import CohereAsrModel
         self.mx=mx;self.check_memory=check_memory;self.config=config;self.detector=None
+        from language_detection import LanguageProbeCache
+        self.language_probe_cache=LanguageProbeCache();self.language_epoch=config.get('language_epoch',0)
         mx.set_memory_limit(5*1024**3);mx.set_cache_limit(256*1024**2)
         self.diar=load(Path(config['diar_path']),strict=True);self.diar.set_streaming_config('low')
         self.state=self.diar.init_streaming_state()
@@ -224,6 +226,8 @@ class Models:
             return None
     def set_language_context(self,context,start_sample):
         self.language_context=copy.deepcopy(context);self.transcription_start_sample=start_sample
+    def set_language_epoch(self,epoch):
+        self.language_epoch=epoch
     def transcribe(self,audio,language,names,overlap=False):
         import sys
         from language_detection import SpeechTranscriber,WhisperLanguageDetector
@@ -231,7 +235,8 @@ class Models:
         if language=='auto' and self.detector is None:self.detector=WhisperLanguageDetector(self.config['lid_path'])
         transcriber=SpeechTranscriber(self.asr,language,self.config.get('lid_path'),detector=self.detector,
             context=self.language_context,speech_evidence=(self.speech_historical
-                if self.speech_historical is not None else self.speech_live.evidence))
+                if self.speech_historical is not None else self.speech_live.evidence),
+            probe_cache=self.language_probe_cache,language_epoch=self.language_epoch)
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 result=transcriber.transcribe(audio,RATE,tuple(names),max_asr_seconds=24.5,allow_overlap=overlap,
@@ -308,6 +313,7 @@ class Engine:
         if prefix_context and sample<=prefix_context['end_sample']<=sample+len(pcm):context=prefix_context
         if hasattr(self.models,'set_language_context'):
             self.models.set_language_context({k:context[k] for k in ('language','end_sample')} if context else None,sample)
+        if hasattr(self.models,'set_language_epoch'):self.models.set_language_epoch(epoch)
         passages=self.models.transcribe(pcm,language,names,overlap=overlap)
         for passage in passages:
             for event in language_probe_events(passage,sample) if language=='auto' else []:

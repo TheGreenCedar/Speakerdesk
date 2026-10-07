@@ -10,8 +10,15 @@ import re
 
 RATE = 16000
 MARGIN = 4000
-CALIBRATION = 'ami-english-coarse-v1-5ab4e661e62f'
-MODEL = 'e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c'
+CALIBRATION = 'ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75'
+MODEL = '38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d'
+QUALIFIED_IDENTITIES = frozenset({(MODEL, CALIBRATION),
+    ('e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c',
+     'ami-english-coarse-v1-5ab4e661e62f')})
+
+
+def qualified_identity(model, calibration):
+    return isinstance(model,str) and isinstance(calibration,str) and (model, calibration) in QUALIFIED_IDENTITIES
 
 
 def alignment_words(result, text, start, end):
@@ -21,10 +28,9 @@ def alignment_words(result, text, start, end):
     if (result.get('raw_text') != text
             or result.get('text_sha256') != hashlib.sha256(text.encode()).hexdigest()
             or result.get('audio_anchor') != {'start_sample': start, 'end_sample': end}
-            or result.get('model_sha256') != MODEL
+            or not qualified_identity(result.get('model_sha256'), result.get('frame_calibration_id'))
             or result.get('timing_kind') != 'ctc_emission_cell_envelope'
-            or result.get('frame_calibration_id') != CALIBRATION
-            or result.get('score_calibration_id') != CALIBRATION):
+            or result.get('score_calibration_id') != result.get('frame_calibration_id')):
         return []
     units = list(re.finditer(r'\S+', text))
     words = result.get('words')
@@ -40,7 +46,9 @@ def alignment_words(result, text, start, end):
         timed = (word.get('status') == 'aligned' and type(a) is int and type(b) is int
                  and previous <= a < b <= end)
         output.append({'text': unit.group(), 'start_char': unit.start(), 'end_char': unit.end(),
-                       'start_sample': a if timed else None, 'end_sample': b if timed else None})
+                       'start_sample': a if timed else None, 'end_sample': b if timed else None,
+                       'model_sha256':result['model_sha256'],
+                       'calibration_id':result['frame_calibration_id']})
         if timed:
             previous = b
     return output
@@ -50,11 +58,16 @@ def bind_words(row, words):
     if row.get('protected_fields') or row.get('text_audio_anchor') != {
             'start_sample': row['start_sample'], 'end_sample': row['end_sample']}:
         return
+    identities={(word.get('model_sha256',MODEL),word.get('calibration_id',CALIBRATION))
+                for word in words if word.get('start_sample') is not None}
+    if len(identities)>1 or any(not qualified_identity(*identity) for identity in identities):
+        return
+    model,calibration=next(iter(identities), (MODEL,CALIBRATION))
     row['reading_word_evidence'] = {
         'text_sha256': hashlib.sha256(row['text'].encode()).hexdigest(),
         'machine_revision': row['machine_revision'], 'audio_revision': row['audio_revision'],
         'audio_anchor': copy.deepcopy(row['text_audio_anchor']), 'words': copy.deepcopy(words),
-        'calibration_id': CALIBRATION, 'model_sha256': MODEL,
+        'calibration_id': calibration, 'model_sha256': model,
         'timing_kind': 'ctc_emission_cell_envelope'}
 
 
@@ -70,7 +83,7 @@ def project_turns(row):
             or anchor.get('start_sample') != row['start_sample']
             or type(anchor.get('end_sample')) is not int
             or not row['start_sample'] < anchor['end_sample'] <= row['end_sample']
-            or evidence.get('calibration_id') != CALIBRATION or evidence.get('model_sha256') != MODEL
+            or not qualified_identity(evidence.get('model_sha256'), evidence.get('calibration_id'))
             or activity.get('audio_revision') != row['audio_revision']):
         return []
     units = list(re.finditer(r'\S+', row['text']))
@@ -167,7 +180,7 @@ def validated_turns(segment):
                 sort_keys=True,separators=(',',':')).encode()).hexdigest()
             or receipt.get('turns_sha256') != hashlib.sha256(json.dumps(turns,
                 sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
-            or receipt.get('calibration_id') != CALIBRATION or receipt.get('model_sha256') != MODEL):
+            or not qualified_identity(receipt.get('model_sha256'), receipt.get('calibration_id'))):
         return []
     cursor = 0
     for turn in turns:
