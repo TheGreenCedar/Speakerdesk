@@ -8,12 +8,39 @@ import hashlib
 import re
 import json
 import os
+import math
 from pathlib import Path
 
 RATE = 16000
 MAX_DECODE_SAMPLES = 392000
 CORE_SAMPLES = 18*RATE
 CONTEXT_SAMPLES = 3*RATE
+
+
+def complete_non_speech(row, start, end):
+    """A blank negative classification covering this exact physical anchor.
+
+    Empty recognition, legacy/failed evidence and partial negative coverage do
+    not authorize removal of machine words. The current admission policy may
+    qualify exact constant PCM independently of neural probabilities; neither
+    outcome asserts that quiet nonconstant speech is impossible.
+    """
+    from speech_admission import INPUT_POLICY, SILERO_SPEC
+    if (type(start) is not int or type(end) is not int or not 0<=start<end
+            or not isinstance(row,dict) or not isinstance(row.get('text'),str)
+            or row['text'].strip() or row.get('transcription_review') or row.get('canonical_unresolved')
+            or row.get('audio_state')!='model_non_speech'):
+        return False
+    evidence=row.get('acoustic_evidence')
+    if not isinstance(evidence,dict):return False
+    probability=evidence.get('maximum_probability')
+    return (evidence.get('source')=='silero_v6' and evidence.get('model_revision')==SILERO_SPEC['revision']
+        and evidence.get('input_policy')==INPUT_POLICY and evidence.get('complete') is True
+        and evidence.get('decision')=='no_speech' and evidence.get('speech_regions')==[]
+        and evidence.get('uncertain_regions')==[] and type(probability) in (int,float)
+        and math.isfinite(probability) and 0<=probability<.5
+        and type(evidence.get('start_sample')) is int and type(evidence.get('end_sample')) is int
+        and (evidence['start_sample'],evidence['end_sample'])==(start,end))
 
 
 class RevisionArchive:
@@ -181,18 +208,24 @@ class UtteranceBook:
         row.pop('bounded_decode_provenance',None)
         return copy.deepcopy(row)
 
-    def apply_model(self, identity, revision, text, *, start_sample, end_sample, stage, complete):
+    def apply_model(self, identity, revision, text, *, start_sample, end_sample, stage, complete,
+                    non_speech_evidence=None):
         row = self.rows[identity]
         if (type(revision) is not int or revision != row['machine_revision'] or not isinstance(text, str)
                 or type(start_sample) is not int or type(end_sample) is not int
                 or (start_sample, end_sample) != (row['start_sample'], row['end_sample'])
                 or stage not in ('live', 'refined') or type(complete) is not bool):
             raise ValueError('Stale or mismatched utterance result.')
-        if complete and not text.strip():
+        negative=complete and complete_non_speech(dict(text=text,audio_state='model_non_speech',
+            acoustic_evidence=non_speech_evidence),start_sample,end_sample)
+        if complete and not text.strip() and not negative:
             complete = False
         version = {'text': text, 'stage': stage, 'complete': complete,
                    'audio_anchor': {'start_sample': start_sample, 'end_sample': end_sample},
                    'base_revision': revision, 'audio_revision': row['audio_revision']}
+        if negative:
+            version['non_speech_evidence']=copy.deepcopy(non_speech_evidence)
+            version['previous_text']=row['text']
         if self.archive:
             self.archive.append({'type':'machine_version','utterance_id':identity,'version':version})
         row['machine_versions'].append(version)
@@ -209,6 +242,9 @@ class UtteranceBook:
             row.pop('decode_core_plan',None)
             row.pop('assembly_provenance',None)
             row.pop('bounded_decode_provenance',None)
+            if negative:
+                row.pop('reading_turns',None);row.pop('reading_turn_provenance',None)
+                row['voice_eligible']=False
         return copy.deepcopy(row)
 
     def decode_requests(self, identity, *, contextual=False):

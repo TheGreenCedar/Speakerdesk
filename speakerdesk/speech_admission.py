@@ -14,7 +14,7 @@ from pathlib import Path
 RATE = 16000
 FRAME = 512
 HOT_FRAMES = 1875  #60 seconds, exceeding any single admitted decode window.
-INPUT_POLICY = 'raw_and_peak025_gaincap256_per512_modelnegative_v2'
+INPUT_POLICY = 'raw_and_peak025_gaincap256_per512_constant_guard_v3'
 SILERO_SPEC = {
     'name': 'Speech detection', 'repo': 'mlx-community/silero-vad-v6',
     'revision': '2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06',
@@ -133,7 +133,10 @@ class SpeechFrames:
             self.speaking = True
         elif probability < .35:
             self.speaking = False
-        frame=(start, end, float(probability), self.speaking)
+        constant_pcm=isinstance(observation,dict) and observation.get('constant_pcm_override') is True
+        # Preserve neural onset/release state across a physically empty frame:
+        # a subsequent quiet nonconstant frame may still be inside speech.
+        frame=(start, end, 0. if constant_pcm else float(probability), self.speaking and not constant_pcm)
         self.frames.append(frame+(observation,) if observation is not None else frame)
         self.end_sample = end
 
@@ -158,6 +161,9 @@ class SpeechFrames:
         conditioned=all(len(frame)==5 and frame[4].get('input_policy')==INPUT_POLICY for frame in selected)
         if conditioned:
             result['input_policy']=INPUT_POLICY
+            result['maximum_model_probability']=max(
+                max(frame[4].get('raw_probability',frame[2]),
+                    frame[4].get('normalized_probability',frame[2])) for frame in selected)
             # A successfully evaluated hysteresis-negative neural frame is a
             # model classification, not a claim of physically known silence.
             # Nonconstant room tone does not imply failed/unobserved inspection.
@@ -183,7 +189,7 @@ class SpeechFrames:
         result['decision'] = 'speech' if result['speech_regions'] else 'no_speech'
         if conditioned and not result['speech_regions']:
             result['negative_signal_state']='model_non_speech'
-            result['classification_scope']='observed_dual_view_hysteresis_not_acoustic_certainty'
+            result['classification_scope']='exact_constant_pcm_or_observed_dual_view_hysteresis_not_acoustic_certainty'
         return result
 
     def persist(self):
@@ -307,13 +313,20 @@ class SpeechSession:
                         'constant_value':float(raw[0]) if (bool(np.all(raw==raw[0]))
                             and (self.previous_sample is None or self.previous_sample==float(raw[0]))) else None}
                     probability=max(probability,normalized_probability)
+                    # Recurrent neural probability can remain high after speech
+                    # ends. An exactly constant physical frame has no speech
+                    # variation; it cannot authorize decoding a separate empty
+                    # crop. Keep both measured neural probabilities and advance
+                    # both states normally. No amplitude threshold or duration
+                    # veto applies to nonconstant PCM, however quiet or brief.
+                    observation['constant_pcm_override']=observation['constant_value'] is not None
                     self.normalized_state=normalized_state
                 self.evidence.append(begin, begin+count, probability,observation=observation)
                 # Hash only original physical samples after successful neural
                 # inspection. Virtual final-frame padding/normalized VAD input
                 # never enters the retained-PCM identity.
                 self.inspected_pcm.update(np.clip(np.rint(chunk[:count]*32768),-32768,32767).astype('<i2').tobytes())
-                speaking=self.evidence.speaking
+                speaking=self.evidence.frames[-1][3]
                 key=('speech_samples' if speaking else 'uncertain_samples' if observation is None
                      else 'negative_constant_samples' if observation.get('constant_value') is not None
                      else 'model_negative_samples')

@@ -237,7 +237,18 @@ class SpeechTranscriber:
             # Language confidence, names, context and ownership cannot bypass it.
             evidence = self.admission(start_sample+int(begin), start_sample+int(end))
             state = evidence['decision']
-            if state != 'speech':
+            if state == 'speech' and np.all(pcm == pcm[0]):
+                # A clipped crop can inherit positive neighboring frame scores.
+                # Exactly zero/constant PCM has no waveform encoding speech.
+                # Retain the neural receipt separately; no energy threshold.
+                silence=pcm[0]==0
+                decision={'language':None if automatic else self.language,'review':True,
+                          'language_detection':{'mode':'auto' if automatic else 'manual','reason':'insufficient_speech'},
+                          'audio_state':'digital_silence' if silence else 'constant_signal',
+                          'pcm_evidence':{'kind':'exact_digital_silence' if silence else 'exact_constant_signal',
+                              'start_sample':start_sample+int(begin),'end_sample':start_sample+int(end),
+                              **({} if silence else {'sample_value':float(pcm[0])})}}
+            elif state != 'speech':
                 reason = 'insufficient_speech' if state == 'no_speech' else 'speech_admission_uncertain' if state=='uncertain' else 'speech_evidence_pending'
                 decision={'language':None if automatic else self.language,'review':True,
                           'language_detection':{'mode':'auto' if automatic else 'manual','reason':reason},
@@ -256,6 +267,14 @@ class SpeechTranscriber:
                 except (RuntimeError,ValueError,OSError):
                     decision={'language':None,'review':True,
                               'language_detection':{'mode':'auto','reason':'needs_language','detector_error':True}}
+            if state == 'no_speech' and np.all(pcm == pcm[0]):
+                # Earlier frame qualification may already have rejected this
+                # constant PCM. Keep its model-negative state and also retain
+                # the exact physical proof used by the requested-crop guard.
+                silence=pcm[0]==0
+                decision['pcm_evidence']={'kind':'exact_digital_silence' if silence else 'exact_constant_signal',
+                    'start_sample':start_sample+int(begin),'end_sample':start_sample+int(end),
+                    **({} if silence else {'sample_value':float(pcm[0])})}
             decision['acoustic_evidence']=evidence
             probes.append({'begin':int(begin),'end_sample':int(end),**decision})
         results=[]
@@ -354,6 +373,7 @@ class SpeechTranscriber:
                             'language_review':language_review,
                             **({'audio_state':window['audio_state']} if 'audio_state' in window else {}),
                             **({'acoustic_evidence':window['acoustic_evidence']} if 'acoustic_evidence' in window else {}),
+                            **({'pcm_evidence':window['pcm_evidence']} if 'pcm_evidence' in window else {}),
                             **({'transcription_review':transcription_review} if transcription_review else {}),
                             **({'cohere_input_padding':window['cohere_input_padding']} if 'cohere_input_padding' in window else {})})
         return results

@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import uuid
 
-from utterances import UtteranceBook, RevisionArchive, MAX_DECODE_SAMPLES, RATE
+from utterances import UtteranceBook, RevisionArchive, MAX_DECODE_SAMPLES, RATE, complete_non_speech
 from reading_turns import alignment_words, bind_words, project_turns
 
 
@@ -94,6 +94,25 @@ class CanonicalRuntime:
         e=self.engine;stamp=e.language_at(row['start_sample'])
         a,b=row['start_sample'],row['end_sample']
         names=row.get('speaker_candidates',[])
+        # Historical refinement inspected the same immutable full anchor anew.
+        # Its complete negative result can replace prior machine words; empty
+        # recognition and contextual seam inference cannot prove non-speech.
+        historical=getattr(e.models,'speech_historical',None)
+        if historical is not None:
+            try:evidence=historical.admission(a,b)
+            except (RuntimeError,ValueError,OSError,TypeError,KeyError):evidence=None
+            negative=dict(text='',audio_state='model_non_speech',acoustic_evidence=evidence)
+            if complete_non_speech(negative,a,b):
+                self.book.apply_model(row['id'],row['machine_revision'],'',start_sample=a,end_sample=b,
+                    stage=stage,complete=True,non_speech_evidence=negative['acoustic_evidence'])
+                updated=self.book.rows[row['id']]
+                updated.update(audio_state='model_non_speech',acoustic_evidence=negative['acoustic_evidence'],
+                    language=None if stamp['language']=='auto' else stamp['language'],language_review=True,review=True,
+                    language_detection={'mode':'auto' if stamp['language']=='auto' else 'manual',
+                                        'reason':'insufficient_speech'})
+                updated.pop('transcription_review',None);updated.pop('canonical_unresolved',None)
+                self.last_decoded[row['id']]=(b,row['audio_revision'],stage)
+                return True
         if b-a<=self.decode_limit(row):
             passages=e.decode(read_audio(e.path,a,b),stamp['language'],names,a/RATE,row['language_epoch'],overlap=True)
             # Disjoint same-language routes retain exact raw text and slices;
@@ -104,11 +123,13 @@ class CanonicalRuntime:
                       and round(passages[0]['end']*RATE)==b-a)
             complete=complete or routed is not None
             text=passages[0].get('cohere_raw_text',passages[0]['text']) if len(passages)==1 else routed['text'] if routed else ''
+            negative=complete and len(passages)==1 and complete_non_speech(passages[0],a,b)
             self.archive.append({'type':'cohere_passages','utterance_id':row['id'],
                 'audio_revision':row['audio_revision'],'machine_revision':row['machine_revision'],
                 'audio_anchor':{'start_sample':a,'end_sample':b},'passages':passages})
             self.book.apply_model(row['id'],row['machine_revision'],text,
-                start_sample=a,end_sample=b,stage=stage,complete=complete)
+                start_sample=a,end_sample=b,stage=stage,complete=complete,
+                non_speech_evidence=passages[0]['acoustic_evidence'] if negative else None)
             updated=self.book.rows[row['id']]
             if len(passages)==1:
                 for key in ('language','language_detection','language_review','acoustic_evidence','transcription_review','audio_state','review'):
@@ -120,7 +141,7 @@ class CanonicalRuntime:
                 updated['language_review']=any(p.get('language_review',p.get('review',False)) for p in passages)
                 if 'text' not in updated['protected_fields'] and updated['text']==routed['text']:
                     updated['bounded_decode_provenance']=routed['provenance']
-            if not complete or not text.strip():updated['canonical_unresolved']='incomplete_cohere_revision'
+            if not complete or (not text.strip() and not negative):updated['canonical_unresolved']='incomplete_cohere_revision'
             else:updated.pop('canonical_unresolved',None)
             if complete and text.strip() and updated['text']==text and self.reading_alignment_enabled(row):
                 request={'start_sample':a,'end_sample':b}

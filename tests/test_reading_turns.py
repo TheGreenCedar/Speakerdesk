@@ -176,12 +176,18 @@ class ReadingTurnTests(unittest.TestCase):
 
     def test_real_routing_review_for_multiple_owners_does_not_block_english_timing(self):
         from test_canonical_runtime import CanonicalTests
-        from pcm_peer import SpeechEvidencePeer
+        from pcm_peer import SpeechEvidencePeer, varying_pcm
         from language_detection import SpeechTranscriber
         from types import SimpleNamespace
         import numpy as np
+        import wave
         case=CanonicalTests();case.setUp()
         try:
+            # This route represents admitted speech, so use a varying quiet
+            # waveform instead of the helper's constant DC transport sentinel.
+            with wave.open(str(case.path),'wb') as wav:
+                wav.setparams((1,2,16000,0,'NONE','none'))
+                wav.writeframes(varying_pcm(60*16000,1,dtype='<i2').tobytes())
             case.peer.mixed=True;asr_calls=[];timing_calls=[]
             asr=SimpleNamespace(transcribe=lambda audio,**kw:(asr_calls.append(len(audio)) or
                 SimpleNamespace(text=case.peer.text,tokens=[1])))

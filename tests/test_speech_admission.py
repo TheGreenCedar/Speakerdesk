@@ -259,7 +259,7 @@ class SpeechAdmissionTests(unittest.TestCase):
         frames=SpeechFrames();frames.append(0,512,.8);frames.append(512,1000,.4)
         detector=Mock();detector.no_speech_probability.side_effect=AssertionError('Whisper cannot gate speech')
         asr=Mock();asr.transcribe.return_value=types.SimpleNamespace(text='Blue',tokens=[1])
-        pcm=np.ones(1000,dtype=np.float32)*.000001
+        pcm=np.linspace(-.000001,.000001,1000,dtype=np.float32)
         row=SpeechTranscriber(asr,'en',detector=detector,speech_evidence=frames).transcribe(pcm,16000,('speaker_0',))[0]
         self.assertEqual(row['text'],'Blue')
         np.testing.assert_array_equal(asr.transcribe.call_args.args[0],pcm)
