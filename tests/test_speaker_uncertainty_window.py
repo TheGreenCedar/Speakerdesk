@@ -26,6 +26,15 @@ def region(a, b, *owners):
 
 
 class SpeakerUncertaintyWindowTests(unittest.TestCase):
+    def test_all_null_historical_evidence_retains_original_provider_identity(self):
+        data=json.loads((Path(__file__).parent/'acceptance/actual-two-voice-boundary-evidence.json').read_text())
+        row=data['segment'];aligned=data['alignment']
+        words=alignment_words(aligned,row['text'],row['start_sample'],row['end_sample'])
+        for word in words:word.update(start_sample=None,end_sample=None)
+        bind_words(row,words)
+        self.assertEqual(row['reading_word_evidence']['model_sha256'],aligned['model_sha256'])
+        self.assertEqual(row['reading_word_evidence']['calibration_id'],aligned['frame_calibration_id'])
+
     def test_actual_two_voice_raw_evidence_recovers_only_existing_owners(self):
         data = json.loads((Path(__file__).parent / 'acceptance/actual-two-voice-boundary-evidence.json').read_text())
         row = data['segment']

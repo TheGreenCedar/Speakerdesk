@@ -58,8 +58,8 @@ def bind_words(row, words):
     if row.get('protected_fields') or row.get('text_audio_anchor') != {
             'start_sample': row['start_sample'], 'end_sample': row['end_sample']}:
         return
-    identities={(word.get('model_sha256',MODEL),word.get('calibration_id',CALIBRATION))
-                for word in words if word.get('start_sample') is not None}
+    identities={(word['model_sha256'],word['calibration_id'])
+                for word in words if 'model_sha256' in word and 'calibration_id' in word}
     if len(identities)>1 or any(not qualified_identity(*identity) for identity in identities):
         return
     model,calibration=next(iter(identities), (MODEL,CALIBRATION))
