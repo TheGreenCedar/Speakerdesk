@@ -415,7 +415,18 @@ class SidecarUpdateProcessTests(unittest.TestCase):
                         self.assertTrue(selector.select(5), 'Sidecar output timed out.')
                     return process.stdout.readline()
                 line = read_line()
-                self.assertTrue(line.startswith('SPEAKERDESK_URL='), line)
+                if not line.startswith('SPEAKERDESK_URL='):
+                    # Werkzeug reports denied bind/listen as one stderr line
+                    # and exits. Preserve that actual cause instead of an empty
+                    # stdout assertion; this does not retry a denied launch.
+                    if line == '':
+                        try:
+                            _, startup_error = process.communicate(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            startup_error = 'Startup output closed while the process remained alive.'
+                    else:
+                        startup_error = 'Unexpected startup output: ' + repr(line)
+                    self.fail(f'Sidecar bootstrap failed (exit={process.poll()}): {startup_error[:65536]}')
                 base = line.strip().split('=', 1)[1]
                 with urllib.request.urlopen(base, timeout=3) as response:
                     token = re.search(r'name="speakerdesk-token" content="([^"]+)"', response.read().decode())[1]
