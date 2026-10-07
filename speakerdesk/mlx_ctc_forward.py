@@ -1,15 +1,11 @@
-"""Unqualified cached-weight CTC forward prototype, GPU only.
+"""Pinned float32 CTC forward, GPU only, bounded English coarse qualification.
 
 Uses the pinned MIT MLX Audio Wav2Vec2 implementation and Apache-2.0 model
 weights. No alternate transcription, downloader, ORT session or CPU inference.
 """
-from pathlib import Path
-import hashlib
-import json
+from alignment_model import prepare_model, require_runtime
 
-ROOT = Path(__file__).resolve().parent
-
-def load_gpu_model(*, cache_limit_bytes=None, directory=None):
+def load_gpu_model(*, cache_limit_bytes=None, directory):
     # Keep import/init behind the caller's coordinated model lease.
     import mlx.core as mx
     if not mx.metal.is_available():
@@ -22,18 +18,14 @@ def load_gpu_model(*, cache_limit_bytes=None, directory=None):
         assert cache_limit_bytes == 512 * 1024**2
         allocator_policy = dict(GPU_allocator_cache_limit_bytes=cache_limit_bytes,
             previous_GPU_allocator_cache_limit_bytes=mx.set_cache_limit(cache_limit_bytes))
+    folder, conversion = prepare_model(directory)
+    require_runtime(conversion)
+    conversion = dict(conversion, **allocator_policy)
     import mlx.nn as nn
     from mlx_audio.stt.models.mms.mms import Model
     from mlx_audio.stt.models.wav2vec.wav2vec import ModelConfig
     from mlx.utils import tree_flatten
-    folder = Path(directory) if directory is not None else ROOT / 'mlx-ctc-prototype'
-    conversion = json.loads((folder / 'conversion.json').read_text())
-    conversion.update(allocator_policy)
-    with (folder / 'weights.npz').open('rb') as stream:
-        digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-    if digest != conversion['converted_weights_sha256']:
-        raise ValueError('Converted weight digest changed.')
-    config = ModelConfig.from_dict(json.loads((folder / 'config.json').read_text()))
+    config = ModelConfig.from_dict(conversion['config'])
     with mx.stream(mx.gpu):
         model = Model(config)
         # ONNX stores the already-folded positional kernel. Direct convolution
@@ -54,7 +46,7 @@ def load_gpu_model(*, cache_limit_bytes=None, directory=None):
         mx.synchronize(mx.gpu)
     return model, conversion
 
-def forward_scores(model, pcm):
+def forward_scores(model, pcm, *, execution=None):
     """Float32 normalized waveform -> float32 scores; never decode CTC text."""
     import mlx.core as mx
     if (not mx.metal.is_available() or mx.default_device().type != mx.gpu
@@ -68,4 +60,7 @@ def forward_scores(model, pcm):
         scores = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         mx.eval(scores)
         mx.synchronize(mx.gpu)
+    if execution is not None:
+        execution.update(backend='mlx_metal_gpu', device=str(mx.default_device()), stream=str(mx.default_stream(mx.gpu)),
+                         evaluated_and_GPU_synchronized=True, scores_shape=list(scores.shape))
     return scores

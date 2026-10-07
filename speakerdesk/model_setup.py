@@ -11,6 +11,7 @@ from flask import jsonify, request
 from language_detection import LID_SPEC
 from speech_admission import SILERO_SPEC
 from alignment_artifact import ALIGNMENT_SPEC
+from alignment_model import prepare_model, prepared, MODEL_SHA256 as GPU_ALIGNMENT_SHA256, DERIVED_DIRECTORY
 from voice_setup import VoiceSetup
 
 SPECS=[
@@ -50,13 +51,24 @@ def register_setup(app, activate_voice):
         verified_files[path]=(signature,matches)
         return matches
 
-    def installed(spec):
+    def source_installed(spec):
         folder=root/spec['directory']
         weight=spec.get('weight_file','model.safetensors')
         return (all((folder/name).is_file() for name in spec['files'])
                 and (folder/weight).stat().st_size==spec['bytes']
                 and all(verified(folder/name,digest)
                         for name,digest in spec.get('file_sha256',{}).items()))
+
+    def installed(spec):
+        if not source_installed(spec):return False
+        if spec['directory']!=ALIGNMENT_SPEC['directory']:return True
+        folder=root/spec['directory']
+        return prepared(folder) and verified(folder/DERIVED_DIRECTORY/'weights.npz',GPU_ALIGNMENT_SHA256)
+
+    def prepare_optional(spec):
+        if spec['directory']==ALIGNMENT_SPEC['directory']:
+            update(phase='Preparing English timing')
+            prepare_model(root/spec['directory'])
 
     def update(**changes):
         with lock:state.update(changes)
@@ -65,13 +77,14 @@ def register_setup(app, activate_voice):
         try:
             root.mkdir(parents=True,exist_ok=True)
             selected=[s for s in SPECS if not s.get('optional') or include_alignment]
-            missing=sum(s['bytes'] for s in selected if not installed(s))
+            missing=sum(s['bytes'] for s in selected if not source_installed(s))
             if not voice.installed():missing+=voice.state['total_bytes']
             if shutil.disk_usage(root).free < missing+512*1024**2:
                 raise RuntimeError('There is not enough free disk space. Free at least 2.4 GB and retry.')
             finished=0
             for spec in selected:
-                if installed(spec):finished+=spec['bytes'];continue
+                if source_installed(spec):
+                    prepare_optional(spec);finished+=spec['bytes'];continue
                 folder=root/spec['directory'];folder.mkdir(exist_ok=True)
                 weight=spec.get('weight_file','model.safetensors')
                 update(phase=spec['name'])
@@ -104,6 +117,7 @@ def register_setup(app, activate_voice):
                             partial.unlink(missing_ok=True)
                             raise RuntimeError('Model metadata verification failed. Retry the download.')
                     partial.replace(dest)
+                prepare_optional(spec)
                 finished+=spec['bytes']
             voice.update(status='downloading',phase='Preparing voice recognition',error=None)
             voice.download()

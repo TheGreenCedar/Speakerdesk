@@ -1,23 +1,17 @@
-"""Isolated GPU CTC provider qualified only against frozen English AMI gates.
+"""GPU CTC provider qualified only against frozen English AMI coarse gates.
 No ASR, model downloader, CPU neural fallback or fitted timing adjustment.
 """
-import hashlib,json
+import hashlib
 from pathlib import Path
 from word_alignment import MODEL_SHA256,MAX_AUDIO_SAMPLES,parse_vocabulary,align_ctc_scores,FrameClock,AcceptancePolicy
-ROOT=Path('/Users/albert/Documents/Codex/2026-10-07/task-9')
-CALIBRATION_ID='ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75'
-TOKEN_SHA256='a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31'
+from alignment_model import CALIBRATION_ID,TOKEN_SHA256,MANIFEST_SHA256
 class CoarseAlignment:
  def __init__(self,directory,*,cache_directory=None):
-  audit=json.loads((ROOT/'evidence/mlx-ctc-independent-quality/timing-audit.json').read_text())
-  assert audit['bounded_coarse_timing_pass'] and audit['threshold_or_offset_fitted'] is False
-  assert audit['plan_sha256']=='5ab4e661e62f757bc1498121b2c392b46216f4ad3db55f42e16448b43bf64396'
-  report=json.loads((ROOT/'evidence/mlx-ctc-independent-quality/report.json').read_text())
-  assert report['conversion_identity']==MODEL_SHA256 and report['calibration_id']==CALIBRATION_ID
   from mlx_ctc_forward import load_gpu_model
-  self.model,self.conversion=load_gpu_model(cache_limit_bytes=512*1024**2,directory=ROOT/'mlx-ctc-prototype')
-  assert self.conversion['converted_weights_sha256']==MODEL_SHA256
-  tokens=(ROOT/'mlx-ctc-prototype/tokens.txt').read_bytes();assert hashlib.sha256(tokens).hexdigest()==TOKEN_SHA256
+  self.model,self.conversion=load_gpu_model(cache_limit_bytes=512*1024**2,directory=Path(directory))
+  if self.conversion['converted_weights_sha256']!=MODEL_SHA256:raise ValueError('GPU model identity differs.')
+  tokens=(Path(directory)/'tokens.txt').read_bytes()
+  if hashlib.sha256(tokens).hexdigest()!=TOKEN_SHA256:raise ValueError('Alignment vocabulary identity differs.')
   self.vocabulary=parse_vocabulary(tokens.decode())
   from alignment_cache import AlignmentCache
   self.cache=AlignmentCache((MODEL_SHA256,TOKEN_SHA256,CALIBRATION_ID,'ctc_emission_cell_envelope',320,0,-20,'mlx-0.32.2-cached-float32-gpu','ctc-segmentation-1.7.4'),directory=cache_directory)
@@ -33,10 +27,12 @@ class CoarseAlignment:
   if cached is not None:return cached
   self.cache.provider_calls+=1
   from mlx_ctc_forward import forward_scores
-  scores=forward_scores(self.model,audio);self.actual_gpu_forwards+=1
+  execution={}
+  scores=forward_scores(self.model,audio,execution=execution);self.actual_gpu_forwards+=1
+  if execution.get('backend')!='mlx_metal_gpu' or execution.get('evaluated_and_GPU_synchronized') is not True:raise RuntimeError('GPU alignment execution evidence missing.')
   materialized=np.array(scores,copy=True)
   result=align_ctc_scores(text,materialized,self.vocabulary,clock=FrameClock(320,0,CALIBRATION_ID),policy=AcceptancePolicy(-20,CALIBRATION_ID),audio_start_sample=start_sample,audio_num_samples=len(audio))
-  result.update(audio_float32_sha256=hashlib.sha256(data).hexdigest(),qualified_scope='bounded_ami_english_coarse_envelopes',candidate_runtime='mlx_cached_dequantized_float32_GPU')
+  result.update(audio_float32_sha256=hashlib.sha256(data).hexdigest(),qualified_scope='bounded_ami_english_coarse_envelopes',candidate_runtime='mlx_cached_dequantized_float32_GPU',provider_execution=execution,source_model_sha256=self.conversion['source_model_sha256'],conversion_manifest_sha256=MANIFEST_SHA256)
   self.cache.put(key,result)
   del scores,materialized
   return result

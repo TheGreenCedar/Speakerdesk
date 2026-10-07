@@ -11,11 +11,15 @@ data.append((str(root/'packaging/licenses/redimnet2/LICENSE'),'licenses/redimnet
 for folder in ['templates','static']:
     data.append((str(root/'speakerdesk'/folder),folder))
 data.append((str(root/'packaging/licenses/alignment-runtime'),'licenses/alignment-runtime'))
+data.append((str(root/'speakerdesk/alignment-mlx'),'alignment-mlx'))
+# These exact components produced the frozen English GPU calibration.
+for package,version in [('mlx','0.32.2'),('mlx-metal','0.32.2'),('mlx-audio','0.5.7'),('numpy','2.5.3')]:
+    assert importlib.metadata.version(package)==version, f'GPU alignment runtime differs: {package}'
 metal_distribution=importlib.metadata.distribution('mlx-metal')
 # Runtime needs the canonical Metal kernels, not SDK headers or sync-conflict copies.
 data += [(str(metal_distribution.locate_file(f)),str(Path(f).parent))
          for f in metal_distribution.files if str(f)=='mlx/lib/mlx.metallib']
-for package in ['mlx','mlx-audio','mlx-speech','huggingface-hub','numpy','scipy','soundfile','tokenizers']:
+for package in ['mlx','mlx-metal','mlx-audio','mlx-speech','huggingface-hub','numpy','scipy','soundfile','tokenizers']:
     data+=copy_metadata(package)
 hidden=[name for name in collect_submodules('mlx') if all(part.isidentifier() for part in name.split('.'))]
 hidden+=collect_submodules('mlx_audio.vad.models.nemotron_diarization')
@@ -28,6 +32,9 @@ for package,version in [('onnxruntime','1.30.0'),('ctc-segmentation','1.7.4'),('
 hidden+=['onnxruntime','onnxruntime.capi.onnxruntime_pybind11_state',
          'ctc_segmentation','ctc_segmentation.ctc_segmentation_dyn','flatbuffers']
 hidden+=collect_submodules('mlx_audio.stt.models.whisper')
+hidden+=['alignment_model','mlx_ctc_forward']
+hidden+=collect_submodules('mlx_audio.stt.models.mms')
+hidden+=collect_submodules('mlx_audio.stt.models.wav2vec')
 hidden+=collect_submodules('mlx_speech.models.cohere_asr')
 hidden+=['mlx_speech.generation.cohere_asr','mlx_audio.vad','inference_worker','live_worker','live_refinement','live_language','meeting_refinement','rolling_refinement','live_meeting','model_setup','language_detection','app','pipeline','audio','transcript','review']
 # Desktop ships the voice runtime; users only download model data in Settings.

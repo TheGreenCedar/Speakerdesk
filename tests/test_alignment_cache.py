@@ -132,8 +132,9 @@ class CacheTests(unittest.TestCase):
         import numpy as np
         class ForwardPeer:
             def __init__(self):self.calls=0
-            def __call__(self,*args):self.calls+=1;return np.zeros((3,4),dtype=np.float32)
-        forward=ForwardPeer();provider=CoarseAlignment.__new__(CoarseAlignment);provider.model=object();provider.actual_gpu_forwards=0;provider.vocabulary={};provider.cache=AlignmentCache(IDENTITY)
+            def __call__(self,*args,execution):
+                self.calls+=1;execution.update(backend='mlx_metal_gpu',evaluated_and_GPU_synchronized=True);return np.zeros((3,4),dtype=np.float32)
+        forward=ForwardPeer();provider=CoarseAlignment.__new__(CoarseAlignment);provider.model=object();provider.conversion={'source_model_sha256':'e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c'};provider.actual_gpu_forwards=0;provider.vocabulary={};provider.cache=AlignmentCache(IDENTITY)
         audio=np.array([.1,.2,.3],dtype=np.float32)
         key=provider.cache.key('café',audio.astype('<f4').tobytes(),100,103,'en')
         result=evidence(key)
@@ -148,8 +149,9 @@ class CacheTests(unittest.TestCase):
         import numpy as np
         class ForwardPeer:
             def __init__(self):self.calls=0
-            def __call__(self,*args):self.calls+=1;return np.zeros((3,4),dtype=np.float32)
-        forward=ForwardPeer();p=CoarseAlignment.__new__(CoarseAlignment);p.model=object();p.actual_gpu_forwards=0;p.vocabulary={};p.cache=AlignmentCache(IDENTITY)
+            def __call__(self,*args,execution):
+                self.calls+=1;execution.update(backend='mlx_metal_gpu',evaluated_and_GPU_synchronized=True);return np.zeros((3,4),dtype=np.float32)
+        forward=ForwardPeer();p=CoarseAlignment.__new__(CoarseAlignment);p.model=object();p.conversion={'source_model_sha256':'e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c'};p.actual_gpu_forwards=0;p.vocabulary={};p.cache=AlignmentCache(IDENTITY)
         audio=np.array([.1,.2,.3],dtype=np.float32)
         key=p.cache.key('words',audio.astype('<f4').tobytes(),0,3,'en')
         with patch('mlx_ctc_forward.forward_scores',side_effect=forward), patch('coarse_alignment.align_ctc_scores',return_value=dict(evidence(key),status='partial',complete=False)):
