@@ -13,6 +13,7 @@ from meeting_refinement import activity_references
 from reading_turns import CALIBRATION, MODEL, validated_turns
 from transcript import export
 from app import create_app
+from review import review_reason
 RATE = canonical_fixture.RATE
 
 
@@ -136,6 +137,12 @@ class CanonicalAttributionTests(unittest.TestCase):
         self.assertNotIn('reading_turns', row)
         refs = activity_references([row], row['start_sample'], row['end_sample'])
         self.assertTrue(all(len(r['speaker_candidates']) <= 1 for r in refs))
+        self.assertEqual(review_reason(row), 'Speaker uncertain')
+        text, _ = export(dict(speakers={}, segments=[row]), 'txt')
+        self.assertIn('Unknown speaker:', text)
+        self.assertIn(self.peer.text, text)
+        self.assertNotIn('Overlapping speakers', text)
+        self.assertNotIn('Multiple speakers', text)
 
     def test_appended_audio_retains_text_prefix_turns_until_next_decode_and_shrink_invalidates(self):
         self.activity([dict(start=0, end=5, speaker='speaker_0'),
