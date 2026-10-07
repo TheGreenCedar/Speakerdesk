@@ -282,6 +282,25 @@ function validReadingTurns(segment) {
 function hasOverlappingSpeakers(segment) {
   const turns=validReadingTurns(segment);
   if(turns)return turns.some(turn=>turn.attribution==='overlap');
+  if(segment.canonical_utterance_id) {
+    // Canonical candidates are a union across the whole passage. Only current
+    // temporal concurrency or an explicit overlap label establishes overlap.
+    const activity=segment.speaker_activity,regions=activity?.regions;
+    if(activity?.audio_revision===segment.audio_revision && Array.isArray(regions) && regions.length) {
+      let cursor=segment.start_sample,overlap=false;
+      for(const region of regions) {
+        const names=region?.speakers;
+        if(!Number.isSafeInteger(cursor) || !Number.isSafeInteger(region?.start_sample) ||
+           !Number.isSafeInteger(region?.end_sample) || region.start_sample!==cursor ||
+           region.end_sample<=cursor || region.end_sample>segment.end_sample ||
+           !Array.isArray(names) || names.some(name=>typeof name!=='string' || !/^speaker_\d+$/.test(name)) ||
+           new Set(names).size!==names.length)return segment.speaker.startsWith('overlap');
+        overlap ||= names.length>1;cursor=region.end_sample;
+      }
+      if(cursor===segment.end_sample)return overlap;
+    }
+    return segment.speaker.startsWith('overlap');
+  }
   return segment.speaker.startsWith('overlap') ||
     (segment.speaker!=='multiple_speakers' && segment.speaker_candidates?.length>1);
 }
@@ -540,7 +559,7 @@ function appendUncoveredAudio(body,segment) {
   body.append(node('p',`Audio to review: ${ranges.join('; ')}. Current words and original audio retained.`,'review-audio-ranges'));
 }
 function passageReviewReason(segment) {
-  if(segment.review_resolution==='words_reviewed' && segment.text.trim())return hasOverlappingSpeakers(segment) ? reviewReasons.overlapping_speech : '';
+  if(segment.review_resolution==='words_reviewed' && segment.text.trim())return hasOverlappingSpeakers(segment) ? reviewReasons.overlapping_speech : segment.speaker==='unassigned' ? 'Speaker uncertain' : '';
   if(segment.transcription_review?.reason==='refinement_conflict')return 'Previous words retained because the new passage also covers another passage needing review.';
   if(['transcription_failed','empty_result','token_limit'].includes(segment.transcription_review?.reason))return reviewReasons[segment.transcription_review.reason];
   if(hasOverlappingSpeakers(segment))return reviewReasons.overlapping_speech;
@@ -549,6 +568,7 @@ function passageReviewReason(segment) {
   if(segment.language_detection?.reason==='best_effort')return 'Best-effort words; language needs review';
   if(segment.language_detection?.reason==='needs_language')return 'Choose the meeting language; audio retained';
   if(segment.language_detection?.mode==='auto' && !segment.language)return reviewReasons[segment.language_detection.reason] || reviewReasons.uncertain;
+  if(segment.speaker==='unassigned' && segment.text.trim())return 'Speaker uncertain';
   return segment.text.trim() ? '' : reviewReasons.empty_result;
 }
 function appendPassageEvidence(host,segment) {
