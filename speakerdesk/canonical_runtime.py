@@ -14,6 +14,44 @@ from utterances import UtteranceBook, RevisionArchive, MAX_DECODE_SAMPLES, RATE
 from reading_turns import alignment_words, bind_words, project_turns
 
 
+def routed_short_revision(passages, start, end):
+    """Preserve successful disjoint same-language raw decodes, without stitching.
+
+    LID routing can establish context only after an earlier ASR succeeds, so
+    even one short utterance can return several adjacent routes in one language.
+    Their exact original-audio slices authorize ordered raw text, not word times.
+    """
+    import math
+    from transcript import LANGUAGES
+    cursor=0;language=None;parts=[]
+    if not isinstance(passages,list) or len(passages)<2:return None
+    for passage in passages:
+        if not isinstance(passage,dict):return None
+        first,last=passage.get('start'),passage.get('end')
+        if any(type(value) not in (int,float) or not math.isfinite(value) for value in (first,last)):return None
+        first,last=round(first*RATE),round(last*RATE)
+        raw=passage.get('cohere_raw_text',passage.get('text'))
+        selected=passage.get('language');evidence=passage.get('acoustic_evidence') or {}
+        if (first!=cursor or not first<last<=end-start
+                or not isinstance(raw,str) or not raw.strip()
+                or selected not in LANGUAGES or (language is not None and selected!=language)
+                or passage.get('transcription_review') or passage.get('audio_state')
+                or not isinstance(passage.get('language_detection'),dict)
+                or not isinstance(evidence,dict) or evidence.get('source')!='silero_v6'
+                or evidence.get('complete') is not True or evidence.get('decision')!='speech'
+                or evidence.get('start_sample')!=start+first or evidence.get('end_sample')!=start+last
+                or evidence.get('uncertain_regions') or not evidence.get('speech_regions')):
+            return None
+        language=selected;cursor=last
+        parts.append({'start_sample':start+first,'end_sample':start+last,
+                      'text':raw,'text_sha256':hashlib.sha256(raw.encode()).hexdigest(),
+                      'passage':copy.deepcopy(passage)})
+    if cursor!=end-start:return None
+    return {'text':' '.join(part['text'] for part in parts),
+            'provenance':{'method':'contiguous_same_language_passages_v1','separator':' ',
+                'audio_anchor':{'start_sample':start,'end_sample':end},'parts':parts,'word_timing':None}}
+
+
 def activity_regions(turns, start, end, *, observed=None):
     points={start,end}
     if observed is not None and start<observed<end:points.add(observed)
@@ -57,11 +95,14 @@ class CanonicalRuntime:
         names=row.get('speaker_candidates',[])
         if b-a<=self.decode_limit(row):
             passages=e.decode(read_audio(e.path,a,b),stamp['language'],names,a/RATE,row['language_epoch'],overlap=True)
-            # Multiple language-routed pieces have no safe shared word ownership.
+            # Disjoint same-language routes retain exact raw text and slices;
+            # their adjacency does not authorize word stitching or word times.
+            routed=routed_short_revision(passages,a,b) if len(passages)>1 else None
             complete=(len(passages)==1 and not passages[0].get('transcription_review')
                       and round(passages[0]['start']*RATE)==0
                       and round(passages[0]['end']*RATE)==b-a)
-            text=passages[0].get('cohere_raw_text',passages[0]['text']) if len(passages)==1 else ''
+            complete=complete or routed is not None
+            text=passages[0].get('cohere_raw_text',passages[0]['text']) if len(passages)==1 else routed['text'] if routed else ''
             self.archive.append({'type':'cohere_passages','utterance_id':row['id'],
                 'audio_revision':row['audio_revision'],'machine_revision':row['machine_revision'],
                 'audio_anchor':{'start_sample':a,'end_sample':b},'passages':passages})
@@ -72,9 +113,15 @@ class CanonicalRuntime:
                 for key in ('language','language_detection','language_review','acoustic_evidence','transcription_review','audio_state','review'):
                     if key in passages[0]:updated[key]=copy.deepcopy(passages[0][key])
                     else:updated.pop(key,None)
+            elif routed:
+                self.update_core_metadata(updated,[{'request':{'start_sample':a},'passages':passages}],stamp['language'])
+                updated['language_detection']['source']='disjoint_short_language_decisions_v1'
+                updated['language_review']=any(p.get('language_review',p.get('review',False)) for p in passages)
+                if 'text' not in updated['protected_fields'] and updated['text']==routed['text']:
+                    updated['bounded_decode_provenance']=routed['provenance']
             if not complete or not text.strip():updated['canonical_unresolved']='incomplete_cohere_revision'
             else:updated.pop('canonical_unresolved',None)
-            if complete and text.strip() and updated['text']==text and self.reading_alignment_enabled(row):
+            if len(passages)==1 and complete and text.strip() and updated['text']==text and self.reading_alignment_enabled(row):
                 request={'start_sample':a,'end_sample':b}
                 alignment=self.align_reading(request,text,passages[0])
                 bind_words(updated,alignment_words(alignment,text,a,b))

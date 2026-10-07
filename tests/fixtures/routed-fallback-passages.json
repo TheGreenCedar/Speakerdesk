@@ -1,0 +1,730 @@
+{
+  "scope": "Recorded actual model passages from synthetic fixture; tests replay only metadata/assembly, no acoustic models",
+  "source_commit": "d38a50019ea8350b9c0e0e215029185a75b7ba6d",
+  "record": {
+    "type": "cohere_passages",
+    "utterance_id": "utterance-cfc5ea98ec4740e9d5a7ca34",
+    "audio_revision": 27,
+    "machine_revision": 0,
+    "audio_anchor": {
+      "start_sample": 0,
+      "end_sample": 99968
+    },
+    "passages": [
+      {
+        "start": 0.0,
+        "end": 4.1653125,
+        "text": "We will discuss the original meeting notes in English. Please keep the word.",
+        "cohere_raw_text": "We will discuss the original meeting notes in English. Please keep the word.",
+        "language": "en",
+        "language_detection": {
+          "mode": "auto",
+          "probability": 0.45125871896743774,
+          "margin": 0.013883769512176514,
+          "candidates": [
+            {
+              "language": "en",
+              "probability": 0.45125871896743774
+            },
+            {
+              "language": "fr",
+              "probability": 0.43737494945526123
+            },
+            {
+              "language": "la",
+              "probability": 0.028848007321357727
+            }
+          ],
+          "reason": "best_effort",
+          "probes": [
+            {
+              "start_sample": 0,
+              "end_sample": 33322,
+              "language": "en",
+              "decision": {
+                "mode": "auto",
+                "probability": 0.9794713854789734,
+                "margin": 0.9763539414852858,
+                "candidates": [
+                  {
+                    "language": "en",
+                    "probability": 0.9794713854789734
+                  },
+                  {
+                    "language": "cy",
+                    "probability": 0.0031174439936876297
+                  },
+                  {
+                    "language": "ms",
+                    "probability": 0.0021763260010629892
+                  }
+                ],
+                "reason": "detected"
+              },
+              "review": false
+            },
+            {
+              "start_sample": 33322,
+              "end_sample": 66645,
+              "language": "en",
+              "decision": {
+                "mode": "auto",
+                "probability": 0.45125871896743774,
+                "margin": 0.013883769512176514,
+                "candidates": [
+                  {
+                    "language": "en",
+                    "probability": 0.45125871896743774
+                  },
+                  {
+                    "language": "fr",
+                    "probability": 0.43737494945526123
+                  },
+                  {
+                    "language": "la",
+                    "probability": 0.028848007321357727
+                  }
+                ],
+                "reason": "best_effort"
+              },
+              "review": true
+            }
+          ]
+        },
+        "review": true,
+        "language_review": true,
+        "acoustic_evidence": {
+          "source": "silero_v6",
+          "start_sample": 0,
+          "end_sample": 66645,
+          "model_revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+          "observed_until_sample": 99968,
+          "complete": true,
+          "decision": "speech",
+          "speech_regions": [
+            {
+              "start_sample": 512,
+              "end_sample": 45568
+            },
+            {
+              "start_sample": 50176,
+              "end_sample": 66645
+            }
+          ],
+          "input_policy": "raw_and_peak025_gaincap256_per512_modelnegative_v2",
+          "uncertain_regions": [],
+          "model_negative_regions": [
+            {
+              "start_sample": 0,
+              "end_sample": 512
+            },
+            {
+              "start_sample": 45568,
+              "end_sample": 50176
+            }
+          ],
+          "maximum_probability": 0.9999994039535522
+        }
+      },
+      {
+        "start": 4.1653125,
+        "end": 6.248,
+        "text": "Inter Original Language",
+        "cohere_raw_text": "Inter Original Language",
+        "language": "en",
+        "language_detection": {
+          "mode": "auto",
+          "probability": 0.6994286179542542,
+          "margin": 0.6442154608666897,
+          "candidates": [
+            {
+              "language": "fr",
+              "probability": 0.6994286179542542
+            },
+            {
+              "language": "it",
+              "probability": 0.05521315708756447
+            },
+            {
+              "language": "en",
+              "probability": 0.04949275404214859
+            }
+          ],
+          "reason": "recent_context",
+          "context_end_sample": 33322
+        },
+        "review": true,
+        "language_review": true,
+        "acoustic_evidence": {
+          "source": "silero_v6",
+          "start_sample": 66645,
+          "end_sample": 99968,
+          "model_revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+          "observed_until_sample": 99968,
+          "complete": true,
+          "decision": "speech",
+          "speech_regions": [
+            {
+              "start_sample": 66645,
+              "end_sample": 96768
+            }
+          ],
+          "input_policy": "raw_and_peak025_gaincap256_per512_modelnegative_v2",
+          "uncertain_regions": [],
+          "model_negative_regions": [
+            {
+              "start_sample": 96768,
+              "end_sample": 99968
+            }
+          ],
+          "maximum_probability": 0.9999986290931702
+        }
+      }
+    ]
+  },
+  "records": [
+    {
+      "type": "cohere_passages",
+      "utterance_id": "utterance-cfc5ea98ec4740e9d5a7ca34",
+      "audio_revision": 26,
+      "machine_revision": 0,
+      "audio_anchor": {
+        "start_sample": 0,
+        "end_sample": 99840
+      },
+      "passages": [
+        {
+          "start": 0.0,
+          "end": 4.16,
+          "text": "We will discuss the original meeting notes in English. Please keep the word.",
+          "cohere_raw_text": "We will discuss the original meeting notes in English. Please keep the word.",
+          "language": "en",
+          "language_detection": {
+            "mode": "auto",
+            "probability": 0.543168842792511,
+            "margin": 0.23368054628372192,
+            "candidates": [
+              {
+                "language": "en",
+                "probability": 0.543168842792511
+              },
+              {
+                "language": "fr",
+                "probability": 0.30948829650878906
+              },
+              {
+                "language": "la",
+                "probability": 0.042544275522232056
+              }
+            ],
+            "reason": "best_effort",
+            "probes": [
+              {
+                "start_sample": 0,
+                "end_sample": 33280,
+                "language": "en",
+                "decision": {
+                  "mode": "auto",
+                  "probability": 0.9797654747962952,
+                  "margin": 0.9769038902595639,
+                  "candidates": [
+                    {
+                      "language": "en",
+                      "probability": 0.9797654747962952
+                    },
+                    {
+                      "language": "cy",
+                      "probability": 0.002861584536731243
+                    },
+                    {
+                      "language": "ms",
+                      "probability": 0.0023355581797659397
+                    }
+                  ],
+                  "reason": "detected"
+                },
+                "review": false
+              },
+              {
+                "start_sample": 33280,
+                "end_sample": 66560,
+                "language": "en",
+                "decision": {
+                  "mode": "auto",
+                  "probability": 0.543168842792511,
+                  "margin": 0.23368054628372192,
+                  "candidates": [
+                    {
+                      "language": "en",
+                      "probability": 0.543168842792511
+                    },
+                    {
+                      "language": "fr",
+                      "probability": 0.30948829650878906
+                    },
+                    {
+                      "language": "la",
+                      "probability": 0.042544275522232056
+                    }
+                  ],
+                  "reason": "best_effort"
+                },
+                "review": true
+              }
+            ]
+          },
+          "review": true,
+          "language_review": true,
+          "acoustic_evidence": {
+            "source": "silero_v6",
+            "start_sample": 0,
+            "end_sample": 66560,
+            "model_revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+            "observed_until_sample": 99840,
+            "complete": true,
+            "decision": "speech",
+            "speech_regions": [
+              {
+                "start_sample": 512,
+                "end_sample": 45568
+              },
+              {
+                "start_sample": 50176,
+                "end_sample": 66560
+              }
+            ],
+            "input_policy": "raw_and_peak025_gaincap256_per512_modelnegative_v2",
+            "uncertain_regions": [],
+            "model_negative_regions": [
+              {
+                "start_sample": 0,
+                "end_sample": 512
+              },
+              {
+                "start_sample": 45568,
+                "end_sample": 50176
+              }
+            ],
+            "maximum_probability": 0.9999994039535522
+          }
+        },
+        {
+          "start": 4.16,
+          "end": 6.24,
+          "text": "Inter Original Language",
+          "cohere_raw_text": "Inter Original Language",
+          "language": "en",
+          "language_detection": {
+            "mode": "auto",
+            "probability": 0.6387022733688354,
+            "margin": 0.54227264970541,
+            "candidates": [
+              {
+                "language": "fr",
+                "probability": 0.6387022733688354
+              },
+              {
+                "language": "it",
+                "probability": 0.09642962366342545
+              },
+              {
+                "language": "en",
+                "probability": 0.05367117375135422
+              }
+            ],
+            "reason": "recent_context",
+            "context_end_sample": 33280
+          },
+          "review": true,
+          "language_review": true,
+          "acoustic_evidence": {
+            "source": "silero_v6",
+            "start_sample": 66560,
+            "end_sample": 99840,
+            "model_revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+            "observed_until_sample": 99840,
+            "complete": true,
+            "decision": "speech",
+            "speech_regions": [
+              {
+                "start_sample": 66560,
+                "end_sample": 96768
+              }
+            ],
+            "input_policy": "raw_and_peak025_gaincap256_per512_modelnegative_v2",
+            "uncertain_regions": [],
+            "model_negative_regions": [
+              {
+                "start_sample": 96768,
+                "end_sample": 99840
+              }
+            ],
+            "maximum_probability": 0.9999986290931702
+          }
+        }
+      ]
+    },
+    {
+      "type": "cohere_passages",
+      "utterance_id": "utterance-cfc5ea98ec4740e9d5a7ca34",
+      "audio_revision": 27,
+      "machine_revision": 0,
+      "audio_anchor": {
+        "start_sample": 0,
+        "end_sample": 99968
+      },
+      "passages": [
+        {
+          "start": 0.0,
+          "end": 4.1653125,
+          "text": "We will discuss the original meeting notes in English. Please keep the word.",
+          "cohere_raw_text": "We will discuss the original meeting notes in English. Please keep the word.",
+          "language": "en",
+          "language_detection": {
+            "mode": "auto",
+            "probability": 0.45125871896743774,
+            "margin": 0.013883769512176514,
+            "candidates": [
+              {
+                "language": "en",
+                "probability": 0.45125871896743774
+              },
+              {
+                "language": "fr",
+                "probability": 0.43737494945526123
+              },
+              {
+                "language": "la",
+                "probability": 0.028848007321357727
+              }
+            ],
+            "reason": "best_effort",
+            "probes": [
+              {
+                "start_sample": 0,
+                "end_sample": 33322,
+                "language": "en",
+                "decision": {
+                  "mode": "auto",
+                  "probability": 0.9794713854789734,
+                  "margin": 0.9763539414852858,
+                  "candidates": [
+                    {
+                      "language": "en",
+                      "probability": 0.9794713854789734
+                    },
+                    {
+                      "language": "cy",
+                      "probability": 0.0031174439936876297
+                    },
+                    {
+                      "language": "ms",
+                      "probability": 0.0021763260010629892
+                    }
+                  ],
+                  "reason": "detected"
+                },
+                "review": false
+              },
+              {
+                "start_sample": 33322,
+                "end_sample": 66645,
+                "language": "en",
+                "decision": {
+                  "mode": "auto",
+                  "probability": 0.45125871896743774,
+                  "margin": 0.013883769512176514,
+                  "candidates": [
+                    {
+                      "language": "en",
+                      "probability": 0.45125871896743774
+                    },
+                    {
+                      "language": "fr",
+                      "probability": 0.43737494945526123
+                    },
+                    {
+                      "language": "la",
+                      "probability": 0.028848007321357727
+                    }
+                  ],
+                  "reason": "best_effort"
+                },
+                "review": true
+              }
+            ]
+          },
+          "review": true,
+          "language_review": true,
+          "acoustic_evidence": {
+            "source": "silero_v6",
+            "start_sample": 0,
+            "end_sample": 66645,
+            "model_revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+            "observed_until_sample": 112128,
+            "complete": true,
+            "decision": "speech",
+            "speech_regions": [
+              {
+                "start_sample": 512,
+                "end_sample": 45568
+              },
+              {
+                "start_sample": 50176,
+                "end_sample": 66645
+              }
+            ],
+            "input_policy": "raw_and_peak025_gaincap256_per512_modelnegative_v2",
+            "uncertain_regions": [],
+            "model_negative_regions": [
+              {
+                "start_sample": 0,
+                "end_sample": 512
+              },
+              {
+                "start_sample": 45568,
+                "end_sample": 50176
+              }
+            ],
+            "maximum_probability": 0.9999994039535522
+          }
+        },
+        {
+          "start": 4.1653125,
+          "end": 6.248,
+          "text": "Inter Original Language",
+          "cohere_raw_text": "Inter Original Language",
+          "language": "en",
+          "language_detection": {
+            "mode": "auto",
+            "probability": 0.6994286179542542,
+            "margin": 0.6442154608666897,
+            "candidates": [
+              {
+                "language": "fr",
+                "probability": 0.6994286179542542
+              },
+              {
+                "language": "it",
+                "probability": 0.05521315708756447
+              },
+              {
+                "language": "en",
+                "probability": 0.04949275404214859
+              }
+            ],
+            "reason": "recent_context",
+            "context_end_sample": 33322
+          },
+          "review": true,
+          "language_review": true,
+          "acoustic_evidence": {
+            "source": "silero_v6",
+            "start_sample": 66645,
+            "end_sample": 99968,
+            "model_revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+            "observed_until_sample": 112128,
+            "complete": true,
+            "decision": "speech",
+            "speech_regions": [
+              {
+                "start_sample": 66645,
+                "end_sample": 96768
+              }
+            ],
+            "input_policy": "raw_and_peak025_gaincap256_per512_modelnegative_v2",
+            "uncertain_regions": [],
+            "model_negative_regions": [
+              {
+                "start_sample": 96768,
+                "end_sample": 99968
+              }
+            ],
+            "maximum_probability": 0.9999986290931702
+          }
+        }
+      ]
+    },
+    {
+      "type": "cohere_passages",
+      "utterance_id": "utterance-cfc5ea98ec4740e9d5a7ca34",
+      "audio_revision": 27,
+      "machine_revision": 0,
+      "audio_anchor": {
+        "start_sample": 0,
+        "end_sample": 99968
+      },
+      "passages": [
+        {
+          "start": 0.0,
+          "end": 4.1653125,
+          "text": "We will discuss the original meeting notes in English. Please keep the word.",
+          "cohere_raw_text": "We will discuss the original meeting notes in English. Please keep the word.",
+          "language": "en",
+          "language_detection": {
+            "mode": "auto",
+            "probability": 0.45125871896743774,
+            "margin": 0.013883769512176514,
+            "candidates": [
+              {
+                "language": "en",
+                "probability": 0.45125871896743774
+              },
+              {
+                "language": "fr",
+                "probability": 0.43737494945526123
+              },
+              {
+                "language": "la",
+                "probability": 0.028848007321357727
+              }
+            ],
+            "reason": "best_effort",
+            "probes": [
+              {
+                "start_sample": 0,
+                "end_sample": 33322,
+                "language": "en",
+                "decision": {
+                  "mode": "auto",
+                  "probability": 0.9794713854789734,
+                  "margin": 0.9763539414852858,
+                  "candidates": [
+                    {
+                      "language": "en",
+                      "probability": 0.9794713854789734
+                    },
+                    {
+                      "language": "cy",
+                      "probability": 0.0031174439936876297
+                    },
+                    {
+                      "language": "ms",
+                      "probability": 0.0021763260010629892
+                    }
+                  ],
+                  "reason": "detected"
+                },
+                "review": false
+              },
+              {
+                "start_sample": 33322,
+                "end_sample": 66645,
+                "language": "en",
+                "decision": {
+                  "mode": "auto",
+                  "probability": 0.45125871896743774,
+                  "margin": 0.013883769512176514,
+                  "candidates": [
+                    {
+                      "language": "en",
+                      "probability": 0.45125871896743774
+                    },
+                    {
+                      "language": "fr",
+                      "probability": 0.43737494945526123
+                    },
+                    {
+                      "language": "la",
+                      "probability": 0.028848007321357727
+                    }
+                  ],
+                  "reason": "best_effort"
+                },
+                "review": true
+              }
+            ]
+          },
+          "review": true,
+          "language_review": true,
+          "acoustic_evidence": {
+            "source": "silero_v6",
+            "start_sample": 0,
+            "end_sample": 66645,
+            "model_revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+            "observed_until_sample": 99968,
+            "complete": true,
+            "decision": "speech",
+            "speech_regions": [
+              {
+                "start_sample": 512,
+                "end_sample": 45568
+              },
+              {
+                "start_sample": 50176,
+                "end_sample": 66645
+              }
+            ],
+            "input_policy": "raw_and_peak025_gaincap256_per512_modelnegative_v2",
+            "uncertain_regions": [],
+            "model_negative_regions": [
+              {
+                "start_sample": 0,
+                "end_sample": 512
+              },
+              {
+                "start_sample": 45568,
+                "end_sample": 50176
+              }
+            ],
+            "maximum_probability": 0.9999994039535522
+          }
+        },
+        {
+          "start": 4.1653125,
+          "end": 6.248,
+          "text": "Inter Original Language",
+          "cohere_raw_text": "Inter Original Language",
+          "language": "en",
+          "language_detection": {
+            "mode": "auto",
+            "probability": 0.6994286179542542,
+            "margin": 0.6442154608666897,
+            "candidates": [
+              {
+                "language": "fr",
+                "probability": 0.6994286179542542
+              },
+              {
+                "language": "it",
+                "probability": 0.05521315708756447
+              },
+              {
+                "language": "en",
+                "probability": 0.04949275404214859
+              }
+            ],
+            "reason": "recent_context",
+            "context_end_sample": 33322
+          },
+          "review": true,
+          "language_review": true,
+          "acoustic_evidence": {
+            "source": "silero_v6",
+            "start_sample": 66645,
+            "end_sample": 99968,
+            "model_revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+            "observed_until_sample": 99968,
+            "complete": true,
+            "decision": "speech",
+            "speech_regions": [
+              {
+                "start_sample": 66645,
+                "end_sample": 96768
+              }
+            ],
+            "input_policy": "raw_and_peak025_gaincap256_per512_modelnegative_v2",
+            "uncertain_regions": [],
+            "model_negative_regions": [
+              {
+                "start_sample": 96768,
+                "end_sample": 99968
+              }
+            ],
+            "maximum_probability": 0.9999986290931702
+          }
+        }
+      ]
+    }
+  ]
+}
