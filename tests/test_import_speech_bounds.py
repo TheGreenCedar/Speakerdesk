@@ -128,7 +128,7 @@ class ImportSpeechBounds(unittest.TestCase):
                 self.asr.reset_mock();self.detector.reset_mock()
                 document = self.run_import([(0,12*RATE)],language=language)
                 self.asr.transcribe.assert_not_called();self.detector.detect.assert_not_called()
-                self.assertTrue(all(not row['text'] and row['audio_state']=='digital_silence'
+                self.assertTrue(all(not row['text'] and row['audio_state'] in ('digital_silence','model_non_speech')
                                     for row in document['segments']))
                 self.assertEqual(export(document,'txt')[0].strip(), '')
 
@@ -139,7 +139,7 @@ class ImportSpeechBounds(unittest.TestCase):
                 self.replace_pcm(np.full(12*RATE,value,dtype='<i2'))
                 document = self.run_import([(0,12*RATE)],language='auto')
                 self.asr.transcribe.assert_not_called();self.detector.detect.assert_not_called()
-                self.assertTrue(all(row['audio_state']=='constant_signal' and not row['text']
+                self.assertTrue(all(row['audio_state'] in ('constant_signal','model_non_speech') and not row['text']
                                     for row in document['segments']))
                 self.assertTrue(all(row['pcm_evidence']['kind']=='exact_constant_signal'
                                     and row['pcm_evidence']['sample_value']==value/32768
@@ -216,7 +216,7 @@ class ImportSpeechBounds(unittest.TestCase):
         result = self.run_retry()
         self.asr.transcribe.assert_not_called()
         self.assertEqual(result['text'], '')
-        self.assertTrue(any(part['audio_state']=='digital_silence' for part in result.get('retry_parts',[result])))
+        self.assertTrue(any(part['audio_state'] in ('digital_silence','model_non_speech') for part in result.get('retry_parts',[result])))
 
 
 if __name__ == '__main__':
