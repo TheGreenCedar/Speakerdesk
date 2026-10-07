@@ -5,6 +5,7 @@ from rolling_refinement import RATE, CORE_SAMPLES, RollingPlan, anchor_id, bound
 from transcript import validate
 from live_language import validate_language_segment
 from language_detection import language_probe_events
+from utterances import complete_non_speech
 
 
 def activity_references(sources, start_sample, end_sample):
@@ -181,7 +182,17 @@ class RefinementController:
                     row.pop('assembly_provenance',None)
                     row.pop('bounded_decode_provenance',None);row.pop('reading_turns',None);row.pop('reading_turn_provenance',None)
                     if protected & {'start','end'}:row.pop('text_audio_anchor',None)
-                if not row['text'].strip() and prior['text'].strip():
+                negative=(source is not None and
+                    not protected & {'text','start','end'} and
+                    row['canonical_machine_revision']>source['canonical_machine_revision'] and
+                    row['audio_revision']==source['audio_revision'] and
+                    complete_non_speech(row,row['start_sample'],row['end_sample']))
+                if negative and prior['text'].strip():
+                    save_history(job['refinement_history'],sid,{'window_id':sid,
+                        'segments':[copy.deepcopy(prior)],'candidates':[copy.deepcopy(row)],
+                        'reason':'complete_canonical_model_non_speech','language_epoch':row['language_epoch'],
+                        'created':time.time()})
+                if not row['text'].strip() and prior['text'].strip() and not negative:
                     row['text']=prior['text'];row['review']=True;row.pop('alignment',None);row.pop('assembly_provenance',None)
                     row.pop('bounded_decode_provenance',None);row.pop('reading_turns',None);row.pop('reading_turn_provenance',None)
                     row.pop('text_audio_anchor',None)
