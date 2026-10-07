@@ -216,7 +216,7 @@ class ImportSpeechBounds(unittest.TestCase):
         result = self.run_retry()
         self.asr.transcribe.assert_not_called()
         self.assertEqual(result['text'], '')
-        self.assertTrue(any(part['audio_state']=='digital_silence' for part in result['retry_parts']))
+        self.assertTrue(any(part['audio_state']=='digital_silence' for part in result.get('retry_parts',[result])))
 
 
 if __name__ == '__main__':

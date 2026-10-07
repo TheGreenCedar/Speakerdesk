@@ -237,7 +237,7 @@ class SpeechTranscriber:
             # Language confidence, names, context and ownership cannot bypass it.
             evidence = self.admission(start_sample+int(begin), start_sample+int(end))
             state = evidence['decision']
-            if state == 'speech' and np.all(pcm == pcm[0]):
+            if state in ('speech','no_speech') and np.all(pcm == pcm[0]):
                 # A clipped crop can inherit positive neighboring frame scores.
                 # Exactly zero/constant PCM has no waveform encoding speech.
                 # Retain the neural receipt separately; no energy threshold.
