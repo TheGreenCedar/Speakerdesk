@@ -21,6 +21,13 @@ function node(tag, text, className) {
   if (className) el.className = className;
   return el;
 }
+function renderIcons() {
+  // Lucide retains data-lucide on SVGs. Mark only fresh placeholders so a
+  // transcript reconciliation does not replace icons in retained rows.
+  for(const placeholder of document.querySelectorAll('i[data-lucide]'))placeholder.dataset.lucidePending=placeholder.dataset.lucide;
+  lucide.createIcons({nameAttr:'data-lucide-pending'});
+  for(const icon of document.querySelectorAll('svg[data-lucide-pending]'))icon.removeAttribute('data-lucide-pending');
+}
 async function api(path, options = {}) {
   const {updateSave = false, ...requestOptions} = options;
   const mutation = !['GET', 'HEAD'].includes((options.method || 'GET').toUpperCase());
@@ -519,7 +526,7 @@ function renderSegments() {
   renderRetainedAudioReview();
   if(inspected && !host.querySelector('.segment.active'))$('inspector').hidden=true;
   renderSearchResults(visible,query);pane.scrollTop=previousScroll;
-  lucide.createIcons();refreshPlaybackCards();
+  renderIcons();refreshPlaybackCards();
 }
 function appendPassageRepair(body,segment,reason) {
   if(!isLive()) {
@@ -970,7 +977,7 @@ async function init() {
     await refreshSetup();
     setInterval(refreshSetup,1500);
     await refreshUpdates();setInterval(refreshUpdates,1000);
-    lucide.createIcons();
+    renderIcons();
   } catch (e) { notice(e.message, true); }
 }
 function showSettingsTab(name) {
@@ -1130,7 +1137,7 @@ async function refreshMeeting() {
     $('live-delay').textContent=meeting.pending_seconds>3?`${Math.round(meeting.pending_seconds)}s behind`:'';
     const pauseLabel=meeting.status==='paused'?'Resume':'Pause';
     const pauseButton=$('pause-meeting');
-    if(pauseButton.querySelector('span').textContent!==pauseLabel){pauseButton.replaceChildren(icon(meeting.status==='paused'?'play':'pause'),node('span',pauseLabel));lucide.createIcons();}
+    if(pauseButton.querySelector('span').textContent!==pauseLabel){pauseButton.replaceChildren(icon(meeting.status==='paused'?'play':'pause'),node('span',pauseLabel));renderIcons();}
     $('pause-meeting').disabled=!['recording','paused'].includes(meeting.status);
     $('stop-meeting').disabled=meeting.status==='finishing';
   }catch(error){notice(error.message,true);}finally{meetingPoll=false;}
