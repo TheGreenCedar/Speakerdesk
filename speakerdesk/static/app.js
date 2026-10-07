@@ -448,7 +448,7 @@ function savedCard(segment) {
   return card;
 }
 function renderSegments() {
-  if(isLive() || hasPassageDrafts() || hasRecoverablePassageDrafts() || ['waiting','refining'].includes(selected.refinement_status)){renderLiveSegments();return;}
+  if(isLive() || hasPassageDrafts() || hasRecoverablePassageDrafts() || hasPendingPassageSaves() || doc.segments.some(segment=>segment.refinement_state==='provisional') || ['waiting','refining'].includes(selected.refinement_status)){renderLiveSegments();return;}
   $('pending-phrases').hidden=true;
   const pane=$('transcript-pane'),host=$('segments'),previousScroll=pane.scrollTop;
   const inspected=$('inspector').hidden?null:host.querySelector('.segment.active')?.dataset.segmentId;
@@ -626,28 +626,28 @@ function renderRetainedAudioReview() {
 }
 // Group presentation only: each passage keeps its own edit, timing, retry and
 // playback targets. Recompute after filtering/reconciliation without merging IDs.
-function groupConsecutivePassages(host) {
-  let previous,liveLabelShown=false;
-  // Use canonical passage state, including while recording is paused or stopped.
-  // Update presentation in place so arriving refinement cannot replace a draft.
-  const provisional=new Set(doc.segments.filter(segment=>segment.refinement_state==='provisional').map(segment=>segment.id));
+function groupConsecutivePassages(host,pending=0) {
+  let previous,previousSection;
+  const divided=pending>0 || !!host.querySelector('.rolling-segment[data-transcript-section="live"],.rolling-segment[data-transcript-section="corrections"]');
   for(const card of host.children) {
-    const continuation=previous && previous.dataset.speaker===card.dataset.speaker;
+    const section=card.dataset.transcriptSection || 'processed',start=section!==previousSection;
+    const continuation=!start && previous && previous.dataset.speaker===card.dataset.speaker;
     setPassageClass(card,'speaker-continuation',!!continuation);
     setPassageClass(card,'passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
-    const live=provisional.has(card.dataset.segmentId),start=live && !liveLabelShown;
+    const live=section==='live';
     setPassageClass(card,'live-provisional',live);
-    setPassageClass(card,'live-section-start',start);
-    let label=card.querySelector('.live-section-label');
-    if(start && !label){
-      label=node('span','Live','live-section-label');
-      label.title='These words are awaiting refinement and may change with more context.';
-      label.setAttribute('aria-label','Live words awaiting refinement');
-      const top=card.querySelector('.segment-top');top.insertBefore(label,top.firstChild);
+    setPassageClass(card,'live-section-start',live && start);
+    setPassageClass(card,'retained-correction',section==='corrections');
+    setPassageClass(card,'transcript-section-start',divided && start);
+    const className=`${section}-section-label`;
+    for(const label of card.querySelectorAll('.live-section-label,.processed-section-label,.corrections-section-label'))if(!start || !divided || !label.classList.contains(className))label.remove();
+    if(start && divided && !card.querySelector(`.${className}`)) {
+      const label=node('span',({processed:'Processed',corrections:'Your corrections · replaced passages',live:'Live'})[section],`transcript-section-label ${className}`);
+      label.setAttribute('role','heading');label.setAttribute('aria-level','2');
+      if(live){label.title='These words are awaiting refinement and may change with more context.';label.setAttribute('aria-label','Live words awaiting refinement');}
+      card.insertBefore(label,card.firstChild);
     }
-    if(label && label.hidden===start)label.hidden=!start;
-    liveLabelShown ||= live;
-    previous=card;
+    previous=card;previousSection=section;
   }
 }
 function setPassageClass(card,name,value) {
