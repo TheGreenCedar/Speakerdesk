@@ -405,25 +405,45 @@ class SidecarUpdateProcessTests(unittest.TestCase):
     def test_validated_idle_shutdown_acknowledgement_is_followed_by_real_process_exit(self):
         import os
         with tempfile.TemporaryDirectory() as temporary:
+            started = time.monotonic()
             process = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parents[1]/'packaging/sidecar.py')],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                env={**os.environ, 'SPEAKERDESK_HOME': temporary, 'PYTHONDONTWRITEBYTECODE': '1'})
+                env={**os.environ, 'SPEAKERDESK_HOME': temporary, 'PYTHONDONTWRITEBYTECODE': '1',
+                     'PYTHONPROFILEIMPORTTIME': '1'})
+            # Drain stderr during cold imports and HTTP requests; a full pipe
+            # must not block startup. Keep bounded failure/import diagnostics.
+            stderr_tail = ''
+            import_costs = []
+            def drain_stderr():
+                nonlocal stderr_tail
+                for line in process.stderr:
+                    stderr_tail = (stderr_tail + line)[-65536:]
+                    match = re.match(r'import time:\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\S+)', line)
+                    if match:
+                        import_costs.append((int(match[2]), match[3]))
+                        import_costs.sort(reverse=True)
+                        del import_costs[20:]
+            stderr_reader = threading.Thread(target=drain_stderr, daemon=True)
+            stderr_reader.start()
             try:
-                def read_line():
+                def read_line(timeout=5):
                     with selectors.DefaultSelector() as selector:
                         selector.register(process.stdout, selectors.EVENT_READ)
-                        self.assertTrue(selector.select(5), 'Sidecar output timed out.')
+                        if not selector.select(timeout):
+                            self.fail(f'Sidecar output timed out after {timeout}s; exit={process.poll()}; stderr={stderr_tail}')
                     return process.stdout.readline()
-                line = read_line()
+                # Cold source imports on the package runner have a separate
+                # finite budget; all protocol acknowledgements retain 5s.
+                line = read_line(timeout=30)
+                print(f'Sidecar startup_seconds={time.monotonic()-started:.3f}; '
+                      f'top_cumulative_import_us={sorted(import_costs, reverse=True)[:5]}')
                 if not line.startswith('SPEAKERDESK_URL='):
                     # Werkzeug reports denied bind/listen as one stderr line
                     # and exits. Preserve that actual cause instead of an empty
                     # stdout assertion; this does not retry a denied launch.
                     if line == '':
-                        try:
-                            _, startup_error = process.communicate(timeout=1)
-                        except subprocess.TimeoutExpired:
-                            startup_error = 'Startup output closed while the process remained alive.'
+                        stderr_reader.join(timeout=1)
+                        startup_error = stderr_tail
                     else:
                         startup_error = 'Unexpected startup output: ' + repr(line)
                     self.fail(f'Sidecar bootstrap failed (exit={process.poll()}): {startup_error[:65536]}')
@@ -480,7 +500,13 @@ class SidecarUpdateProcessTests(unittest.TestCase):
                 self.assertEqual(process.wait(timeout=5), 0)
             finally:
                 if process.poll() is None:process.kill()
-                process.communicate(timeout=5)
+                process.wait(timeout=5)
+                stderr_reader.join(timeout=2)
+                process.stdin.close()
+                process.stdout.close()
+                if not stderr_reader.is_alive():
+                    process.stderr.close()
+                self.assertFalse(stderr_reader.is_alive(), 'Sidecar stderr reader did not join within its cleanup budget.')
 
 
 if __name__ == '__main__': unittest.main()
