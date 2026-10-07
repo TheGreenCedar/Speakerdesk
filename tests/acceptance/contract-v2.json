@@ -1,0 +1,15 @@
+{
+  "id": "speakerdesk-acoustic-contract-v2",
+  "original_contract": "speakerdesk-core-v1 (unchanged; prior failures retained)",
+  "numeric_equivalence": {
+    "case": "quiet-speech",
+    "expected_cardinal": 11,
+    "written_forms": ["eleven", "11"],
+    "rule": "Entire frozen quiet sentence must match normalized lexical tokens except this one explicit typed cardinal. Decimal/signed/ordinal/different/missing values reject. Never rewrite transcript."
+  },
+  "context_selection": {
+    "rule": "Keep whole unchanged row across verified digital-zero prefix only. Both actual live/refined receipts bind same job, utterance ID, audio revision, audio anchor, pinned model/policy; complete gapless observed speech/negative ledgers and no uncertainty. Ledger frame coordinates may differ. Nonzero context, missing/stale receipts and changed binding reject.",
+    "word_timing": null
+  },
+  "recognition_errors": "No fuzzy, phonetic or fixture-driven lexical replacements. Tankyou/grade remain failed."
+}

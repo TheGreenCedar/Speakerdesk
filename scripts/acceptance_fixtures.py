@@ -1,4 +1,10 @@
-"""Generate only frozen recipes using installed compact voices, without downloads."""
+"""Generate frozen recipes using listed installed voice selectors, without downloads.
+
+Resource identifiers are not `say -v` selectors: an unrecognized selector can
+silently use the default voice. Resource inventory records the requested asset;
+the listed selector and exact output PCM record what this CLI run selected. The
+display-name interface does not prove which duplicate asset footprint was used.
+"""
 import array
 import hashlib
 import json
@@ -6,6 +12,7 @@ import math
 from pathlib import Path
 import plistlib
 import random
+import re
 import subprocess
 import sys
 import wave
@@ -26,7 +33,7 @@ def read_wav(path):
     if sys.byteorder!='little':pcm.byteswap()
     return list(pcm)
 
-def voice(identifier):
+def voice(identifier, command):
     for info in VOICE_ROOT.glob('*/*/Info.plist'):
         value=plistlib.loads(info.read_bytes())
         if value.get('MobileAssetProperties',{}).get('VoiceId')==identifier:
@@ -34,7 +41,28 @@ def voice(identifier):
             resource=info.parent
             files={str(p.relative_to(resource)):hashlib.sha256(p.read_bytes()).hexdigest()
                    for p in resource.rglob('*') if p.is_file()}
-            return {'id':identifier,'path':str(resource),'files_sha256':files}
+            properties=value['MobileAssetProperties']
+            languages=properties.get('Languages',[]);name=properties.get('Name')
+            if len(languages)!=1 or not isinstance(name,str) or not name:
+                raise ValueError('Ambiguous installed voice identity: '+identifier)
+            language=languages[0].replace('-','_')
+            listing=command(['/usr/bin/say','-v','?'],timeout=10).stdout
+            if isinstance(listing,bytes):listing=listing.decode('utf-8',errors='strict')
+            matches=[]
+            for line in listing.splitlines():
+                match=re.fullmatch(r'(.+?)\s+([a-z]{2,3}_[A-Za-z0-9]+)\s+#.*',line)
+                if not match:continue
+                selector,locale=match.groups();selector=selector.strip()
+                if locale==language and (selector==name or selector.startswith(name+' (')):
+                    matches.append(selector)
+            selectors=set(matches)
+            if len(selectors)!=1:
+                raise ValueError('Required voice has no unique listed CLI selector: '+identifier)
+            return {'id':identifier,'path':str(resource),'files_sha256':files,
+                    'say_selector':next(iter(selectors)),'say_language':language,
+                    'say_listing_sha256':hashlib.sha256(listing.encode('utf-8')).hexdigest(),
+                    'matching_listing_entries':len(matches),
+                    'asset_binding':'requested_resource_inventory_only; CLI asset footprint unverified'}
     raise ValueError('Required preinstalled compact voice unavailable: '+identifier)
 
 def generate(recipe, directory, command=None):
@@ -59,8 +87,8 @@ def generate(recipe, directory, command=None):
             for i,v in enumerate(right):mixed[i+offset]+=v//2
             return mixed
         if kind!='speech':raise ValueError('Unknown recipe part')
-        identity=voice(part['voice']);stem=directory/f'speech-{counter}'
-        command(['/usr/bin/say','-v',part['voice'],'-r',str(part.get('rate',175)),
+        identity=voice(part['voice'],command);stem=directory/f'speech-{counter}'
+        command(['/usr/bin/say','-v',identity['say_selector'],'-r',str(part.get('rate',175)),
                  '-o',str(stem.with_suffix('.aiff')),part['text']],timeout=20)
         command(['/usr/bin/afconvert','-f','WAVE','-d','LEI16@16000','-c','1',
                  str(stem.with_suffix('.aiff')),str(stem.with_suffix('.wav'))],timeout=10)
@@ -68,8 +96,12 @@ def generate(recipe, directory, command=None):
         # Remove digital-zero padding only, never an amplitude threshold or a spoken sample.
         while start<end and original[start]==0:start+=1
         while end>start and original[end-1]==0:end-=1
+        if start==end:
+            raise ValueError('Required synthetic speech is empty or digital zero: '+identity['say_selector'])
         gain=part.get('gain',1)
         values=[max(-32768,min(32767,round(v*gain))) for v in original[start:end]]
+        if not any(values):
+            raise ValueError('Required synthetic speech has no nonzero samples after gain')
         metadata.append({'voice':identity,'text':part['text'],'gain':gain,'rate':part.get('rate',175),
                          'original_wav_sha256':hashlib.sha256(stem.with_suffix('.wav').read_bytes()).hexdigest(),
                          'original_frames':len(original),'trim_start':start,'trim_end':end})
