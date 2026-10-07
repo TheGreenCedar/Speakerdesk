@@ -3,6 +3,14 @@
   "productName": "Speakerdesk",
   "version": "0.6.2",
   "identifier": "com.speakerdesk.desktop",
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://rootandruntime.com/downloads/speakerdesk/updater/latest.json"],
+      "pubkey": "",
+      "requireSignedVersion": true,
+      "allowDowngrades": false
+    }
+  },
   "build": {
     "frontendDist": "../frontend"
   },

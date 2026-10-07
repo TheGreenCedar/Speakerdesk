@@ -8,6 +8,12 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
+# Official upstream macOS atomic replacement and previous-bundle recovery fix.
+tauri-plugin-updater = { git = "https://github.com/tauri-apps/plugins-workspace", rev = "65ce65bdbb4390f73076c8182fbf06a52036f241" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time"] }
+libc = "0.2"
 [profile.release]
 strip = false
 codegen-units = 16

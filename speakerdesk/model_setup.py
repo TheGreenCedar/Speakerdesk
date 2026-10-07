@@ -29,6 +29,7 @@ SPECS=[
 def register_setup(app, activate_voice):
     root=Path(os.getenv('SPEAKERDESK_MODELS',Path(__file__).resolve().parents[1]/'models'))
     lock=threading.RLock()
+    updates=app.extensions['speakerdesk']['updates']
     verified_files={}
     state={'status':'idle','phase':'','downloaded_bytes':0,'total_bytes':sum(s['bytes'] for s in SPECS if not s.get('optional')),'error':None}
     voice=VoiceSetup(root,lock,activate_voice,app.logger)
@@ -136,21 +137,23 @@ def register_setup(app, activate_voice):
         include_alignment=body.get('alignment',False)
         if not voice.supported():
             return jsonify(error='This version requires an Apple Silicon Mac with macOS 15 or later.'),409
-        with lock:
+        # Lock order: runtime admission, then setup state. Downloads never hold
+        # setup state while acquiring runtime admission or activating a model.
+        with updates.lock,lock:
             if voice.state['status']=='downloading':return jsonify(error='Wait for voice setup to finish.'),409
             if state['status']=='downloading':return jsonify(state),202
             state.update(status='downloading',error=None,phase='Preparing download',
                 total_bytes=sum(s['bytes'] for s in SPECS if not s.get('optional') or include_alignment)+voice.state['total_bytes'])
-        threading.Thread(target=download,args=(include_alignment,),daemon=True,name='model-setup').start()
+            updates.start_thread('model setup',download,include_alignment,name='model-setup')
         return jsonify(state),202
 
     @app.post('/api/setup/voice')
     def start_voice():
         if not voice.supported():
             return jsonify(error='Update Speakerdesk on an Apple Silicon Mac with macOS 15 or later to use voice recognition.'),409
-        with lock:
+        with updates.lock,lock:
             if state['status']=='downloading':return jsonify(error='Wait for meeting model setup to finish.'),409
             if voice.state['status']=='downloading':return jsonify(voice.state),202
             voice.state.update(status='downloading',phase='Preparing voice download',error=None)
-        threading.Thread(target=voice.download,daemon=True,name='voice-model-setup').start()
+            updates.start_thread('voice setup',voice.download,name='voice-model-setup')
         return jsonify(voice.state),202

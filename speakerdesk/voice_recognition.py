@@ -27,11 +27,12 @@ class RecognitionPreference:
 
 
 class VoiceRecognition:
-    def __init__(self, get, put, folder, lock, runtime, store, preference, logger):
+    def __init__(self, get, put, folder, lock, runtime, store, preference, logger, *, updates):
         self.get, self.put, self.folder, self.lock = get, put, folder, lock
         self.runtime, self.store, self.preference, self.logger = runtime, store, preference, logger
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='voice-recognition')
         self.closed = False
+        self.updates = updates
 
     def observe(self, jid, track=None):
         """Snapshot eligible evidence quickly; model work happens outside the app lock."""
@@ -63,7 +64,8 @@ class VoiceRecognition:
                 job.setdefault('voice_checks', {})[candidate] = {'id': check_id, 'status': 'checking',
                     'model': backend.model.payload(), 'clips': [c.payload() for c in clips]}
                 self.put(job)
-                self.executor.submit(self._check, jid, candidate, check_id, backend, calibration, profiles, clips, audio)
+                args = (jid, candidate, check_id, backend, calibration, profiles, clips, audio)
+                self.updates.submit(self.executor, 'voice recognition', self._check, *args)
 
     def _check(self, jid, track, check_id, backend, calibration, profiles, clips, audio):
         match, failed = None, False
@@ -107,7 +109,7 @@ class VoiceRecognition:
             job['revision'] += 1
             self.put(job)
 
-    def close(self):
+    def close(self, *, wait=False):
         with self.lock:
             self.closed = True
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        self.executor.shutdown(wait=wait, cancel_futures=True)

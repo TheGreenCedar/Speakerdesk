@@ -192,6 +192,7 @@ impl ExportJob {
 struct State {
     pending: Option<Arc<ExportJob>>,
     stopped: bool,
+    update_reservation: Option<u64>,
     protected_root: Option<PathBuf>,
 }
 #[derive(Default)]
@@ -213,7 +214,11 @@ impl ExportDownloads {
     }
     pub fn begin(&self, url: &str, nonce: &str, filename: &str) -> io::Result<PathBuf> {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if state.stopped || state.pending.is_some() || !valid_nonce(nonce) {
+        if state.stopped
+            || state.update_reservation.is_some()
+            || state.pending.is_some()
+            || !valid_nonce(nonce)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "Another export is still pending",
@@ -298,6 +303,28 @@ impl ExportDownloads {
     pub fn cancel(&self, job: &Arc<ExportJob>) -> bool {
         job.cancel();
         self.release(job)
+    }
+    /// Reserve only an idle export subsystem; never cancel a user's pending save.
+    pub fn reserve_update(&self, id: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if id == 0 || state.stopped || state.pending.is_some() {
+            return false;
+        }
+        match state.update_reservation {
+            Some(current) => current == id,
+            None => {
+                state.update_reservation = Some(id);
+                true
+            }
+        }
+    }
+    pub fn release_update(&self, id: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.update_reservation != Some(id) {
+            return false;
+        }
+        state.update_reservation = None;
+        true
     }
     pub fn shutdown(&self) {
         let job = {
@@ -467,5 +494,38 @@ mod tests {
         assert!(job.save_to(&target).is_err());
         exports.cancel(&job);
         assert_eq!(fs::read(target).unwrap(), b"original audio");
+    }
+    #[test]
+    fn update_refuses_download_chooser_and_write_without_cancelling_export() {
+        for phase in [Phase::Downloading, Phase::Choosing, Phase::Writing] {
+            let exports = ExportDownloads::default();
+            let payload = exports.begin("save", nonce(), "meeting.txt").unwrap();
+            fs::write(&payload, b"private transcript").unwrap();
+            let job = exports.state.lock().unwrap().pending.clone().unwrap();
+            job.gate.lock().unwrap().phase = phase;
+            assert!(!exports.reserve_update(7));
+            assert_eq!(fs::read(&payload).unwrap(), b"private transcript");
+            assert_eq!(job.gate.lock().unwrap().phase, phase);
+            assert!(exports.cancel(&job));
+            assert!(exports.reserve_update(7));
+        }
+    }
+    #[test]
+    fn update_reservation_blocks_exports_and_stale_release_cannot_open_gate() {
+        let exports = ExportDownloads::default();
+        assert!(!exports.reserve_update(0));
+        assert!(exports.reserve_update(4));
+        assert!(exports.reserve_update(4));
+        assert!(!exports.reserve_update(5));
+        assert!(exports.begin("save", nonce(), "meeting.txt").is_err());
+        assert!(!exports.release_update(3));
+        assert!(exports.begin("save", nonce(), "meeting.txt").is_err());
+        assert!(exports.release_update(4));
+        let job = ready(&exports, "save", b"after update cancellation");
+        assert!(exports.cancel(&job));
+        assert!(exports.reserve_update(5));
+        assert!(!exports.release_update(4));
+        assert!(exports.begin("save", nonce(), "meeting.txt").is_err());
+        assert!(exports.release_update(5));
     }
 }

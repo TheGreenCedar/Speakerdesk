@@ -85,11 +85,12 @@ class SourceMixer:
 
 
 class MeetingManager:
-    def __init__(self, get, put, patch, folder, lock, inference_busy, recognizer=None, *, default_language=None):
+    def __init__(self, get, put, patch, folder, lock, inference_busy, recognizer=None, *, updates, default_language=None):
         self.get, self.put, self.patch, self.folder = get, put, patch, folder
         self.lock = lock
         self.inference_busy = inference_busy
         self.recognizer = recognizer
+        self.updates = updates
         self.default_language=default_language or (lambda:'auto')
         self.jid = None
         self.capture = self.worker = None
@@ -198,8 +199,7 @@ class MeetingManager:
             self.worker_controls=queue.Queue(maxsize=8);self.two_pass=False
             self.refining_saved=False
             self.active_language=language;self.active_epoch=0
-            self.thread = threading.Thread(target=self._run,args=(self.jid,language,sources),daemon=True)
-            self.thread.start()
+            self.thread = self.updates.start_thread('meeting capture',self._run,self.jid,language,sources)
             return job
 
     def control(self, jid, action):
@@ -541,6 +541,16 @@ class MeetingManager:
         if thread and thread is not threading.current_thread():thread.join(timeout=5)
         if self.recognizer:self.recognizer.close()
 
+    def close_for_update(self):
+        """Join only an idle owner. An update never stops a live/paused meeting."""
+        with self.lock:
+            if self.jid or self.capture or self.worker:
+                raise RuntimeError('A meeting still owns capture or inference.')
+            thread=self.thread
+        if thread and thread is not threading.current_thread():thread.join(timeout=5)
+        if thread and thread.is_alive():raise RuntimeError('Meeting cleanup is still finishing.')
+        if self.recognizer:self.recognizer.close(wait=True)
+
     def resume_refinement(self, jid):
         with self.lock:
             if self.jid==jid and self.worker and self.two_pass:
@@ -563,7 +573,7 @@ class MeetingManager:
             self.jid=jid;self.duration=job['duration'];self.processed=self.duration
             self.stopped=threading.Event();self.worker_controls=queue.Queue(maxsize=8);self.two_pass=True
             self.refining_saved=True
-            self.thread=threading.Thread(target=self._run_saved_refinement,args=(jid,),daemon=True);self.thread.start()
+            self.thread=self.updates.start_thread('saved meeting refinement',self._run_saved_refinement,jid)
             return job
 
     def _run_saved_refinement(self,jid):
@@ -637,7 +647,8 @@ def append_finalized_segment(document, result):
 
 
 def register_meetings(app, get, put, patch, folder, lock, inference_busy, recognizer=None, *, default_language=None):
-    manager=MeetingManager(get,put,patch,folder,lock,inference_busy,recognizer,default_language=default_language)
+    manager=MeetingManager(get,put,patch,folder,lock,inference_busy,recognizer,default_language=default_language,
+                           updates=app.extensions['speakerdesk']['updates'])
     app.extensions['speakerdesk']['meetings']=manager
     @app.get('/api/meeting')
     def meeting_status():return jsonify(manager.status())
