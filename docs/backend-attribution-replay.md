@@ -75,3 +75,11 @@ After the first two serial controls, `a-b-a` and `gap` expand the same fixture s
 If real NVIDIA activity or alignment does not qualify a case, retain all outputs
 and report the failing stage. CPU passing results alone cannot qualify the real
 model behavior or a release.
+
+Run the sequential case in both explicit English and the default Automatic mode.
+When Automatic produces multiple contiguous successful English passages, retain
+their exact raw aggregate and all routing probes. Verify aggregate timing is
+qualified across the complete original anchor, with separate reading owners in
+live and sealed revisions. A mixed-language route, discontinuity, or non-English
+probe must not borrow the first piece's English calibration. These source cases
+are covered by the Automatic regressions in `test_canonical_attribution.py`.

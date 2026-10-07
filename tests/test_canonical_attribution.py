@@ -58,6 +58,26 @@ class CanonicalAttributionTests(unittest.TestCase):
         self.assertFalse(row['voice_eligible'])
         return turns
 
+    def automatic_routes(self, *, second_language='en', gap_samples=0, second_probe_language=None):
+        self.engine.config['language'] = 'auto';self.engine.timeline[0]['language'] = 'auto'
+        def transcribe(audio, language, names, overlap=False):
+            self.peer.calls.append(len(audio));middle = len(audio)//2
+            parts = [(0, middle, 'Alpha. Still alpha.', 'en'),
+                     (middle + gap_samples, len(audio), 'Beta. Still beta.', second_language)]
+            output = [dict(start=a/RATE, end=b/RATE, text=raw, cohere_raw_text=raw,
+                language=selected, review=True, language_review=True,
+                language_detection=dict(mode='auto', reason='recent_context'),
+                acoustic_evidence=dict(source='silero_v6', complete=True, decision='speech',
+                    start_sample=a, end_sample=b,
+                    speech_regions=[dict(start_sample=a, end_sample=b)], uncertain_regions=[]))
+                for a, b, raw, selected in parts]
+            if second_probe_language:
+                a, b = parts[1][:2]
+                output[1]['language_detection']['probes'] = [dict(start_sample=a, end_sample=b,
+                    language=second_probe_language, decision=dict(reason='recent_context'))]
+            return output
+        self.peer.transcribe = transcribe
+
     def test_open_and_sealed_five_second_a_then_b_survive_host_and_export(self):
         self.activity([dict(start=0, end=5, speaker='speaker_0'),
                        dict(start=5, end=10, speaker='speaker_1')],
@@ -175,6 +195,71 @@ class CanonicalAttributionTests(unittest.TestCase):
         self.assertEqual(refined['text'], self.peer.text)
         self.assertNotIn('reading_turns', refined)
         self.assertTrue(refined['review']);self.assertFalse(refined['voice_eligible'])
+
+    def test_automatic_same_english_routes_align_the_exact_complete_aggregate_live_and_sealed(self):
+        self.activity([dict(start=0, end=5, speaker='speaker_0'),
+                       dict(start=5, end=10, speaker='speaker_1')],
+                      'Alpha. Still alpha. Beta. Still beta.',
+                      [RATE, 2*RATE, 3*RATE, 6*RATE, 7*RATE, 8*RATE])
+        self.automatic_routes()
+        original_align = self.peer.align_canonical;aligned_texts = []
+        def align(request, raw, **kwargs):
+            aligned_texts.append(raw)
+            return original_align(request, raw, **kwargs)
+        self.peer.align_canonical = align
+        self.feed(0, 10, mode='auto');live = self.rows()[-1]
+        self.assertEqual(live['canonical_state'], 'open')
+        self.assert_turns(live, ['speaker_0', 'speaker_1'])
+        self.assertEqual(live['language'], 'en');self.assertTrue(live['language_review'])
+        self.assertEqual(live['language_detection']['source'], 'disjoint_short_language_decisions_v1')
+        self.assertIsNone(live['bounded_decode_provenance']['word_timing'])
+        self.assertTrue(aligned_texts)
+        self.assertTrue(all(raw == self.peer.text for raw in aligned_texts))
+        self.engine.handle({'type': 'stop'});sealed = self.rows()[-1]
+        self.assertEqual(sealed['canonical_state'], 'sealed')
+        self.assert_turns(sealed, ['speaker_0', 'speaker_1'])
+        self.assertEqual(sealed['id'], live['id'])
+        self.assertEqual(sealed['text'], self.peer.text)
+
+    def assert_unqualified_routes(self, **variant):
+        self.activity([dict(start=0, end=5, speaker='speaker_0'),
+                       dict(start=5, end=10, speaker='speaker_1')],
+                      'Alpha. Still alpha. Beta. Still beta.',
+                      [RATE, 2*RATE, 3*RATE, 6*RATE, 7*RATE, 8*RATE])
+        self.automatic_routes(**variant)
+        self.feed(0, 10, mode='auto');self.engine.handle({'type': 'stop'})
+        self.assertEqual(self.alignment_calls, [])
+        row = self.rows()[-1]
+        self.assertEqual(row['canonical_unresolved'], 'incomplete_cohere_revision')
+        self.assertNotIn('reading_turns', row)
+        self.assertNotIn('bounded_decode_provenance', row)
+        self.assertFalse(row['voice_eligible'])
+        import json
+        journal = [json.loads(line) for line in self.engine.canonical.archive.path.read_text().splitlines()]
+        original = [item for item in journal if item['type'] == 'cohere_passages'][-1]
+        self.assertEqual([p['cohere_raw_text'] for p in original['passages']],
+                         ['Alpha. Still alpha.', 'Beta. Still beta.'])
+
+    def test_automatic_mixed_language_routes_never_borrow_english_aggregate_timing(self):
+        self.assert_unqualified_routes(second_language='fr')
+
+    def test_automatic_discontinuous_routes_never_claim_complete_aggregate_timing(self):
+        self.assert_unqualified_routes(gap_samples=1)
+
+    def test_automatic_english_route_label_cannot_hide_a_non_english_probe(self):
+        self.activity([dict(start=0, end=5, speaker='speaker_0'),
+                       dict(start=5, end=10, speaker='speaker_1')],
+                      'Alpha. Still alpha. Beta. Still beta.',
+                      [RATE, 2*RATE, 3*RATE, 6*RATE, 7*RATE, 8*RATE])
+        self.automatic_routes(second_probe_language='fr')
+        self.feed(0, 10, mode='auto');self.engine.handle({'type': 'stop'})
+        row = self.rows()[-1]
+        self.assertEqual(row['text'], self.peer.text)
+        self.assertIn('bounded_decode_provenance', row)
+        self.assertNotIn('canonical_unresolved', row)
+        self.assertEqual(self.alignment_calls, [])
+        self.assertNotIn('reading_turns', row)
+        self.assertEqual(row['speaker'], 'unassigned')
 
 
 if __name__ == '__main__':

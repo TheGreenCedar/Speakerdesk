@@ -58,8 +58,15 @@ class RuntimeDiscardRegression(unittest.TestCase):
   with self.assertRaises(ValueError):book.edit(identity,revision,'stale correction')
  def test_routed_text_does_not_use_first_piece_as_whole_alignment_evidence(self):
   self.peer.alignment_supported=lambda language:True
-  self.peer.align_canonical=lambda *args,**kwargs:self.fail('Joined routes require separate timing qualification')
+  calls=[]
+  self.peer.align_canonical=lambda request,text,**kwargs:calls.append((copy.deepcopy(request),text,kwargs))
   row=self.decode_recorded()
-  self.assertEqual(row['text'],' '.join(p['cohere_raw_text'] for p in RECORD['passages']))
+  expected=' '.join(p['cohere_raw_text'] for p in RECORD['passages'])
+  self.assertEqual(row['text'],expected);self.assertTrue(calls)
+  for request,text,kwargs in calls:
+   end=request['end_sample'];aggregate=' '.join(p['cohere_raw_text'] for p in RECORDED_BY_LENGTH[end])
+   self.assertEqual(request,{'start_sample':0,'end_sample':end});self.assertEqual(text,aggregate)
+   self.assertEqual(kwargs,{'language':'en'})
+  self.assertEqual(calls[-1][0],{'start_sample':0,'end_sample':99968})
   self.assertIsNone(row['bounded_decode_provenance']['word_timing'])
 if __name__=='__main__':unittest.main()

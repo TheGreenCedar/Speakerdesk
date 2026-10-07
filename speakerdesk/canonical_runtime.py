@@ -122,9 +122,12 @@ class CanonicalRuntime:
                     updated['bounded_decode_provenance']=routed['provenance']
             if not complete or not text.strip():updated['canonical_unresolved']='incomplete_cohere_revision'
             else:updated.pop('canonical_unresolved',None)
-            if len(passages)==1 and complete and text.strip() and updated['text']==text and self.reading_alignment_enabled(row):
+            if complete and text.strip() and updated['text']==text and self.reading_alignment_enabled(row):
                 request={'start_sample':a,'end_sample':b}
-                alignment=self.align_reading(request,text,passages[0])
+                # A complete routed aggregate is qualified by every original
+                # route's English probe, not the first piece's language label.
+                passage=passages[0] if len(passages)==1 else updated
+                alignment=self.align_reading(request,text,passage)
                 bind_words(updated,alignment_words(alignment,text,a,b))
         else:
             use_alignment=((stamp['language']=='en' or (stamp['language']=='auto' and row.get('language')=='en'))
