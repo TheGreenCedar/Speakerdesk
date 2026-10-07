@@ -133,7 +133,10 @@ class SpeechFrames:
             self.speaking = True
         elif probability < .35:
             self.speaking = False
-        frame=(start, end, float(probability), self.speaking)
+        constant_pcm=isinstance(observation,dict) and observation.get('constant_pcm_override') is True
+        # Preserve neural onset/release state across a physically empty frame:
+        # a subsequent quiet nonconstant frame may still be inside speech.
+        frame=(start, end, 0. if constant_pcm else float(probability), self.speaking and not constant_pcm)
         self.frames.append(frame+(observation,) if observation is not None else frame)
         self.end_sample = end
 
@@ -317,14 +320,13 @@ class SpeechSession:
                     # both states normally. No amplitude threshold or duration
                     # veto applies to nonconstant PCM, however quiet or brief.
                     observation['constant_pcm_override']=observation['constant_value'] is not None
-                    if observation['constant_pcm_override']:probability=0.
                     self.normalized_state=normalized_state
                 self.evidence.append(begin, begin+count, probability,observation=observation)
                 # Hash only original physical samples after successful neural
                 # inspection. Virtual final-frame padding/normalized VAD input
                 # never enters the retained-PCM identity.
                 self.inspected_pcm.update(np.clip(np.rint(chunk[:count]*32768),-32768,32767).astype('<i2').tobytes())
-                speaking=self.evidence.speaking
+                speaking=self.evidence.frames[-1][3]
                 key=('speech_samples' if speaking else 'uncertain_samples' if observation is None
                      else 'negative_constant_samples' if observation.get('constant_value') is not None
                      else 'model_negative_samples')

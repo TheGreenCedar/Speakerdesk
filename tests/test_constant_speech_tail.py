@@ -19,6 +19,15 @@ class RecurrentPositive:
         return .99,state+1
 
 class ConstantSpeechTailTests(unittest.TestCase):
+    def test_neural_hysteresis_retains_quiet_nonconstant_frame_after_zero_frame(self):
+        class Model(RecurrentPositive):
+            def feed(self,chunk,state):return (.99 if state<2 else .4),state+1
+        speech=np.linspace(-1e-9,1e-9,FRAME,dtype=np.float32);speech[-1]=0.
+        session=SpeechSession(Model());session.feed(np.concatenate((speech,np.zeros(FRAME),speech)),0,final=True)
+        self.assertEqual(session.evidence.admission(FRAME,2*FRAME)['decision'],'no_speech')
+        self.assertEqual(session.evidence.admission(2*FRAME,3*FRAME)['decision'],'speech')
+        self.assertEqual(session.evidence.frames[-1][2],.4)
+
     def test_empty_tail_after_speech_never_reaches_asr_but_neural_state_advances(self):
         # Last physical speech sample is zero, matching the real fixture.
         prefix=np.linspace(-.004,.004,FRAME,dtype=np.float32);prefix[-1]=0.
