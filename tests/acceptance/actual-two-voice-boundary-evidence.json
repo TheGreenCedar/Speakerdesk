@@ -40,7 +40,8 @@
           "end_sample": 135808,
           "speakers": []
         }
-      ]
+      ],
+      "observed_end_sample": 135808
     }
   },
   "alignment": {
@@ -347,5 +348,6 @@
         "minimum_token_log_probability": -8.857439041137695
       }
     ]
-  }
+  },
+  "observation_scope": "Final synchronous batch_turns ran over full retained physical anchor; explicit horizon added by current contract."
 }

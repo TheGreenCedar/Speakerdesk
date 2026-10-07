@@ -10,11 +10,13 @@ sys.path.insert(0, str(Path(os.environ.get('SPEAKER_UNCERTAINTY_SOURCE_ROOT',
     Path(__file__).resolve().parents[1])) / 'speakerdesk'))
 from reading_turns import alignment_words, bind_words, project_turns
 from test_reading_turns import fixture
+from utterances import UtteranceBook
 
 
 def row_for(word_start, word_end, regions):
     row = fixture('word')
     row['speaker_activity']['regions'] = regions
+    row['speaker_activity']['observed_end_sample'] = row['end_sample']
     row['reading_word_evidence']['words'][0].update(start_sample=word_start, end_sample=word_end)
     return row
 
@@ -68,6 +70,37 @@ class SpeakerUncertaintyWindowTests(unittest.TestCase):
         row['text_audio_anchor']['end_sample'] = 80000
         row['reading_word_evidence']['audio_anchor'] = copy.deepcopy(row['text_audio_anchor'])
         self.assertEqual(project_turns(row)[0]['attribution'], 'unknown')
+
+    def test_unobserved_empty_tail_does_not_count_as_observed_gap(self):
+        row = row_for(75000, 79000, [region(0, 80000, 'speaker_0'), region(80000, 160000)])
+        row['speaker_activity']['observed_end_sample'] = 80000
+        self.assertEqual(project_turns(row)[0]['attribution'], 'unknown')
+        row['speaker_activity']['observed_end_sample'] = 83000
+        self.assertEqual(project_turns(row)[0]['speaker'], 'speaker_0')
+
+    def test_legacy_horizon_and_invalid_new_receipts_do_not_gain_claims(self):
+        row = row_for(75000, 79000, [region(0, 80000, 'speaker_0'), region(80000, 160000)])
+        row['speaker_activity'].pop('observed_end_sample')
+        self.assertEqual(project_turns(row)[0]['attribution'], 'unknown')
+        for invalid in [True, -1, 160001, '160000']:
+            with self.subTest(invalid=invalid):
+                row['speaker_activity']['observed_end_sample'] = invalid
+                self.assertEqual(project_turns(row), [])
+
+    def test_real_activity_attachment_preserves_horizon_and_rejects_future_owner(self):
+        book = UtteranceBook('observation-control')
+        book.observe({'start_sample': 0, 'end_sample': 8000, 'complete': True,
+            'decision': 'speech', 'speech_regions': [{'start_sample': 0, 'end_sample': 4000}]})
+        row = book.finish()[0]
+        regions = [region(0, 4000, 'speaker_0'), region(4000, row['end_sample'])]
+        bound = book.attach_activity(row['id'], row['audio_revision'], regions, observed_end_sample=4000)
+        self.assertEqual(bound['speaker_activity']['observed_end_sample'], 4000)
+        self.assertFalse(bound['voice_eligible'])
+        with self.assertRaises(ValueError):
+            book.attach_activity(row['id'], row['audio_revision'],
+                [region(0, row['end_sample'], 'speaker_0')], observed_end_sample=4000)
+        complete = book.attach_activity(row['id'], row['audio_revision'], regions)
+        self.assertTrue(complete['voice_eligible'])
 
 
 if __name__ == '__main__':

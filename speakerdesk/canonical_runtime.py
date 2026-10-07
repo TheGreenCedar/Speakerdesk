@@ -477,8 +477,11 @@ class CanonicalRuntime:
             previous=self.published.get(identity)
             if (row['state']=='sealed' and previous and previous['canonical_state']=='sealed'
                     and previous['audio_revision']==row['audio_revision']):continue
-            self.book.attach_activity(identity,row['audio_revision'],activity_regions(e.turns,row['start_sample'],row['end_sample'],
-                observed=min(e.received,getattr(e.models,'nvidia_observed_sample',round(e.processed*RATE)))))
+            observed = max(row['start_sample'], min(row['end_sample'], e.received,
+                getattr(e.models,'nvidia_observed_sample',round(e.processed*RATE))))
+            self.book.attach_activity(identity,row['audio_revision'],
+                activity_regions(e.turns,row['start_sample'],row['end_sample'],observed=observed),
+                observed_end_sample=observed)
             last=self.last_decoded.get(identity)
             changed=last is None or last[1]!=row['audio_revision']
             # First text/language routing keeps its six-second deadline. Only

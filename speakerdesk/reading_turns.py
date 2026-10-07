@@ -91,6 +91,10 @@ def project_turns(row):
         cursor = b
     if cursor != row['end_sample']:
         return []
+    observed = activity.get('observed_end_sample')
+    if observed is not None and (type(observed) is not int
+            or not row['start_sample'] <= observed <= row['end_sample']):
+        return []
     turns = []
     position = 0
     previous_sample = row['start_sample']
@@ -112,7 +116,16 @@ def project_turns(row):
                 # words in a gap never acquire a voice from their neighbours.
                 left = max(row['start_sample'], a - MARGIN)
                 right = min(row['end_sample'], b + MARGIN)
+                if observed is None:
+                    # Legacy receipts lost the observation horizon. Retain
+                    # their conservative edge/gap behaviour, not new claims.
+                    safe = (anchor['start_sample'] + MARGIN <= a < b <= anchor['end_sample'] - MARGIN
+                        and region['start_sample'] + (MARGIN if i else 0) <= a
+                        and b <= region['end_sample'] - (MARGIN if i + 1 < len(regions) else 0))
+                else:
+                    safe = right <= observed
                 if (region['start_sample'] <= a < b <= region['end_sample'] and names
+                        and safe
                         and all(re.fullmatch(r'speaker_\d+', n) for n in names)
                         and all(not other['speakers'] or other['speakers'] == names
                                 for other in regions
