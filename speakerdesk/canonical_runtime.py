@@ -410,9 +410,20 @@ class CanonicalRuntime:
                 if hasattr(e.models,'begin_refinement'):e.models.begin_refinement(pcm,a)
                 absolute=[dict(turn,start=turn['start']+a/RATE,end=turn['end']+a/RATE)
                           for turn in e.models.batch_turns(pcm)]
-                mapping=align_tracks(absolute,request['references'])
+                scores=[]
+                mapping=align_tracks(absolute,request['references'],diagnostics=scores)
                 mapped=[dict(turn,speaker=mapping.get(turn['speaker'],'unknown_mixed')) for turn in absolute]
                 self.book.attach_activity(identity,current['audio_revision'],activity_regions(mapped,a,b))
+                # Meeting correspondence can be unresolved while the batch
+                # diarizer still distinguishes local voices. Retain those slots
+                # within this audio scope; they are not new global identities or
+                # an authorization to assign unsplit words to either voice.
+                current['speaker_track_mapping']={'source':'batch_diarization_temporal_mapping_v1',
+                    'utterance_id':identity,'operation_id':request['operation_id'],
+                    'audio_revision':current['audio_revision'],
+                    'audio_anchor':{'start_sample':a,'end_sample':b},
+                    'raw_batch_turns':copy.deepcopy(absolute),'mapping':copy.deepcopy(mapping),
+                    'scores':scores,'local_activity':activity_regions(absolute,a,b)}
             if not self.decode(current,'refined') or e.inbox.cancelled_request(request):
                 restore();return {**result,'cancelled':True}
             candidate=self.project(self.book.rows[identity])

@@ -102,6 +102,7 @@ class UtteranceBook:
             row.pop('assembly_provenance',None)
             row.pop('bounded_decode_provenance',None)
             row.pop('speaker_activity', None)
+            row.pop('speaker_track_mapping', None)
             row['voice_eligible'] = False
 
     def _seal(self, end):
