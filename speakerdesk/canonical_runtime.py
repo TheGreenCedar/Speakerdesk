@@ -293,10 +293,26 @@ class CanonicalRuntime:
                     saved['alignment']=e.models.align_canonical(request,saved['text'],language=saved['passages'][0].get('language'))
                 parts.append(saved);continue
             try:
+                if authoritative and hasattr(e.models,'begin_asr_request'):
+                    from final_asr_reuse import digest as scope_digest
+                    binding={'utterance_id':row['id'],'language_epoch':row['language_epoch'],
+                        'audio_revision':row['audio_revision'],'text_revision':row['machine_revision'],
+                        'text_sha256':hashlib.sha256(row['text'].encode()).hexdigest(),
+                        'expected_source_sha256':(self.refinement_request.get('expected',{}).get(row['id'])
+                            if stage=='refined' else scope_digest(request))}
+                    eligible=(not row.get('protected_fields') and (stage=='live' or
+                        (not row.get('canonical_unresolved') and not row.get('transcription_review')
+                         and bool(row['text'].strip()))))
+                    e.models.begin_asr_request({'stage':stage,'operation_id':operation,'binding':binding,
+                        'purpose':self.refinement_request.get('asr_purpose') if stage=='refined' else 'live',
+                        'eligible':eligible})
                 if hasattr(e.models,'set_decode_boundary_padding'):
                     e.models.set_decode_boundary_padding(3200 if x>a else 0,3200 if y<b else 0)
                 if stage=='refined' and hasattr(e.models,'begin_refinement'):e.models.begin_refinement(pcm,x)
                 passages=e.decode(pcm,stamp['language'],row.get('speaker_candidates',[]),x/RATE,row['language_epoch'],overlap=True)
+            except Exception:
+                if authoritative and hasattr(e.models,'finish_asr_request'):e.models.finish_asr_request()
+                raise
             finally:
                 if hasattr(e.models,'set_decode_boundary_padding'):e.models.set_decode_boundary_padding(0,0)
                 if stage=='refined' and hasattr(e.models,'end_refinement'):e.models.end_refinement()
@@ -325,6 +341,10 @@ class CanonicalRuntime:
             if authoritative and complete:
                 self.authoritative_store.put(key,part)
                 part['authority_reference']=self.authoritative_store.reference(key)
+            if authoritative and hasattr(e.models,'finish_asr_request'):
+                decisions=e.models.finish_asr_request(part.get('authority_reference') if stage=='live' and complete else None)
+                if decisions:self.archive.append({'type':'final_asr_reuse_decisions',
+                    'utterance_id':row['id'],'stage':stage,'operation_id':operation,'decisions':decisions})
         return parts
 
     @staticmethod

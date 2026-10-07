@@ -165,9 +165,10 @@ class SpeechTranscriber:
     CONTEXT_SAMPLES = 60 * 16000
 
     def __init__(self, asr, language, detector_path=None, *, detector=None, context=None, speech_evidence=None,
-                 probe_cache=None, language_epoch=0):
+                 probe_cache=None, language_epoch=0, final_asr_reuse=None):
         self.asr,self.detector_path,self.detector=asr,detector_path,detector
         self.probe_cache=probe_cache;self.language_epoch=language_epoch
+        self.final_asr_reuse=final_asr_reuse
         self.cohere_calls=0
         self.speech_evidence = speech_evidence
         self.set_language(language)
@@ -349,9 +350,22 @@ class SpeechTranscriber:
                             'leading_samples':left,'trailing_samples':right,
                             'physical_start_sample':start_sample+window['begin'],
                             'physical_end_sample':start_sample+window['end_sample']}
-                    self.cohere_calls+=1
-                    result=self.asr.transcribe(pcm,
-                        sample_rate=sample_rate,language=window['language'],max_new_tokens=448)
+                    def recognize():
+                        self.cohere_calls+=1
+                        return self.asr.transcribe(pcm,
+                            sample_rate=sample_rate,language=window['language'],
+                            punctuation=True,itn=False,max_new_tokens=448)
+                    if self.final_asr_reuse is None:result=recognize()
+                    else:
+                        result,receipt=self.final_asr_reuse.resolve(self.asr,pcm,
+                            {'sample_rate':sample_rate,'language':window['language'],
+                             'punctuation':True,'itn':False,'max_new_tokens':448},
+                            {'start_sample':start_sample+window['begin'],
+                             'end_sample':start_sample+window['end_sample'],
+                             'padding':[left,right],'language_detection':copy.deepcopy(detection)},recognize)
+                        window['cohere_result_reuse']={k:receipt[k] for k in
+                            ('signature_sha256','operation_id','provider_executed','reused','raw_text_sha256',
+                             'raw_tokens_sha256','source_authority','consumer_binding') if k in receipt}
                     raw_text=result.text
                     text=raw_text.strip()
                     if len(result.tokens)>=448:
@@ -384,4 +398,5 @@ class SpeechTranscriber:
                             **({'pcm_evidence':window['pcm_evidence']} if 'pcm_evidence' in window else {}),
                             **({'transcription_review':transcription_review} if transcription_review else {}),
                             **({'cohere_input_padding':window['cohere_input_padding']} if 'cohere_input_padding' in window else {})})
+            if 'cohere_result_reuse' in window:results[-1]['cohere_result_reuse']=window['cohere_result_reuse']
         return results

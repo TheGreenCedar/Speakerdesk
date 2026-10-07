@@ -180,12 +180,19 @@ class Models:
         from mlx_audio.vad import load
         from mlx_speech.generation.cohere_asr import CohereAsrModel
         self.mx=mx;self.check_memory=check_memory;self.config=config;self.detector=None
+        if config.get('asr_final_reuse_mode') and mx.default_device().type!=mx.gpu:
+            raise RuntimeError('Final ASR observer/reuse requires the GPU; CPU fallback is disabled.')
         from language_detection import LanguageProbeCache
         self.language_probe_cache=LanguageProbeCache();self.language_epoch=config.get('language_epoch',0)
         mx.set_memory_limit(5*1024**3);mx.set_cache_limit(256*1024**2)
         self.diar=load(Path(config['diar_path']),strict=True);self.diar.set_streaming_config('low')
         self.state=self.diar.init_streaming_state()
         self.asr=CohereAsrModel.from_path(Path(config['cohere_path']))
+        self.final_asr_reuse=None
+        if config.get('asr_final_reuse_mode'):
+            from final_asr_reuse import FinalAsrReuse
+            self.final_asr_reuse=FinalAsrReuse(config['asr_reuse_identity'],
+                mode=config['asr_final_reuse_mode'],qualification=config.get('asr_reuse_qualification'))
         self.cohere_calls=0
         from speech_admission import SileroModel, FrameArchive
         import uuid
@@ -228,15 +235,28 @@ class Models:
         self.language_context=copy.deepcopy(context);self.transcription_start_sample=start_sample
     def set_language_epoch(self,epoch):
         self.language_epoch=epoch
+    def begin_asr_request(self,scope):
+        reuse=getattr(self,'final_asr_reuse',None)
+        if reuse is not None:
+            if self.mx.default_device().type!=self.mx.gpu:
+                raise RuntimeError('Final ASR observer/reuse requires the GPU; CPU fallback is disabled.')
+            reuse.begin(scope)
+    def finish_asr_request(self,authority=None):
+        reuse=getattr(self,'final_asr_reuse',None)
+        return reuse.finish(authority) if reuse is not None else []
     def transcribe(self,audio,language,names,overlap=False):
         import sys
         from language_detection import SpeechTranscriber,WhisperLanguageDetector
         self.check_memory()
+        reuse=getattr(self,'final_asr_reuse',None)
+        if reuse is not None and self.mx.default_device().type!=self.mx.gpu:
+            raise RuntimeError('Final ASR observer/reuse requires the GPU; CPU fallback is disabled.')
         if language=='auto' and self.detector is None:self.detector=WhisperLanguageDetector(self.config['lid_path'])
         transcriber=SpeechTranscriber(self.asr,language,self.config.get('lid_path'),detector=self.detector,
             context=self.language_context,speech_evidence=(self.speech_historical
                 if self.speech_historical is not None else self.speech_live.evidence),
-            probe_cache=self.language_probe_cache,language_epoch=self.language_epoch)
+            probe_cache=self.language_probe_cache,language_epoch=self.language_epoch,
+            final_asr_reuse=reuse if reuse is not None and reuse.active else None)
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 result=transcriber.transcribe(audio,RATE,tuple(names),max_asr_seconds=24.5,allow_overlap=overlap,
@@ -245,6 +265,7 @@ class Models:
             # Count actual decoder attempts, including failures, rather than
             # routing windows or transcript rows. No transcript is substituted.
             self.cohere_calls+=transcriber.cohere_calls
+            if reuse is not None:reuse.active=False
         self.detector=transcriber.detector
         self.mx.clear_cache();return result
     def feed(self,audio,final=False):

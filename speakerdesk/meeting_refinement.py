@@ -231,6 +231,9 @@ class RefinementController:
             if current is None:
                 done[row['id']]=row['audio_revision'];self.manager.put(job);return self.schedule(jid)
             request={'type':'refine','canonical':copy.deepcopy(row),'operation_id':uuid.uuid4().hex,
+                'asr_purpose':('explicit_retry' if (self.manager.refining_saved or
+                    job.get('canonical_force_fresh_asr') or current.get('protected_fields')
+                    or row.get('canonical_unresolved') or row.get('transcription_review')) else 'automatic_final'),
                 'language_epoch':row['language_epoch'],'language':row['language_mode'],
                 'window':{'id':row['id'],'start_sample':row['start_sample'],'end_sample':row['end_sample'],
                     'context_start_sample':row['start_sample'],'context_end_sample':row['end_sample']},
@@ -391,6 +394,7 @@ class RefinementController:
         with self.manager.lock:
             job=self.manager.get(jid);self.initialize(job);plan=RollingPlan(job['rolling_refinement']);plan.resume()
             if job.get('canonical_utterances'):
+                job['canonical_force_fresh_asr']=True
                 for row in job['rolling_sources'].values():
                     if row.get('canonical_unresolved'):
                         job.setdefault('canonical_refined',{}).pop(row['id'],None)
