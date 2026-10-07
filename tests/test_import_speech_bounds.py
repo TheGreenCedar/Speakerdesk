@@ -56,6 +56,12 @@ class ImportSpeechBounds(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def replace_pcm(self, pcm):
+        self.pcm = pcm
+        with wave.open(str(self.audio), 'wb') as wav:
+            wav.setparams((1,2,RATE,0,'NONE','none'));wav.writeframes(pcm.tobytes())
+        self.original = self.audio.read_bytes()
+
     def run_import(self, spans, *, language='en', turns=()):
         def worker(python, task, request, folder):
             return dict(turns=list(turns)) if task == 'diarize' else inference_worker.run(task, request)
@@ -98,6 +104,54 @@ class ImportSpeechBounds(unittest.TestCase):
         self.asr.transcribe.assert_not_called();self.detector.detect.assert_not_called()
         self.assertTrue(all(not row['text'] for row in document['segments']))
         self.assertEqual(export(document, 'txt')[0].strip(), '')
+
+    def test_zero_unknown_gap_inside_positive_neighbor_frames_never_decodes(self):
+        pcm = self.pcm.copy();pcm[320:720] = 0;self.replace_pcm(pcm)
+        document = self.run_import([(0,2*FRAME)],
+            turns=('0 .02 speaker_0','.045 12 speaker_1'))
+        gap = next(row for row in document['segments'] if row['speaker']=='unassigned'
+                   and row['start']==.02 and row['end']==.045)
+        self.assertEqual(gap['text'], '')
+        self.assertEqual(gap['audio_state'], 'digital_silence')
+        # Preserve the positive clipped neural receipt instead of rewriting it
+        # as model-negative. The independent physical crop is exactly zero.
+        self.assertEqual(gap['acoustic_evidence']['decision'], 'speech')
+        self.assertEqual(gap['pcm_evidence'], dict(kind='exact_digital_silence',
+            start_sample=320,end_sample=720))
+        self.assertEqual(self.asr.transcribe.call_count, 2)
+        self.assertTrue(all(np.any(call.args[0]) for call in self.asr.transcribe.call_args_list))
+
+    def test_allzero_import_with_positive_model_observations_never_routes_or_decodes(self):
+        self.replace_pcm(np.zeros(12*RATE,dtype='<i2'))
+        for language in ('en','auto'):
+            with self.subTest(language=language):
+                self.asr.reset_mock();self.detector.reset_mock()
+                document = self.run_import([(0,12*RATE)],language=language)
+                self.asr.transcribe.assert_not_called();self.detector.detect.assert_not_called()
+                self.assertTrue(all(not row['text'] and row['audio_state']=='digital_silence'
+                                    for row in document['segments']))
+                self.assertEqual(export(document,'txt')[0].strip(), '')
+
+    def test_exact_nonzero_dc_with_positive_observations_never_routes_or_decodes(self):
+        for value in (1,1311):
+            with self.subTest(sample=value):
+                self.asr.reset_mock();self.detector.reset_mock()
+                self.replace_pcm(np.full(12*RATE,value,dtype='<i2'))
+                document = self.run_import([(0,12*RATE)],language='auto')
+                self.asr.transcribe.assert_not_called();self.detector.detect.assert_not_called()
+                self.assertTrue(all(row['audio_state']=='constant_signal' and not row['text']
+                                    for row in document['segments']))
+                self.assertTrue(all(row['pcm_evidence']['kind']=='exact_constant_signal'
+                                    and row['pcm_evidence']['sample_value']==value/32768
+                                    for row in document['segments']))
+
+    def test_one_quantum_variation_on_dc_offset_keeps_quiet_raw_speech(self):
+        self.replace_pcm((varying_pcm(12*RATE,1,dtype='<i2')+1000).astype('<i2'))
+        document = self.run_import([(0,12*RATE)])
+        self.asr.transcribe.assert_called_once()
+        np.testing.assert_array_equal(self.asr.transcribe.call_args.args[0],
+                                     self.pcm.astype(np.float32)/32768)
+        self.assertEqual([row['text'] for row in document['segments'] if row['text']], ['Thank you.'])
 
     def test_single_quiet_positive_frame_and_genuine_thanks_are_retained(self):
         document = self.run_import([(FRAME, 2*FRAME)])
@@ -156,6 +210,13 @@ class ImportSpeechBounds(unittest.TestCase):
         self.assertTrue(result['transcription_review']['partial_text'])
         self.assertTrue(any(part.get('transcription_review',{}).get('reason')=='transcription_failed'
                             for part in result['retry_parts']))
+
+    def test_allzero_retry_with_positive_model_observations_never_decodes(self):
+        self.replace_pcm(np.zeros(12*RATE,dtype='<i2'))
+        result = self.run_retry()
+        self.asr.transcribe.assert_not_called()
+        self.assertEqual(result['text'], '')
+        self.assertTrue(any(part['audio_state']=='digital_silence' for part in result['retry_parts']))
 
 
 if __name__ == '__main__':

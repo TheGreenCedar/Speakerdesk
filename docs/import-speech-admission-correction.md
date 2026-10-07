@@ -19,6 +19,15 @@ speech admission; negative gaps return blank reviewed coverage. Original samples
 speaker labels, archive receipts and raw Cohere strings remain intact. No words,
 word times, amplitude thresholds or phrase filters define these bounds.
 
+Canonical bounds alone cannot exclude a tiny all-zero crop inside positive
+neighboring 32 ms frames. `SpeechTranscriber` therefore also checks the actual
+physical PCM before positive admission can trigger language detection or ASR.
+Exactly equal samples are recorded separately as `digital_silence` (zero) or
+`constant_signal` (nonzero DC), with sample bounds and the DC value. The original
+positive neural receipt remains unchanged. Any waveform variation passes this
+check, including one PCM quantum on a much larger DC offset; no loudness threshold
+is used. Existing model-negative and pending receipts retain their prior states.
+
 A passage retry can consequently have several speech and blank pieces. The
 pipeline checks their full contiguous coverage and presents whole raw speech
 strings separated by one space. `retry_parts` retains separate returned receipts
@@ -41,6 +50,18 @@ single positive frame remains admissible, genuine `Thank you.` text remains,
 repeated words from separate speakers remain, original sample offsets survive,
 and separated retry speech gets two independent decodes. Original WAV bytes and
 owned temporary crop cleanup are checked.
+
+Five further cases cover the independent 400-sample zero gap, all-zero positive
+import/retry, exact nonzero DC and one-quantum variation on a DC offset. Zero/DC
+controls fail before the corresponding guard and pass afterward; the varying
+quiet control passes throughout. Two older positive
+speech fixtures used constant DC sentinels; those inputs now vary at the same
+quiet amplitude while all their original routing/timing assertions remain.
+
+The independent reviewer file `test_import_silence_boundary.py` runs against this
+checkout through `SILENCE_SOURCE_ROOT`, without copying or editing it. All four
+methods pass through real upload, Run, pipeline, WAV crop, SQLite, API and TXT
+export, including zero/DC positive controls and retained quiet/gratitude words.
 
 ## Required acoustic replay
 

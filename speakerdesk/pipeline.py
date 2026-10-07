@@ -303,5 +303,5 @@ def retry_passage(audio_path, start, end, language, folder, config=None):
                 'review':any(part['review'] for part in parts),'retry_parts':parts,
                 **({'transcription_review':{**reviews[0],
                     'partial_text':any(review.get('partial_text') for review in reviews)
-                        or any(not part['text'].strip() and part.get('audio_state')!='model_non_speech' for part in parts)}}
+                        or any(not part['text'].strip() and part.get('audio_state') not in ('model_non_speech','digital_silence','constant_signal') for part in parts)}}
                    if reviews else {})}
