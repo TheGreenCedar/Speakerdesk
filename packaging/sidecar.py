@@ -8,6 +8,19 @@ APP_ROOT=Path(sys._MEIPASS) if getattr(sys,'frozen',False) else Path(__file__).r
 sys.path.insert(0,str(APP_ROOT))
 
 
+def make_loopback_server(app):
+    """Bind the fixed local address without a reverse-DNS dependency."""
+    from socketserver import TCPServer
+    from werkzeug.serving import ThreadedWSGIServer
+
+    class LoopbackServer(ThreadedWSGIServer):
+        def server_bind(self):
+            TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
+    return LoopbackServer('127.0.0.1', 0, app)
+
+
 def listen_for_control(app, server, stream):
     """Read bounded parent commands; update shutdown requires an idle reservation."""
     from pipeline import shutdown_workers, workers_idle
@@ -105,7 +118,6 @@ if __name__=='__main__':
         Path(output_path).write_text(json.dumps(result,ensure_ascii=False))
         sys.exit(1 if 'error' in result else 0)
     from app import create_app
-    from werkzeug.serving import make_server
     storage=Path(os.getenv('SPEAKERDESK_HOME',Path.home()/'Library/Application Support/Speakerdesk'))
     storage.mkdir(parents=True,exist_ok=True);storage.chmod(0o700)
     os.environ['SPEAKERDESK_MODELS']=str(storage/'models')
@@ -113,7 +125,7 @@ if __name__=='__main__':
     os.environ['ASR_PYTHON']=sys.executable
     os.environ['HF_HOME']=str(storage/'cache')
     app=create_app(storage/'recordings')
-    server=make_server('127.0.0.1',0,app,threaded=True)
+    server=make_loopback_server(app)
     app.extensions['speakerdesk']['updates'].connect(lambda frame:print(frame,flush=True))
     threading.Thread(target=listen_for_control,args=(app,server,sys.stdin),daemon=True).start()
     print(f'SPEAKERDESK_URL=http://127.0.0.1:{server.server_port}',flush=True)
