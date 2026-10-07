@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +22,76 @@ def evidence(key):
         'qualified_scope':'bounded_ami_english_coarse_envelopes','words':[{'text':'café','start_sample':start,'end_sample':end}]}
 
 class CacheTests(unittest.TestCase):
+    def test_worker_disk_reuses_25_exact_results_after_hot_eviction(self):
+        with tempfile.TemporaryDirectory() as folder:
+            c=AlignmentCache(IDENTITY,directory=Path(folder)/'worker',max_entries=1,max_bytes=1000)
+            keys=[c.key(str(i),b'pcm',i,i+1,'en') for i in range(25)]
+            for key in keys:self.assertTrue(c.put(key,evidence(key)))
+            for key in keys:
+                got=c.get(key);self.assertEqual(got,evidence(key));got['words'][0]['text']='changed'
+            self.assertEqual(c.disk_hits,25);self.assertLessEqual(c.bytes,1000)
+            self.assertEqual(len(c.disk),25);self.assertEqual(c.get(keys[0]),evidence(keys[0]))
+            self.assertEqual(c.provider_calls,0)
+    def test_disk_keys_preserve_raw_unicode_audio_clock_policy_and_worker_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            c=AlignmentCache(IDENTITY,directory=Path(folder)/'worker',max_entries=1)
+            key=c.key('é é',b'pcm',0,8,'en');c.put(key,evidence(key));c.entries.clear();c.bytes=0
+            for args in [('e\u0301 é',b'pcm',0,8,'en'),('é é',b'other',0,8,'en'),
+                         ('é é',b'pcm',1,9,'en'),('é é',b'pcm',0,9,'en'),('é é',b'pcm',0,8,'fr')]:
+                self.assertIsNone(c.get(c.key(*args)))
+            other=AlignmentCache((*IDENTITY[:-1],'other'),directory=Path(folder)/'other')
+            self.assertIsNone(c.get(other.key('é é',b'pcm',0,8,'en')))
+            self.assertIsNone(other.get(key));self.assertEqual(c.get(key),evidence(key))
+    def test_disk_corruption_missing_file_and_failed_optional_write_are_cache_misses(self):
+        with tempfile.TemporaryDirectory() as folder:
+            c=AlignmentCache(IDENTITY,directory=Path(folder)/'worker',max_entries=1)
+            key=c.key('words',b'pcm',0,8,'en');c.put(key,evidence(key));c.entries.clear();c.bytes=0
+            path=c.disk[key][0];data=path.read_bytes();path.write_bytes(data.replace(b'cafe',b'xxxx')+b' ')
+            self.assertIsNone(c.get(key));path.unlink();self.assertIsNone(c.get(key))
+            with patch.object(Path,'open',side_effect=OSError('disk unavailable')):
+                self.assertTrue(c.put(key,evidence(key)))
+            self.assertEqual(c.get(key),evidence(key))
+    def test_disk_entry_and_byte_eviction_partial_exclusion_and_oversized_rejection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            c=AlignmentCache(IDENTITY,directory=Path(folder)/'worker',max_entries=1,
+                             max_bytes=1000,disk_max_entries=2,disk_max_bytes=2000)
+            keys=[c.key(str(i),b'pcm',i,i+1,'en') for i in range(3)]
+            for k in keys:c.put(k,evidence(k))
+            self.assertIsNone(c.get(keys[0]));self.assertIsNotNone(c.get(keys[1]))
+            self.assertEqual(len(list(c.directory.glob('*.json'))),2)
+            large=dict(evidence(keys[0]),extra='x'*2001);self.assertFalse(c.put(keys[0],large))
+            self.assertFalse(c.put(keys[0],dict(evidence(keys[0]),complete=False)))
+            self.assertLessEqual(c.disk_bytes,2000);self.assertEqual(c.disk_bytes,sum(p.stat().st_size for p in c.directory.glob('*.json')))
+    def test_optional_directory_failure_preserves_hot_cache_and_provider_fallback(self):
+        with patch.object(Path,'mkdir',side_effect=OSError('unavailable')):
+            c=AlignmentCache(IDENTITY,directory='unavailable')
+        key=c.key('words',b'pcm',0,8,'en');self.assertTrue(c.put(key,evidence(key)))
+        self.assertEqual(c.get(key),evidence(key));self.assertTrue(c.disk_write_disabled)
+        self.assertIsNone(c.directory)
+    def test_failed_eviction_remains_counted_and_prevents_more_disk_writes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            c=AlignmentCache(IDENTITY,directory=Path(folder)/'worker',disk_max_entries=2)
+            keys=[c.key(str(i),b'pcm',i,i+1,'en') for i in range(8)]
+            with patch.object(Path,'unlink',side_effect=OSError('blocked cleanup')):
+                for key in keys:self.assertTrue(c.put(key,evidence(key)))
+            files=list(c.directory.glob('*.json'))
+            self.assertEqual(len(files),2);self.assertEqual(len(c.disk),2)
+            self.assertEqual(c.disk_bytes,sum(p.stat().st_size for p in files));self.assertTrue(c.disk_write_disabled)
+            self.assertEqual(c.get(keys[-1]),evidence(keys[-1]))
+    def test_partial_write_cleanup_failure_is_counted_and_stops_disk_growth(self):
+        with tempfile.TemporaryDirectory() as folder:
+            c=AlignmentCache(IDENTITY,directory=Path(folder)/'worker')
+            keys=[c.key(str(i),b'pcm',i,i+1,'en') for i in range(8)];original=Path.open
+            class Partial:
+                def __init__(self,path):self.stream=original(path,'xb')
+                def __enter__(self):return self
+                def write(self,data):self.stream.write(data[:17]);self.stream.flush();raise OSError('partial write')
+                def __exit__(self,*args):self.stream.close()
+            with patch.object(Path,'open',lambda path,*args,**kw:Partial(path)),patch.object(Path,'unlink',side_effect=OSError('blocked cleanup')):
+                for key in keys:self.assertTrue(c.put(key,evidence(key)))
+            files=list(c.directory.glob('*.json'));self.assertEqual(len(files),1)
+            self.assertEqual(c.disk_bytes,17);self.assertTrue(c.disk_write_disabled)
+            c.entries.clear();c.bytes=0;self.assertIsNone(c.get(keys[0]))
     def test_exact_evidence_hit_and_mutation_isolation(self):
         c=AlignmentCache(IDENTITY);key=c.key('café café',b'audio',100,200,'en');original=evidence(key)
         self.assertTrue(c.put(key,original));original['words'][0]['text']='changed'

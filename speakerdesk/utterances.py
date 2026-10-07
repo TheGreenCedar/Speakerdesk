@@ -199,8 +199,11 @@ class UtteranceBook:
             row.pop('bounded_decode_provenance',None)
         return copy.deepcopy(row)
 
-    def decode_requests(self, identity):
+    def decode_requests(self, identity, *, contextual=False):
         """Bounded core/context requests, without assigning words to cores."""
+        if contextual:
+            from context_plan import requests
+            return requests(self.rows[identity])
         row=self.rows[identity];start,end=row['start_sample'],row['end_sample']
         requests=[]
         for core_start in range(start,end,CORE_SAMPLES):
@@ -266,16 +269,19 @@ class UtteranceBook:
             row['voice_eligible']=False
         return copy.deepcopy(row)
 
-    def apply_decode_parts(self, identity, parts, *, stage):
+    def apply_decode_parts(self, identity, parts, *, stage, contextual=False):
         """CAS-bound bounded decoding; no lexical stitching of context windows."""
         from canonical_assembly import assemble_parts
         if stage not in ('live','refined'):raise ValueError('Invalid canonical decode stage.')
         row=self.rows[identity]
-        assembled=assemble_parts(row,self.decode_requests(identity),parts)
+        assembled=assemble_parts(row,self.decode_requests(identity,contextual=contextual),parts)
         version={'text':assembled['text'],'stage':stage,'complete':assembled['complete'],
             'reason':assembled['reason'],'base_revision':row['machine_revision'],
             'audio_revision':row['audio_revision'],
             'audio_anchor':{'start_sample':row['start_sample'],'end_sample':row['end_sample']}}
+        if contextual:
+            from context_plan import POLICY
+            version['context_policy']=POLICY
         # Keep every raw full-context text/alignment in the durable journal.
         # Hot history contains the assembly result, not duplicate raw contexts.
         if self.archive:self.archive.append({'type':'bounded_machine_version','utterance_id':identity,
@@ -296,11 +302,59 @@ class UtteranceBook:
                  'frame_calibration_id','score_calibration_id','separator_policy')}
             row['assembly_provenance'].update(machine_revision=row['machine_revision'],
                 audio_revision=row['audio_revision'],audio_anchor=copy.deepcopy(version['audio_anchor']))
+            if contextual:row['assembly_provenance']['context_policy']=version['context_policy']
             if assembled['alignment_complete']:
                 self.attach_alignment(identity,row['machine_revision'],assembled['text_sha256'],
                     assembled['words'],audio_revision=row['audio_revision'])
                 row['alignment'].update({key:assembled[key] for key in
                     ('model_sha256','timing_kind','frame_calibration_id','score_calibration_id','separator_policy')})
+        return copy.deepcopy(row)
+
+    def apply_authoritative_parts(self, identity, parts, *, stage, vocabulary=None,committed_receipts=None):
+        from authoritative_tail import assemble,requests,POLICY
+        if stage not in ('live','refined'):raise ValueError('Invalid canonical decode stage.')
+        row=self.rows[identity]
+        result=assemble(row,requests(row),parts,vocabulary=vocabulary,committed_receipts=committed_receipts)
+        # Engine authorities are immutable once-only disk records. Bind the
+        # current CAS separately; don't duplicate old acoustic arrays every tick.
+        references=all(isinstance(part.get('authority_reference'),dict) for part in parts)
+        archived_parts=([{'authority_reference':copy.deepcopy(part['authority_reference']),
+            'request':copy.deepcopy(part['request']),
+            'source_inference_request':copy.deepcopy(part.get('source_inference_request',part['request']))}
+            for part in parts] if references else copy.deepcopy(parts))
+        archived_result=copy.deepcopy(result)
+        if references:
+            archived_result.pop('words',None)
+            archived_result['word_count']=len(result['words'])
+            archived_result['rollover_receipts']=[{key:receipt[key] for key in
+                ('policy','nominal_frontier_sample','left_raw_end_char','right_raw_start_char',
+                 'left_text_sha256','right_text_sha256','model_sha256','calibration_id',
+                 'uncertainty_samples','bidirectional_unique','intersecting_cell_count',
+                 'committed','anchor_selection','later_unmapped_raw_anchors',
+                 'left_source_request','right_source_request','left_source_audio_sha256','right_source_audio_sha256')}
+                for receipt in result['rollover_receipts']]
+        event={'type':'authoritative_machine_version','utterance_id':identity,
+            'base_revision':row['machine_revision'],'audio_revision':row['audio_revision'],
+            'stage':stage,'policy':POLICY,'parts':archived_parts,'result':archived_result}
+        if self.archive:self.archive.append(event)
+        version={'text':result['text'],'stage':stage,'complete':result['complete'],
+            'recognition_complete':result['recognition_complete'],'reason':result['reason'],
+            'base_revision':row['machine_revision'],'audio_revision':row['audio_revision'],
+            'audio_anchor':{'start_sample':row['start_sample'],'end_sample':row['end_sample']},'context_policy':POLICY}
+        if not self.archive:version['parts']=copy.deepcopy(parts)
+        row['machine_versions'].append(version)
+        if self.history_limit is not None:row['machine_versions']=row['machine_versions'][-self.history_limit:]
+        row['recognition_complete']=result['recognition_complete']
+        row['local_seam_review']=copy.deepcopy(result['local_seams'])
+        if result['complete'] and 'text' not in row['protected_fields']:
+            row['text']=result['text'];row['machine_revision']+=1
+            row['text_audio_anchor']=copy.deepcopy(version['audio_anchor'])
+            row['refinement_state']='refined' if stage=='refined' and row['state']=='sealed' else 'provisional'
+            for key in ('alignment','reading_word_evidence','decode_core_plan','bounded_decode_provenance'):row.pop(key,None)
+            row['assembly_provenance']={key:copy.deepcopy(result[key]) for key in
+                ('text_sha256','words','alignment_complete','model_sha256','timing_kind','frame_calibration_id','score_calibration_id','rollover_receipts')}
+            row['assembly_provenance'].update(context_policy=POLICY,machine_revision=row['machine_revision'],
+                audio_revision=row['audio_revision'],audio_anchor=copy.deepcopy(version['audio_anchor']))
         return copy.deepcopy(row)
 
     def attach_alignment(self, identity, revision, text_sha256, words, *, audio_revision):
