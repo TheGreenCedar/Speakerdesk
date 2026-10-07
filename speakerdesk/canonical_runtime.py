@@ -215,7 +215,8 @@ class CanonicalRuntime:
                             offset+=len(raw)+1
                         bind_words(updated,words)
             if use_alignment and updated.get('assembly_provenance'):
-                bind_words(updated,updated['assembly_provenance']['words'])
+                from authoritative_tail import reading_words
+                bind_words(updated,reading_words(updated['assembly_provenance']['words']))
             last=updated['machine_versions'][-1]
             if not last['complete']:updated['canonical_unresolved']=last.get('reason') or 'incomplete_cohere_revision'
             else:updated.pop('canonical_unresolved',None)
