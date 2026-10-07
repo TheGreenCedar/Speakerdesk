@@ -39,6 +39,7 @@ def run(task, request):
         from mlx_speech.generation.cohere_asr import CohereAsrModel
         from language_detection import SpeechTranscriber
         from speech_admission import SileroModel, FrameArchive
+        from utterances import UtteranceBook
         import uuid
         import soundfile as sf
 
@@ -54,6 +55,13 @@ def run(task, request):
                 speech_session.feed(pcm,speech_session.received)
         import numpy as np
         speech_session.feed(np.empty(0,dtype=np.float32),speech_session.received,final=True)
+        # A positive frame admits its canonical speech object, not an entire
+        # diarization/gap crop. Use the same settling/context policy as live.
+        speech_book=UtteranceBook('import-'+uuid.uuid4().hex)
+        for begin in range(0,speech_session.received,60*16000):
+            speech_book.observe(speech_session.evidence.admission(
+                begin,min(begin+60*16000,speech_session.received)))
+        utterances=speech_book.finish()
         model = CohereAsrModel.from_path(model_path)
         transcriber = SpeechTranscriber(model, request['language'], request.get('lid_path'),
             speech_evidence=speech_session.evidence)
@@ -62,8 +70,21 @@ def run(task, request):
         for chunk in request['chunks']:
             check_memory()
             audio, rate = sf.read(chunk['audio'], dtype='float32')
-            regions.append(transcriber.transcribe(audio, rate, tuple(chunk['speakers']),
-                start_sample=round(chunk.get('audio_start',chunk.get('start',0))*rate),max_asr_seconds=18))
+            origin=round(chunk.get('audio_start',chunk.get('start',0))*rate)
+            edges={0,len(audio)}
+            for utterance in utterances:
+                begin=max(0,utterance['start_sample']-origin)
+                end=min(len(audio),utterance['end_sample']-origin)
+                if begin<end:edges.update((begin,end))
+            edges=sorted(edges);pieces=[]
+            for begin,end in zip(edges,edges[1:]):
+                # Negative gaps still return reviewed original-audio coverage;
+                # SpeechTranscriber independently checks every resulting slice.
+                for piece in transcriber.transcribe(audio[begin:end],rate,tuple(chunk['speakers']),
+                        start_sample=origin+begin,max_asr_seconds=18):
+                    pieces.append({**piece,'start':piece['start']+begin/rate,
+                                   'end':piece['end']+begin/rate})
+            regions.append(pieces)
             print(f'Transcribed region {len(regions)}/{len(request["chunks"])}', flush=True)
             mx.clear_cache()
         output = {'regions': regions}

@@ -283,6 +283,25 @@ def retry_passage(audio_path, start, end, language, folder, config=None):
             'language':language,'device':'mlx','speech_path':config['speech_path'],
             'audio':str(audio)},target)
         regions = result['regions']
-        if len(regions) != 1 or len(regions[0]) != 1:
+        if len(regions) != 1 or not regions[0]:
             raise RuntimeError('The retry returned an incomplete passage result.')
-        return {**regions[0][0], 'start':start, 'end':end}
+        parts=regions[0]
+        if len(parts)==1:return {**parts[0], 'start':start, 'end':end}
+        cursor=0.
+        for part in parts:
+            if (not all(map(math.isfinite,(part['start'],part['end'])))
+                    or abs(part['start']-cursor)>1/16000 or part['end']<=part['start']):
+                raise RuntimeError('The retry returned an incomplete passage result.')
+            cursor=part['end']
+        if abs(cursor-(end-start))>1/16000:
+            raise RuntimeError('The retry returned an incomplete passage result.')
+        # Disjoint physical speech crops retain whole raw decoder strings.
+        # One separator is presentation only; no lexical merging/word timing.
+        text=' '.join(part.get('cohere_raw_text',part['text']) for part in parts if part['text'].strip())
+        reviews=[part['transcription_review'] for part in parts if part.get('transcription_review')]
+        return {'start':start,'end':end,'text':text,'language':language,
+                'review':any(part['review'] for part in parts),'retry_parts':parts,
+                **({'transcription_review':{**reviews[0],
+                    'partial_text':any(review.get('partial_text') for review in reviews)
+                        or any(not part['text'].strip() and part.get('audio_state')!='model_non_speech' for part in parts)}}
+                   if reviews else {})}
