@@ -55,10 +55,22 @@ class UtteranceBook:
     @staticmethod
     def _set_end(row, end):
         if row['end_sample'] != end:
+            previous_end, previous_revision = row['end_sample'], row['audio_revision']
             row['end_sample'] = end
             row['audio_revision'] += 1
             row.pop('alignment', None)
-            row.pop('reading_word_evidence',None)
+            evidence = row.get('reading_word_evidence') or {}
+            anchor = row.get('text_audio_anchor') or {}
+            if (end > previous_end and evidence.get('audio_anchor') == anchor
+                    and anchor.get('start_sample') == row['start_sample']
+                    and type(anchor.get('end_sample')) is int and anchor['end_sample'] <= previous_end
+                    and evidence.get('retained_audio_revision', evidence.get('audio_revision')) == previous_revision):
+                # Appending immutable recording samples leaves the aligned
+                # text prefix intact. Keep its original anchor/source revision;
+                # current activity will independently requalify each word.
+                evidence['retained_audio_revision'] = row['audio_revision']
+            else:
+                row.pop('reading_word_evidence',None)
             row.pop('decode_core_plan',None)
             row.pop('assembly_provenance',None)
             row.pop('bounded_decode_provenance',None)

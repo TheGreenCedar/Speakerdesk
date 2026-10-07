@@ -21,6 +21,30 @@ const parts=[{text:'Hello 🙂, français.  ',speaker:'speaker_0',start:0,end:3}
   {text:'Last words stay exact.',speaker:'speaker_0',start:6,end:9}];
 const card=f=>f.document.getElementById('segments').children[0];
 
+test('canonical unassigned words use current temporal concurrency, never candidate union, for overlap warnings',()=>{
+  const f=fixture(parts);
+  f.run(`(()=>{const s=doc.segments[0];delete s.reading_turns;
+    Object.assign(s,{canonical_utterance_id:s.id,speaker:'unassigned',review:true,audio_revision:3,
+      start_sample:0,end_sample:160000,text_audio_anchor:{start_sample:0,end_sample:160000},
+      speaker_activity:{audio_revision:3,regions:[
+        {start_sample:0,end_sample:80000,speakers:['speaker_0']},
+        {start_sample:80000,end_sample:160000,speakers:['speaker_1']}]}});})()`);
+  assert.equal(f.run('hasOverlappingSpeakers(doc.segments[0])'),false);
+  assert.equal(f.run('passageReviewReason(doc.segments[0])'),'Speaker uncertain');
+  f.run("doc.segments[0].review_resolution='words_reviewed'");
+  assert.equal(f.run('passageReviewReason(doc.segments[0])'),'Speaker uncertain');
+  f.run('delete doc.segments[0].review_resolution');
+  f.run("doc.segments[0].speaker_activity.regions[0].speakers.push('speaker_1')");
+  assert.equal(f.run('hasOverlappingSpeakers(doc.segments[0])'),true);
+  assert.match(f.run('passageReviewReason(doc.segments[0])'),/Overlapping speakers/);
+  f.run('doc.segments[0].speaker_activity.audio_revision=2');
+  assert.equal(f.run('hasOverlappingSpeakers(doc.segments[0])'),false);
+  f.run("delete doc.segments[0].speaker_activity;doc.segments[0].speaker='overlap_speaker_0_speaker_1'");
+  assert.equal(f.run('hasOverlappingSpeakers(doc.segments[0])'),true);
+  f.run("doc.segments[0].speaker='speaker_0';delete doc.segments[0].canonical_utterance_id");
+  assert.equal(f.run('hasOverlappingSpeakers(doc.segments[0])'),true);
+});
+
 test('saved sequential reading turns preserve Unicode, spaces, one parent ID and one whole-parent editor',()=>{
   const f=fixture(parts),c=card(f);
   assert.equal(f.document.getElementById('segments').children.length,1);assert.equal(c.dataset.segmentId,'r0');

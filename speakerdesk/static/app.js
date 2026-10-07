@@ -282,6 +282,25 @@ function validReadingTurns(segment) {
 function hasOverlappingSpeakers(segment) {
   const turns=validReadingTurns(segment);
   if(turns)return turns.some(turn=>turn.attribution==='overlap');
+  if(segment.canonical_utterance_id) {
+    // Canonical candidates are a union across the whole passage. Only current
+    // temporal concurrency or an explicit overlap label establishes overlap.
+    const activity=segment.speaker_activity,regions=activity?.regions;
+    if(activity?.audio_revision===segment.audio_revision && Array.isArray(regions) && regions.length) {
+      let cursor=segment.start_sample,overlap=false;
+      for(const region of regions) {
+        const names=region?.speakers;
+        if(!Number.isSafeInteger(cursor) || !Number.isSafeInteger(region?.start_sample) ||
+           !Number.isSafeInteger(region?.end_sample) || region.start_sample!==cursor ||
+           region.end_sample<=cursor || region.end_sample>segment.end_sample ||
+           !Array.isArray(names) || names.some(name=>typeof name!=='string' || !/^speaker_\d+$/.test(name)) ||
+           new Set(names).size!==names.length)return segment.speaker.startsWith('overlap');
+        overlap ||= names.length>1;cursor=region.end_sample;
+      }
+      if(cursor===segment.end_sample)return overlap;
+    }
+    return segment.speaker.startsWith('overlap');
+  }
   return segment.speaker.startsWith('overlap') ||
     (segment.speaker!=='multiple_speakers' && segment.speaker_candidates?.length>1);
 }
@@ -429,7 +448,7 @@ function savedCard(segment) {
   return card;
 }
 function renderSegments() {
-  if(isLive() || hasPassageDrafts() || hasRecoverablePassageDrafts() || ['waiting','refining'].includes(selected.refinement_status)){renderLiveSegments();return;}
+  if(isLive() || hasPassageDrafts() || hasRecoverablePassageDrafts() || hasPendingPassageSaves() || doc.segments.some(segment=>segment.refinement_state==='provisional') || ['waiting','refining'].includes(selected.refinement_status)){renderLiveSegments();return;}
   $('pending-phrases').hidden=true;
   const pane=$('transcript-pane'),host=$('segments'),previousScroll=pane.scrollTop;
   const inspected=$('inspector').hidden?null:host.querySelector('.segment.active')?.dataset.segmentId;
@@ -540,7 +559,7 @@ function appendUncoveredAudio(body,segment) {
   body.append(node('p',`Audio to review: ${ranges.join('; ')}. Current words and original audio retained.`,'review-audio-ranges'));
 }
 function passageReviewReason(segment) {
-  if(segment.review_resolution==='words_reviewed' && segment.text.trim())return hasOverlappingSpeakers(segment) ? reviewReasons.overlapping_speech : '';
+  if(segment.review_resolution==='words_reviewed' && segment.text.trim())return hasOverlappingSpeakers(segment) ? reviewReasons.overlapping_speech : segment.speaker==='unassigned' ? 'Speaker uncertain' : '';
   if(segment.transcription_review?.reason==='refinement_conflict')return 'Previous words retained because the new passage also covers another passage needing review.';
   if(['transcription_failed','empty_result','token_limit'].includes(segment.transcription_review?.reason))return reviewReasons[segment.transcription_review.reason];
   if(hasOverlappingSpeakers(segment))return reviewReasons.overlapping_speech;
@@ -549,6 +568,7 @@ function passageReviewReason(segment) {
   if(segment.language_detection?.reason==='best_effort')return 'Best-effort words; language needs review';
   if(segment.language_detection?.reason==='needs_language')return 'Choose the meeting language; audio retained';
   if(segment.language_detection?.mode==='auto' && !segment.language)return reviewReasons[segment.language_detection.reason] || reviewReasons.uncertain;
+  if(segment.speaker==='unassigned' && segment.text.trim())return 'Speaker uncertain';
   return segment.text.trim() ? '' : reviewReasons.empty_result;
 }
 function appendPassageEvidence(host,segment) {
@@ -606,28 +626,28 @@ function renderRetainedAudioReview() {
 }
 // Group presentation only: each passage keeps its own edit, timing, retry and
 // playback targets. Recompute after filtering/reconciliation without merging IDs.
-function groupConsecutivePassages(host) {
-  let previous,liveLabelShown=false;
-  // Use canonical passage state, including while recording is paused or stopped.
-  // Update presentation in place so arriving refinement cannot replace a draft.
-  const provisional=new Set(doc.segments.filter(segment=>segment.refinement_state==='provisional').map(segment=>segment.id));
+function groupConsecutivePassages(host,pending=0) {
+  let previous,previousSection;
+  const divided=pending>0 || !!host.querySelector('.rolling-segment[data-transcript-section="live"],.rolling-segment[data-transcript-section="corrections"]');
   for(const card of host.children) {
-    const continuation=previous && previous.dataset.speaker===card.dataset.speaker;
+    const section=card.dataset.transcriptSection || 'processed',start=section!==previousSection;
+    const continuation=!start && previous && previous.dataset.speaker===card.dataset.speaker;
     setPassageClass(card,'speaker-continuation',!!continuation);
     setPassageClass(card,'passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
-    const live=provisional.has(card.dataset.segmentId),start=live && !liveLabelShown;
+    const live=section==='live';
     setPassageClass(card,'live-provisional',live);
-    setPassageClass(card,'live-section-start',start);
-    let label=card.querySelector('.live-section-label');
-    if(start && !label){
-      label=node('span','Live','live-section-label');
-      label.title='These words are awaiting refinement and may change with more context.';
-      label.setAttribute('aria-label','Live words awaiting refinement');
-      const top=card.querySelector('.segment-top');top.insertBefore(label,top.firstChild);
+    setPassageClass(card,'live-section-start',live && start);
+    setPassageClass(card,'retained-correction',section==='corrections');
+    setPassageClass(card,'transcript-section-start',divided && start);
+    const className=`${section}-section-label`;
+    for(const label of card.querySelectorAll('.live-section-label,.processed-section-label,.corrections-section-label'))if(!start || !divided || !label.classList.contains(className))label.remove();
+    if(start && divided && !card.querySelector(`.${className}`)) {
+      const label=node('span',({processed:'Processed',corrections:'Your corrections · replaced passages',live:'Live'})[section],`transcript-section-label ${className}`);
+      label.setAttribute('role','heading');label.setAttribute('aria-level','2');
+      if(live){label.title='These words are awaiting refinement and may change with more context.';label.setAttribute('aria-label','Live words awaiting refinement');}
+      card.insertBefore(label,card.firstChild);
     }
-    if(label && label.hidden===start)label.hidden=!start;
-    liveLabelShown ||= live;
-    previous=card;
+    previous=card;previousSection=section;
   }
 }
 function setPassageClass(card,name,value) {

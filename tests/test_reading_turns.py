@@ -208,11 +208,12 @@ class ReadingTurnTests(unittest.TestCase):
             case.feed(0,7,mode='auto');case.engine.handle({'type':'stop'})
             row=case.rows()[-1]
             self.assertEqual(row['text'],case.peer.text)
-            self.assertEqual(len(timing_calls),1)
+            self.assertEqual(len(timing_calls),2)  # Open revision and sealed revision.
             self.assertEqual(sum(n>24.5*16000 for n in asr_calls),0)
             self.assertIn('reading_turns',row)
             self.assertEqual(''.join(t['text'] for t in row['reading_turns']),row['text'])
-            self.assertEqual(row['speaker'],'multiple_speakers')
+            self.assertTrue(all(t['attribution']=='unknown' for t in row['reading_turns']))
+            self.assertEqual(row['speaker'],'unassigned')
             self.assertTrue(row['review'])
         finally:case.tearDown()
 

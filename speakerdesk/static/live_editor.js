@@ -16,7 +16,9 @@ const passageWidthObserver=new ResizeObserver(()=>{
 });
 passageWidthObserver.observe(document.getElementById('transcript-pane'));
 function hasPassageDrafts() { return passageDrafts.size > 0; }
-function hasRecoverablePassageDrafts() { return !!doc?.segments.some(segment=>recoverablePassageDrafts.has(segment.id)); }
+// These maps belong to the selected meeting and are cleared on selection. A
+// replaced canonical ID must not hide its retained correction after Stop.
+function hasRecoverablePassageDrafts() { return recoverablePassageDrafts.size > 0; }
 function isPassageSaving(id,jid=selected?.id) { return passageSaveOperations.has(`${jid}:${id}`); }
 function hasPendingPassageSaves() { return Array.from(passageSaveOperations.values()).some(operation=>operation.jid===selected?.id); }
 function renderPassageSaveState(card) {
@@ -142,20 +144,34 @@ function liveCard(segment) {
   body.append(details);
   card.append(avatar,body);refreshReadingTurnView(card,segment);renderPassageSaveState(card);return card;
 }
+// Canonical IDs own machine words. A replaced local correction remains available
+// in its own region, never as a second provisional copy of the same audio.
+function livePassageRows() {
+  const rows=new Map();
+  for(const segment of doc.segments) {
+    const prior=rows.get(segment.id)?.segment;
+    if(!prior || (segment.machine_revision ?? 0)>=(prior.machine_revision ?? 0))rows.set(segment.id,{segment,section:segment.refinement_state==='provisional'?'live':'processed'});
+  }
+  const retain=segment=>{if(!rows.has(segment.id))rows.set(segment.id,{segment,section:'corrections'});};
+  for(const draft of passageDrafts.values())retain(draft.segment);
+  for(const draft of recoverablePassageDrafts.values())retain(draft.segment);
+  for(const operation of passageSaveOperations.values())if(operation.jid===selected.id)retain(operation.segment);
+  const order={processed:0,corrections:1,live:2};
+  return Array.from(rows.values()).sort((a,b)=>order[a.section]-order[b.section] || a.segment.start-b.segment.start || a.segment.end-b.segment.end || String(a.segment.id).localeCompare(String(b.segment.id)));
+}
 function renderLiveSegments() {
   const pane=$('transcript-pane'),host=$('segments'),scroll=pane.scrollTop;
-  const focused=host.contains(document.activeElement);
+  const active=host.contains(document.activeElement)?document.activeElement:null;
+  const caret=active?.tagName==='TEXTAREA'?[active.selectionStart,active.selectionEnd,active.selectionDirection]:null;
+  const focused=!!active;
   const follow=isLive() && followingLive && !focused,paneTop=pane.getBoundingClientRect().top;
-  const anchor=follow?null:Array.from(host.children).find(card=>card.dataset.start && card.getBoundingClientRect().bottom>paneTop);
-  const anchorTime=anchor?Number(anchor.dataset.start):null,offset=anchor?anchor.getBoundingClientRect().top-paneTop:0;
+  const anchor=follow?null:active?.closest('.segment') || Array.from(host.children).find(card=>card.dataset.start && card.getBoundingClientRect().bottom>paneTop);
+  const anchorTime=anchor?Number(anchor.dataset.start):null,offset=anchor?(active || anchor).getBoundingClientRect().top-paneTop:0;
   const existing=new Map(Array.from(host.children).map(card=>[card.dataset.segmentId,card]));
   const query=$('search').value.toLowerCase();let cursor=host.firstChild,pending=0,visible=0;
-  const rows=doc.segments.slice();
-  for(const [id,draft] of passageDrafts)if(!rows.some(s=>s.id===id))rows.push(draft.segment);
-  for(const operation of passageSaveOperations.values())if(operation.jid===selected.id && !rows.some(s=>s.id===operation.segment.id))rows.push(operation.segment);
-  rows.sort((a,b)=>a.start-b.start || a.end-b.end);
+  const rows=livePassageRows();
   const retained=new Set();
-  for(const segment of rows) {
+  for(const {segment,section} of rows) {
     if(!showTranscriptPassage(segment) && !isPassageSaving(segment.id)){if(segment.refinement_state==='provisional' && !isEmptyNonSpeechPlaceholder(segment))pending++;continue;}
     if(query && !passageSearchText(segment).toLowerCase().includes(query) && !passageDrafts.has(segment.id))continue;
     const signature=JSON.stringify([segment,doc.speakers]);let card=existing.get(segment.id);
@@ -164,6 +180,8 @@ function renderLiveSegments() {
       if(card){if(cursor===card)cursor=next;card.replaceWith(next);}card=next;
     }
     retained.add(card);visible++;
+    card.dataset.transcriptSection=section;
+    card.dataset.start=segment.start;card.dataset.end=segment.end;
     if(card!==cursor)host.insertBefore(card,cursor);cursor=card.nextSibling;
     const draft=passageDrafts.get(segment.id);
     const uiSignature=JSON.stringify([signature,draft?.text,draft?.revision,recoverablePassageDrafts.has(segment.id),isPassageSaving(segment.id)]);
@@ -187,19 +205,27 @@ function renderLiveSegments() {
     }
   }
   for(const child of Array.from(host.children))if(!retained.has(child))child.remove();
+  // Moving an existing DOM node between regions can blur it in a browser.
+  if(active?.isConnected && document.activeElement!==active) {
+    active.focus({preventScroll:true});
+    if(caret)active.setSelectionRange(...caret);
+  }
   renderRetainedAudioReview();
-  groupConsecutivePassages(host);
+  groupConsecutivePassages(host,pending);
   const texts=[];
   for(const card of host.children)for(const text of card.querySelectorAll('textarea'))if(text.readOnly || !card.contains(document.activeElement))texts.push(text);
   fitPassageTexts(texts);
-  $('pending-phrases').hidden=!pending;$('pending-phrases').textContent=pending?'Listening…':'';
+  $('pending-phrases').hidden=!pending;
+  $('pending-phrases').classList.toggle('live-pending',!!pending);
+  $('pending-phrases').textContent=pending?(host.querySelector('.live-provisional')?'Listening…':'Live · listening…'):'';
   $('listening').hidden=visible>0 || pending>0 || !isLive();
   renderSearchResults(visible,query);
   $('no-results').hidden=visible>0 || !query;
   if(follow)pane.scrollTop=pane.scrollHeight;
   else if(anchorTime!==null) {
-    const next=Array.from(host.children).find(card=>Number(card.dataset.start)<=anchorTime && Number(card.dataset.end)>anchorTime) || host.querySelector(`[data-segment-id="${anchor.dataset.segmentId}"]`);
-    pane.scrollTop=next?scroll+next.getBoundingClientRect().top-pane.getBoundingClientRect().top-offset:scroll;
+    const next=host.querySelector(`[data-segment-id="${CSS.escape(anchor.dataset.segmentId)}"]`) || Array.from(host.children).find(card=>Number(card.dataset.start)<=anchorTime && Number(card.dataset.end)>anchorTime);
+    const target=active?.isConnected && next?.contains(active)?active:next;
+    pane.scrollTop=target?scroll+target.getBoundingClientRect().top-pane.getBoundingClientRect().top-offset:scroll;
   }else pane.scrollTop=scroll;
   renderRefinementStatus();
   refreshPlaybackCards();

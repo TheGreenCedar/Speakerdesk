@@ -41,11 +41,93 @@ test('unchanged live rows avoid rewriting names; provisional heading and focused
   const host=f.document.getElementById('segments'),names=host.querySelectorAll('.name-speaker'),assignments=names.map(n=>n.textAssignments);
   f.run('renderSegments()');assert.deepEqual(names.map(n=>n.textAssignments),assignments);
   assert.equal(host.querySelectorAll('.live-section-start').length,1);assert.equal(host.querySelectorAll('.live-provisional').length,2);
-  const text=host.children[0].querySelector('textarea');text.focus();text.value='Protected local words';text.setSelectionRange(5,5);text.dispatchEvent({type:'input'});
+  const card=host.querySelector('[data-segment-id="r0"]'),text=card.querySelector('textarea');text.focus();text.value='Protected local words';text.setSelectionRange(5,5);text.dispatchEvent({type:'input'});
   f.run("doc.segments[0].text='New machine words';doc.segments[0].machine_revision=2;renderSegments()");
-  assert.ok(host.children[0].querySelector('textarea')===text);assert.equal(text.value,'Protected local words');assert.equal(text.selectionStart,5);
-  assert.equal(host.children[0].querySelector('.keep-correction').dataset.revision,'2');
-  assert.equal(host.children[0].querySelector('.latest-machine-words').textContent,'New machine words');
+  assert.ok(card.querySelector('textarea')===text);assert.equal(text.value,'Protected local words');assert.equal(text.selectionStart,5);
+  assert.equal(card.querySelector('.keep-correction').dataset.revision,'2');
+  assert.equal(card.querySelector('.latest-machine-words').textContent,'New machine words');
+});
+
+test('processed and live regions stay separate and chronological across language epochs and duplicate revisions',()=>{
+  const f=frontend(root);f.seed(6,'recording');
+  f.run(`doc.segments.forEach((s,i)=>{s.refinement_state=i%2?'provisional':'refined';s.language_epoch=Math.floor(i/2);s.text='Repeated words';});
+    doc.segments.push({...doc.segments[3],text:'Older duplicate',machine_revision:0});
+    doc.segments.reverse();window.original=JSON.stringify(doc);renderSegments()`);
+  const host=f.document.getElementById('segments');
+  assert.deepEqual(host.children.map(c=>c.dataset.segmentId),['r0','r2','r4','r1','r3','r5']);
+  assert.deepEqual(host.querySelectorAll('.live-provisional').map(c=>c.dataset.segmentId),['r1','r3','r5']);
+  assert.equal(host.querySelectorAll('.live-section-label').length,1);
+  assert.equal(host.querySelectorAll('.processed-section-label').length,1);
+  assert.equal(host.querySelectorAll('.speaker-continuation.live-section-start').length,0,'Speaker grouping resets at the section boundary');
+  assert.equal(host.querySelector('[data-segment-id="r3"] textarea').value,'Repeated words','Newest revision wins only within the same ID');
+  assert.equal(host.querySelectorAll('textarea:not([readonly])').filter(t=>t.value==='Repeated words').length,6,'Repeated speech with different IDs is retained');
+  assert.equal(f.run('JSON.stringify(doc)===original'),true,'Partitioning never rewrites the canonical document');
+});
+
+test('refinement moves a focused draft into processed and retains replaced corrections outside the live timeline',()=>{
+  const f=frontend(root);f.seed(3,'recording');
+  f.run("doc.segments[0].refinement_state='provisional';doc.segments[2].refinement_state='provisional';renderSegments()");
+  const host=f.document.getElementById('segments'),text=host.querySelector('[data-segment-id="r0"] textarea');
+  text.focus();text.value='Exact human correction';text.dispatchEvent({type:'input'});text.setSelectionRange(2,8);
+  f.run("doc.segments[0].refinement_state='refined';doc.segments[0].text='Refined machine words';doc.segments[0].machine_revision=2;renderSegments()");
+  assert.deepEqual(host.children.map(c=>c.dataset.segmentId),['r0','r1','r2']);
+  assert.equal(host.children[0].querySelector('textarea'),text);assert.equal(f.document.activeElement,text);
+  assert.equal(text.value,'Exact human correction');assert.equal(text.selectionStart,2);assert.equal(text.selectionEnd,8);
+  assert.equal(host.children[0].classList.contains('live-provisional'),false);
+  assert.equal(host.children[0].querySelector('.latest-machine-words').textContent,'Refined machine words');
+  f.run("doc.segments.splice(0,1);doc.segments[0].start=0;doc.segments[0].end=20;renderSegments()");
+  assert.deepEqual(host.children.map(c=>c.dataset.segmentId),['r1','r0','r2']);
+  assert.equal(host.querySelector('[data-segment-id="r0"]').dataset.transcriptSection,'corrections');
+  assert.equal(host.querySelectorAll('.corrections-section-label').length,1);
+  assert.equal(host.querySelectorAll('.live-provisional').length,1);
+  assert.equal(host.querySelector('[data-segment-id="r0"] textarea'),text);assert.equal(text.value,'Exact human correction');
+});
+
+test('latest pending tail stays distinct through Stop and full refinement leaves only processed content',async()=>{
+  const f=frontend(root);f.seed(2,'recording');
+  f.run("doc.segments[1].text='';doc.segments[1].refinement_state='provisional';renderSegments();followingLive=true;renderSegments()");
+  assert.equal(f.document.getElementById('pending-phrases').hidden,false);
+  assert.equal(f.document.getElementById('pending-phrases').textContent,'Live · listening…');
+  assert.equal(f.document.getElementById('transcript-pane').scrollTop,f.document.getElementById('transcript-pane').scrollHeight);
+  f.run(`api=async path=>path==='/api/jobs'?[]:{...structuredClone(selected),status:'ready',refinement_status:'paused',revision:2,
+    document:{...structuredClone(doc),segments:[doc.segments[0],{...doc.segments[1],text:'Final pending tail'}]}}`);
+  await f.run('poll()');
+  const host=f.document.getElementById('segments');
+  assert.equal(host.querySelector('[data-segment-id="r1"]').classList.contains('live-provisional'),true);
+  assert.equal(host.querySelectorAll('.live-section-label').length,1);
+  assert.equal(f.document.getElementById('pending-phrases').hidden,true);
+  f.run("doc.segments[1].refinement_state='refined';selected.refinement_status='complete';renderSegments()");
+  assert.equal(host.querySelectorAll('.live-provisional').length,0);
+  assert.equal(host.querySelectorAll('.live-section-label,.processed-section-label').length,0);
+  assert.equal(host.children[1].querySelector('textarea').value,'Final pending tail');
+});
+
+test('a delayed older poll cannot restore provisional rows after a newer processed revision',async()=>{
+  const f=frontend(root);f.seed(2,'recording');
+  f.run(`doc.segments[1].refinement_state='provisional';renderSegments();window.release=null;
+    api=path=>path==='/api/jobs'?Promise.resolve([]):new Promise(resolve=>release=resolve);window.pending=poll()`);
+  await Promise.resolve();
+  f.run(`selected.revision=4;doc.segments[1].refinement_state='refined';doc.segments[1].text='Newest processed words';renderSegments();
+    release({...selected,revision:3,document:{...doc,segments:[{...doc.segments[1],text:'Older provisional words',refinement_state:'provisional'}]}})`);
+  await f.run('pending');
+  assert.equal(f.run('selected.revision'),4);
+  assert.equal(f.document.getElementById('segments').querySelector('[data-segment-id="r1"] textarea').value,'Newest processed words');
+  assert.equal(f.document.getElementById('segments').querySelectorAll('.live-provisional').length,0);
+});
+
+test('Use latest keeps a replaced recoverable correction accessible after Stop',()=>{
+  const f=frontend(root);f.seed(2,'recording');f.run('renderSegments()');
+  const host=f.document.getElementById('segments'),card=host.querySelector('[data-segment-id="r0"]'),text=card.querySelector('textarea');
+  text.focus();text.value='Recoverable human correction';text.dispatchEvent({type:'input'});
+  card.querySelector('.use-latest').click();
+  f.run("doc.segments.splice(0,1);renderSegments();selected.status='ready';selected.refinement_status='complete';renderSegments()");
+  const retained=host.querySelector('[data-segment-id="r0"]');
+  assert.ok(retained,'Replaced correction remains available after Stop');
+  assert.equal(retained.dataset.transcriptSection,'corrections');
+  assert.equal(retained.querySelector('.recover-correction').disabled,false);
+  retained.querySelector('.recover-correction').click();
+  assert.equal(host.querySelector('[data-segment-id="r0"] textarea').value,'Recoverable human correction');
+  assert.equal(f.run('doc.segments.some(s=>s.id==="r0")'),false,'Recovery does not recreate removed canonical machine words');
 });
 
 test('playback keeps overlap and backward seek highlights without per-card linear searches',()=>{

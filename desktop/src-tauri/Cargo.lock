@@ -3010,7 +3010,7 @@ dependencies = [
 
 [[package]]
 name = "speakerdesk"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "tauri",
  "tauri-build",

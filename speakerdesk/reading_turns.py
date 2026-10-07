@@ -62,11 +62,15 @@ def bind_words(row, words):
 def project_turns(row):
     evidence = row.get('reading_word_evidence')
     activity = row.get('speaker_activity') or {}
+    anchor = row.get('text_audio_anchor') or {}
     if (not isinstance(evidence, dict) or row.get('protected_fields')
             or evidence.get('text_sha256') != hashlib.sha256(row['text'].encode()).hexdigest()
             or evidence.get('machine_revision') != row['machine_revision']
-            or evidence.get('audio_revision') != row['audio_revision']
-            or evidence.get('audio_anchor') != row.get('text_audio_anchor')
+            or evidence.get('retained_audio_revision', evidence.get('audio_revision')) != row['audio_revision']
+            or evidence.get('audio_anchor') != anchor
+            or anchor.get('start_sample') != row['start_sample']
+            or type(anchor.get('end_sample')) is not int
+            or not row['start_sample'] < anchor['end_sample'] <= row['end_sample']
             or evidence.get('calibration_id') != CALIBRATION or evidence.get('model_sha256') != MODEL
             or activity.get('audio_revision') != row['audio_revision']):
         return []
@@ -98,7 +102,7 @@ def project_turns(row):
         a, b = word.get('start_sample'), word.get('end_sample')
         speaker, state = 'unassigned', 'unknown'
         timed = (type(a) is int and type(b) is int
-                 and previous_sample <= a < b <= row['end_sample'])
+                 and previous_sample <= a < b <= anchor['end_sample'])
         if timed:
             previous_sample = b
             for i, region in enumerate(regions):
