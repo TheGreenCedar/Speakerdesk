@@ -215,7 +215,8 @@ class CanonicalRuntime:
                             offset+=len(raw)+1
                         bind_words(updated,words)
             if use_alignment and updated.get('assembly_provenance'):
-                bind_words(updated,updated['assembly_provenance']['words'])
+                from authoritative_tail import reading_words
+                bind_words(updated,reading_words(updated['assembly_provenance']['words']))
             last=updated['machine_versions'][-1]
             if not last['complete']:updated['canonical_unresolved']=last.get('reason') or 'incomplete_cohere_revision'
             else:updated.pop('canonical_unresolved',None)
@@ -410,9 +411,20 @@ class CanonicalRuntime:
                 if hasattr(e.models,'begin_refinement'):e.models.begin_refinement(pcm,a)
                 absolute=[dict(turn,start=turn['start']+a/RATE,end=turn['end']+a/RATE)
                           for turn in e.models.batch_turns(pcm)]
-                mapping=align_tracks(absolute,request['references'])
+                scores=[]
+                mapping=align_tracks(absolute,request['references'],diagnostics=scores)
                 mapped=[dict(turn,speaker=mapping.get(turn['speaker'],'unknown_mixed')) for turn in absolute]
                 self.book.attach_activity(identity,current['audio_revision'],activity_regions(mapped,a,b))
+                # Meeting correspondence can be unresolved while the batch
+                # diarizer still distinguishes local voices. Retain those slots
+                # within this audio scope; they are not new global identities or
+                # an authorization to assign unsplit words to either voice.
+                current['speaker_track_mapping']={'source':'batch_diarization_temporal_mapping_v1',
+                    'utterance_id':identity,'operation_id':request['operation_id'],
+                    'audio_revision':current['audio_revision'],
+                    'audio_anchor':{'start_sample':a,'end_sample':b},
+                    'raw_batch_turns':copy.deepcopy(absolute),'mapping':copy.deepcopy(mapping),
+                    'scores':scores,'local_activity':activity_regions(absolute,a,b)}
             if not self.decode(current,'refined') or e.inbox.cancelled_request(request):
                 restore();return {**result,'cancelled':True}
             candidate=self.project(self.book.rows[identity])
@@ -451,7 +463,8 @@ class CanonicalRuntime:
                 'audio_anchor':copy.deepcopy(row['text_audio_anchor']),
                 'activity_sha256':hashlib.sha256(json.dumps(row['speaker_activity'],sort_keys=True,separators=(',',':')).encode()).hexdigest(),
                 'turns_sha256':hashlib.sha256(json.dumps(turns,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest(),
-                'method':'english_coarse_emissions_temporal_nvidia_v1','transition_margin_samples':4000,
+                'method':'english_coarse_emissions_temporal_nvidia_v2','transition_margin_samples':4000,
+                'uncertainty_policy':'emission_inside_activity_no_competing_owner_in_margin',
                 'calibration_id':row['reading_word_evidence']['calibration_id'],
                 'model_sha256':row['reading_word_evidence']['model_sha256']}
         if row.get('canonical_unresolved'):
@@ -476,8 +489,11 @@ class CanonicalRuntime:
             previous=self.published.get(identity)
             if (row['state']=='sealed' and previous and previous['canonical_state']=='sealed'
                     and previous['audio_revision']==row['audio_revision']):continue
-            self.book.attach_activity(identity,row['audio_revision'],activity_regions(e.turns,row['start_sample'],row['end_sample'],
-                observed=min(e.received,getattr(e.models,'nvidia_observed_sample',round(e.processed*RATE)))))
+            observed = max(row['start_sample'], min(row['end_sample'], e.received,
+                getattr(e.models,'nvidia_observed_sample',round(e.processed*RATE))))
+            self.book.attach_activity(identity,row['audio_revision'],
+                activity_regions(e.turns,row['start_sample'],row['end_sample'],observed=observed),
+                observed_end_sample=observed)
             last=self.last_decoded.get(identity)
             changed=last is None or last[1]!=row['audio_revision']
             # First text/language routing keeps its six-second deadline. Only

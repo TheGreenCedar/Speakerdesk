@@ -12,7 +12,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, render_template, request, send_file
+from flask import Flask, abort, g, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 from audio import normalize
@@ -25,6 +25,7 @@ from people import register_people, reconcile_assignments
 from voice_profiles import speaker_audio_eligible
 from voice_recognition import RecognitionPreference, VoiceRecognition
 from job_store import JobStore, PRIVATE_FIELDS
+from update_runtime import MUTATING_METHODS, RuntimeUpdates, UpdateReserved, register_updates
 
 ROOT=Path(__file__).resolve().parent
 ACTIVE=('preparing','queued','processing')+LIVE
@@ -54,6 +55,16 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     store=JobStore(db)
     store.initialize()
     store.recover(ACTIVE)
+
+    def update_busy():
+        manager=app.extensions['speakerdesk'].get('meetings')
+        return bool(store.count_status(ACTIVE) or
+                    (manager and (manager.jid or manager.capture or manager.worker or
+                                  (manager.thread and manager.thread.is_alive()))))
+
+    updates=RuntimeUpdates(lock,update_busy)
+    app.extensions['speakerdesk']={'executor':executor,'data':data,'updates':updates}
+    register_updates(app,updates)
 
 
     def get(jid, *, metadata=False):
@@ -129,9 +140,16 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
 
     @app.before_request
     def local_access():
-        if request.method in ('POST','PUT','PATCH','DELETE'):
+        if request.method in MUTATING_METHODS:
             if not secrets.compare_digest(request.headers.get('X-Speakerdesk-Token',''),token):
                 abort(403,description='Reload the app before making changes.')
+            if request.path!='/api/updates':
+                g.update_activity=updates.begin_activity('request:'+request.path)
+
+    @app.teardown_request
+    def release_request(_error):
+        lease=g.pop('update_activity',None)
+        if lease is not None:updates.finish_activity(lease)
 
     @app.after_request
     def security_headers(response):
@@ -144,6 +162,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     @app.errorhandler(Exception)
     def error(exc):
         if isinstance(exc,HTTPException):return jsonify(error=exc.description),exc.code
+        if isinstance(exc,UpdateReserved):return jsonify(error=str(exc)),409
         if isinstance(exc,(ValueError,KeyError,TypeError)):
             return jsonify(error=str(exc) if isinstance(exc,ValueError) else 'Invalid request.'),400
         app.logger.exception('Request failed')
@@ -213,7 +232,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             except Exception:
                 for dest in staged:shutil.rmtree(dest)
                 raise
-            for job in created:executor.submit(prepare,job['id'])
+            for job in created:updates.submit(executor,'import preparation',prepare,job['id'])
         return jsonify(created),201
 
     @app.get('/api/jobs/<jid>')
@@ -280,7 +299,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                 abort(409,description='Finish the active meeting before running import inference.')
             issues=preflight(model_config(), job['language'])
             if issues:abort(409,description=' '.join(issues))
-            patch(jid,status='queued',message='Waiting for local inference…');executor.submit(process,jid)
+            patch(jid,status='queued',message='Waiting for local inference…');updates.submit(executor,'import inference',process,jid)
         return jsonify(get(jid)),202
 
     @app.put('/api/jobs/<jid>/transcript')
@@ -364,7 +383,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             job.update(status='processing',message='Retrying this passage locally; existing words are retained.',
                        passage_retry={'id':operation,'segment_id':segment['id'],'language':language})
             put(job)
-            executor.submit(process_passage_retry,jid,segment['id'],language,operation,copy.deepcopy(segment))
+            updates.submit(executor,'passage retry',process_passage_retry,jid,segment['id'],language,operation,copy.deepcopy(segment))
         return jsonify(get(jid)),202
 
     @app.get('/api/jobs/<jid>/export/<kind>')
@@ -394,7 +413,6 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             with db() as conn:conn.execute('DELETE FROM jobs WHERE id=?',(jid,))
         return jsonify(deleted=True)
 
-    app.extensions['speakerdesk']={'executor':executor,'data':data}
     voice_message='Finish local model setup to recognize saved voices.'
     if voice_backend is None and voice_calibration is None and os.getenv('SPEAKERDESK_VOICE_CONFIG'):
         try:
@@ -409,7 +427,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     register_people(app,db,get,put,lock,folder,voice_backend,voice_calibration,voice_busy)
     preference=RecognitionPreference(db)
     recognizer=VoiceRecognition(get,put,folder,lock,lambda:app.extensions['speakerdesk']['voice_runtime'],
-                               app.extensions['speakerdesk']['people'],preference,app.logger)
+                               app.extensions['speakerdesk']['people'],preference,app.logger,updates=updates)
     app.extensions['speakerdesk'].update(recognition=recognizer,recognition_preference=preference)
 
     @app.get('/api/recognition')

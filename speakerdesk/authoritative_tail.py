@@ -193,11 +193,17 @@ def assemble(row,requests,parts,*,vocabulary=None,committed_receipts=None):
             start,end=unit.start()+a,unit.end()+a
             candidate=next((w for w in (attached['words'] if attached else []) if (w['start_char'],w['end_char'])==(start,end)),None)
             x,y=(candidate['start_sample'],candidate['end_sample']) if candidate else (None,None)
-            if x is not None and any(x<end+MARGIN and y>start-MARGIN for f in base['rollover_receipts'] for start,end in ((f['nominal_frontier_sample'],f['nominal_frontier_sample']),(f['left_boundary_word']['start_sample'],f['left_boundary_word']['end_sample']),(f['right_boundary_units'][-1]['start_sample'],f['right_boundary_units'][-1]['end_sample']))):x=y=None
+            source_envelope=None
+            if x is not None and any(x<end+MARGIN and y>start-MARGIN for f in base['rollover_receipts'] for start,end in ((f['nominal_frontier_sample'],f['nominal_frontier_sample']),(f['left_boundary_word']['start_sample'],f['left_boundary_word']['end_sample']),(f['right_boundary_units'][-1]['start_sample'],f['right_boundary_units'][-1]['end_sample']))):
+                # An artificial decode seam does not erase the selected raw
+                # word's calibrated acoustic envelope. Core ownership stays
+                # unknown; reading attribution independently checks activity.
+                source_envelope={'start_sample':x,'end_sample':y};x=y=None
             base['words'].append({'text':unit.group(),'start_char':offset+unit.start(),'end_char':offset+unit.end(),
                 'start_sample':x,'end_sample':y,'raw_start_char':start,'raw_end_char':end,
                 'raw_text_sha256':hashlib.sha256(raw.encode()).hexdigest(),'decode_id':part_utterance(part.get('source_inference_request',part['request']),raw)['id'],
                 'core_ownership':'owned' if x is not None else 'unknown'})
+            if source_envelope is not None:base['words'][-1]['source_emission_envelope']=source_envelope
         fragments.append(fragment)
     text=' '.join(fragments)
     _ordered_word_timings(base['words'])
@@ -206,6 +212,24 @@ def assemble(row,requests,parts,*,vocabulary=None,committed_receipts=None):
     return dict(base,complete=True,text=text,reason=None,text_sha256=hashlib.sha256(text.encode()).hexdigest(),
        alignment_complete=all(w['start_sample'] is not None for w in base['words']),
        model_sha256=MODEL,frame_calibration_id=CALIBRATION,score_calibration_id=CALIBRATION,timing_kind='ctc_emission_cell_envelope')
+
+
+def reading_words(words):
+    """Use qualified selected envelopes without assigning uncertain cores.
+
+    Restored envelopes cannot overlap a later retained timing; the forward
+    order check rejects conflicts with earlier words. The canonical word
+    timings and rollover ownership remain unchanged.
+    """
+    output=copy.deepcopy(words);next_start=float('inf')
+    for word in reversed(output):
+        source=word.get('source_emission_envelope') or {}
+        a,b=source.get('start_sample'),source.get('end_sample')
+        if word['start_sample'] is None and type(a) is int and type(b) is int and 0<=a<b<=next_start:
+            word.update(start_sample=a,end_sample=b)
+        if word['start_sample'] is not None:next_start=word['start_sample']
+    _ordered_word_timings(output)
+    return output
 
 
 def _ordered_word_timings(words):

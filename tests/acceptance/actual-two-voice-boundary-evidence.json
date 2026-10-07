@@ -1,0 +1,353 @@
+{
+  "source": "retained actual synthetic NVIDIA/Cohere/CTC inference; tests only replay evidence without models",
+  "source_commit": "9ccc347075c348e899d78fbed17685b346b0701a",
+  "segment": {
+    "id": "utterance-88753048e25e280889d23dcc",
+    "text": "Please keep the original words and save the meeting on this committee. The meeting starts tomorrow. Please keep the word inter-original language.",
+    "start_sample": 0,
+    "end_sample": 135808,
+    "machine_revision": 9,
+    "audio_revision": 9,
+    "protected_fields": [],
+    "text_audio_anchor": {
+      "start_sample": 0,
+      "end_sample": 135808
+    },
+    "speaker_activity": {
+      "audio_revision": 9,
+      "regions": [
+        {
+          "start_sample": 0,
+          "end_sample": 52320,
+          "speakers": [
+            "speaker_0"
+          ]
+        },
+        {
+          "start_sample": 52320,
+          "end_sample": 55040,
+          "speakers": []
+        },
+        {
+          "start_sample": 55040,
+          "end_sample": 129600,
+          "speakers": [
+            "speaker_1"
+          ]
+        },
+        {
+          "start_sample": 129600,
+          "end_sample": 135808,
+          "speakers": []
+        }
+      ],
+      "observed_end_sample": 135808
+    }
+  },
+  "alignment": {
+    "raw_text": "Please keep the original words and save the meeting on this committee. The meeting starts tomorrow. Please keep the word inter-original language.",
+    "text_sha256": "3bc557d303978fbe2b4965c120409b1c8844330727e54723805522072e3dce62",
+    "audio_anchor": {
+      "start_sample": 0,
+      "end_sample": 135808
+    },
+    "model_sha256": "e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c",
+    "timing_kind": "ctc_emission_cell_envelope",
+    "frame_calibration_id": "ami-english-coarse-v1-5ab4e661e62f",
+    "score_calibration_id": "ami-english-coarse-v1-5ab4e661e62f",
+    "words": [
+      {
+        "text": "Please",
+        "start_char": 0,
+        "end_char": 6,
+        "start_utf16": 0,
+        "end_utf16": 6,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 640,
+        "end_sample": 4160,
+        "acoustic_aliases": [
+          {
+            "start_char": 0,
+            "end_char": 1,
+            "raw_text": "P",
+            "acoustic_token": "p",
+            "kind": "supported_single_character_lowercase_alias"
+          }
+        ],
+        "minimum_token_log_probability": -0.786634087562561
+      },
+      {
+        "text": "keep",
+        "start_char": 7,
+        "end_char": 11,
+        "start_utf16": 7,
+        "end_utf16": 11,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 5120,
+        "end_sample": 7680,
+        "minimum_token_log_probability": -0.07590386271476746
+      },
+      {
+        "text": "the",
+        "start_char": 12,
+        "end_char": 15,
+        "start_utf16": 12,
+        "end_utf16": 15,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 9280,
+        "end_sample": 10240,
+        "minimum_token_log_probability": -0.049646127969026566
+      },
+      {
+        "text": "original",
+        "start_char": 16,
+        "end_char": 24,
+        "start_utf16": 16,
+        "end_utf16": 24,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 11840,
+        "end_sample": 18560,
+        "minimum_token_log_probability": -0.02059783972799778
+      },
+      {
+        "text": "words",
+        "start_char": 25,
+        "end_char": 30,
+        "start_utf16": 25,
+        "end_utf16": 30,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 19840,
+        "end_sample": 23360,
+        "minimum_token_log_probability": -0.6730777621269226
+      },
+      {
+        "text": "and",
+        "start_char": 31,
+        "end_char": 34,
+        "start_utf16": 31,
+        "end_utf16": 34,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 24640,
+        "end_sample": 25920,
+        "minimum_token_log_probability": -0.0754876509308815
+      },
+      {
+        "text": "save",
+        "start_char": 35,
+        "end_char": 39,
+        "start_utf16": 35,
+        "end_utf16": 39,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 27520,
+        "end_sample": 30400,
+        "minimum_token_log_probability": -0.034464281052351
+      },
+      {
+        "text": "the",
+        "start_char": 40,
+        "end_char": 43,
+        "start_utf16": 40,
+        "end_utf16": 43,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 31360,
+        "end_sample": 32640,
+        "minimum_token_log_probability": -0.04131198674440384
+      },
+      {
+        "text": "meeting",
+        "start_char": 44,
+        "end_char": 51,
+        "start_utf16": 44,
+        "end_utf16": 51,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 33280,
+        "end_sample": 37120,
+        "minimum_token_log_probability": -0.6282577514648438
+      },
+      {
+        "text": "on",
+        "start_char": 52,
+        "end_char": 54,
+        "start_utf16": 52,
+        "end_utf16": 54,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 38720,
+        "end_sample": 39360,
+        "minimum_token_log_probability": -0.1419583559036255
+      },
+      {
+        "text": "this",
+        "start_char": 55,
+        "end_char": 59,
+        "start_utf16": 55,
+        "end_utf16": 59,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 40320,
+        "end_sample": 42560,
+        "minimum_token_log_probability": -0.02160758338868618
+      },
+      {
+        "text": "committee.",
+        "start_char": 60,
+        "end_char": 70,
+        "start_utf16": 60,
+        "end_utf16": 70,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 44160,
+        "end_sample": 50560,
+        "minimum_token_log_probability": -10.414982795715332
+      },
+      {
+        "text": "The",
+        "start_char": 71,
+        "end_char": 74,
+        "start_utf16": 71,
+        "end_utf16": 74,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 56640,
+        "end_sample": 57600,
+        "acoustic_aliases": [
+          {
+            "start_char": 71,
+            "end_char": 72,
+            "raw_text": "T",
+            "acoustic_token": "t",
+            "kind": "supported_single_character_lowercase_alias"
+          }
+        ],
+        "minimum_token_log_probability": -3.8714327812194824
+      },
+      {
+        "text": "meeting",
+        "start_char": 75,
+        "end_char": 82,
+        "start_utf16": 75,
+        "end_utf16": 82,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 58880,
+        "end_sample": 64960,
+        "minimum_token_log_probability": -1.6090829372406006
+      },
+      {
+        "text": "starts",
+        "start_char": 83,
+        "end_char": 89,
+        "start_utf16": 83,
+        "end_utf16": 89,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 66880,
+        "end_sample": 72000,
+        "minimum_token_log_probability": -4.893362522125244
+      },
+      {
+        "text": "tomorrow.",
+        "start_char": 90,
+        "end_char": 99,
+        "start_utf16": 90,
+        "end_utf16": 99,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 72320,
+        "end_sample": 80640,
+        "minimum_token_log_probability": -3.7555153369903564
+      },
+      {
+        "text": "Please",
+        "start_char": 100,
+        "end_char": 106,
+        "start_utf16": 100,
+        "end_utf16": 106,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 86080,
+        "end_sample": 90560,
+        "acoustic_aliases": [
+          {
+            "start_char": 100,
+            "end_char": 101,
+            "raw_text": "P",
+            "acoustic_token": "p",
+            "kind": "supported_single_character_lowercase_alias"
+          }
+        ],
+        "minimum_token_log_probability": -0.6964603662490845
+      },
+      {
+        "text": "keep",
+        "start_char": 107,
+        "end_char": 111,
+        "start_utf16": 107,
+        "end_utf16": 111,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 91520,
+        "end_sample": 94080,
+        "minimum_token_log_probability": -0.45637747645378113
+      },
+      {
+        "text": "the",
+        "start_char": 112,
+        "end_char": 115,
+        "start_utf16": 112,
+        "end_utf16": 115,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 95680,
+        "end_sample": 96640,
+        "minimum_token_log_probability": -3.987147808074951
+      },
+      {
+        "text": "word",
+        "start_char": 116,
+        "end_char": 120,
+        "start_utf16": 116,
+        "end_utf16": 120,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 97920,
+        "end_sample": 102080,
+        "minimum_token_log_probability": -1.4525415897369385
+      },
+      {
+        "text": "inter-original",
+        "start_char": 121,
+        "end_char": 135,
+        "start_utf16": 121,
+        "end_utf16": 135,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 103040,
+        "end_sample": 118080,
+        "minimum_token_log_probability": -0.14020559191703796
+      },
+      {
+        "text": "language.",
+        "start_char": 136,
+        "end_char": 145,
+        "start_utf16": 136,
+        "end_utf16": 145,
+        "unit_kind": "whitespace_run",
+        "status": "aligned",
+        "start_sample": 120320,
+        "end_sample": 128320,
+        "minimum_token_log_probability": -8.857439041137695
+      }
+    ]
+  },
+  "observation_scope": "Final synchronous batch_turns ran over full retained physical anchor; explicit horizon added by current contract."
+}

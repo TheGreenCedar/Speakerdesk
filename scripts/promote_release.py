@@ -6,6 +6,7 @@ executes an already-authorized release; it is never CI-driven.
 An existing release/draft is preserved, not overwritten or auto-resumed.
 """
 import argparse
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -20,6 +21,42 @@ from core_acceptance import ROOT, artifact, digest_file, require, validate
 
 REPOSITORY='TheGreenCedar/Speakerdesk'
 REPOSITORY_ID=1406057260
+
+def payload_names(manifest):
+    """Exact signed payload contract; legacy candidates retain two payloads."""
+    version=manifest['version']
+    require(re.fullmatch(r'\d+\.\d+\.\d+',version),'Invalid release version')
+    stem=f'Speakerdesk_{version}_AppleSilicon'
+    expected={stem+'.dmg',stem+'.app.zip'}
+    if 'updater' in manifest:
+        update=manifest['updater']
+        require(isinstance(update,dict) and set(update)=={'platform','filename','signature_filename','signature','public_key','require_signed_version'},'Invalid updater metadata contract')
+        archive=stem+'.app.tar.gz'
+        require(update['platform']=='darwin-aarch64' and update['filename']==archive and
+                update['signature_filename']==archive+'.sig' and update['require_signed_version'] is True,'Updater platform/version binding differs')
+        for key in ('signature','public_key'):
+            value=update[key]
+            require(isinstance(value,str) and 0<len(value)<=8192,'Missing updater '+key)
+            try:base64.b64decode(value.strip(),validate=True)
+            except (ValueError,TypeError):raise ValueError('Invalid updater '+key)
+        expected|={archive,archive+'.sig'}
+    return expected
+
+def verify_updater_files(manifest,directory,config):
+    """Bind authenticated signer output to this client's compiled public key."""
+    public_key=config.get('plugins',{}).get('updater',{}).get('pubkey','')
+    update=manifest.get('updater')
+    if tuple(map(int,manifest['version'].split('.')))>=(0,6,2):
+        require(update is not None and public_key,'Speakerdesk 0.6.2+ requires configured and signed updater artifacts')
+    require(not public_key or update is not None,'Updater-enabled client requires signed updater artifacts')
+    if update is None:return
+    payload_names(manifest)
+    require(public_key and update['public_key']==public_key,'Updater verification key differs from the compiled client')
+    plugin=config['plugins']['updater']
+    require(plugin.get('requireSignedVersion') is True and plugin.get('allowDowngrades',False) is False,'Updater client version policy differs')
+    signature=directory/update['signature_filename']
+    require(signature.stat().st_size<=8192 and not signature.is_symlink(),'Unsafe updater signature file')
+    require(signature.read_text().strip()==update['signature'].strip(),'Updater signature metadata differs from final signer bytes')
 
 def prepare(report, manifest_path, qa_path, notes, signer_archive=None):
     require(manifest_path.name=='artifact-manifest.json','Validate the exact manifest that will be uploaded')
@@ -44,7 +81,8 @@ def prepare(report, manifest_path, qa_path, notes, signer_archive=None):
     for item in manifest['files']:
         filename=item['filename'];require(Path(filename).name==filename,'Unsafe artifact filename')
         path=manifest_path.parent/filename;artifact(path,item);files[filename]=dict(item,path=str(path))
-    require(set(files)=={f'Speakerdesk_{version}_AppleSilicon.dmg',f'Speakerdesk_{version}_AppleSilicon.app.zip'},'Unexpected package payload inventory')
+    require(set(files)==payload_names(manifest) and len(manifest['files'])==len(files),'Unexpected package payload inventory')
+    verify_updater_files(manifest,manifest_path.parent,config)
     for name in ('artifact-manifest.json','SHA256SUMS'):
         path=manifest_path.parent/name;require(path.is_file() and not path.is_symlink(),'Release metadata missing')
         files[name]={'filename':name,'bytes':path.stat().st_size,'sha256':digest_file(path),'path':str(path)}
@@ -92,8 +130,10 @@ and its input to the successful main producer run. No credential changes.
     require(archive.is_file() and not archive.is_symlink() and candidate.get('digest')=='sha256:'+digest_file(archive),'Original signer archive differs from authenticated service digest')
     with zipfile.ZipFile(archive) as zipped:
         members=[i for i in zipped.infolist() if not i.is_dir()]
-        require({i.filename for i in members}=={x['filename'] for x in manifest['files']}|{'artifact-manifest.json','SHA256SUMS'} and len(members)==4,'Signer artifact inventory differs')
         require(json.loads(zipped.read('artifact-manifest.json'))==manifest,'Validated source manifest differs from trusted signer output')
+        names=payload_names(manifest)|{'artifact-manifest.json','SHA256SUMS'}
+        require({i.filename for i in members}==names and len(members)==len(names) and
+                len(manifest['files'])==len(names)-2,'Signer artifact inventory differs')
         for item in manifest['files']:
             info=zipped.getinfo(item['filename']);require(info.file_size==item['bytes'],'Trusted signed payload size differs')
             with zipped.open(info) as stream:require(hashlib.file_digest(stream,'sha256').hexdigest()==item['sha256'],'Trusted signed payload hash differs')

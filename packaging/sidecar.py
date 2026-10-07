@@ -7,6 +7,58 @@ from pathlib import Path
 APP_ROOT=Path(sys._MEIPASS) if getattr(sys,'frozen',False) else Path(__file__).resolve().parents[1]/'speakerdesk'
 sys.path.insert(0,str(APP_ROOT))
 
+
+def listen_for_control(app, server, stream):
+    """Read bounded parent commands; update shutdown requires an idle reservation."""
+    from pipeline import shutdown_workers, workers_idle
+    from update_runtime import PREFIX, MAX_FRAME_BYTES, decode_frame
+    updates=app.extensions['speakerdesk']['updates']
+    ordinary_shutdown=False
+    while True:
+        try:line=stream.readline(MAX_FRAME_BYTES+1)
+        except (OSError,ValueError):
+            ordinary_shutdown=True
+            break
+        if not line:
+            ordinary_shutdown=True
+            break
+        if len(line.encode('utf-8'))>MAX_FRAME_BYTES:
+            # Discard the complete oversized physical line without buffering it.
+            while line and not line.endswith('\n'):
+                try:line=stream.readline(MAX_FRAME_BYTES+1)
+                except (OSError,ValueError):line=''
+            continue
+        if line.strip()=='shutdown':
+            ordinary_shutdown=True
+            break
+        if not line.startswith(PREFIX):continue
+        try:message=decode_frame(line)
+        except (ValueError,TypeError):continue
+        try:accepted=updates.handle(message)
+        except OSError:
+            ordinary_shutdown=True
+            break
+        if message.get('op')!='shutdown' or not accepted:continue
+        try:
+            # Admission was sealed before this point. No active capture is
+            # stopped, and no acknowledgement substitutes for child reaping.
+            if not workers_idle():raise RuntimeError('Inference cleanup is still finishing.')
+            app.extensions['speakerdesk']['meetings'].close_for_update()
+            app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
+            shutdown_workers()
+            if not workers_idle():raise RuntimeError('An inference child has not exited.')
+        except Exception:
+            updates.shutdown_result(message['id'],message['preparation'],ok=False,error='Runtime cleanup did not finish. Keep Speakerdesk open and retry after restarting.')
+            continue
+        updates.shutdown_result(message['id'],message['preparation'],ok=True)
+        server.shutdown()
+        return
+    if ordinary_shutdown:
+        app.extensions['speakerdesk']['meetings'].close()
+        shutdown_workers()
+        app.extensions['speakerdesk']['executor'].shutdown(wait=False,cancel_futures=True)
+        server.shutdown()
+
 if __name__=='__main__':
     if len(sys.argv)>1 and sys.argv[1]=='--model-capability':
         import importlib.metadata
@@ -62,17 +114,7 @@ if __name__=='__main__':
     os.environ['HF_HOME']=str(storage/'cache')
     app=create_app(storage/'recordings')
     server=make_server('127.0.0.1',0,app,threaded=True)
-    def listen_for_shutdown():
-        # A closed parent pipe means the desktop app exited or crashed.
-        try:
-            for line in sys.stdin:
-                if line.strip()=='shutdown':break
-        finally:
-            from pipeline import shutdown_workers
-            app.extensions['speakerdesk']['meetings'].close()
-            shutdown_workers()
-            app.extensions['speakerdesk']['executor'].shutdown(wait=False,cancel_futures=True)
-            server.shutdown()
-    threading.Thread(target=listen_for_shutdown,daemon=True).start()
+    app.extensions['speakerdesk']['updates'].connect(lambda frame:print(frame,flush=True))
+    threading.Thread(target=listen_for_control,args=(app,server,sys.stdin),daemon=True).start()
     print(f'SPEAKERDESK_URL=http://127.0.0.1:{server.server_port}',flush=True)
     server.serve_forever()

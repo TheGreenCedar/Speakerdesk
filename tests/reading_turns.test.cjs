@@ -65,7 +65,7 @@ test('unknown text has no invented time and actual overlap is labeled independen
     {text:'Clear words.',speaker:'speaker_0',start:7,end:9}]);
   const rows=card(f).querySelectorAll('.reading-turn');
   assert.deepEqual(rows.map(e=>e.dataset.attribution),['unknown','overlap','single']);
-  assert.deepEqual(rows.map(e=>e.querySelector('.reading-turn-speaker').textContent),['Unknown speaker','Overlapping speakers','Albert']);
+  assert.deepEqual(rows.map(e=>e.querySelector('.reading-turn-speaker').textContent),['Speaker unassigned','Overlapping speakers','Albert']);
   assert.equal(rows[0].querySelector('.reading-turn-time'),null);
   assert.equal(f.run('hasOverlappingSpeakers(doc.segments[0])'),true);
   assert.match(f.run('passageReviewReason(doc.segments[0])'),/Overlapping speakers/);
@@ -180,9 +180,9 @@ test('A/unknown/B, long unknown, standalone unknown and actual overlap remain se
     {text:'This longer unassigned passage has more than six words. ',speaker:'unassigned',attribution:'unknown'},
     {text:'Same owner.',speaker:'speaker_0',start:6,end:8}]);
   assert.equal(card(f).querySelectorAll('.reading-turn').length,3);
-  assert.equal(card(f).querySelectorAll('.reading-turn-speaker')[1].textContent,'Unknown speaker');
+  assert.equal(card(f).querySelectorAll('.reading-turn-speaker')[1].textContent,'Speaker unassigned');
   const alone=fixture([{text:'Unassigned alone.',speaker:'unassigned',attribution:'unknown'}]);
-  assert.equal(card(alone).querySelector('.reading-turn-speaker').textContent,'Unknown speaker');
+  assert.equal(card(alone).querySelector('.reading-turn-speaker').textContent,'Speaker unassigned');
 });
 
 test('repeated brief unknown bridges retain every uncertainty span and suppress incomplete timing',()=>{

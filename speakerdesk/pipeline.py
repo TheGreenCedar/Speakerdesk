@@ -34,6 +34,13 @@ def shutdown_workers():
             worker.wait(timeout=3)
         except subprocess.TimeoutExpired:
             worker.kill()
+            worker.wait(timeout=3)
+
+
+def workers_idle():
+    """Whether all owned inference children have actually exited."""
+    with _worker_lock:
+        return all(worker.poll() is not None for worker in _workers)
 
 
 def model_config():

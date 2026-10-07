@@ -5,6 +5,8 @@ let config, jobs = [], selected = null, doc = null, dirty = false, polling = fal
 let meeting = null, followingLive = true, passageEnd = null, retrying = false;
 let changingLiveLanguage = false, changingDefaultLanguage = false, defaultLanguageGeneration = 0;
 let pendingExport = null, autosaveTimer = null, setupState = null, undoRemoval = null;
+let updateState = {id: 0, state: 'unavailable'}, updateFrozen = false, updatePolling = false;
+let updatePreparation = null, updateRequesting = false, localMutations = 0;
 const savedPassageBindings = new WeakMap();
 const readingTurnBindings = new WeakMap();
 let playbackDocument = null, playbackIndexDirty = true, playbackRows = [], playbackEnds = [];
@@ -20,12 +22,27 @@ function node(tag, text, className) {
   return el;
 }
 async function api(path, options = {}) {
+  const {updateSave = false, ...requestOptions} = options;
+  const mutation = !['GET', 'HEAD'].includes((options.method || 'GET').toUpperCase());
+  const updater = path === '/api/updates';
+  if (updateFrozen && mutation && !updater && !updateSave) throw new Error('Speakerdesk is preparing an update. Cancel the update to continue.');
   const headers = {'X-Speakerdesk-Token': token, ...options.headers};
   if (options.body && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
-  const response = await fetch(path, {...options, headers});
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Local request failed.');
-  return data;
+  if (mutation && !updater) localMutations++;
+  let updateTimer, controller;
+  try {
+    if(updater)controller=new AbortController();
+    const operation=(async()=>{
+      const response = await fetch(path, {...requestOptions, headers,...(controller?{signal:controller.signal}:{})});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Local request failed.');
+      return data;
+    })();
+    if(!updater)return await operation;
+    return await Promise.race([operation,new Promise((_,reject)=>{
+      updateTimer=setTimeout(()=>{controller.abort();reject(new Error('The local update service did not respond. Check the update status and try again.'));},10000);
+    })]);
+  } finally { clearTimeout(updateTimer);if (mutation && !updater) localMutations--; }
 }
 function notice(text, error = false, action = null) {
   const host = $('notice'); host.replaceChildren(); host.hidden = !text;
@@ -40,7 +57,7 @@ function notice(text, error = false, action = null) {
   if (!error) setTimeout(() => { if (host.contains(message)) host.hidden = true; }, action ? 8000 : 4500);
 }
 function renderExportState() {
-  document.querySelectorAll('[data-export]').forEach(button=>{button.disabled=!!pendingExport || !doc?.segments?.length;});
+  document.querySelectorAll('[data-export]').forEach(button=>{button.disabled=updateFrozen || !!pendingExport || !doc?.segments?.length;});
   const notices=document.querySelector('a[href="/api/notices"]');
   if(notices){notices.setAttribute('aria-disabled',String(!!pendingExport));notices.setAttribute('aria-busy',String(!!pendingExport));}
   document.querySelector('.export-menu').setAttribute('aria-busy',String(!!pendingExport));
@@ -59,6 +76,7 @@ window.speakerdeskExportStatus=(nonce,phase)=>{
   return true;
 };
 async function downloadExport(kind=null) {
+  if(updateFrozen)throw new Error('Cancel the update before exporting.');
   if(pendingExport)return;
   const snapshot={id:selected?.id,name:selected?.name,generation:selectionGeneration};
   if(kind && (!['txt','srt','vtt','json'].includes(kind) || !/^[0-9a-f]{32}$/.test(snapshot.id || '')))throw new Error('Choose a saved meeting to export.');
@@ -84,7 +102,7 @@ async function downloadExport(kind=null) {
 }
 function renderSaveState() {
   const button = $('save');
-  button.disabled = saving || !dirty;
+  button.disabled = updateFrozen || saving || !dirty;
   button.textContent = saving ? 'Saving…' : dirty ? 'Save now' : 'Saved';
   button.classList.toggle('is-dirty', dirty && !saving);
   button.title = dirty ? 'Edits save automatically. Press ⌘S to save now.' : 'All changes saved on this Mac';
@@ -100,9 +118,10 @@ function scheduleAutosave() {
     save({quiet: true}).catch(error => notice(`Couldn’t save automatically: ${error.message}`, true));
   }, 1200);
 }
-async function flushSave() {
+async function flushSave({canContinue = () => true} = {}) {
   clearTimeout(autosaveTimer); autosaveTimer = null;
   while (dirty || saving) {
+    if(!canContinue())return;
     if (saving) await new Promise(resolve => setTimeout(resolve, 50));
     else await save({quiet: true});
   }
@@ -152,7 +171,7 @@ function setStatus() {
   $('meeting-date').textContent = new Date(selected.created*1000).toLocaleString(undefined,{weekday:'long',month:'long',day:'numeric',hour:'numeric',minute:'2-digit'});
   $('job-message').textContent = selected.message;
   const live=isLive(), busy=live || ['preparing','processing','queued'].includes(selected.status);
-  $('editor').inert=retrying || (busy && !live);
+  $('editor').inert=updateFrozen || retrying || (busy && !live);
   $('recording-dot').hidden=!live;
   $('recording-dot').classList.toggle('paused',selected.status==='paused');
   $('run').hidden = !!doc?.segments?.length || live; $('run').disabled = busy || !languageReady(selected.language);
@@ -208,7 +227,25 @@ function renderFollowLive() {
   $('follow-live').hidden = !isLive() || followingLive;
 }
 function nameSpeaker(id) {
+  if(updateFrozen){notice('Cancel the update before changing a speaker name.',true);return;}
   flushSave().then(() => openNamePicker(id)).catch(error => notice(error.message, true));
+}
+function speakerLabel(id) {
+  if(id==='unassigned')return 'Speaker unassigned';
+  return doc.speakers[id] || (/^speaker_\d+$/.test(id)?`Speaker ${Number(id.slice(8))+1}`:'Unknown speaker');
+}
+function speakerNameControl(id,className='name-speaker') {
+  const assigned=id!=='unassigned',label=speakerLabel(id);
+  const control=node(assigned?'button':'span',label,className);control.dataset.speaker=id;
+  if(assigned) {
+    control.type='button';control.title='Name this speaker or remember their voice';
+    control.setAttribute('aria-label',`Name or remember voice for ${label}`);
+    control.addEventListener('click',()=>nameSpeaker(id));
+  }else {
+    control.title='These words have no assigned speaker.';
+    control.setAttribute('aria-label',label);
+  }
+  return control;
 }
 function removePassage(segment) {
   const index = doc.segments.indexOf(segment), jid = selected.id;
@@ -235,8 +272,8 @@ function renderSearchResults(visible, query) {
 }
 function speakerOptions(selectEl, current) {
   selectEl.replaceChildren();
-  for (const [id, name] of Object.entries(doc.speakers)) {
-    const option = node('option', name); option.value = id; option.selected = id === current; selectEl.append(option);
+  for (const id of Object.keys(doc.speakers)) {
+    const option = node('option', speakerLabel(id)); option.value = id; option.selected = id === current; selectEl.append(option);
   }
 }
 function renderEditor() {
@@ -245,14 +282,12 @@ function renderEditor() {
   renderSaveState();
   $('segment-count').textContent = isLive() ? '' : passageCountLabel();
   $('speaker-list').replaceChildren();
-  Object.entries(doc.speakers).forEach(([id, name], i) => {
+  Object.keys(doc.speakers).forEach((id, i) => {
     const row = node('div', undefined, 'speaker-name');
     const dot = node('span', undefined, 'speaker-dot'); dot.dataset.color = i % 8;
-    const choose = node('button', undefined, 'speaker-name-action name-speaker'); choose.type = 'button';
-    choose.append(dot, node('span', name), icon('pencil'));
-    choose.setAttribute('aria-label', `Name or remember voice for ${name}`);
-    choose.title = 'Name this speaker or remember their voice';
-    choose.addEventListener('click', () => nameSpeaker(id));
+    const choose = speakerNameControl(id,'speaker-name-action name-speaker');
+    choose.replaceChildren(dot, node('span', speakerLabel(id)));
+    if(id!=='unassigned')choose.append(icon('pencil'));
     row.append(choose); $('speaker-list').append(row);
   });
   $('timing-note').textContent = doc.provenance?.timing || 'User supplied segment boundaries.';
@@ -306,12 +341,12 @@ function hasOverlappingSpeakers(segment) {
 }
 function readingTurnLabel(turn) {
   if(turn.attribution==='overlap')return 'Overlapping speakers';
-  if(turn.attribution==='unknown')return 'Unknown speaker';
-  return doc.speakers[turn.speaker] || (/^speaker_\d+$/.test(turn.speaker)?`Speaker ${Number(turn.speaker.slice(8))+1}`:'Unknown speaker');
+  if(turn.attribution==='unknown')return speakerLabel('unassigned');
+  return speakerLabel(turn.speaker);
 }
 function passageSearchText(segment) {
   const names=validReadingTurns(segment)?.map(readingTurnLabel).join(' ') || '';
-  return segment.text+' '+(doc.speakers[segment.speaker] || '')+' '+names;
+  return segment.text+' '+speakerLabel(segment.speaker)+' '+names;
 }
 function refreshReadingTurnView(card,segment) {
   const turns=validReadingTurns(segment);let binding=readingTurnBindings.get(card);
@@ -403,7 +438,7 @@ function savedPassageSignature(segment) {
 function savedCard(segment) {
   const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;card.dataset.speaker=segment.speaker;
   const index = Object.keys(doc.speakers).indexOf(segment.speaker);
-  const avatar=node('span',`S${index+1}`,'speaker-avatar');avatar.setAttribute('aria-hidden','true');avatar.dataset.color=index%8;
+  const avatar=node('span',segment.speaker==='unassigned'?'?':`S${index+1}`,'speaker-avatar');avatar.setAttribute('aria-hidden','true');avatar.dataset.color=segment.speaker==='unassigned'?-1:index%8;
   const body=node('div',undefined,'segment-body');
   const top = node('div', undefined, 'segment-top');
   const seek = node('button', undefined, 'seek'); seek.append(icon('play'),node('span',time(segment.start))); seek.setAttribute('aria-label', `Play passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);seek.title=`Play passage ${passageTime(segment.start)}–${passageTime(segment.end)}`;
@@ -577,7 +612,7 @@ function appendPassageEvidence(host,segment) {
   appendUncoveredAudio(host,segment);
   const evidence=node('details',undefined,'passage-evidence');evidence.append(node('summary','Inference evidence'));
   const metadata={};
-  for(const key of ['review','review_resolution','refinement_state','language','language_detection','confidence','speaker_candidates','voice_eligible','audio_state','transcription_review','audio_anchor','timing','provenance','refinement_window','machine_revision']) {
+  for(const key of ['review','review_resolution','refinement_state','language','language_detection','confidence','speaker_candidates','speaker_track_mapping','voice_eligible','audio_state','transcription_review','audio_anchor','timing','provenance','refinement_window','machine_revision']) {
     if(segment[key]!==undefined)metadata[key]=segment[key];
   }
   if(doc.provenance)metadata.recording_provenance=doc.provenance;
@@ -631,7 +666,7 @@ function groupConsecutivePassages(host,pending=0) {
   const divided=pending>0 || !!host.querySelector('.rolling-segment[data-transcript-section="live"],.rolling-segment[data-transcript-section="corrections"]');
   for(const card of host.children) {
     const section=card.dataset.transcriptSection || 'processed',start=section!==previousSection;
-    const continuation=!start && previous && previous.dataset.speaker===card.dataset.speaker;
+    const continuation=!start && previous && card.dataset.speaker!=='unassigned' && previous.dataset.speaker===card.dataset.speaker;
     setPassageClass(card,'speaker-continuation',!!continuation);
     setPassageClass(card,'passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
     const live=section==='live';
@@ -729,7 +764,7 @@ async function save({quiet = false} = {}) {
   const generation = editGeneration, jid = selected.id;
   saving = true; renderSaveState();
   try {
-    const result = await api(`/api/jobs/${jid}/transcript`, {method: 'PUT', body: JSON.stringify({revision: selected.revision, document: doc})});
+    const result = await api(`/api/jobs/${jid}/transcript`, {method: 'PUT', updateSave: true, body: JSON.stringify({revision: selected.revision, document: doc})});
     if (selected?.id !== jid) return;
     selected = result;
     if (generation === editGeneration) {
@@ -825,6 +860,10 @@ function wire() {
     if(key==='s' && !$('workspace').hidden){event.preventDefault();flushSave().then(()=>{if(doc && !isLive())notice('Saved on this Mac.');}).catch(e=>notice(e.message,true));}
   });
   $('settings-close').addEventListener('click',closeSettings);
+  $('update-check').addEventListener('click',()=>requestUpdate('check').catch(error=>notice(error.message,true)));
+  $('update-download').addEventListener('click',()=>requestUpdate('download').catch(error=>notice(error.message,true)));
+  $('update-install').addEventListener('click',()=>requestUpdate('install').catch(error=>notice(error.message,true)));
+  $('update-cancel').addEventListener('click',()=>requestUpdate('cancel').catch(error=>notice(error.message,true)));
   document.addEventListener('keydown', event => {
     if($('setup').hidden) return;
     if(event.key==='Escape') closeSettings();
@@ -894,6 +933,7 @@ function wire() {
   window.addEventListener('beforeunload', e => { if (dirty || hasPassageDrafts()) { e.preventDefault(); e.returnValue = ''; } });
 }
 async function poll() {
+  if(updateFrozen)return;
   if (polling) return; polling = true;
   try {
     jobs = await api('/api/jobs'); renderJobs();
@@ -929,6 +969,7 @@ async function init() {
     else if(meeting?.id && liveStatuses.includes(meeting.status)) await select(meeting.id);
     await refreshSetup();
     setInterval(refreshSetup,1500);
+    await refreshUpdates();setInterval(refreshUpdates,1000);
     lucide.createIcons();
   } catch (e) { notice(e.message, true); }
 }
@@ -936,8 +977,8 @@ function showSettingsTab(name) {
   document.querySelectorAll('.settings-tabs [role=tab]').forEach(tab=>{const on=tab.dataset.tab===name;tab.setAttribute('aria-selected',String(on));tab.tabIndex=on?0:-1;});
   document.querySelectorAll('.settings-panel').forEach(panel=>{panel.hidden=panel.id!==`panel-${name}`;});
 }
-function openSettings(tab) { if(tab)showSettingsTab(tab);$('setup').hidden=false;$('setup-toggle').setAttribute('aria-expanded','true');document.querySelector('main').inert=true;document.querySelector('.sidebar').inert=true;$('settings-close').focus();loadPeople().catch(error=>notice(error.message,true)); }
-function closeSettings() { $('setup').hidden=true;document.querySelector('main').inert=false;document.querySelector('.sidebar').inert=false;$('setup-toggle').setAttribute('aria-expanded','false'); $('setup-toggle').focus(); }
+function openSettings(tab) { if(tab)showSettingsTab(tab);$('setup').hidden=false;$('setup-toggle').setAttribute('aria-expanded','true');document.querySelector('main').inert=true;document.querySelector('.sidebar').inert=true;$('settings-close').focus();if(tab!=='updates')loadPeople().catch(error=>notice(error.message,true)); }
+function closeSettings() { if(updateFrozen)return; $('setup').hidden=true;document.querySelector('main').inert=false;document.querySelector('.sidebar').inert=false;$('setup-toggle').setAttribute('aria-expanded','false'); $('setup-toggle').focus(); }
 function formatBytes(bytes) {
   return bytes<1e8?`${Math.round(bytes/1e6)} MB`:`${(bytes/1e9).toFixed(1)} GB`;
 }
@@ -1093,5 +1134,111 @@ async function refreshMeeting() {
     $('pause-meeting').disabled=!['recording','paused'].includes(meeting.status);
     $('stop-meeting').disabled=meeting.status==='finishing';
   }catch(error){notice(error.message,true);}finally{meetingPoll=false;}
+}
+function freezeForUpdate(frozen) {
+  updateFrozen = frozen;
+  if (frozen) openSettings('updates');
+  $('settings-close').disabled = frozen;
+  document.querySelector('main').inert = frozen || !$('setup').hidden;
+  document.querySelector('.sidebar').inert = frozen || !$('setup').hidden;
+  document.querySelectorAll('.settings-panel').forEach(panel => { panel.inert = frozen && panel.id !== 'panel-updates'; });
+  const tabs = document.querySelector('.settings-tabs'); if (tabs) tabs.inert = frozen;
+  document.querySelectorAll('dialog').forEach(dialog => { dialog.inert = frozen; });
+  $('editor').inert = frozen || retrying || (!!selected && ['preparing','processing','queued'].includes(selected.status));
+  renderSaveState();renderExportState();
+}
+function renderUpdates() {
+  const state = updateState.state, version = updateState.version || '';
+  const messages = {idle:'Check for a newer Speakerdesk version.',checking:'Checking for updates…',current:'Speakerdesk is up to date.',
+    available:`Speakerdesk ${version} is available.`,downloading:'Downloading the update…',verifying:'Verifying the update…',
+    ready:updateState.error || `Speakerdesk ${version} is ready to install.`,preparing:'Saving your edits before updating…',preparing_install:'Saving your edits before updating…',
+    stopping:'Closing the local processing service…',shutting_down:'Closing the local processing service…',installing:'Installing the update. Speakerdesk will restart.',
+    error:updateState.error || 'The update could not finish. Try checking again.',unavailable:updateState.error || 'Updates are available in the installed desktop app.'};
+  $('update-status').textContent = messages[state] || 'Waiting for the update service…';
+  $('update-notes').textContent = typeof updateState.notes === 'string' ? updateState.notes : '';
+  $('update-notes').hidden = !$('update-notes').textContent;
+  const active = ['checking','downloading','verifying','preparing','preparing_install','stopping','shutting_down','installing'].includes(state);
+  const capture = liveStatuses.includes(meeting?.status) || liveStatuses.includes(selected?.status);
+  $('update-check').disabled = updateRequesting || active || updateFrozen || state === 'unavailable';
+  $('update-download').hidden = state !== 'available';
+  $('update-download').disabled = updateRequesting || capture;
+  $('update-install').hidden = state !== 'ready';
+  $('update-install').disabled = updateRequesting || capture;
+  $('update-cancel').hidden = !active && state !== 'ready' && !updateFrozen;
+  const cancellable = typeof updateState.cancellable === 'boolean' ? updateState.cancellable :
+    !['stopping','shutting_down','installing'].includes(state) && !updateState.reserved;
+  $('update-cancel').disabled = updateRequesting || !cancellable;
+  $('update-capture-note').hidden = !capture;
+  const progress = $('update-progress');progress.hidden = state !== 'downloading';
+  if (Number.isFinite(updateState.total_bytes) && updateState.total_bytes > 0) {
+    progress.max = updateState.total_bytes;progress.value = Math.min(updateState.downloaded_bytes || 0, progress.max);
+  } else progress.removeAttribute('value');
+}
+async function requestUpdate(op) {
+  if (updateRequesting) return;
+  if (['download','install'].includes(op) && (liveStatuses.includes(meeting?.status) || isLive())) throw new Error('Finish the recording before updating. Paused recordings are still active.');
+  updateRequesting = true;renderUpdates();
+  try { await api('/api/updates',{method:'POST',body:JSON.stringify({op})});await refreshUpdates(); }
+  finally { updateRequesting = false;renderUpdates(); }
+}
+async function boundedUpdateSave(action, milliseconds = 15000) {
+  let timer;
+  try {
+    await Promise.race([action(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Saving took too long. Your edits remain open; try again when saving finishes.')),milliseconds);})]);
+  } finally { clearTimeout(timer); }
+}
+async function prepareEditorUpdate(id, preparation) {
+  if (!Number.isSafeInteger(preparation) || preparation <= 0) return;
+  if (updatePreparation?.id === id && updatePreparation.preparation === preparation) return updatePreparation.promise;
+  const attempt = {id, preparation, promise:null};updatePreparation = attempt;
+  const current=()=>!attempt.cancelled && updatePreparation===attempt && updateState.id===id && updateState.preparation===preparation && ['preparing','preparing_install'].includes(updateState.state);
+  attempt.promise = (async()=>{
+    const selection = selectionGeneration, generation = editGeneration, jid = selected?.id;
+    try {
+      if (liveStatuses.includes(meeting?.status) || isLive()) throw new Error('Finish the recording before installing an update. Paused recordings are still active.');
+      if (hasPassageDrafts() || hasRecoverablePassageDrafts()) throw new Error('Save or recover your passage drafts before installing an update.');
+      if (undoRemoval) throw new Error('Finish or undo the passage removal before installing an update.');
+      if (pendingExport) throw new Error('Finish or cancel the export before installing an update.');
+      if (hasPendingPassageSaves() || retrying || changingLiveLanguage || changingDefaultLanguage ||
+          (typeof identityBusy !== 'undefined' && identityBusy) || document.querySelector('dialog[open]')) throw new Error('Finish the open edit or settings change before installing an update.');
+      freezeForUpdate(true);
+      await boundedUpdateSave(async()=>{
+        while (localMutations || saving) {
+          if(!current())return;
+          await new Promise(resolve=>setTimeout(resolve,50));
+        }
+        if(!current())return;
+        if(undoRemoval || hasPassageDrafts() || hasRecoverablePassageDrafts() || hasPendingPassageSaves()) throw new Error('Finish or undo your local edits before installing an update.');
+        await flushSave({canContinue:current});
+      });
+      if (updatePreparation !== attempt || updateState.id !== id || updateState.preparation !== preparation || !['preparing','preparing_install'].includes(updateState.state)) return;
+      if (dirty || saving || localMutations || hasPassageDrafts() || hasRecoverablePassageDrafts() || hasPendingPassageSaves() ||
+          selectionGeneration !== selection || selected?.id !== jid || editGeneration !== generation) throw new Error('Your edits changed while saving. Review them before trying the update again.');
+      await api('/api/updates',{method:'POST',body:JSON.stringify({op:'editor_ready',id,preparation})});
+    } catch (error) {
+      attempt.cancelled = true;
+      if (updatePreparation !== attempt || updateState.id !== id || updateState.preparation !== preparation) return;
+      $('update-status').textContent = error.message;
+      if(!undoRemoval)notice(error.message,true);
+      try { await api('/api/updates',{method:'POST',body:JSON.stringify({op:'editor_error',id,preparation,error:error.message})}); }
+      catch { $('update-status').textContent = 'The update could not be cancelled. Keep Speakerdesk open and try Cancel again.'; }
+    }
+  })();
+  return attempt.promise;
+}
+async function refreshUpdates() {
+  if (updatePolling) return;
+  updatePolling = true;
+  try {
+    const next = await api('/api/updates');
+    if (!Number.isSafeInteger(next.id) || next.id < updateState.id || typeof next.state !== 'string') return;
+    updateState = next;
+    const protectedState = ['preparing','preparing_install','stopping','shutting_down','installing'].includes(next.state) || !!next.reserved;
+    if (updateFrozen && !protectedState) { updatePreparation = null;freezeForUpdate(false); }
+    renderUpdates();
+    if (['preparing','preparing_install'].includes(next.state)) void prepareEditorUpdate(next.id,next.preparation);
+  } catch (error) {
+    if (updateFrozen) $('update-status').textContent = 'Waiting for the local update service. Keep Speakerdesk open.';
+  } finally { updatePolling = false; }
 }
 init();

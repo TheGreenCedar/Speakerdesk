@@ -102,6 +102,7 @@ class UtteranceBook:
             row.pop('assembly_provenance',None)
             row.pop('bounded_decode_provenance',None)
             row.pop('speaker_activity', None)
+            row.pop('speaker_track_mapping', None)
             row['voice_eligible'] = False
 
     def _seal(self, end):
@@ -430,11 +431,15 @@ class UtteranceBook:
                             'text_sha256': text_sha256, 'words': copy.deepcopy(words)}
         return copy.deepcopy(row)
 
-    def attach_activity(self, identity, audio_revision, regions):
+    def attach_activity(self, identity, audio_revision, regions, *, observed_end_sample=None):
         """Retain NVIDIA activity independently; it cannot split Cohere words."""
         row = self.rows[identity]
         if type(audio_revision) is not int or audio_revision != row['audio_revision']:
             raise ValueError('Speaker activity belongs to different utterance audio.')
+        observed_end_sample = row['end_sample'] if observed_end_sample is None else observed_end_sample
+        if (type(observed_end_sample) is not int
+                or not row['start_sample'] <= observed_end_sample <= row['end_sample']):
+            raise ValueError('Invalid speaker-activity observation horizon.')
         cursor = row['start_sample']
         owners = set()
         clean = True
@@ -443,7 +448,8 @@ class UtteranceBook:
             if (type(a) is not int or type(b) is not int or not cursor == a < b <= row['end_sample']
                     or not isinstance(speakers, list)
                     or any(not isinstance(s, str) or not s for s in speakers)
-                    or len(speakers) != len(set(speakers))):
+                    or len(speakers) != len(set(speakers))
+                    or (speakers and b > observed_end_sample)):
                 raise ValueError('Speaker activity must cover ordered original audio.')
             cursor = b
             # The full anchor is the possible voice clip. Independent NVIDIA
@@ -454,7 +460,9 @@ class UtteranceBook:
                 clean = clean and len(speakers) == 1 and bool(re.fullmatch(r'speaker_\d+', speakers[0]))
         if cursor != row['end_sample']:
             raise ValueError('Incomplete speaker-activity evidence.')
-        row['speaker_activity'] = {'audio_revision': audio_revision, 'regions': copy.deepcopy(regions)}
+        row['speaker_activity'] = {'audio_revision': audio_revision,
+            'observed_end_sample': observed_end_sample, 'regions': copy.deepcopy(regions)}
         row['speaker_candidates'] = sorted(owners)
-        row['voice_eligible'] = row['state'] == 'sealed' and clean and len(owners) == 1
+        row['voice_eligible'] = (row['state'] == 'sealed' and clean and len(owners) == 1
+            and observed_end_sample == row['end_sample'])
         return copy.deepcopy(row)

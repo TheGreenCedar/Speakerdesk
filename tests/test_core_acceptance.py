@@ -245,7 +245,7 @@ class CoreAcceptanceTests(unittest.TestCase):
         with patch.object(promote_release,'api',side_effect=[[{'ref':'refs/tags/v0.0.0','object':{'type':'tag','sha':'c'*40}}],{'object':{'type':'commit','sha':'a'*40}}]):
             promote_release.check_tag(plan,required=True)
     def test_trusted_signer_archive_rejects_relabelled_manifest(self):
-        manifest=copy.deepcopy(self.manifest);manifest.update(producer_run_id=11,input_artifact_id=12,input_artifact_sha256='1'*64,
+        manifest=copy.deepcopy(self.manifest);manifest.update(version='0.0.0',producer_run_id=11,input_artifact_id=12,input_artifact_sha256='1'*64,
                  signer_run_id='21',signer_commit='2'*40)
         manifest['files'].append({'filename':'Speakerdesk_0.0.0_AppleSilicon.dmg','bytes':3,'sha256':hashlib.sha256(b'dmg').hexdigest()})
         archive=self.base/'original-signer.zip'

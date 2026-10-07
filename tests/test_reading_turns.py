@@ -88,7 +88,7 @@ class ReadingTurnTests(unittest.TestCase):
         changed=copy.deepcopy(row);changed['speaker_activity']['regions'][0]['speakers']=['speaker_2']
         self.assertEqual(project_turns(changed)[0]['speaker'],'speaker_2')
 
-    def test_unqualified_or_stale_alignment_and_core_seam_word_stays_null(self):
+    def test_unqualified_or_stale_alignment_rejected_outer_anchor_has_no_shared_seam(self):
         row=fixture();text=row['text'];words=row['reading_word_evidence']['words']
         result={'raw_text':text,'text_sha256':hashlib.sha256(text.encode()).hexdigest(),
                 'audio_anchor':row['text_audio_anchor'],'model_sha256':MODEL,
@@ -96,7 +96,7 @@ class ReadingTurnTests(unittest.TestCase):
                 'score_calibration_id':CALIBRATION,'words':[dict(w,status='aligned') for w in words]}
         result['words'][0].update(start_sample=320,end_sample=640)
         valid=alignment_words(result,text,0,160000)
-        self.assertIsNone(valid[0]['start_sample']);self.assertIsNotNone(valid[1]['start_sample'])
+        self.assertEqual(valid[0]['start_sample'],320);self.assertIsNotNone(valid[1]['start_sample'])
         for key in ('text_sha256','model_sha256','frame_calibration_id','score_calibration_id','audio_anchor'):
             broken=copy.deepcopy(result);broken[key]='stale'
             self.assertEqual(alignment_words(broken,text,0,160000),[])
