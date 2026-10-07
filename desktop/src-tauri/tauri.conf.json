@@ -5,8 +5,10 @@
   "identifier": "com.speakerdesk.desktop",
   "plugins": {
     "updater": {
-      "endpoints": ["https://rootandruntime.com/downloads/speakerdesk/updater/latest.json"],
-      "pubkey": "",
+      "endpoints": [
+        "https://rootandruntime.com/downloads/speakerdesk/updater/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdERkFCNDE4OTY5RjUzOTYKUldTV1U1K1dHTFQ2Zlh3bStBV0hkZ2FUYkpzd0hNQ1hoU0crTk1Wb1RKdjVUVzRscHkrQ051TlQK",
       "requireSignedVersion": true,
       "allowDowngrades": false
     }
