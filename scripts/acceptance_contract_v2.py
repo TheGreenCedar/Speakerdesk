@@ -6,17 +6,20 @@ SPEECH_REVISION=models()['silero-speech']['revision']
 SPEECH_POLICY=ast.literal_eval(assignment(ROOT/'speakerdesk/speech_admission.py','INPUT_POLICY'))
 CONTRACT='speakerdesk-acoustic-contract-v2'
 
+def normalized_cardinal_text(text):
+    return ''.join(c for c in unicodedata.normalize('NFKD',text.casefold()) if not unicodedata.combining(c))
+
 def cardinal_tokens(text):
-    value=''.join(c for c in unicodedata.normalize('NFKD',text.casefold()) if not unicodedata.combining(c))
-    return re.findall(r'[+-]?\d+(?:[.,]\d+)*(?!\w)|\w+',value)
+    return re.findall(r'[+-]?\d+(?:[.,]\d+)*(?!\w)|\w+',normalized_cardinal_text(text))
 
 def quiet_cardinal_equivalent(reference,actual):
     # This typed policy is deliberately scoped to the declared cardinal eleven
     # in the entire frozen quiet sentence. It is not lexical error correction.
-    for amount in re.finditer(r'\b(?:eleven|11)\b',actual,re.IGNORECASE):
-        before=actual[:amount.start()].rstrip();after=actual[amount.end():].lstrip()
+    normalized=normalized_cardinal_text(actual)
+    for amount in re.finditer(r'\b(?:eleven|11)\b',normalized):
+        before=normalized[:amount.start()].rstrip();after=normalized[amount.end():].lstrip()
         for decoration in ((before[-1] if before else ''),(after[0] if after else '')):
-            if decoration and (unicodedata.category(decoration).startswith('S')
+            if decoration and (unicodedata.category(decoration).startswith('S') or unicodedata.category(decoration)=='Pd'
                     or decoration in '+-−%‰‱#@'):
                 return False
     expected=cardinal_tokens(reference);observed=cardinal_tokens(actual)

@@ -7,7 +7,7 @@ class CardinalTests(unittest.TestCase):
  def test_explicit_cardinal_equivalence_preserves_full_sentence(self):
   reference='The green notebook has eleven pages. Keep it beside the window.'
   self.assertTrue(quiet_cardinal_equivalent(reference,reference.replace('eleven','11')))
-  for token in ('12','110','-11','+11','11.0','11,000','11th','−11','- 11','+ 11','11%','11 %','11‰','$11','$ 11','11€','eleven%','€eleven','', 'Tankyou'):
+  for token in ('12','110','-11','+11','11.0','11,000','11th','−11','- 11','+ 11','11%','11 %','11‰','$11','$ 11','11€','eleven%','€eleven','１１%','１１‰','＄１１','–11','—11','', 'Tankyou'):
    with self.subTest(token=token):self.assertFalse(quiet_cardinal_equivalent(reference,reference.replace('eleven',token)))
   self.assertFalse(quiet_cardinal_equivalent(reference,reference.replace('notebook','book')))
 class ContextTests(unittest.TestCase):
