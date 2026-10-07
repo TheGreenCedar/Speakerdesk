@@ -406,7 +406,13 @@ class SidecarUpdateProcessTests(unittest.TestCase):
         import os
         with tempfile.TemporaryDirectory() as temporary:
             started = time.monotonic()
-            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parents[1]/'packaging/sidecar.py')],
+            # Preserve a bounded live stack if hosted startup stalls after its
+            # imports. run_path executes the same entry point and control pipe.
+            diagnostic = ('import faulthandler,runpy,sys; '
+                          'faulthandler.dump_traceback_later(5); '
+                          'runpy.run_path(sys.argv[1],run_name="__main__")')
+            process = subprocess.Popen([sys.executable, '-c', diagnostic,
+                                        str(Path(__file__).resolve().parents[1]/'packaging/sidecar.py')],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env={**os.environ, 'SPEAKERDESK_HOME': temporary, 'PYTHONDONTWRITEBYTECODE': '1',
                      'PYTHONPROFILEIMPORTTIME': '1'})
