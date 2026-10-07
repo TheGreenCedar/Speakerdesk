@@ -141,7 +141,11 @@ class RuntimeUpdates:
                     abort(409, description='This update preparation is no longer current.')
                 self._editor_ready = op == 'editor_ready'
             elif op == 'cancel':
-                if self._shutting_down or state in ('stopping', 'installing', 'shutting_down', 'restart_required'):
+                # Native uses 'stopping' while its reservation handshake is still
+                # cancellable. Only its validated status can open this interval;
+                # committed runtime shutdown always closes it.
+                if (self._shutting_down or state in ('installing', 'shutting_down', 'restart_required') or
+                        (state == 'stopping' and self._status.get('cancellable') is not True)):
                     abort(409, description='Installation is finishing. Keep Speakerdesk open.')
                 if self._attempt == 0:
                     abort(409, description='There is no update to cancel.')

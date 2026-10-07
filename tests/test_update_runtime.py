@@ -192,6 +192,25 @@ class UpdateApiTests(UpdateFixture, unittest.TestCase):
         self.assertFalse(self.client.get('/api/updates').json['reserved'])
         self.assertEqual(self.operation('check').status_code,202)
 
+    def test_native_reservation_cancel_matches_status_until_shutdown_commits(self):
+        self.connect_updates()
+        attempt = self.prepare_update()
+        self.assertTrue(self.native('status', attempt, state='stopping', reserved=True, cancellable=True))
+        self.assertEqual(self.operation('cancel').status_code, 202)
+        self.assertEqual(self.frames[-1]['op'], 'cancel')
+        # An acknowledged reservation alone is still releasable. Keep all
+        # mutations guarded until native actually releases its reservation.
+        self.assertTrue(self.reserve(attempt))
+        self.assertEqual(self.operation('cancel').status_code, 202)
+        self.assertEqual(self.client.post('/api/people', headers=self.headers, json={'name':'Guarded'}).status_code, 409)
+        self.assertTrue(self.native('status', attempt, state='stopping', reserved=True, cancellable=False))
+        self.assertEqual(self.operation('cancel').status_code, 409)
+        # Even a delayed cancellable status cannot reopen committed shutdown.
+        self.assertTrue(self.native('status', attempt, state='stopping', reserved=True, cancellable=True))
+        self.assertTrue(self.native('shutdown', attempt))
+        self.assertTrue(self.native('status', attempt, state='stopping', reserved=True, cancellable=True))
+        self.assertEqual(self.operation('cancel').status_code, 409)
+
     def test_import_preparation_lease_survives_queued_and_running_work(self):
         self.connect_updates()
         attempt = self.prepare_update()
