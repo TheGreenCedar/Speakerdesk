@@ -31,9 +31,23 @@ def read_audio(path, start, end):
 
 class Inbox:
     """Coalesce audio notifications into ranges; PCM stays in the saved WAV."""
-    def __init__(self):
+    def __init__(self,*,audio_batch_seconds=1,refinement_interval_seconds=0):
+        if type(audio_batch_seconds) is not int or not 1<=audio_batch_seconds<=6:
+            raise ValueError('Invalid bounded audio drain cadence.')
+        self.audio_batch_samples=audio_batch_seconds*RATE
+        if type(refinement_interval_seconds) is not int or not 0<=refinement_interval_seconds<=60:
+            raise ValueError('Invalid bounded background refinement interval.')
+        self.refinement_interval_seconds=refinement_interval_seconds
+        self.last_refinement_at=None;self.active_refinement=None;self.capture_finished=False
         self.condition=threading.Condition();self.messages=deque();self.refinement=None
         self.closed=False;self.shutdown=False;self.error=None;self.historical=False;self.latest_epoch=0;self.cancelled=set();self.received=0
+    def _remember_cancel(self,operation_id):
+        # Called under condition. Unrelated pending cancellations cannot revive
+        # an operation still running after its own ordered language boundary.
+        keep={operation_id}
+        if self.active_refinement and self.active_refinement[0] in self.cancelled:
+            keep.add(self.active_refinement[0])
+        self.cancelled=set(sorted(self.cancelled-keep)[-(16-len(keep)):])|keep
     def push(self,message):
         with self.condition:
             kind=message['type']
@@ -49,12 +63,13 @@ class Inbox:
                 if self.refinement is not None:raise ValueError('Only one dispatched refinement is allowed.')
                 self.refinement=copy.deepcopy(message)
             elif kind=='cancel_refinement':
-                if message.get('operation_id'):self.cancelled.add(message['operation_id'])
+                if message.get('operation_id'):self._remember_cancel(message['operation_id'])
                 if self.refinement and self.refinement['operation_id']==message.get('operation_id'):
-                    self.cancelled.add(self.refinement['operation_id']);self.refinement=None
-                self.cancelled=set(list(self.cancelled)[-16:])
+                    self.refinement=None
             elif kind=='language':
                 self.latest_epoch=int(message.get('language_epoch',message.get('generation',0)))
+                if not self.historical and self.active_refinement and self.active_refinement[1]!=self.latest_epoch:
+                    self._remember_cancel(self.active_refinement[0])
                 if self.refinement and self.refinement['language_epoch']!=self.latest_epoch:self.refinement=None
                 self.messages.append(copy.deepcopy(message))
             elif kind=='shutdown':self.shutdown=True
@@ -64,7 +79,23 @@ class Inbox:
             self.condition.notify_all()
     def cancelled_request(self,request):
         with self.condition:
-            return self.shutdown or request['operation_id'] in self.cancelled or (not self.historical and request['language_epoch']!=self.latest_epoch)
+            # Canonical requests retain their immutable source epoch and host CAS.
+            # Language changes still cancel explicit in-flight operations; new
+            # background requests may cover earlier sealed original epochs.
+            historical=self.historical or (self.refinement_interval_seconds and
+                request.get('canonical') and request['canonical'].get('canonical_state')=='sealed'
+                and request['language_epoch']<=self.latest_epoch)
+            return self.shutdown or request['operation_id'] in self.cancelled or (not historical and request['language_epoch']!=self.latest_epoch)
+    def newer_audio_queued(self,through_sample,epoch):
+        """Only contiguous audio before the next ordered control supersedes a tail."""
+        with self.condition:
+            if not self.messages:return False
+            message=self.messages[0]
+            return (message['type']=='audio' and message['language_epoch']==epoch
+                    and message['start_sample']==through_sample and message['end_sample']>through_sample)
+    def finish_refinement(self,operation_id):
+        with self.condition:
+            if self.active_refinement and self.active_refinement[0]==operation_id:self.active_refinement=None
     def take(self):
         with self.condition:
             if self.error:raise ValueError(self.error)
@@ -72,13 +103,16 @@ class Inbox:
             if self.messages:
                 result=copy.deepcopy(self.messages[0])
                 if result['type']=='audio':
-                    result['end_sample']=min(result['end_sample'],result['start_sample']+RATE)
+                    result['end_sample']=min(result['end_sample'],result['start_sample']+self.audio_batch_samples)
                     self.messages[0]['start_sample']=result['end_sample']
                     if result['end_sample']==self.messages[0]['end_sample']:self.messages.popleft()
                 else:self.messages.popleft()
                 return result
-            if self.refinement:
-                result=self.refinement;self.refinement=None;return result
+            if self.refinement and (not self.refinement_interval_seconds or self.capture_finished or self.historical
+                    or self.last_refinement_at is None
+                    or time.monotonic()-self.last_refinement_at>=self.refinement_interval_seconds):
+                result=self.refinement;self.refinement=None;self.last_refinement_at=time.monotonic()
+                self.active_refinement=(result['operation_id'],result['language_epoch']);return result
             if self.closed:return {'type':'shutdown'}
             self.condition.wait(.1);return None
 
@@ -180,7 +214,9 @@ class Models:
         try:
             if self.coarse_aligner is None:
                 from coarse_alignment import CoarseAlignment
-                self.coarse_aligner=CoarseAlignment(self.config['alignment_path'])
+                import uuid
+                self.coarse_aligner=CoarseAlignment(self.config['alignment_path'],cache_directory=
+                    Path(self.config['audio_path']).parent/f'alignment-evidence-{uuid.uuid4().hex}')
             return self.coarse_aligner.align(read_audio(self.config['audio_path'],
                 request['start_sample'],request['end_sample']),text,
                 start_sample=request['start_sample'],language=language)
@@ -379,8 +415,8 @@ class Engine:
         self.emit({'type':'boundary_candidate','start':begin,'end':end,'language_epoch':config['epoch'],'candidates':passages})
         return self.decorate([{'start':0,'end':end-start,'text':'','language':None,'review':True,
                               'transcription_review':{'reason':'refinement_incomplete'}}],start,end,names,config['epoch'])
-    def commit(self,final=False):
-        if self.canonical:return self.canonical.commit(final)
+    def commit(self,final=False,*,decode_open=True):
+        if self.canonical:return self.canonical.commit(final,decode_open=decode_open)
         while True:
             before=self.cursor;self._commit_once(final)
             if self.cursor==before or self.cursor>=min(self.received/RATE,self.processed):break
@@ -529,7 +565,12 @@ class Engine:
                 pcm=read_audio(self.path,a,b)
                 output,self.processed=self.models.feed(pcm);self.received=b
                 self.turns.extend(output)
-                self.commit()
+                # Inspect every one-second crop, retaining seals and original
+                # anchors. Recognize an open tail only when its ordered audio
+                # horizon is current; newer queued PCM supersedes interim work.
+                current=(b==message['end_sample'] and
+                    not self.inbox.newer_audio_queued(b,message['language_epoch']))
+                self.commit(decode_open=current)
             self.emit({'type':'progress','processed_seconds':self.processed,'received_seconds':self.received/RATE,**self.models.metrics()})
         elif kind in ('flush','stop'):
             if kind=='flush' and 'request_id' in message:
@@ -539,6 +580,7 @@ class Engine:
             if kind=='stop':
                 output,self.processed=self.models.feed(np.empty(0,dtype='float32'),final=True);self.turns.extend(output)
                 self.capture_finished=True
+                self.inbox.capture_finished=True
             self.commit(final=True)
             self.emit({'type':'progress','processed_seconds':self.processed,'received_seconds':self.received/RATE,'flush':True,**self.models.metrics()})
             if kind=='flush' and 'request_id' in message:
@@ -567,6 +609,7 @@ class Engine:
         elif kind=='refine':
             try:result=self.refine(message)
             except Exception:result={'type':'refinement_result','operation_id':message['operation_id'],'language_epoch':message['language_epoch'],'window':message['window'],'error':'Refinement failed; previous words and audio retained.'}
+            finally:self.inbox.finish_refinement(message['operation_id'])
             self.emit(result)
         elif kind=='shutdown':self.emit({'type':'finished','duration':self.received/RATE});return False
         return True
@@ -575,7 +618,9 @@ class Engine:
 def run(config,emit):
     import sys
     with contextlib.redirect_stdout(sys.stderr):models=Models(config)
-    inbox=Inbox();inbox.latest_epoch=config.get('language_epoch',0);inbox.historical=bool(config.get('refinement_only'))
+    inbox=Inbox(audio_batch_seconds=6 if config.get('canonical_utterances') else 1,
+                refinement_interval_seconds=30 if config.get('canonical_utterances') and not config.get('refinement_only') else 0)
+    inbox.latest_epoch=config.get('language_epoch',0);inbox.historical=bool(config.get('refinement_only'))
     engine=Engine(config,models,emit,inbox)
     emit({'type':'ready','two_pass':True,'canonical_utterances':bool(engine.canonical),
           **({'admission_execution':models.admission_execution}

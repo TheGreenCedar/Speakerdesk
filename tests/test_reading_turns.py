@@ -154,20 +154,25 @@ class ReadingTurnTests(unittest.TestCase):
             finally:
                 manager.close();ext['executor'].shutdown(wait=True,cancel_futures=True)
 
-    def test_auto_timing_uses_only_current_confident_english_without_retranscription(self):
+    def test_english_routing_keeps_timing_independent_of_lid_confidence(self):
         from canonical_runtime import CanonicalRuntime
         from types import SimpleNamespace
         calls=[]
-        models=SimpleNamespace(align_canonical=lambda request,text,**kw:calls.append((request,text,kw)))
+        models=SimpleNamespace(align_canonical=lambda request,text,**kw:(calls.append((request,text,kw)) or {'words':[]}))
         runtime=object.__new__(CanonicalRuntime);runtime.engine=SimpleNamespace(models=models)
-        for language,reason,review in [('en','recent_context',False),('fr','detected',False),
-                                      ('en','detected',True),('en','best_effort',False)]:
-            self.assertIsNone(runtime.align_reading({'start_sample':0,'end_sample':16000},'RAW unchanged',
-                {'language':language,'review':review,'language_detection':{'reason':reason}}))
-        self.assertEqual(calls,[])
-        runtime.align_reading({'start_sample':0,'end_sample':16000},'RAW unchanged',
-            {'language':'en','language_detection':{'reason':'detected'}})
-        self.assertEqual(len(calls),1);self.assertEqual(calls[0][1],'RAW unchanged')
+        for reason,review in [('recent_context',True),('detected',True),('best_effort',True),
+                              ('detected',False),('override',False)]:
+            result=runtime.align_reading({'start_sample':0,'end_sample':16000},'RAW unchanged',
+                {'language':'en','language_review':review,'language_detection':{'reason':reason}})
+            self.assertEqual(result['reading_language_review'],review)
+        self.assertEqual(len(calls),5)
+        self.assertTrue(all(x[1]=='RAW unchanged' and x[2]=={'language':'en'} for x in calls))
+        for passage in [{'language':'fr','language_detection':{'reason':'detected'}},
+                        {'language':'en','language_detection':{'reason':'unsupported'}},
+                        {'language':'en','language_detection':{'reason':'mixed_languages'}},
+                        {'language':'en','transcription_review':{'reason':'empty_result'}}]:
+            self.assertIsNone(runtime.align_reading({'start_sample':0,'end_sample':16000},'RAW unchanged',passage))
+        self.assertEqual(len(calls),5)
 
     def test_real_routing_review_for_multiple_owners_does_not_block_english_timing(self):
         from test_canonical_runtime import CanonicalTests
@@ -200,10 +205,10 @@ class ReadingTurnTests(unittest.TestCase):
             case.peer.transcribe=transcribe;case.peer.alignment_supported=lambda language:language=='en'
             case.peer.align_canonical=align
             case.engine.config['language']='auto';case.engine.timeline[0]['language']='auto'
-            case.feed(0,30,mode='auto');case.engine.handle({'type':'stop'})
+            case.feed(0,7,mode='auto');case.engine.handle({'type':'stop'})
             row=case.rows()[-1]
-            self.assertEqual(row['text'],' '.join([case.peer.text]*2))
-            self.assertEqual(len(timing_calls),2)
+            self.assertEqual(row['text'],case.peer.text)
+            self.assertEqual(len(timing_calls),1)
             self.assertEqual(sum(n>24.5*16000 for n in asr_calls),0)
             self.assertIn('reading_turns',row)
             self.assertEqual(''.join(t['text'] for t in row['reading_turns']),row['text'])
@@ -211,7 +216,7 @@ class ReadingTurnTests(unittest.TestCase):
             self.assertTrue(row['review'])
         finally:case.tearDown()
 
-    def test_one_weak_probe_does_not_erase_confident_english_words_or_promote_weak_words(self):
+    def test_weak_english_probes_do_not_destroy_independent_acoustic_timing(self):
         from canonical_runtime import CanonicalRuntime
         from types import SimpleNamespace
         text='clear weak clear';words=[{'text':m.group(),'start_char':m.start(),'end_char':m.end(),
@@ -226,9 +231,51 @@ class ReadingTurnTests(unittest.TestCase):
             {'start_sample':96000,'end_sample':144000,'language':'en','review':False,'decision':{'reason':'detected'}}]}}
         projected=runtime.align_reading({'start_sample':0,'end_sample':144000},text,passage)
         self.assertEqual(len(calls),1)
-        self.assertEqual([w['start_sample'] for w in projected['words']],[16000,None,112000])
+        self.assertEqual([w['start_sample'] for w in projected['words']],[16000,64000,112000])
         self.assertEqual(result['words'][1]['start_sample'],64000)
-        self.assertEqual(projected['reading_english_regions'],[[0,48000],[96000,144000]])
+        self.assertTrue(projected['reading_language_review'])
+        self.assertEqual(projected['reading_timing_qualification'],'english_decoder_and_calibrated_acoustic_evidence')
+        # The same actual acoustic weakness stays null regardless of LID reason.
+        result['words'][1].update(status='unresolved',start_sample=None,end_sample=None)
+        projected=runtime.align_reading({'start_sample':0,'end_sample':144000},text,passage)
+        self.assertIsNone(projected['words'][1]['start_sample'])
+        # Mixed/non-English, stale probe anchors and incomplete partitions do
+        # not borrow the English calibration or execute the provider.
+        for modify in (lambda p:p['language_detection']['probes'][1].update(language='fr'),
+                       lambda p:p['language_detection']['probes'][1].update(start_sample=48001),
+                       lambda p:p['language_detection']['probes'].pop(),
+                       lambda p:p['language_detection'].update(probes=[]),
+                       lambda p:p['language_detection'].update(probes='invalid'),
+                       lambda p:p['language_detection']['probes'].__setitem__(1,None),
+                       lambda p:p['language_detection']['probes'][1].update(decision='invalid')):
+            broken=copy.deepcopy(passage);modify(broken)
+            self.assertIsNone(runtime.align_reading({'start_sample':0,'end_sample':144000},text,broken))
+        self.assertEqual(len(calls),2)
+
+    def test_lid_confidence_cannot_change_clean_ownership_or_acoustic_unknown(self):
+        from canonical_runtime import CanonicalRuntime
+        from types import SimpleNamespace
+        row=fixture();text=row['text'];words=copy.deepcopy(row['reading_word_evidence']['words'])
+        words[1].update(status='unresolved',start_sample=None,end_sample=None)
+        result={'raw_text':text,'text_sha256':hashlib.sha256(text.encode()).hexdigest(),
+                'audio_anchor':row['text_audio_anchor'],'model_sha256':MODEL,
+                'timing_kind':'ctc_emission_cell_envelope','frame_calibration_id':CALIBRATION,
+                'score_calibration_id':CALIBRATION,'words':[dict(w,status=w.get('status','aligned')) for w in words]}
+        runtime=object.__new__(CanonicalRuntime)
+        runtime.engine=SimpleNamespace(models=SimpleNamespace(align_canonical=lambda *args,**kw:result))
+        projections=[]
+        for reason,review in [('detected',False),('recent_context',True),('best_effort',True)]:
+            current=copy.deepcopy(row)
+            passage={'language':'en','language_review':review,'language_detection':{'reason':reason,'probes':[
+                {'start_sample':0,'end_sample':80000,'language':'en','review':review,'decision':{'reason':reason}},
+                {'start_sample':80000,'end_sample':160000,'language':'en','review':review,'decision':{'reason':reason}}]}}
+            aligned=runtime.align_reading({'start_sample':0,'end_sample':160000},text,passage)
+            bind_words(current,alignment_words(aligned,text,0,160000))
+            projections.append(project_turns(current))
+        self.assertEqual(projections[0],projections[1]);self.assertEqual(projections[1],projections[2])
+        self.assertEqual(projections[0][0]['speaker'],'speaker_0')
+        self.assertTrue(any(t['attribution']=='unknown' for t in projections[0]))
+        self.assertIsNone(result['words'][1]['start_sample'])
 
 
 if __name__=='__main__':unittest.main()

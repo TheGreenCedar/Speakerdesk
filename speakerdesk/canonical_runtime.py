@@ -2,10 +2,11 @@
 
 The short utterance path replaces one complete same-anchor Cohere revision.
 Long English utterances may use calibrated context ownership. Other languages
-and missing/failed alignment use disjoint original-audio crops, preserving every
+use disjoint original-audio crops, preserving every
 raw core text without pretending to know individual word boundaries.
 """
 import copy
+import hashlib
 from pathlib import Path
 import uuid
 
@@ -31,7 +32,9 @@ class CanonicalRuntime:
         self.engine=engine
         self.archive=RevisionArchive(Path(engine.path).parent/f'utterance-versions-{uuid.uuid4().hex}.jsonl')
         self.book=UtteranceBook(engine.config['job_id'],history_limit=2,archive=self.archive)
-        self.last_decoded={};self.published={}
+        from authority_store import AuthorityStore
+        self.last_decoded={};self.published={};self.authoritative_commitments={}
+        self.authoritative_store=AuthorityStore(Path(engine.path).parent/f'authority-{uuid.uuid4().hex}')
 
     def observe(self,available):
         ledger=self.engine.models.speech_live.evidence
@@ -52,7 +55,7 @@ class CanonicalRuntime:
         e=self.engine;stamp=e.language_at(row['start_sample'])
         a,b=row['start_sample'],row['end_sample']
         names=row.get('speaker_candidates',[])
-        if b-a<=MAX_DECODE_SAMPLES:
+        if b-a<=self.decode_limit(row):
             passages=e.decode(read_audio(e.path,a,b),stamp['language'],names,a/RATE,row['language_epoch'],overlap=True)
             # Multiple language-routed pieces have no safe shared word ownership.
             complete=(len(passages)==1 and not passages[0].get('transcription_review')
@@ -76,17 +79,45 @@ class CanonicalRuntime:
                 alignment=self.align_reading(request,text,passages[0])
                 bind_words(updated,alignment_words(alignment,text,a,b))
         else:
-            use_alignment=(stamp['language']=='en' and hasattr(e.models,'align_canonical')
+            use_alignment=((stamp['language']=='en' or (stamp['language']=='auto' and row.get('language')=='en'))
+                and hasattr(e.models,'align_canonical')
                 and (not hasattr(e.models,'alignment_supported') or e.models.alignment_supported('en')))
             if use_alignment:
-                parts=self.decode_long_parts(row,stage,self.book.decode_requests(row['id']),aligned=True)
+                authoritative=e.config.get('authoritative_tail',True)
+                if authoritative:
+                    from authoritative_tail import requests
+                    wanted=requests(row)
+                else:wanted=self.book.decode_requests(row['id'],contextual=True)
+                parts=self.decode_long_parts(row,stage,wanted,aligned=True,authoritative=authoritative)
                 if parts is False:return False
-                self.book.apply_decode_parts(row['id'],parts,stage=stage)
+                if authoritative:
+                    vocabulary=getattr(getattr(e.models,'coarse_aligner',None),'vocabulary',None)
+                    operation=self.refinement_request['operation_id'] if stage=='refined' else 'live'
+                    key=(row['id'],row['language_epoch'],stage)
+                    previous=self.authoritative_commitments.get(key,{})
+                    locked=previous.get('receipts',{}) if previous.get('operation')==operation else {}
+                    current=self.book.apply_authoritative_parts(row['id'],parts,stage=stage,vocabulary=vocabulary,
+                        committed_receipts=locked)
+                    if current['machine_versions'][-1]['complete'] and 'text' not in current['protected_fields']:
+                        self.authoritative_commitments[key]={'operation':operation,'receipts':{
+                            receipt['nominal_frontier_sample']:copy.deepcopy(receipt)
+                            for receipt in current['assembly_provenance']['rollover_receipts'] if receipt['committed']}}
+
+                else:self.book.apply_decode_parts(row['id'],parts,stage=stage,contextual=True)
                 updated=self.book.rows[row['id']]
-                # Keep failed aligned candidates in the journal. If ownership
-                # failed, decode separate cores; no uncalibrated CTC fallback.
-                if not updated['machine_versions'][-1]['complete'] and all(p['complete'] for p in parts):
-                    use_alignment=False
+                # A failed contextual seam remains an explicit candidate. A
+                # successful disjoint decode cannot certify this boundary or
+                # silently replace protected/prior words with clipped crops.
+                if updated['machine_versions'][-1]['complete'] and 'text' not in updated['protected_fields']:
+                    self.update_context_metadata(updated,parts,stamp['language'])
+                    updated.pop('context_candidate_language',None)
+                else:
+                    # Candidate routing cannot change the primary revision's
+                    # eligibility and make an unchanged retry bypass context.
+                    candidate={}
+                    self.update_context_metadata(candidate,parts,stamp['language'])
+                    updated['context_candidate_language']={key:copy.deepcopy(candidate[key]) for key in
+                        ('language','language_review','review','language_detection')}
             if not use_alignment:
                 from core_plan import plan,validate
                 row['decode_core_plan']=plan(row,e.models.speech_live.evidence.admission)
@@ -119,6 +150,15 @@ class CanonicalRuntime:
         self.last_decoded[row['id']]=(b,row['audio_revision'],stage)
         return True
 
+    def decode_limit(self,row):
+        stamp=self.engine.language_at(row['start_sample']);models=self.engine.models
+        if ((stamp['language']=='en' or (stamp['language']=='auto' and row.get('language')=='en'))
+                and hasattr(models,'align_canonical')
+                and (not hasattr(models,'alignment_supported') or models.alignment_supported('en'))):
+            from context_plan import PHYSICAL_MAX
+            return PHYSICAL_MAX
+        return MAX_DECODE_SAMPLES
+
     def reading_alignment_enabled(self,row):
         models=self.engine.models
         return (row['state']=='sealed' and len(row.get('speaker_candidates',[]))>1
@@ -126,45 +166,38 @@ class CanonicalRuntime:
             and models.alignment_supported('en'))
 
     def align_reading(self,request,text,passage):
-        # Timing never changes language routing or supplies a transcript. Auto
-        # requires the actual current confident decision, not a recent guess.
+        # Actual English decoder routing establishes this provider's scope.
+        # LID uncertainty remains review metadata, independent of acoustic
+        # timing and NVIDIA activity. CTC neither certifies language nor repairs
+        # the transcript. Unsupported/mixed routes and failed ASR stay excluded.
         detection=passage.get('language_detection') or {}
-        if passage.get('language')!='en' or passage.get('transcription_review'):
+        if not isinstance(detection,dict):return None
+        if (passage.get('language')!='en' or passage.get('transcription_review')
+                or detection.get('reason') in ('mixed_languages','unsupported','needs_language','insufficient_speech',
+                    'speech_admission_uncertain','speech_evidence_pending')):
             return None
         probes=detection.get('probes')
-        if probes:
-            regions=[];cursor=request['start_sample']
+        if 'probes' in detection:
+            if not isinstance(probes,list) or not probes:return None
+            cursor=request['start_sample']
             for probe in probes:
+                if not isinstance(probe,dict) or not isinstance(probe.get('decision',{}),dict):return None
                 a,b=probe.get('start_sample'),probe.get('end_sample')
-                if type(a) is not int or type(b) is not int or not cursor==a<b<=request['end_sample']:
+                if (type(a) is not int or type(b) is not int or not cursor==a<b<=request['end_sample']
+                        or probe.get('language')!='en'
+                        or probe.get('decision',{}).get('reason') in ('unsupported','needs_language',
+                            'insufficient_speech','speech_admission_uncertain','speech_evidence_pending')):
                     return None
                 cursor=b
-                if (probe.get('language')=='en' and not probe.get('review')
-                        and probe.get('decision',{}).get('reason') in ('detected','override')):
-                    if regions and regions[-1][1]==a:regions[-1][1]=b
-                    else:regions.append([a,b])
             if cursor!=request['end_sample']:return None
-        elif (not passage.get('language_review',passage.get('review'))
-              and detection.get('reason') in ('detected','override')):
-            regions=[[request['start_sample'],request['end_sample']]]
-        else:
-            regions=[]
-        if not regions:
-            return None
         result=self.engine.models.align_canonical(request,text,language='en')
         if not isinstance(result,dict):return None
-        result=copy.deepcopy(result);result['reading_english_regions']=regions
-        # Align unchanged whole core text, but trust no envelope in its weak or
-        # context-routed language slots. Merge confident contiguous probes so
-        # a language detector's feed grid cannot create artificial word gaps.
-        for word in result.get('words',[]):
-            a,b=word.get('start_sample'),word.get('end_sample')
-            if not (type(a) is int and type(b) is int and
-                    any(x<=a-4000<b+4000<=y for x,y in regions)):
-                word.update(status='unresolved_language',start_sample=None,end_sample=None)
+        result=copy.deepcopy(result)
+        result['reading_timing_qualification']='english_decoder_and_calibrated_acoustic_evidence'
+        result['reading_language_review']=bool(passage.get('language_review',passage.get('review')))
         return result
 
-    def decode_long_parts(self,row,stage,requests,*,aligned):
+    def decode_long_parts(self,row,stage,requests,*,aligned,authoritative=False):
         from live_refinement import read_audio
         from rolling_refinement import successful_non_speech
         e=self.engine;stamp=e.language_at(row['start_sample']);a,b=row['start_sample'],row['end_sample']
@@ -172,6 +205,18 @@ class CanonicalRuntime:
         for request in requests:
             if stage=='refined' and e.inbox.cancelled_request(self.refinement_request):return False
             x,y=request['start_sample'],request['end_sample'];pcm=read_audio(e.path,x,y)
+            digest=hashlib.sha256(pcm.astype('<f4').tobytes()).hexdigest()
+            operation=self.refinement_request['operation_id'] if stage=='refined' else 'live'
+            key=(row['id'],row['language_epoch'],stamp['language'],stage,operation,x,y,digest)
+            saved=self.authoritative_store.get(key) if authoritative else None
+            if saved is not None:
+                saved['authority_reference']=self.authoritative_store.reference(key)
+                saved['request']=copy.deepcopy(request);saved['reuse']='previous_selected_same_pcm_authority'
+                # Chosen text is stable; failed optional timing is retryable.
+                # Explicit ASR refinement/retry gets a distinct operation key.
+                if saved.get('alignment') is None and hasattr(e.models,'align_canonical'):
+                    saved['alignment']=e.models.align_canonical(request,saved['text'],language=saved['passages'][0].get('language'))
+                parts.append(saved);continue
             try:
                 if hasattr(e.models,'set_decode_boundary_padding'):
                     e.models.set_decode_boundary_padding(3200 if x>a else 0,3200 if y<b else 0)
@@ -197,11 +242,33 @@ class CanonicalRuntime:
             reading_alignment=None
             if not aligned and complete and text.strip() and len(passages)==1 and self.reading_alignment_enabled(row):
                 reading_alignment=self.align_reading(request,text,passages[0])
-            parts.append({'request':request,'text':text,'complete':complete,'alignment':alignment,
+            part={'request':request,'source_inference_request':copy.deepcopy(request),'source_audio_float32_sha256':digest,'text':text,'complete':complete,'alignment':alignment,
                           'reading_alignment':reading_alignment,
                           'cohere_input_padding':[copy.deepcopy(p.get('cohere_input_padding')) for p in passages],
-                          'passages':passages})
+                          'passages':passages}
+            parts.append(part)
+            if authoritative and complete:
+                self.authoritative_store.put(key,part)
+                part['authority_reference']=self.authoritative_store.reference(key)
         return parts
+
+    @staticmethod
+    def update_context_metadata(row,parts,mode):
+        passages=[p for part in parts for p in part['passages'] if p['text'].strip()]
+        languages={p.get('language') for p in passages}
+        row['language']=next(iter(languages)) if len(languages)==1 else None
+        weak=next((p for p in passages if p.get('language_review',p.get('review'))),None)
+        reason=('override' if mode!='auto' else 'mixed_languages' if len(languages)>1
+                else ((weak.get('language_detection') or {}).get('reason') or 'uncertain') if weak else 'detected')
+        row['language_review']=bool(weak)
+        row['review']=bool(weak) or (mode=='auto' and (len(languages)!=1 or None in languages))
+        row['language_detection']={'mode':'manual' if mode!='auto' else 'auto','reason':reason,
+            'source':'contextual_decode_language_decisions','contexts':[
+                {'start_sample':part['request']['start_sample'],'end_sample':part['request']['end_sample'],
+                 'passages':[{'language':p.get('language'),'language_review':p.get('language_review',p.get('review')),
+                              'language_detection':copy.deepcopy(p.get('language_detection'))} for p in part['passages']]}
+                for part in parts]}
+        for key in ('acoustic_evidence','transcription_review','audio_state'):row.pop(key,None)
 
     @staticmethod
     def update_core_metadata(row,parts,mode):
@@ -264,7 +331,7 @@ class CanonicalRuntime:
         self.refinement_request=request
         a,b=current['start_sample'],current['end_sample']
         try:
-            if b-a<=MAX_DECODE_SAMPLES:
+            if b-a<=self.decode_limit(current):
                 pcm=read_audio(e.path,a,b)
                 if hasattr(e.models,'begin_refinement'):e.models.begin_refinement(pcm,a)
                 absolute=[dict(turn,start=turn['start']+a/RATE,end=turn['end']+a/RATE)
@@ -322,7 +389,7 @@ class CanonicalRuntime:
         e=self.engine;e.fast_sequence+=1
         e.emit({'type':'canonical_revision','candidate':candidate,'fast_sequence':e.fast_sequence})
 
-    def commit(self,final=False):
+    def commit(self,final=False,*,decode_open=True):
         e=self.engine;available=min(e.received,e.models.speech_live.evidence.end_sample)
         self.observe(available)
         if e.capture_finished and available==e.received and not self.book.closed:self.book.finish()
@@ -335,13 +402,21 @@ class CanonicalRuntime:
                 observed=min(e.received,getattr(e.models,'nvidia_observed_sample',round(e.processed*RATE)))))
             last=self.last_decoded.get(identity)
             changed=last is None or last[1]!=row['audio_revision']
-            # Keep the existing6s first/3s subsequent cadence for growing audio.
+            # First text/language routing keeps its six-second deadline. Only
+            # later open revisions are superseded by newer queued audio; seals
+            # and explicit flush/Stop remain mandatory original-anchor work.
             due=final or row['state']=='sealed' or (row['end_sample']-row['start_sample']>=6*RATE
-                and (last is None or row['end_sample']-last[0]>=3*RATE))
-            if row['end_sample']-row['start_sample']>MAX_DECODE_SAMPLES:
-                row['canonical_unresolved']='unresolved_alignment'
-            # Uncalibrated long open audio cannot be repeatedly decoded/stitched.
-            if changed and due and (row['end_sample']-row['start_sample']<=MAX_DECODE_SAMPLES or row['state']=='sealed' or final):
+                and (last is None or (decode_open and row['end_sample']-last[0]>=3*RATE)))
+            limit=self.decode_limit(row)
+            # A selected tail revises with new audio; stable earlier physical
+            # hypotheses are reused, not independently re-recognized each tick.
+            stamp=e.language_at(row['start_sample'])
+            authoritative=(e.config.get('authoritative_tail',True) and (stamp['language']=='en' or
+                (stamp['language']=='auto' and row.get('language')=='en')) and hasattr(e.models,'align_canonical')
+                and (not hasattr(e.models,'alignment_supported') or e.models.alignment_supported('en')))
+            if row['end_sample']-row['start_sample']>limit and not authoritative:
+                row.setdefault('canonical_unresolved','unresolved_alignment')
+            if changed and due and (row['end_sample']-row['start_sample']<=limit or row['state']=='sealed' or final or authoritative):
                 self.decode(row,'live')
             self.publish(row)
         e.cursor=self.book.cursor/RATE
@@ -353,6 +428,9 @@ class CanonicalRuntime:
                 and self.book.rows[identity]['end_sample']<available-60*RATE]
         for identity in retire:
             self.book.rows.pop(identity);self.published.pop(identity,None);self.last_decoded.pop(identity,None)
+
+        if retire:
+            self.authoritative_commitments={key:value for key,value in self.authoritative_commitments.items() if key[0] not in retire}
         if retire:self.book.order=[identity for identity in self.book.order if identity not in set(retire)]
         e.turns=[turn for turn in e.turns if round(turn['end']*RATE)>max(0,self.book.cursor-60*RATE)
                  or (self.book.active and round(turn['end']*RATE)>self.book.rows[self.book.active]['start_sample'])]

@@ -14,7 +14,7 @@ TOKEN_SHA256 = 'a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31
 
 
 class CoarseAlignment:
-    def __init__(self, directory):
+    def __init__(self, directory, *, cache_directory=None):
         directory=Path(directory)
         for name,digest in (('model.int8.onnx',MODEL_SHA256),('tokens.txt',TOKEN_SHA256)):
             with (directory/name).open('rb') as stream:
@@ -30,7 +30,8 @@ class CoarseAlignment:
         self.vocabulary=parse_vocabulary((directory/'tokens.txt').read_text())
         from alignment_cache import AlignmentCache
         self.cache=AlignmentCache((MODEL_SHA256,TOKEN_SHA256,CALIBRATION_ID,
-            'ctc_emission_cell_envelope',320,0,-20,'onnxruntime-1.30.0','ctc-segmentation-1.7.4'))
+            'ctc_emission_cell_envelope',320,0,-20,'onnxruntime-1.30.0','ctc-segmentation-1.7.4'),
+            directory=cache_directory)
 
     def align(self,audio,text,*,start_sample,language):
         if language!='en':return None
