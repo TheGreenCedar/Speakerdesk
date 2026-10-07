@@ -9,7 +9,7 @@ const {mkdtemp,readFile,rm,mkdir,writeFile}=require('node:fs/promises');
 const {tmpdir}=require('node:os');
 const {join,resolve}=require('node:path');
 const {setTimeout:delay}=require('node:timers/promises');
-const [chromium,output]=process.argv.slice(2),root=resolve(__dirname,'..'),jid='d'.repeat(32);
+const [chromium,output,mode]=process.argv.slice(2),root=resolve(__dirname,'..'),jid='d'.repeat(32);
 async function main(){
   assert(chromium && output,'Pass installed Chromium executable and evidence directory');
   await mkdir(output,{recursive:true});
@@ -65,6 +65,40 @@ async function main(){
     await send('Page.navigate',{url:`${base}/?meeting=${jid}`});await wait('typeof selected!=="undefined" && selected?.id && !polling && !meetingPoll');
     const checks=[],measurements=[],source={sha256:{}};
     for(const file of ['speakerdesk/static/app.js','speakerdesk/static/live_editor.js','speakerdesk/static/style.css'])source.sha256[file]=createHash('sha256').update(await readFile(join(root,file))).digest('hex');
+    if(mode==='--unknown-speakers') {
+      const snapshots=require('./support/unknown_speaker_jobs.json'),partition=structuredClone(job);
+      for(const status of ['ready','recording'])for(const [name,snapshot] of Object.entries(snapshots)) {
+        job=structuredClone(snapshot);job.id=jid;job.status=status;job.refinement_status='complete';
+        job.document.segments.forEach(s=>s.refinement_state='refined');
+        await evaluate(`select('${jid}')`);
+        const qualified=name.startsWith('qualified');
+        const state=await evaluate(`(()=>{const c=$('segments').firstElementChild;return {count:$('segments').children.length,
+          words:c.querySelector('textarea').value,labels:Array.from(c.querySelectorAll('.reading-turn-speaker')).map(e=>e.textContent),
+          unassigned:c.querySelector('.name-speaker')?.textContent || c.querySelector('select').selectedOptions[0].textContent,
+          names:Array.from($('speaker-list').querySelectorAll('button')).map(e=>e.textContent),
+          invented:!!doc.speakers.speaker_7 || !!doc.speakers.speaker_8}})()`);
+        assert.equal(state.count,1);assert.equal(state.words,'Alpha. Still alpha. Beta. Still beta.');assert.equal(state.invented,false);
+        assert(!state.names.includes('Speaker unassigned'));
+        if(qualified)assert.deepEqual(state.labels,['Speaker 1','Speaker 2']);
+        else {assert.deepEqual(state.labels,[]);assert.equal(state.unassigned,'Speaker unassigned');}
+        if(name.endsWith('candidate')) {
+          await evaluate("document.querySelector('.passage-details-toggle').click()");
+          const receipt=await evaluate(`(()=>{const evidence=document.querySelector('.passage-evidence');return {open:evidence.open,mapping:JSON.parse(evidence.querySelector('pre').textContent).speaker_track_mapping};})()`);
+          assert.equal(receipt.open,false);assert.deepEqual(receipt.mapping.mapping,qualified?{speaker_7:'speaker_0',speaker_8:'speaker_1'}:{});
+          assert.deepEqual(receipt.mapping.raw_batch_turns.map(t=>t.speaker),['speaker_7','speaker_8']);
+          await evaluate(status==='ready'?"$('inspector').hidden=true":"document.querySelector('.passage-details-toggle').click()");
+        }
+        if(name==='one-live-track-two-batch-slots.candidate')for(const width of [1280,760]) {
+          await send('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false});
+          await evaluate(`document.documentElement.dataset.theme='${width===1280?'light':'dark'}';$('transcript-pane').scrollTop=0`);
+          await screenshot(`unknown-${status}-${width}.png`);
+        }
+      }
+      checks.push('Eight actual synthetic saved-API snapshots in saved/live views: qualified tracks keep two owners; missing timing and unmatched local slots keep unassigned words, with no invented global IDs or generic naming action.');
+      checks.push('Mapped/unmatched batch receipts preserve both local IDs inside collapsed existing Inference evidence; four saved/live wide/light and narrow/dark screenshots.');
+      job=partition;await send('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});
+      await evaluate(`document.documentElement.dataset.theme='light';select('${jid}')`);
+    }
     const ids=()=>evaluate("Array.from($('segments').children).map(c=>c.dataset.segmentId)");
     assert.deepEqual(await ids(),['r0','r2','r4','r1','r3','r5']);
     assert.equal(await evaluate("document.querySelectorAll('.live-section-label').length"),1);

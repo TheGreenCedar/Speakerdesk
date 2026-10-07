@@ -1,0 +1,781 @@
+{
+  "qualified-two-tracks.baseline": {
+    "canonical_utterances": true,
+    "created": 1,
+    "document": {
+      "provenance": {
+        "kind": "local_inference",
+        "mode": "canonical_vad_utterances",
+        "timing": "Original VAD audio anchors; NVIDIA activity is independent. No word timestamps without calibrated alignment."
+      },
+      "schema_version": 1,
+      "segments": [
+        {
+          "audio_revision": 10,
+          "canonical_machine_revision": 3,
+          "canonical_state": "sealed",
+          "canonical_utterance_id": "utterance-e7298777cff7dea9ac701b95",
+          "end": 10,
+          "end_sample": 160000,
+          "finalized": true,
+          "id": "utterance-e7298777cff7dea9ac701b95",
+          "language": "en",
+          "language_detection": {
+            "mode": "manual",
+            "reason": "override"
+          },
+          "language_epoch": 0,
+          "language_generation": 0,
+          "language_mode": "en",
+          "machine_revision": 10,
+          "protected_fields": [],
+          "reading_turn_provenance": {
+            "activity_sha256": "1322e0a95c9fb9c955da6bcc5a3410611ccdd7887ffe2366e13c689b3eddae90",
+            "audio_anchor": {
+              "end_sample": 160000,
+              "start_sample": 0
+            },
+            "audio_revision": 10,
+            "calibration_id": "ami-english-coarse-v1-5ab4e661e62f",
+            "canonical_machine_revision": 3,
+            "language_epoch": 0,
+            "machine_revision": 10,
+            "method": "english_coarse_emissions_temporal_nvidia_v1",
+            "model_sha256": "e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c",
+            "text_sha256": "23c27436474a03df62a4fe6364b4a5802c3bc59b2dcad849f4ad9dd3a0db8600",
+            "transition_margin_samples": 4000,
+            "turns_sha256": "3c4698dda589a3236d41fb6545e864bb5ce5fc8cc4988eb84914acd096ae3678",
+            "utterance_id": "utterance-e7298777cff7dea9ac701b95"
+          },
+          "reading_turns": [
+            {
+              "attribution": "single",
+              "end": 3.9,
+              "end_offset": 20,
+              "speaker": "speaker_0",
+              "start": 0.75,
+              "start_offset": 0,
+              "text": "Alpha. Still alpha. "
+            },
+            {
+              "attribution": "single",
+              "end": 6.65,
+              "end_offset": 37,
+              "speaker": "speaker_1",
+              "start": 5.5,
+              "start_offset": 20,
+              "text": "Beta. Still beta."
+            }
+          ],
+          "refinement_state": "provisional",
+          "review": true,
+          "source_speaker_candidates": [
+            "speaker_0",
+            "speaker_1"
+          ],
+          "speaker": "multiple_speakers",
+          "speaker_activity": {
+            "audio_revision": 10,
+            "regions": [
+              {
+                "end_sample": 16000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 0
+              },
+              {
+                "end_sample": 32000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 16000
+              },
+              {
+                "end_sample": 48000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 32000
+              },
+              {
+                "end_sample": 64000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 48000
+              },
+              {
+                "end_sample": 80000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 64000
+              },
+              {
+                "end_sample": 96000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 80000
+              },
+              {
+                "end_sample": 112000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 96000
+              },
+              {
+                "end_sample": 128000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 112000
+              },
+              {
+                "end_sample": 144000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 128000
+              },
+              {
+                "end_sample": 160000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 144000
+              }
+            ]
+          },
+          "speaker_candidates": [
+            "speaker_0",
+            "speaker_1"
+          ],
+          "speech_regions": [
+            {
+              "end_sample": 160000,
+              "start_sample": 0
+            }
+          ],
+          "start": 0,
+          "start_sample": 0,
+          "text": "Alpha. Still alpha. Beta. Still beta.",
+          "text_audio_anchor": {
+            "end_sample": 160000,
+            "start_sample": 0
+          },
+          "timing": "canonical_vad_audio_anchor",
+          "voice_eligible": false
+        }
+      ],
+      "speakers": {
+        "multiple_speakers": "Multiple speakers",
+        "speaker_0": "Speaker 1",
+        "speaker_1": "Speaker 2",
+        "unassigned": "Unknown speaker"
+      },
+      "warnings": []
+    },
+    "duration": 10,
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "inference_owned": false,
+    "kind": "meeting",
+    "language": "en",
+    "language_acknowledged_revision": 0,
+    "language_epoch": 0,
+    "language_history": [
+      {
+        "epoch": 0,
+        "generation": 0,
+        "language": "en",
+        "start_sample": 0
+      }
+    ],
+    "language_revision": 0,
+    "last_fast_sequence": 11,
+    "name": "CPU identity control",
+    "refinement_status": "waiting",
+    "refinement_unresolved": [],
+    "revision": 11,
+    "rolling_refinement": {
+      "cancelled": false,
+      "completed_sample": 0,
+      "last_scheduled_at": 2313566.3977895,
+      "pending": [],
+      "version": 1
+    },
+    "status": "ready",
+    "updated": 1791397745.638916
+  },
+  "unqualified-two-tracks.baseline": {
+    "canonical_utterances": true,
+    "created": 1,
+    "document": {
+      "provenance": {
+        "kind": "local_inference",
+        "mode": "canonical_vad_utterances",
+        "timing": "Original VAD audio anchors; NVIDIA activity is independent. No word timestamps without calibrated alignment."
+      },
+      "schema_version": 1,
+      "segments": [
+        {
+          "audio_revision": 10,
+          "canonical_machine_revision": 3,
+          "canonical_state": "sealed",
+          "canonical_utterance_id": "utterance-e7298777cff7dea9ac701b95",
+          "end": 10,
+          "end_sample": 160000,
+          "finalized": true,
+          "id": "utterance-e7298777cff7dea9ac701b95",
+          "language": "en",
+          "language_detection": {
+            "mode": "manual",
+            "reason": "override"
+          },
+          "language_epoch": 0,
+          "language_generation": 0,
+          "language_mode": "en",
+          "machine_revision": 10,
+          "protected_fields": [],
+          "refinement_state": "provisional",
+          "review": true,
+          "source_speaker_candidates": [
+            "speaker_0",
+            "speaker_1"
+          ],
+          "speaker": "unassigned",
+          "speaker_activity": {
+            "audio_revision": 10,
+            "regions": [
+              {
+                "end_sample": 16000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 0
+              },
+              {
+                "end_sample": 32000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 16000
+              },
+              {
+                "end_sample": 48000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 32000
+              },
+              {
+                "end_sample": 64000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 48000
+              },
+              {
+                "end_sample": 80000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 64000
+              },
+              {
+                "end_sample": 96000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 80000
+              },
+              {
+                "end_sample": 112000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 96000
+              },
+              {
+                "end_sample": 128000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 112000
+              },
+              {
+                "end_sample": 144000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 128000
+              },
+              {
+                "end_sample": 160000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 144000
+              }
+            ]
+          },
+          "speaker_candidates": [
+            "speaker_0",
+            "speaker_1"
+          ],
+          "speech_regions": [
+            {
+              "end_sample": 160000,
+              "start_sample": 0
+            }
+          ],
+          "start": 0,
+          "start_sample": 0,
+          "text": "Alpha. Still alpha. Beta. Still beta.",
+          "text_audio_anchor": {
+            "end_sample": 160000,
+            "start_sample": 0
+          },
+          "timing": "canonical_vad_audio_anchor",
+          "voice_eligible": false
+        }
+      ],
+      "speakers": {
+        "speaker_0": "Speaker 1",
+        "speaker_1": "Speaker 2",
+        "unassigned": "Unknown speaker"
+      },
+      "warnings": []
+    },
+    "duration": 10,
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "inference_owned": false,
+    "kind": "meeting",
+    "language": "en",
+    "language_acknowledged_revision": 0,
+    "language_epoch": 0,
+    "language_history": [
+      {
+        "epoch": 0,
+        "generation": 0,
+        "language": "en",
+        "start_sample": 0
+      }
+    ],
+    "language_revision": 0,
+    "last_fast_sequence": 11,
+    "name": "CPU identity control",
+    "refinement_status": "waiting",
+    "refinement_unresolved": [],
+    "revision": 11,
+    "rolling_refinement": {
+      "cancelled": false,
+      "completed_sample": 0,
+      "last_scheduled_at": 2313566.417756125,
+      "pending": [],
+      "version": 1
+    },
+    "status": "ready",
+    "updated": 1791397745.658634
+  },
+  "one-live-track-two-batch-slots.candidate": {
+    "canonical_utterances": true,
+    "created": 1,
+    "document": {
+      "provenance": {
+        "kind": "local_inference",
+        "mode": "canonical_vad_utterances",
+        "timing": "Original VAD audio anchors; NVIDIA activity is independent. No word timestamps without calibrated alignment."
+      },
+      "schema_version": 1,
+      "segments": [
+        {
+          "audio_revision": 10,
+          "canonical_machine_revision": 4,
+          "canonical_state": "sealed",
+          "canonical_utterance_id": "utterance-e7298777cff7dea9ac701b95",
+          "end": 10,
+          "end_sample": 160000,
+          "finalized": true,
+          "id": "utterance-e7298777cff7dea9ac701b95",
+          "language": "en",
+          "language_detection": {
+            "mode": "manual",
+            "reason": "override"
+          },
+          "language_epoch": 0,
+          "language_generation": 0,
+          "language_mode": "en",
+          "machine_revision": 11,
+          "protected_fields": [],
+          "refinement_state": "refined",
+          "review": true,
+          "source_speaker_candidates": [
+            "unknown_mixed"
+          ],
+          "speaker": "unassigned",
+          "speaker_activity": {
+            "audio_revision": 10,
+            "regions": [
+              {
+                "end_sample": 80000,
+                "speakers": [
+                  "unknown_mixed"
+                ],
+                "start_sample": 0
+              },
+              {
+                "end_sample": 160000,
+                "speakers": [
+                  "unknown_mixed"
+                ],
+                "start_sample": 80000
+              }
+            ]
+          },
+          "speaker_candidates": [
+            "unknown_mixed"
+          ],
+          "speaker_track_mapping": {
+            "audio_anchor": {
+              "end_sample": 160000,
+              "start_sample": 0
+            },
+            "audio_revision": 10,
+            "local_activity": [
+              {
+                "end_sample": 80000,
+                "speakers": [
+                  "speaker_7"
+                ],
+                "start_sample": 0
+              },
+              {
+                "end_sample": 160000,
+                "speakers": [
+                  "speaker_8"
+                ],
+                "start_sample": 80000
+              }
+            ],
+            "mapping": {},
+            "operation_id": "identity-control",
+            "raw_batch_turns": [
+              {
+                "end": 5,
+                "speaker": "speaker_7",
+                "start": 0
+              },
+              {
+                "end": 10,
+                "speaker": "speaker_8",
+                "start": 5
+              }
+            ],
+            "scores": [
+              {
+                "active_seconds": 5,
+                "best_fraction": 1,
+                "best_speaker": "speaker_0",
+                "local_speaker": "speaker_7",
+                "reason": "ambiguous_claim",
+                "reference_overlap_seconds": {
+                  "speaker_0": 5
+                },
+                "runner_up_fraction": 0
+              },
+              {
+                "active_seconds": 5,
+                "best_fraction": 1,
+                "best_speaker": "speaker_0",
+                "local_speaker": "speaker_8",
+                "reason": "ambiguous_claim",
+                "reference_overlap_seconds": {
+                  "speaker_0": 5
+                },
+                "runner_up_fraction": 0
+              }
+            ],
+            "source": "batch_diarization_temporal_mapping_v1",
+            "utterance_id": "utterance-e7298777cff7dea9ac701b95"
+          },
+          "speech_regions": [
+            {
+              "end_sample": 160000,
+              "start_sample": 0
+            }
+          ],
+          "start": 0,
+          "start_sample": 0,
+          "text": "Alpha. Still alpha. Beta. Still beta.",
+          "text_audio_anchor": {
+            "end_sample": 160000,
+            "start_sample": 0
+          },
+          "timing": "canonical_vad_audio_anchor",
+          "voice_eligible": false
+        }
+      ],
+      "speakers": {
+        "speaker_0": "Speaker 1",
+        "unassigned": "Unknown speaker",
+        "unknown_mixed": "Mixed audio"
+      },
+      "warnings": []
+    },
+    "duration": 10,
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "inference_owned": false,
+    "kind": "meeting",
+    "language": "en",
+    "language_acknowledged_revision": 0,
+    "language_epoch": 0,
+    "language_history": [
+      {
+        "epoch": 0,
+        "generation": 0,
+        "language": "en",
+        "start_sample": 0
+      }
+    ],
+    "language_revision": 0,
+    "last_fast_sequence": 12,
+    "name": "CPU identity control",
+    "refinement_status": "waiting",
+    "refinement_unresolved": [],
+    "revision": 12,
+    "rolling_refinement": {
+      "cancelled": false,
+      "completed_sample": 0,
+      "last_scheduled_at": 2313656.599428541,
+      "pending": [],
+      "version": 1
+    },
+    "status": "ready",
+    "updated": 1791397835.841585
+  },
+  "qualified-mapped-batch-slots.candidate": {
+    "canonical_utterances": true,
+    "created": 1,
+    "document": {
+      "provenance": {
+        "kind": "local_inference",
+        "mode": "canonical_vad_utterances",
+        "timing": "Original VAD audio anchors; NVIDIA activity is independent. No word timestamps without calibrated alignment."
+      },
+      "schema_version": 1,
+      "segments": [
+        {
+          "audio_revision": 10,
+          "canonical_machine_revision": 4,
+          "canonical_state": "sealed",
+          "canonical_utterance_id": "utterance-e7298777cff7dea9ac701b95",
+          "end": 10,
+          "end_sample": 160000,
+          "finalized": true,
+          "id": "utterance-e7298777cff7dea9ac701b95",
+          "language": "en",
+          "language_detection": {
+            "mode": "manual",
+            "reason": "override"
+          },
+          "language_epoch": 0,
+          "language_generation": 0,
+          "language_mode": "en",
+          "machine_revision": 11,
+          "protected_fields": [],
+          "reading_turn_provenance": {
+            "activity_sha256": "d9dd071dd6f7b381e796c812539d2434b84c7e99ec265465cc715d9d31a91671",
+            "audio_anchor": {
+              "end_sample": 160000,
+              "start_sample": 0
+            },
+            "audio_revision": 10,
+            "calibration_id": "ami-english-coarse-v1-5ab4e661e62f",
+            "canonical_machine_revision": 4,
+            "language_epoch": 0,
+            "machine_revision": 11,
+            "method": "english_coarse_emissions_temporal_nvidia_v1",
+            "model_sha256": "e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c",
+            "text_sha256": "23c27436474a03df62a4fe6364b4a5802c3bc59b2dcad849f4ad9dd3a0db8600",
+            "transition_margin_samples": 4000,
+            "turns_sha256": "3c4698dda589a3236d41fb6545e864bb5ce5fc8cc4988eb84914acd096ae3678",
+            "utterance_id": "utterance-e7298777cff7dea9ac701b95"
+          },
+          "reading_turns": [
+            {
+              "attribution": "single",
+              "end": 3.9,
+              "end_offset": 20,
+              "speaker": "speaker_0",
+              "start": 0.75,
+              "start_offset": 0,
+              "text": "Alpha. Still alpha. "
+            },
+            {
+              "attribution": "single",
+              "end": 6.65,
+              "end_offset": 37,
+              "speaker": "speaker_1",
+              "start": 5.5,
+              "start_offset": 20,
+              "text": "Beta. Still beta."
+            }
+          ],
+          "refinement_state": "refined",
+          "review": true,
+          "source_speaker_candidates": [
+            "speaker_0",
+            "speaker_1"
+          ],
+          "speaker": "multiple_speakers",
+          "speaker_activity": {
+            "audio_revision": 10,
+            "regions": [
+              {
+                "end_sample": 80000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 0
+              },
+              {
+                "end_sample": 160000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 80000
+              }
+            ]
+          },
+          "speaker_candidates": [
+            "speaker_0",
+            "speaker_1"
+          ],
+          "speaker_track_mapping": {
+            "audio_anchor": {
+              "end_sample": 160000,
+              "start_sample": 0
+            },
+            "audio_revision": 10,
+            "local_activity": [
+              {
+                "end_sample": 80000,
+                "speakers": [
+                  "speaker_7"
+                ],
+                "start_sample": 0
+              },
+              {
+                "end_sample": 160000,
+                "speakers": [
+                  "speaker_8"
+                ],
+                "start_sample": 80000
+              }
+            ],
+            "mapping": {
+              "speaker_7": "speaker_0",
+              "speaker_8": "speaker_1"
+            },
+            "operation_id": "identity-control",
+            "raw_batch_turns": [
+              {
+                "end": 5,
+                "speaker": "speaker_7",
+                "start": 0
+              },
+              {
+                "end": 10,
+                "speaker": "speaker_8",
+                "start": 5
+              }
+            ],
+            "scores": [
+              {
+                "active_seconds": 5,
+                "best_fraction": 1,
+                "best_speaker": "speaker_0",
+                "local_speaker": "speaker_7",
+                "reason": "mapped",
+                "reference_overlap_seconds": {
+                  "speaker_0": 5,
+                  "speaker_1": 0
+                },
+                "runner_up_fraction": 0
+              },
+              {
+                "active_seconds": 5,
+                "best_fraction": 1,
+                "best_speaker": "speaker_1",
+                "local_speaker": "speaker_8",
+                "reason": "mapped",
+                "reference_overlap_seconds": {
+                  "speaker_0": 0,
+                  "speaker_1": 5
+                },
+                "runner_up_fraction": 0
+              }
+            ],
+            "source": "batch_diarization_temporal_mapping_v1",
+            "utterance_id": "utterance-e7298777cff7dea9ac701b95"
+          },
+          "speech_regions": [
+            {
+              "end_sample": 160000,
+              "start_sample": 0
+            }
+          ],
+          "start": 0,
+          "start_sample": 0,
+          "text": "Alpha. Still alpha. Beta. Still beta.",
+          "text_audio_anchor": {
+            "end_sample": 160000,
+            "start_sample": 0
+          },
+          "timing": "canonical_vad_audio_anchor",
+          "voice_eligible": false
+        }
+      ],
+      "speakers": {
+        "multiple_speakers": "Multiple speakers",
+        "speaker_0": "Speaker 1",
+        "speaker_1": "Speaker 2",
+        "unassigned": "Unknown speaker"
+      },
+      "warnings": []
+    },
+    "duration": 10,
+    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "inference_owned": false,
+    "kind": "meeting",
+    "language": "en",
+    "language_acknowledged_revision": 0,
+    "language_epoch": 0,
+    "language_history": [
+      {
+        "epoch": 0,
+        "generation": 0,
+        "language": "en",
+        "start_sample": 0
+      }
+    ],
+    "language_revision": 0,
+    "last_fast_sequence": 12,
+    "name": "CPU identity control",
+    "refinement_status": "waiting",
+    "refinement_unresolved": [],
+    "revision": 12,
+    "rolling_refinement": {
+      "cancelled": false,
+      "completed_sample": 0,
+      "last_scheduled_at": 2313656.617926541,
+      "pending": [],
+      "version": 1
+    },
+    "status": "ready",
+    "updated": 1791397835.862756
+  }
+}

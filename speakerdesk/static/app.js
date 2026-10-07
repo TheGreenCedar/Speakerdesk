@@ -210,6 +210,23 @@ function renderFollowLive() {
 function nameSpeaker(id) {
   flushSave().then(() => openNamePicker(id)).catch(error => notice(error.message, true));
 }
+function speakerLabel(id) {
+  if(id==='unassigned')return 'Speaker unassigned';
+  return doc.speakers[id] || (/^speaker_\d+$/.test(id)?`Speaker ${Number(id.slice(8))+1}`:'Unknown speaker');
+}
+function speakerNameControl(id,className='name-speaker') {
+  const assigned=id!=='unassigned',label=speakerLabel(id);
+  const control=node(assigned?'button':'span',label,className);control.dataset.speaker=id;
+  if(assigned) {
+    control.type='button';control.title='Name this speaker or remember their voice';
+    control.setAttribute('aria-label',`Name or remember voice for ${label}`);
+    control.addEventListener('click',()=>nameSpeaker(id));
+  }else {
+    control.title='These words have no assigned speaker.';
+    control.setAttribute('aria-label',label);
+  }
+  return control;
+}
 function removePassage(segment) {
   const index = doc.segments.indexOf(segment), jid = selected.id;
   if (index < 0) return;
@@ -235,8 +252,8 @@ function renderSearchResults(visible, query) {
 }
 function speakerOptions(selectEl, current) {
   selectEl.replaceChildren();
-  for (const [id, name] of Object.entries(doc.speakers)) {
-    const option = node('option', name); option.value = id; option.selected = id === current; selectEl.append(option);
+  for (const id of Object.keys(doc.speakers)) {
+    const option = node('option', speakerLabel(id)); option.value = id; option.selected = id === current; selectEl.append(option);
   }
 }
 function renderEditor() {
@@ -245,14 +262,12 @@ function renderEditor() {
   renderSaveState();
   $('segment-count').textContent = isLive() ? '' : passageCountLabel();
   $('speaker-list').replaceChildren();
-  Object.entries(doc.speakers).forEach(([id, name], i) => {
+  Object.keys(doc.speakers).forEach((id, i) => {
     const row = node('div', undefined, 'speaker-name');
     const dot = node('span', undefined, 'speaker-dot'); dot.dataset.color = i % 8;
-    const choose = node('button', undefined, 'speaker-name-action name-speaker'); choose.type = 'button';
-    choose.append(dot, node('span', name), icon('pencil'));
-    choose.setAttribute('aria-label', `Name or remember voice for ${name}`);
-    choose.title = 'Name this speaker or remember their voice';
-    choose.addEventListener('click', () => nameSpeaker(id));
+    const choose = speakerNameControl(id,'speaker-name-action name-speaker');
+    choose.replaceChildren(dot, node('span', speakerLabel(id)));
+    if(id!=='unassigned')choose.append(icon('pencil'));
     row.append(choose); $('speaker-list').append(row);
   });
   $('timing-note').textContent = doc.provenance?.timing || 'User supplied segment boundaries.';
@@ -306,12 +321,12 @@ function hasOverlappingSpeakers(segment) {
 }
 function readingTurnLabel(turn) {
   if(turn.attribution==='overlap')return 'Overlapping speakers';
-  if(turn.attribution==='unknown')return 'Unknown speaker';
-  return doc.speakers[turn.speaker] || (/^speaker_\d+$/.test(turn.speaker)?`Speaker ${Number(turn.speaker.slice(8))+1}`:'Unknown speaker');
+  if(turn.attribution==='unknown')return speakerLabel('unassigned');
+  return speakerLabel(turn.speaker);
 }
 function passageSearchText(segment) {
   const names=validReadingTurns(segment)?.map(readingTurnLabel).join(' ') || '';
-  return segment.text+' '+(doc.speakers[segment.speaker] || '')+' '+names;
+  return segment.text+' '+speakerLabel(segment.speaker)+' '+names;
 }
 function refreshReadingTurnView(card,segment) {
   const turns=validReadingTurns(segment);let binding=readingTurnBindings.get(card);
@@ -403,7 +418,7 @@ function savedPassageSignature(segment) {
 function savedCard(segment) {
   const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;card.dataset.speaker=segment.speaker;
   const index = Object.keys(doc.speakers).indexOf(segment.speaker);
-  const avatar=node('span',`S${index+1}`,'speaker-avatar');avatar.setAttribute('aria-hidden','true');avatar.dataset.color=index%8;
+  const avatar=node('span',segment.speaker==='unassigned'?'?':`S${index+1}`,'speaker-avatar');avatar.setAttribute('aria-hidden','true');avatar.dataset.color=segment.speaker==='unassigned'?-1:index%8;
   const body=node('div',undefined,'segment-body');
   const top = node('div', undefined, 'segment-top');
   const seek = node('button', undefined, 'seek'); seek.append(icon('play'),node('span',time(segment.start))); seek.setAttribute('aria-label', `Play passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);seek.title=`Play passage ${passageTime(segment.start)}–${passageTime(segment.end)}`;
@@ -577,7 +592,7 @@ function appendPassageEvidence(host,segment) {
   appendUncoveredAudio(host,segment);
   const evidence=node('details',undefined,'passage-evidence');evidence.append(node('summary','Inference evidence'));
   const metadata={};
-  for(const key of ['review','review_resolution','refinement_state','language','language_detection','confidence','speaker_candidates','voice_eligible','audio_state','transcription_review','audio_anchor','timing','provenance','refinement_window','machine_revision']) {
+  for(const key of ['review','review_resolution','refinement_state','language','language_detection','confidence','speaker_candidates','speaker_track_mapping','voice_eligible','audio_state','transcription_review','audio_anchor','timing','provenance','refinement_window','machine_revision']) {
     if(segment[key]!==undefined)metadata[key]=segment[key];
   }
   if(doc.provenance)metadata.recording_provenance=doc.provenance;
@@ -631,7 +646,7 @@ function groupConsecutivePassages(host,pending=0) {
   const divided=pending>0 || !!host.querySelector('.rolling-segment[data-transcript-section="live"],.rolling-segment[data-transcript-section="corrections"]');
   for(const card of host.children) {
     const section=card.dataset.transcriptSection || 'processed',start=section!==previousSection;
-    const continuation=!start && previous && previous.dataset.speaker===card.dataset.speaker;
+    const continuation=!start && previous && card.dataset.speaker!=='unassigned' && previous.dataset.speaker===card.dataset.speaker;
     setPassageClass(card,'speaker-continuation',!!continuation);
     setPassageClass(card,'passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
     const live=section==='live';

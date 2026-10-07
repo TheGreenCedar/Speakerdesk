@@ -45,12 +45,10 @@ function liveCard(segment) {
   card.dataset.start=segment.start;card.dataset.end=segment.end;
   card.dataset.speaker=segment.speaker;
   const jid=selected.id,key=`${jid}:${segment.id}`;card.dataset.meetingId=jid;
-  const avatar=node('span',`S${Object.keys(doc.speakers).indexOf(segment.speaker)+1}`,'speaker-avatar');
-  avatar.dataset.color=Object.keys(doc.speakers).indexOf(segment.speaker)%8;avatar.setAttribute('aria-hidden','true');
+  const avatar=node('span',segment.speaker==='unassigned'?'?':`S${Object.keys(doc.speakers).indexOf(segment.speaker)+1}`,'speaker-avatar');
+  avatar.dataset.color=segment.speaker==='unassigned'?-1:Object.keys(doc.speakers).indexOf(segment.speaker)%8;avatar.setAttribute('aria-hidden','true');
   const body=node('div',undefined,'segment-body'),top=node('div',undefined,'segment-top');
-  const identity=node('button',doc.speakers[segment.speaker],'name-speaker');
-  identity.title='Name this speaker or remember their voice';identity.setAttribute('aria-label',`Name or remember voice for ${doc.speakers[segment.speaker]}`);
-  identity.addEventListener('click',()=>openNamePicker(segment.speaker).catch(e=>notice(e.message,true)));
+  const identity=speakerNameControl(segment.speaker);
   const timing=node('span',time(segment.start),'rolling-time');
   timing.title=`${passageTime(segment.start)}–${passageTime(segment.end)}`;
   timing.setAttribute('aria-label',`Passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);
@@ -189,8 +187,14 @@ function renderLiveSegments() {
     if(card.dataset.uiSignature===uiSignature)continue;
     card.dataset.uiSignature=uiSignature;
     if(card.dataset.speaker!==segment.speaker)card.dataset.speaker=segment.speaker;
-    const name=card.querySelector('.name-speaker');
-    if(name.textContent!==doc.speakers[segment.speaker]){name.textContent=doc.speakers[segment.speaker];name.setAttribute('aria-label',`Name or remember voice for ${doc.speakers[segment.speaker]}`);}
+    let name=card.querySelector('.name-speaker');
+    if(name.dataset.speaker!==segment.speaker){const next=speakerNameControl(segment.speaker);name.replaceWith(next);name=next;}
+    const label=speakerLabel(segment.speaker);
+    if(name.textContent!==label){name.textContent=label;name.setAttribute('aria-label',segment.speaker==='unassigned'?label:`Name or remember voice for ${label}`);}
+    const avatar=card.querySelector('.speaker-avatar'),index=Object.keys(doc.speakers).indexOf(segment.speaker);
+    const avatarText=segment.speaker==='unassigned'?'?':`S${index+1}`,color=String(segment.speaker==='unassigned'?-1:index%8);
+    if(avatar.textContent!==avatarText)avatar.textContent=avatarText;
+    if(avatar.dataset.color!==color)avatar.dataset.color=color;
     card.classList.toggle('has-draft',!!draft);
     card.classList.toggle('has-new-words',!!draft && draft.revision!==segment.machine_revision);
     card.classList.toggle('has-recoverable-draft',recoverablePassageDrafts.has(segment.id));
