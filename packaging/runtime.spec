@@ -12,6 +12,12 @@ for folder in ['templates','static']:
     data.append((str(root/'speakerdesk'/folder),folder))
 data.append((str(root/'packaging/licenses/alignment-runtime'),'licenses/alignment-runtime'))
 data.append((str(root/'speakerdesk/alignment-mlx'),'alignment-mlx'))
+# Exact policy/decoder file checks also work in the frozen runtime. The profile
+# does not hash itself or its loader, avoiding recursive digest dependencies.
+data.append((str(root/'speakerdesk/asr-reuse-profile.json'),'.'))
+for name in ['canonical_runtime','final_asr_reuse','language_detection','language_probe_cache',
+             'live_refinement','meeting_refinement']:
+    data.append((str(root/'speakerdesk'/(name+'.py')),'.'))
 # These exact components produced the frozen English GPU calibration.
 for package,version in [('mlx','0.32.2'),('mlx-metal','0.32.2'),('mlx-audio','0.5.7'),('numpy','2.5.3')]:
     assert importlib.metadata.version(package)==version, f'GPU alignment runtime differs: {package}'
@@ -32,7 +38,7 @@ for package,version in [('onnxruntime','1.30.0'),('ctc-segmentation','1.7.4'),('
 hidden+=['onnxruntime','onnxruntime.capi.onnxruntime_pybind11_state',
          'ctc_segmentation','ctc_segmentation.ctc_segmentation_dyn','flatbuffers']
 hidden+=collect_submodules('mlx_audio.stt.models.whisper')
-hidden+=['alignment_model','mlx_ctc_forward']
+hidden+=['alignment_model','mlx_ctc_forward','asr_reuse_profile']
 hidden+=collect_submodules('mlx_audio.stt.models.mms')
 hidden+=collect_submodules('mlx_audio.stt.models.wav2vec')
 hidden+=collect_submodules('mlx_speech.models.cohere_asr')
@@ -49,7 +55,7 @@ binary+=collect_dynamic_libs('coremltools')
 binary+=collect_dynamic_libs('onnxruntime')
 a=Analysis([str(root/'packaging/sidecar.py')],pathex=[str(root/'speakerdesk')],binaries=binary,datas=data,
            hiddenimports=hidden,excludes=['torch','transformers','tensorflow','matplotlib','pandas','Cython','pyximport'],noarchive=False,
-           module_collection_mode={'mlx_audio':'pyz+py'})
+           module_collection_mode={'mlx_audio':'pyz+py','mlx_speech':'pyz+py'})
 pyz=PYZ(a.pure)
 exe=EXE(pyz,a.scripts,a.binaries,a.datas,[],name='speakerdesk-runtime-aarch64-apple-darwin',debug=False,
         bootloader_ignore_signals=False,strip=False,upx=False,console=True,target_arch='arm64',codesign_identity=os.getenv("SPEAKERDESK_SIGNING_IDENTITY"))

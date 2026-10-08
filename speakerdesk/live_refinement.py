@@ -188,11 +188,8 @@ class Models:
         self.diar=load(Path(config['diar_path']),strict=True);self.diar.set_streaming_config('low')
         self.state=self.diar.init_streaming_state()
         self.asr=CohereAsrModel.from_path(Path(config['cohere_path']))
-        self.final_asr_reuse=None
-        if config.get('asr_final_reuse_mode'):
-            from final_asr_reuse import FinalAsrReuse
-            self.final_asr_reuse=FinalAsrReuse(config['asr_reuse_identity'],
-                mode=config['asr_final_reuse_mode'],qualification=config.get('asr_reuse_qualification'))
+        from asr_reuse_profile import initialize_reuse
+        self.final_asr_reuse,self.asr_reuse_profile=initialize_reuse(config,self.asr,mx)
         self.cohere_calls=0
         from speech_admission import SileroModel, FrameArchive
         import uuid
@@ -238,7 +235,8 @@ class Models:
     def begin_asr_request(self,scope):
         reuse=getattr(self,'final_asr_reuse',None)
         if reuse is not None:
-            if self.mx.default_device().type!=self.mx.gpu:
+            if (self.mx.default_device().type!=self.mx.gpu or
+                    self.mx.default_stream(self.mx.gpu).device.type!=self.mx.gpu):
                 raise RuntimeError('Final ASR observer/reuse requires the GPU; CPU fallback is disabled.')
             reuse.begin(scope)
     def finish_asr_request(self,authority=None):
@@ -249,7 +247,8 @@ class Models:
         from language_detection import SpeechTranscriber,WhisperLanguageDetector
         self.check_memory()
         reuse=getattr(self,'final_asr_reuse',None)
-        if reuse is not None and self.mx.default_device().type!=self.mx.gpu:
+        if reuse is not None and (self.mx.default_device().type!=self.mx.gpu or
+                self.mx.default_stream(self.mx.gpu).device.type!=self.mx.gpu):
             raise RuntimeError('Final ASR observer/reuse requires the GPU; CPU fallback is disabled.')
         if language=='auto' and self.detector is None:self.detector=WhisperLanguageDetector(self.config['lid_path'])
         transcriber=SpeechTranscriber(self.asr,language,self.config.get('lid_path'),detector=self.detector,

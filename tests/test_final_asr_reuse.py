@@ -31,7 +31,9 @@ class RoutingPeer(fixtures.Peer):
     def __init__(self,mode):
         super().__init__();self.config={};self.check_memory=lambda:None
         self.mx=SimpleNamespace(clear_cache=lambda:None,
-            default_device=lambda:SimpleNamespace(type='synthetic_gpu'),gpu='synthetic_gpu');self.detector=None
+            default_device=lambda:SimpleNamespace(type='synthetic_gpu'),
+            default_stream=lambda device:SimpleNamespace(device=SimpleNamespace(type='synthetic_gpu')),
+            gpu='synthetic_gpu');self.detector=None
         self.language_probe_cache=LanguageProbeCache();self.language_epoch=0
         self.language_context=None;self.transcription_start_sample=0;self.cohere_calls=0
         self.coarse_aligner=SimpleNamespace(vocabulary=VOCAB)
