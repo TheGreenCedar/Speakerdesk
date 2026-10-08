@@ -7,7 +7,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 import numpy as np
@@ -97,23 +97,28 @@ class SetupTests(unittest.TestCase):
                 self.assertEqual(done,[folder]);self.assertTrue(client.get('/api/setup').json['models'][0]['installed']);network.assert_not_called()
 
 class BackendTests(unittest.TestCase):
+    def modules(self,mx):
+        # Source CI has no Metal package. Stub the parent as well as its core
+        # so these guards test the fake backend on every platform.
+        parent=ModuleType('mlx');parent.__path__=[];parent.core=mx
+        return {'mlx':parent,'mlx.core':mx}
     def mx(self,available=True,device='gpu',stream_device='gpu'):
         calls=[]
         m=SimpleNamespace(gpu='gpu',float32=np.float32,metal=SimpleNamespace(is_available=lambda:available),default_device=lambda:SimpleNamespace(type=device),default_stream=lambda d:SimpleNamespace(device=SimpleNamespace(type=stream_device)),stream=lambda d:contextlib.nullcontext(),array=lambda x,**k:np.array(x,**k),mean=np.mean,var=np.var,sqrt=np.sqrt,logsumexp=lambda x,**k:np.log(np.exp(x).sum(**k)),eval=lambda *a:calls.append('eval'),synchronize=lambda *a:calls.append('sync'))
         return m,calls
     def test_Metal_unavailable_rejects_before_any_model_or_data_preparation(self):
         mx,_=self.mx(available=False)
-        with patch.dict(sys.modules,{'mlx.core':mx}),patch.object(forward,'prepare_model',side_effect=AssertionError('unexpected prepare')):
+        with patch.dict(sys.modules,self.modules(mx)),patch.object(forward,'prepare_model',side_effect=AssertionError('unexpected prepare')):
             with self.assertRaisesRegex(RuntimeError,'No CPU fallback'):forward.load_gpu_model(directory='configured-models')
     def test_CPU_default_or_stream_rejected_before_neural_call(self):
         for device,stream in [('cpu','gpu'),('gpu','cpu')]:
             mx,_=self.mx(device=device,stream_device=stream)
-            with patch.dict(sys.modules,{'mlx.core':mx}):
+            with patch.dict(sys.modules,self.modules(mx)):
                 with self.assertRaisesRegex(RuntimeError,'refusing neural inference'):forward.forward_scores(lambda *a:self.fail('model called'),np.ones(8,dtype=np.float32))
     def test_forward_materializes_GPU_scores_before_execution_provenance(self):
         mx,calls=self.mx();receipt={}
         def model(audio):self.assertEqual(receipt,{});calls.append('model');return np.zeros((1,2,4),dtype=np.float32)
-        with patch.dict(sys.modules,{'mlx.core':mx}):scores=forward.forward_scores(model,np.arange(16,dtype=np.float32),execution=receipt)
+        with patch.dict(sys.modules,self.modules(mx)):scores=forward.forward_scores(model,np.arange(16,dtype=np.float32),execution=receipt)
         self.assertEqual(calls,['model','eval','sync']);self.assertEqual(receipt['backend'],'mlx_metal_gpu');self.assertTrue(receipt['evaluated_and_GPU_synchronized']);np.testing.assert_allclose(scores,np.full((2,4),-np.log(4)),rtol=1e-6)
     def test_provider_does_not_cache_or_publish_unverified_execution(self):
         p=CoarseAlignment.__new__(CoarseAlignment);p.model=object();p.actual_gpu_forwards=0;p.cache=AlignmentCache((MODEL_SHA256,TOKEN_SHA256,CALIBRATION_ID,'ctc_emission_cell_envelope',320,0,-20,'mlx-0.32.2-cached-float32-gpu','ctc-segmentation-1.7.4'));p.vocabulary={}
