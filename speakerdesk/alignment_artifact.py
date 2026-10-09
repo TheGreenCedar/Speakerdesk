@@ -4,7 +4,7 @@ ALIGNMENT_SPEC = {
     'provider_id': 'omnilingual-ctc-mlx-supplied-text-v2',
     'supported_languages': ['en','de','fr','it','es','pt','el','nl','pl','vi','zh','ar','ja','ko'],
     'timing_accuracy_calibrated_languages': ['en'],
-    'provider_identity_sha256': '7a285f556e32b8b1fb3da3ad5b7988bae5c3d7315f4f9498c6f9591cb2328829',
+    'provider_identity_sha256': 'd6edf058ea6884706739dfcce150605bc3ec9f415d8fdf4cf6274a44813ad16f',
     'repo': 'csukuangfj2/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12',
     'revision': '6fc542a3b0661c8278cca1230c34deb989f31202',
     'directory': 'coarse-alignment', 'weight_file': 'model.int8.onnx',

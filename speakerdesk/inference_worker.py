@@ -16,6 +16,7 @@ def utterance_tail_chunks(chunks, utterances, *, rate=16000, max_seconds=18):
     Only a clean single-speaker crop followed by an unassigned gap qualifies.
     A speech region must cross that boundary and its utterance must finish in
     the gap. Real switches/overlap and the existing decode size limit remain.
+    Leading VAD context may precede the crop, but admitted speech may not.
     The activity ledger is retained; context does not establish word ownership.
     """
     import copy
@@ -28,7 +29,8 @@ def utterance_tail_chunks(chunks, utterances, *, rate=16000, max_seconds=18):
                 or following['speakers'] or abs(current['end']-following['start']) > 1e-6):
             index += 1;continue
         utterance = next((row for row in utterances
-            if round(current['start']*rate) <= row['start_sample'] < boundary < row['end_sample']
+            if row['speech_regions']
+            and round(current['start']*rate) <= row['speech_regions'][0]['start_sample'] < boundary < row['end_sample']
             and row['end_sample'] <= round(following['end']*rate)
             and row['end_sample']-round(current.get('audio_start',current['start'])*rate) <= max_seconds*rate
             and any(part['start_sample'] < boundary < part['end_sample'] for part in row['speech_regions'])), None)
@@ -39,7 +41,8 @@ def utterance_tail_chunks(chunks, utterances, *, rate=16000, max_seconds=18):
             {'start':current['start'], 'end':current['end'], 'speakers':list(current['speakers'])},
             {'start':following['start'], 'end':end, 'speakers':[]}]
         current['decode_context'] = {'policy':'speech_utterance_tail_context_v1',
-            'start_sample':utterance['start_sample'], 'end_sample':utterance['end_sample'],
+            'start_sample':round(current.get('audio_start',current['start'])*rate),
+            'end_sample':utterance['end_sample'],
             'boundary_sample':boundary}
         current['end'] = current['audio_end'] = end
         current.pop('audio', None)

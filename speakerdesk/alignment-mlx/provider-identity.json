@@ -32,6 +32,6 @@
     "canonical_runtime.py": "7f69606e48e87b23b0ac7fd7f29ba3a1f8c02c123ea3019e08ff36381a605b49",
     "live_refinement.py": "e8d3e49506c0a6b1d9f38edf8291f7fe9945609c8ea7f3b77f8c92ab199c633c",
     "pipeline.py": "78fcf18053f342f52afe7497327402ce2a7c5fe9be2d359d314b53d78057b432",
-    "inference_worker.py": "ac90166e3e4e27764861a082ef168814eb0347ed8929a1c8d079e17ae40b5779"
+    "inference_worker.py": "328b70909931ad581fc4287feef22ecc115a6460e800e08ab391b490952198f5"
   }
 }

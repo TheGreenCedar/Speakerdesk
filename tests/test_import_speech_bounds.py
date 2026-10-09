@@ -175,6 +175,32 @@ class ImportSpeechBounds(unittest.TestCase):
         np.testing.assert_array_equal(self.asr.transcribe.call_args_list[1].args[0],
             self.pcm[224*FRAME-3200:256*FRAME+3200].astype(np.float32)/32768)
 
+    def test_later_utterance_leading_context_does_not_fragment_its_admitted_tail(self):
+        document = self.run_import([(0,32*FRAME),(224*FRAME,256*FRAME)],
+            turns=('0 6 speaker_0','7.04 7.9 speaker_1'))
+        self.assertEqual(self.asr.transcribe.call_count, 2)
+        np.testing.assert_array_equal(self.asr.transcribe.call_args_list[1].args[0],
+            self.pcm[112640:134272].astype(np.float32)/32768)
+        words = [row for row in document['segments'] if row['text']]
+        self.assertEqual([row['text'] for row in words], ['Thank you.','Thank you.'])
+        later = words[1]
+        self.assertEqual((later['start'],later['end']), (7.04,8.392))
+        self.assertEqual(later['decode_context']['start_sample'], 112640)
+        self.assertEqual(later['speaker'], 'unassigned')
+        self.assertTrue(later['review']);self.assertFalse(later['voice_eligible'])
+        self.assertEqual(later['activity_regions'], [
+            {'start':7.04,'end':7.9,'speakers':['speaker_1']},
+            {'start':7.9,'end':8.392,'speakers':[]}])
+
+    def test_admitted_speech_before_a_later_speaker_crop_keeps_separate_decodes(self):
+        document = self.run_import([(0,32*FRAME),(224*FRAME,256*FRAME)],
+            turns=('0 6 speaker_0','7.5 7.9 speaker_1'))
+        self.assertEqual(self.asr.transcribe.call_count, 4)
+        words = [row for row in document['segments'] if row['text']]
+        self.assertEqual([row['speaker'] for row in words],
+            ['speaker_0','unassigned','speaker_1','unassigned'])
+        self.assertFalse(any(row.get('decode_context') for row in words))
+
     def run_retry(self):
         def worker(python, task, request, folder):
             return inference_worker.run(task, request)
