@@ -69,6 +69,29 @@ class UpdateApiTests(UpdateFixture, unittest.TestCase):
         self.models.stop()
         self.temp.cleanup()
 
+    def test_update_notice_persists_across_runtime_restart_without_native_command(self):
+        self.connect_updates()
+        attempt = self.operation('check').json['id']
+        self.updates.handle({'op': 'status', 'id': attempt, 'state': 'available', 'version': '0.7.0'})
+        path = '/api/preferences/update-notice'
+        self.assertEqual(self.client.patch(path, json={'version': '0.7.0'}).status_code, 403)
+        for body in ({'version': '0.8.0'}, {'version': '0.7.0', 'url': 'https://example.test'}, {}):
+            self.assertEqual(self.client.patch(path, headers=self.headers, json=body).status_code, 400)
+        response = self.client.patch(path, headers=self.headers, json={'version': '0.7.0'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json['dismissed_version'], '0.7.0')
+        self.assertEqual([frame['op'] for frame in self.frames], ['check'])
+        self.assertEqual(self.client.get('/api/updates').json['dismissed_version'], '0.7.0')
+        # A fresh service/HTTP origin reads the real persisted preference.
+        restarted = create_app(self.root/'recordings')
+        try:
+            self.assertEqual(restarted.test_client().get('/api/updates').json['dismissed_version'], '0.7.0')
+        finally:
+            restarted.extensions['speakerdesk']['meetings'].close()
+            restarted.extensions['speakerdesk']['executor'].shutdown(wait=True, cancel_futures=True)
+        self.updates.handle({'op': 'status', 'id': attempt, 'state': 'current'})
+        self.assertEqual(self.client.patch(path, headers=self.headers, json={'version': '0.7.0'}).status_code, 400)
+
     def wait_for(self, predicate):
         deadline = time.monotonic()+3
         while time.monotonic() < deadline:
@@ -244,7 +267,7 @@ class UpdateApiTests(UpdateFixture, unittest.TestCase):
             entered.set()
             self.assertTrue(release.wait(3))
             voice.update(status='ready')
-        with patch.object(voice, 'supported', return_value=True), patch.object(voice, 'download', side_effect=download):
+        with patch.object(voice, 'supported', return_value=True), patch.object(voice, 'released', return_value=True), patch.object(voice, 'download', side_effect=download):
             try:
                 self.assertEqual(self.client.post('/api/setup/voice', headers=self.headers).status_code, 202)
                 self.assertTrue(entered.wait(2))

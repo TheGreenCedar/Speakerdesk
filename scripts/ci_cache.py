@@ -40,7 +40,7 @@ def keys(root, tracked, tools):
         'compiler-prefix': compiler_prefix,
         'compiler-key': compiler_prefix + fingerprint(root, rust_inputs + rust_contract, {}),
         # Whole components use exact inputs only. No prefix restore for executable outputs.
-        'runtime-key': f"{prefix}-runtime-{fingerprint(root, files('speakerdesk/', 'packaging/', 'requirements-', 'scripts/setup.sh', 'scripts/setup_alignment.sh', 'scripts/build_macos.sh', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
+        'runtime-key': f"{prefix}-runtime-{fingerprint(root, files('speakerdesk/', 'packaging/', 'desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/echo_compile_guard.py', 'requirements-', 'scripts/setup.sh', 'scripts/setup_alignment.sh', 'scripts/build_macos.sh', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
         'capture-key': f"{prefix}-capture-{fingerprint(root, files('desktop/capture/', 'desktop/src-tauri/Entitlements.plist', 'scripts/build_macos.sh', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
     }
 
@@ -86,6 +86,8 @@ if __name__ == '__main__':
             'deployment': '15.0', 'rust': command('rustc', '-Vv'),
             'xcode': command('xcodebuild', '-version'), 'swift': command('xcrun', 'swiftc', '--version'),
             'sdk': command('xcrun', '--show-sdk-version'), 'python': command('python3.13', '--version'),
+            'clang': command('xcrun','clang','--version'),
+            'cmake': command('cmake','--version'), 'ninja': command('ninja','--version'),
             'uv': command('uv', '--version'), 'node': command('node', '--version'),
             'sccache': command('sccache', '--version'), 'profile': 'release-default-features-adhoc',
         }

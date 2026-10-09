@@ -36,7 +36,9 @@ if config.get('test_canonical_peer'):
                 'received_sample':peer.received,'closed':phase=='stop',
                 'audio_encoding':'pcm_s16le','pcm_sha256':retained_pcm_digest(cfg['audio_path'],end),
                 'speech_samples':end,'uncertain_samples':0,'negative_constant_samples':0,'model_negative_samples':0,'decision':'speech'}
-        peer.inspection_receipt=inspection;return peer
+        peer.inspection_receipt=inspection
+        peer.for_source=lambda source_config:canonical_cpu_models(source_config)
+        return peer
     live_refinement.Models=canonical_cpu_models
 else:
     # Retain the explicit legacy rolling-window regression contracts. The new

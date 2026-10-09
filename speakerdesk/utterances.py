@@ -62,13 +62,14 @@ class RevisionArchive:
 
 class UtteranceBook:
     def __init__(self, job_id, *, silence_samples=8000, context_samples=3200,
-                 history_limit=None, archive=None):
+                 history_limit=None, archive=None, capture_source=None):
         if not isinstance(job_id, str) or not job_id:
             raise ValueError('Utterance identity requires a recording.')
         if (type(silence_samples) is not int or type(context_samples) is not int
                 or not 0 < context_samples < silence_samples):
             raise ValueError('Invalid utterance context policy.')
         self.job_id, self.silence_samples, self.context_samples = job_id, silence_samples, context_samples
+        self.capture_source = copy.deepcopy(capture_source)
         if history_limit is not None and (type(history_limit) is not int or history_limit<1 or archive is None):
             raise ValueError('Bounded utterance history requires durable archival.')
         self.history_limit,self.archive=history_limit,archive
@@ -158,14 +159,16 @@ class UtteranceBook:
             if self.active is None:
                 previous_end = self.rows[self.order[-1]]['end_sample'] if self.order else 0
                 begin = max(self.epoch_start, previous_end, a-self.context_samples)
-                identity = hashlib.sha256(f'{self.job_id}:{self.epoch}:{begin}'.encode()).hexdigest()[:24]
-                self.active = 'utterance-'+identity
+                from capture_sources import utterance_id
+                self.active = utterance_id(self.job_id,self.epoch,begin,self.capture_source)
                 self.rows[self.active] = {'id': self.active, 'start_sample': begin, 'end_sample': b,
                     'last_speech_sample': b, 'language_epoch': self.epoch, 'state': 'open',
                     'text': '', 'machine_revision': 0, 'audio_revision': 0,
                     'speech_regions': [], 'voice_eligible': False,
                     'protected_fields': [], 'machine_versions': []}
                 self.order.append(self.active)
+                if self.capture_source is not None:
+                    self.rows[self.active]['capture_source'] = copy.deepcopy(self.capture_source)
             row = self.rows[self.active]
             if row['speech_regions'] and row['speech_regions'][-1]['end_sample'] == a:
                 row['speech_regions'][-1]['end_sample'] = b

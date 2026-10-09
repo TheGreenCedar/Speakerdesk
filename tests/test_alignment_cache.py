@@ -19,7 +19,8 @@ def evidence(key):
         'audio_float32_sha256':audio,'audio_anchor':{'start_sample':start,'end_sample':end},
         'model_sha256':MODEL_SHA256,'frame_calibration_id':CALIBRATION_ID,
         'score_calibration_id':CALIBRATION_ID,'timing_kind':'ctc_emission_cell_envelope',
-        'qualified_scope':'bounded_ami_english_coarse_envelopes','words':[{'text':'café','start_sample':start,'end_sample':end}]}
+        'qualified_scope':'bounded_ami_english_coarse_envelopes','normalization_spans':[],
+        'words':[{'text':'café','unit_kind':'whitespace_run','start_sample':start,'end_sample':end}]}
 
 class CacheTests(unittest.TestCase):
     def test_worker_disk_reuses_25_exact_results_after_hot_eviction(self):
@@ -135,6 +136,7 @@ class CacheTests(unittest.TestCase):
             def __call__(self,*args,execution):
                 self.calls+=1;execution.update(backend='mlx_metal_gpu',evaluated_and_GPU_synchronized=True);return np.zeros((3,4),dtype=np.float32)
         forward=ForwardPeer();provider=CoarseAlignment.__new__(CoarseAlignment);provider.model=object();provider.conversion={'source_model_sha256':'e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c'};provider.actual_gpu_forwards=0;provider.vocabulary={};provider.cache=AlignmentCache(IDENTITY)
+        provider.provider_identity_sha256='test-provider-identity'
         audio=np.array([.1,.2,.3],dtype=np.float32)
         key=provider.cache.key('café',audio.astype('<f4').tobytes(),100,103,'en')
         result=evidence(key)
@@ -152,9 +154,10 @@ class CacheTests(unittest.TestCase):
             def __call__(self,*args,execution):
                 self.calls+=1;execution.update(backend='mlx_metal_gpu',evaluated_and_GPU_synchronized=True);return np.zeros((3,4),dtype=np.float32)
         forward=ForwardPeer();p=CoarseAlignment.__new__(CoarseAlignment);p.model=object();p.conversion={'source_model_sha256':'e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c'};p.actual_gpu_forwards=0;p.vocabulary={};p.cache=AlignmentCache(IDENTITY)
+        p.provider_identity_sha256='test-provider-identity'
         audio=np.array([.1,.2,.3],dtype=np.float32)
         key=p.cache.key('words',audio.astype('<f4').tobytes(),0,3,'en')
         with patch('mlx_ctc_forward.forward_scores',side_effect=forward), patch('coarse_alignment.align_ctc_scores',return_value=dict(evidence(key),status='partial',complete=False)):
             p.align(audio,'words',start_sample=0,language='en');p.align(audio,'words',start_sample=0,language='en')
         self.assertEqual(forward.calls,2);self.assertEqual(p.cache.bytes,0)
-        self.assertIsNone(p.align(audio,'words',start_sample=0,language='fr'));self.assertEqual(forward.calls,2)
+        self.assertIsNone(p.align(audio,'words',start_sample=0,language='xx'));self.assertEqual(forward.calls,2)

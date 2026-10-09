@@ -39,6 +39,7 @@ class Inbox:
             raise ValueError('Invalid bounded background refinement interval.')
         self.refinement_interval_seconds=refinement_interval_seconds
         self.last_refinement_at=None;self.active_refinement=None;self.capture_finished=False
+        self.last_taken=None
         self.condition=threading.Condition();self.messages=deque();self.refinement=None
         self.closed=False;self.shutdown=False;self.error=None;self.historical=False;self.latest_epoch=0;self.cancelled=set();self.received=0
     def _remember_cancel(self,operation_id):
@@ -82,8 +83,7 @@ class Inbox:
             # Canonical requests retain their immutable source epoch and host CAS.
             # Language changes still cancel explicit in-flight operations; new
             # background requests may cover earlier sealed original epochs.
-            historical=self.historical or (self.refinement_interval_seconds and
-                request.get('canonical') and request['canonical'].get('canonical_state')=='sealed'
+            historical=self.historical or (request.get('canonical') and request['canonical'].get('canonical_state')=='sealed'
                 and request['language_epoch']<=self.latest_epoch)
             return self.shutdown or request['operation_id'] in self.cancelled or (not historical and request['language_epoch']!=self.latest_epoch)
     def newer_audio_queued(self,through_sample,epoch):
@@ -100,6 +100,17 @@ class Inbox:
         with self.condition:
             if self.error:raise ValueError(self.error)
             if self.shutdown:return {'type':'shutdown'}
+            refinement_due=self.refinement and (not self.refinement_interval_seconds or self.capture_finished or self.historical
+                    or self.last_refinement_at is None
+                    or time.monotonic()-self.last_refinement_at>=self.refinement_interval_seconds)
+            # A sealed original anchor can be certified between audio drains.
+            # Alternate under backlog; neither side may starve the other.
+            # Ordered language/Pause/Stop controls keep their existing priority.
+            if refinement_due and (not self.messages or
+                    (self.messages[0]['type']=='audio' and self.last_taken=='audio')):
+                result=self.refinement;self.refinement=None;self.last_refinement_at=time.monotonic()
+                self.active_refinement=(result['operation_id'],result['language_epoch'])
+                self.last_taken='refine';return result
             if self.messages:
                 result=copy.deepcopy(self.messages[0])
                 if result['type']=='audio':
@@ -107,12 +118,7 @@ class Inbox:
                     self.messages[0]['start_sample']=result['end_sample']
                     if result['end_sample']==self.messages[0]['end_sample']:self.messages.popleft()
                 else:self.messages.popleft()
-                return result
-            if self.refinement and (not self.refinement_interval_seconds or self.capture_finished or self.historical
-                    or self.last_refinement_at is None
-                    or time.monotonic()-self.last_refinement_at>=self.refinement_interval_seconds):
-                result=self.refinement;self.refinement=None;self.last_refinement_at=time.monotonic()
-                self.active_refinement=(result['operation_id'],result['language_epoch']);return result
+                self.last_taken=result['type'];return result
             if self.closed:return {'type':'shutdown'}
             self.condition.wait(.1);return None
 
@@ -201,6 +207,26 @@ class Models:
             Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'))
         self.speech_historical=None
         self.language_context=None;self.transcription_start_sample=0;self.coarse_aligner=None;self.asr_padding=(0,0)
+    def for_source(self,config):
+        """Share loaded weights; every mutable streaming/request state is local.
+
+        Called before feeding or decoding. Execution stays serial in the
+        source router. No weight reload or model-selection change occurs here.
+        """
+        from language_detection import LanguageProbeCache
+        from speech_admission import FrameArchive
+        from admission_receipt import execution
+        import uuid
+        result=copy.copy(self);result.config=config;result.shared_model_owner=self
+        result.state=self.diar.init_streaming_state()
+        result.speech_live=self.speech.session(archive=FrameArchive(
+            Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'))
+        result.admission_execution=execution(config['job_id'],uuid.uuid4().hex)
+        result.language_probe_cache=LanguageProbeCache()
+        result.final_asr_reuse=copy.deepcopy(self.final_asr_reuse)
+        result.cohere_calls=0;result.speech_historical=None;result.language_context=None
+        result.transcription_start_sample=0;result.asr_padding=(0,0)
+        return result
     def inspection_receipt(self,phase,request_id):
         return {**self.admission_execution,**self.speech_live.inspection(),
                 'phase':phase,'request_id':request_id,'cohere_calls':self.cohere_calls}
@@ -211,23 +237,30 @@ class Models:
     def alignment_supported(self,language):
         from alignment_artifact import ALIGNMENT_SPEC
         path=Path(self.config.get('alignment_path',''))
-        return language=='en' and bool(self.config.get('alignment_path')) and all((path/name).is_file() for name in ALIGNMENT_SPEC['files'])
+        return language in ALIGNMENT_SPEC['supported_languages'] and bool(self.config.get('alignment_path')) and all((path/name).is_file() for name in ALIGNMENT_SPEC['files'])
     def align_canonical(self,request,text,*,language):
-        # No implicit download or non-English calibration extrapolation. The
-        # existing null/review path remains when the optional provider is absent.
-        if language!='en' or not self.config.get('alignment_path'):return None
+        # No implicit download or claim of measured non-English accuracy. The
+        # required provider must not silently select a timing-free path.
+        if not self.alignment_supported(language):
+            raise RuntimeError('Required transcript timing is unavailable. Finish setup or retry timing setup.')
         self.check_memory()
         try:
             if self.coarse_aligner is None:
                 from coarse_alignment import CoarseAlignment
                 import uuid
-                self.coarse_aligner=CoarseAlignment(self.config['alignment_path'],cache_directory=
-                    Path(self.config['audio_path']).parent/f'alignment-evidence-{uuid.uuid4().hex}')
-            return self.coarse_aligner.align(read_audio(self.config['audio_path'],
+                owner=getattr(self,'shared_model_owner',self)
+                if owner.coarse_aligner is None:
+                    owner.coarse_aligner=CoarseAlignment(self.config['alignment_path'],cache_directory=
+                        Path(self.config['audio_path']).parent/f'alignment-evidence-{uuid.uuid4().hex}')
+                self.coarse_aligner=owner.coarse_aligner
+            result=self.coarse_aligner.align(read_audio(self.config['audio_path'],
                 request['start_sample'],request['end_sample']),text,
                 start_sample=request['start_sample'],language=language)
-        except (ImportError,OSError,ValueError,RuntimeError):
-            return None
+            if self.config.get('capture_source'):
+                result={**result,'capture_source':copy.deepcopy(self.config['capture_source'])}
+            return result
+        except (ImportError,OSError,ValueError,RuntimeError) as error:
+            raise RuntimeError('Required transcript timing failed. Existing text is retained; retry the accuracy pass.') from error
     def set_language_context(self,context,start_sample):
         self.language_context=copy.deepcopy(context);self.transcription_start_sample=start_sample
     def set_language_epoch(self,epoch):
@@ -250,7 +283,10 @@ class Models:
         if reuse is not None and (self.mx.default_device().type!=self.mx.gpu or
                 self.mx.default_stream(self.mx.gpu).device.type!=self.mx.gpu):
             raise RuntimeError('Final ASR observer/reuse requires the GPU; CPU fallback is disabled.')
-        if language=='auto' and self.detector is None:self.detector=WhisperLanguageDetector(self.config['lid_path'])
+        if language=='auto' and self.detector is None:
+            owner=getattr(self,'shared_model_owner',self)
+            if owner.detector is None:owner.detector=WhisperLanguageDetector(self.config['lid_path'])
+            self.detector=owner.detector
         transcriber=SpeechTranscriber(self.asr,language,self.config.get('lid_path'),detector=self.detector,
             context=self.language_context,speech_evidence=(self.speech_historical
                 if self.speech_historical is not None else self.speech_live.evidence),
@@ -645,12 +681,17 @@ def run(config,emit):
     import sys
     with contextlib.redirect_stdout(sys.stderr):models=Models(config)
     inbox=Inbox(audio_batch_seconds=6 if config.get('canonical_utterances') else 1,
-                refinement_interval_seconds=30 if config.get('canonical_utterances') and not config.get('refinement_only') else 0)
+                refinement_interval_seconds=0)
     inbox.latest_epoch=config.get('language_epoch',0);inbox.historical=bool(config.get('refinement_only'))
-    engine=Engine(config,models,emit,inbox)
+    if config.get('capture_source_catalog'):
+        from source_runtime import SourceRuntime
+        engine=SourceRuntime(config,models,emit,inbox)
+    else:engine=Engine(config,models,emit,inbox)
     emit({'type':'ready','two_pass':True,'canonical_utterances':bool(engine.canonical),
+          **({'source_admission_executions':engine.admission_executions}
+             if config.get('capture_source_catalog') and not config.get('refinement_only') else {}),
           **({'admission_execution':models.admission_execution}
-             if engine.canonical and not config.get('refinement_only') and hasattr(models,'admission_execution') else {}),
+             if not config.get('capture_source_catalog') and engine.canonical and not config.get('refinement_only') and hasattr(models,'admission_execution') else {}),
           'asr':'canonical_vad_utterances' if engine.canonical else 'growing_phrase_with_rolling_refinement',**models.metrics()})
     def read():
         try:
@@ -661,8 +702,10 @@ def run(config,emit):
             with inbox.condition:inbox.closed=True;inbox.condition.notify_all()
     threading.Thread(target=read,daemon=True).start()
     if config.get('refinement_only'):
-        with wave.open(config['audio_path'],'rb') as audio:engine.received=audio.getnframes()
-        engine.capture_finished=True;emit({'type':'capture_finished','duration':engine.received/RATE})
+        if config.get('capture_source_catalog'):engine.restore_saved()
+        else:
+            with wave.open(config['audio_path'],'rb') as audio:engine.received=audio.getnframes()
+            engine.capture_finished=True;emit({'type':'capture_finished','duration':engine.received/RATE})
     while True:
         message=inbox.take()
         if message is None:continue

@@ -12,7 +12,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let stateLock = NSLock()
     private var engine = AVAudioEngine()
     private var stream: SCStream?
-    private var converters: [String: AVAudioConverter] = [:]
+    private var converters: [String: CaptureAudioConverter] = [:]
     private var startHost = 0.0
     private var pausedAt = 0.0
     private var pausedSeconds = 0.0
@@ -22,6 +22,9 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var timer: DispatchSourceTimer?
     private let pcmFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
         sampleRate: 16000, channels: 1, interleaved: false)!
+
+    private let systemFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+        sampleRate: 16000, channels: 2, interleaved: true)!
 
     func emit(_ value: [String: Any]) {
         output.async {
@@ -38,27 +41,46 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // The serial audio queue owns both converters; state snapshots use a lock.
         let timing = stateLock.withLock { (active, paused, startHost, pausedSeconds) }
         guard timing.0 && !timing.1 else { return }
-        var converter = converters[source]
-        if converter == nil || converter!.inputFormat != input.format {
-            converter = AVAudioConverter(from: input.format, to: pcmFormat)
-            converters[source] = converter
-        }
-        guard let converter else { emit(["type":"error","error":"Audio format conversion failed."]); return }
-        let capacity = AVAudioFrameCount(ceil(Double(input.frameLength)*16000/input.format.sampleRate)+64)
-        guard let pcm = AVAudioPCMBuffer(pcmFormat: pcmFormat, frameCapacity: capacity) else { return }
-        var supplied = false
-        var error: NSError?
-        converter.convert(to: pcm, error: &error) { _, status in
-            if supplied { status.pointee = .noDataNow; return nil }
-            supplied = true; status.pointee = .haveData; return input
-        }
-        if let error { emit(["type":"error","error":error.localizedDescription]); return }
-        guard pcm.frameLength > 0, let pointer = pcm.floatChannelData?[0] else { return }
-        let audio = Data(bytes: pointer, count: Int(pcm.frameLength)*4)
+        let targetFormat = source == "system" ? systemFormat : pcmFormat
         let position = max(0, timestamp-timing.2-timing.3)
-        emit(["type":"audio","source":source,"time":position,"rate":16000,
-              "pcm":audio.base64EncodedString()])
+        do {
+            var converter = converters[source]
+            if let previous = converter,
+               previous.inputFormat != input.format || previous.discontinuous(at: position) {
+                try emitConverted(previous.finish(), source: source)
+                emit(["type":"format_changed","source":source,"time":position])
+                converters.removeValue(forKey: source)
+                converter = nil
+            }
+            if converter == nil {
+                converter = try CaptureAudioConverter(input: input.format, output: targetFormat)
+                converters[source] = converter
+            }
+            try emitConverted(converter!.convert(input, at: position), source: source)
+        } catch { emit(["type":"error","error":error.localizedDescription]) }
     }
+    private func emitConverted(_ chunks: [ConvertedAudioChunk], source: String) throws {
+        for chunk in chunks {
+            guard let pointer = chunk.pcm.floatChannelData?[0] else {
+                throw NSError(domain:"MeetingCapture",code:6)
+            }
+            let channels = Int(chunk.pcm.format.channelCount)
+            let audio = Data(bytes:pointer,count:Int(chunk.pcm.frameLength)*channels*4)
+            emit(["type":"audio","source":source,"time":chunk.time,"rate":16000,
+                  "channels":channels,"pcm":audio.base64EncodedString()])
+        }
+    }
+    private func finishConversion() {
+        // The serial queue drains copied input before EOF releases SRC lookahead.
+        audioQueue.sync {
+            for (source, converter) in converters {
+                do { try emitConverted(converter.finish(), source:source) }
+                catch { emit(["type":"error","error":error.localizedDescription]) }
+            }
+            converters.removeAll()
+        }
+    }
+
     func start(microphone: Bool, system: Bool) async throws {
         guard !stateLock.withLock({ active }) else { throw NSError(domain:"MeetingCapture",code:1,
             userInfo:[NSLocalizedDescriptionKey:"A meeting is already recording."]) }
@@ -81,7 +103,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             config.width = 2; config.height = 2
             config.minimumFrameInterval = CMTime(value:1,timescale:1)
             config.capturesAudio = true; config.excludesCurrentProcessAudio = true
-            config.sampleRate = 16000; config.channelCount = 1
+            config.sampleRate = 16000; config.channelCount = 2
             let capture = SCStream(filter: filter, configuration: config, delegate: self)
             try capture.addStreamOutput(self, type:.audio, sampleHandlerQueue: audioQueue)
             stream = capture
@@ -127,7 +149,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if let stream { try await stream.stopCapture() }
         if micEnabled { engine.pause() }
         // Drain copied audio before changing timeline state.
-        audioQueue.sync {}
+        finishConversion()
         stateLock.withLock { pausedAt = hostSeconds(); paused = true }
         emit(["type":"paused","time":elapsed()])
     }
@@ -143,7 +165,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         timer?.cancel(); timer = nil
         if let stream { try? await stream.stopCapture() }
         if micEnabled { engine.stop(); engine.inputNode.removeTap(onBus:0) }
-        audioQueue.sync {}
+        finishConversion()
         let duration = elapsed()
         stateLock.withLock { active = false }; stream = nil; converters.removeAll()
         if emitStopped { emit(["type":"stopped","time":duration]) }
@@ -175,34 +197,41 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-if CommandLine.arguments.contains("--check") {
-    // Metadata-only diagnostic: no engine, devices, capture, or permission calls.
-    let info = Bundle.main.infoDictionary ?? [:]
-    let value: [String: Any] = ["type":"helper_check", "capture_started":false,
-        "bundle_identifier":Bundle.main.bundleIdentifier ?? "",
-        "microphone_usage":info["NSMicrophoneUsageDescription"] as? String ?? "",
-        "system_audio_usage":info["NSScreenCaptureUsageDescription"] as? String ?? ""]
-    let data = try! JSONSerialization.data(withJSONObject:value)
-    FileHandle.standardOutput.write(data + Data([10]))
-    exit(0)
-}
-let capture = MeetingCapture()
-Task {
-    while let line = readLine() {
-        do {
-            guard let data = line.data(using:.utf8),
-                  let command = try JSONSerialization.jsonObject(with:data) as? [String:Any],
-                  let action = command["type"] as? String else { continue }
-            switch action {
-            case "start": try await capture.start(microphone:command["microphone"] as? Bool ?? false,
-                                                  system:command["system"] as? Bool ?? false)
-            case "pause": try await capture.pause()
-            case "resume": try await capture.resume()
-            case "stop": await capture.stop(); capture.drainOutput(); exit(0)
-            default: capture.emit(["type":"error","error":"Unknown recording action."])
+@main
+struct CaptureMain {
+    static func main() {
+
+        if CommandLine.arguments.contains("--check") {
+            // Metadata-only diagnostic: no engine, devices, capture, or permission calls.
+            let info = Bundle.main.infoDictionary ?? [:]
+            let value: [String: Any] = ["type":"helper_check", "capture_started":false,
+                "bundle_identifier":Bundle.main.bundleIdentifier ?? "",
+                "microphone_usage":info["NSMicrophoneUsageDescription"] as? String ?? "",
+                "system_audio_usage":info["NSScreenCaptureUsageDescription"] as? String ?? ""]
+            let data = try! JSONSerialization.data(withJSONObject:value)
+            FileHandle.standardOutput.write(data + Data([10]))
+            exit(0)
+        }
+        let capture = MeetingCapture()
+        Task {
+            while let line = readLine() {
+                do {
+                    guard let data = line.data(using:.utf8),
+                          let command = try JSONSerialization.jsonObject(with:data) as? [String:Any],
+                          let action = command["type"] as? String else { continue }
+                    switch action {
+                    case "start": try await capture.start(microphone:command["microphone"] as? Bool ?? false,
+                                                          system:command["system"] as? Bool ?? false)
+                    case "pause": try await capture.pause()
+                    case "resume": try await capture.resume()
+                    case "stop": await capture.stop(); capture.drainOutput(); exit(0)
+                    default: capture.emit(["type":"error","error":"Unknown recording action."])
+                    }
+                } catch { capture.emit(["type":"error","error":error.localizedDescription]) }
             }
-        } catch { capture.emit(["type":"error","error":error.localizedDescription]) }
+            await capture.stop(); capture.drainOutput(); exit(0)
+        }
+        RunLoop.main.run()
+
     }
-    await capture.stop(); capture.drainOutput(); exit(0)
 }
-RunLoop.main.run()

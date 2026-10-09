@@ -3,6 +3,7 @@ from collections import OrderedDict
 import hashlib
 import json
 from pathlib import Path
+from alignment_text import SUPPORTED_LANGUAGES, FUNCTIONAL_POLICY_ID, PROVIDER_ID
 
 
 class AlignmentCache:
@@ -84,7 +85,14 @@ class AlignmentCache:
         if not isinstance(result,dict):return False
         identity,text_sha,audio_sha,start,end,language=key
         model_sha,token_sha,calibration,timing_kind,*_=identity
-        if (language!='en' or result.get('status')!='aligned' or result.get('complete') is not True
+        multilingual=len(identity)==13 and identity[-2]==PROVIDER_ID
+        if multilingual and language!='en':calibration=FUNCTIONAL_POLICY_ID
+        english=(language=='en' and (not multilingual or (
+            not result.get('normalization_spans') and all(
+                isinstance(word,dict) and word.get('unit_kind')=='whitespace_run'
+                for word in result.get('words',[])))))
+        scope='bounded_ami_english_coarse_envelopes' if english else 'multilingual_functional_ctc_units'
+        if (language not in (SUPPORTED_LANGUAGES if multilingual else ('en',)) or result.get('status')!='aligned' or result.get('complete') is not True
                 or result.get('text_source')!='cohere' or result.get('text_sha256')!=text_sha
                 or result.get('audio_float32_sha256')!=audio_sha
                 or result.get('audio_anchor')!={'start_sample':start,'end_sample':end}
@@ -92,7 +100,10 @@ class AlignmentCache:
                 or result.get('frame_calibration_id')!=calibration
                 or result.get('score_calibration_id')!=calibration
                 or result.get('timing_kind')!=timing_kind
-                or result.get('qualified_scope')!='bounded_ami_english_coarse_envelopes'):
+                or result.get('qualified_scope')!=scope
+                or (multilingual and (result.get('provider_identity_sha256')!=identity[-1]
+                    or result.get('provider_id')!=PROVIDER_ID
+                    or (result.get('normalization_policy_id'),result.get('timing_unit_policy_id'))!=identity[-4:-2]))):
             return False
         try:data=json.dumps(result,ensure_ascii=False,separators=(',',':'),allow_nan=False).encode('utf-8')
         except (ValueError,TypeError):return False

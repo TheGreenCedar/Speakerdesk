@@ -265,7 +265,7 @@ class DecoderContractTests(unittest.TestCase):
         model.get_tokenizer.assert_not_called()
         model.decode.assert_not_called()
 
-    def test_missing_or_corrupt_metadata_disables_auto_but_preserves_manual_preflight(self):
+    def test_required_language_metadata_refuses_all_routes_when_incomplete(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
             for name, kind in [('diar','nemotron_diarization'),('asr','cohere_asr')]:
@@ -274,7 +274,8 @@ class DecoderContractTests(unittest.TestCase):
                 (folder/'model.safetensors').touch()
             cfg={'diar_path':str(root/'diar'),'cohere_path':str(root/'asr'), 'lid_path':str(root/'missing'),
                  'diar_python':sys.executable,'asr_python':sys.executable,'device':'mlx'}
-            with patch('pipeline.speech_issues',return_value=[]):self.assertEqual(preflight(cfg,'fr'),[])
+            with patch('pipeline.speech_issues',return_value=[]):
+                self.assertTrue(preflight(cfg,'fr'))
             self.assertTrue(preflight(cfg,'auto'))
             (root/'missing').mkdir();(root/'missing/config.json').write_text('{}')
             self.assertTrue(detector_issues(root/'missing'))
@@ -460,14 +461,16 @@ class LanguageAppTests(unittest.TestCase):
               'bytes':3,'files':['model.int8.onnx','tokens.txt'],
               'file_sha256':{'model.int8.onnx':hashlib.sha256(b'yes').hexdigest(),
                              'tokens.txt':hashlib.sha256(b'tokens').hexdigest()}}
-        with patch('model_setup.SPECS',[spec]),patch.dict('os.environ',{'SPEAKERDESK_MODELS':str(root)}):
+        with (patch('model_setup.SPECS',[spec]),
+              patch('voice_setup.VoiceSetup.released', return_value=False),
+              patch.dict('os.environ',{'SPEAKERDESK_MODELS':str(root)})):
             app=create_app(self.root/'alignment-setup-test')
             try:
                 client=app.test_client()
                 self.assertTrue(client.get('/api/setup').json['core_ready'])
-                self.assertEqual(model_config()['alignment_path'],str(checkpoint))
+                self.assertIsNone(model_config()['alignment_path'])  # Source-only cache is not active.
                 self.assertTrue(client.get('/api/setup').json['models'][0]['optional'])
-                self.assertEqual(client.get('/api/setup').json['total_bytes'],app.extensions['speakerdesk']['voice_setup'].state['total_bytes'])
+                self.assertEqual(client.get('/api/setup').json['total_bytes'],3)
                 weights.write_bytes(b'bad')
                 self.assertTrue(client.get('/api/setup').json['core_ready'])
                 self.assertFalse(client.get('/api/setup').json['models'][0]['installed'])

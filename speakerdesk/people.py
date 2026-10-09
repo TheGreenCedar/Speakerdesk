@@ -4,8 +4,11 @@ import json
 import re
 import time
 import uuid
-from flask import abort, jsonify, request
-from voice_profiles import clean_clips, extract, make_profile, propose_match, speaker_audio_reason, voice_clip_choices
+from flask import abort, jsonify, request, send_file
+from voice_profiles import make_profile, propose_match, runtime_available, speaker_audio_reason, speaker_audio_ranges
+from source_voice import clean_clips,extract,voice_clip_choices
+from voice_profile_status import profile_status
+from voice_readiness import readiness
 
 
 def person_name(value):
@@ -126,8 +129,12 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
 
     def voice_runtime():
         backend, calibration = app.extensions['speakerdesk']['voice_runtime']
-        available = backend is not None and calibration is not None and backend.model == calibration.model
+        available = runtime_available(backend, calibration)
         return backend, calibration, available
+
+    def runtime_readiness(available):
+        managed = app.extensions['speakerdesk'].get('voice_setup')
+        return managed.readiness(available=available) if managed else readiness(available=available)
 
     def suggestions(job):
         backend, calibration, available = voice_runtime()
@@ -159,10 +166,12 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
     def people_list():
         backend, calibration, available = voice_runtime()
         profiles = {p['person_id']: p for p in store.profiles()}
-        people = [dict(p, voice_compatible=bool(available and p['id'] in profiles
-                                               and profiles[p['id']]['model'] == backend.model.payload())) for p in store.list()]
-        return jsonify(people=people, voice_available=available,
-                       voice_message=app.extensions['speakerdesk'].get('voice_message', 'Voice recognition is unavailable.'))
+        people = [dict(p, **profile_status(profiles.get(p['id']),
+                                          model=backend.model if available else None,
+                                          available=available)) for p in store.list()]
+        public = runtime_readiness(available)
+        return jsonify(people=people, voice_available=available, voice_message=public['message'],
+                       readiness_code=public['readiness_code'], next_action=public['next_action'])
 
     @app.post('/api/people')
     def people_create():
@@ -195,6 +204,7 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
             if track not in document.get('speakers', {}):
                 abort(404)
             backend, calibration, available = voice_runtime()
+            public = runtime_readiness(available)
             minimum = calibration.minimum_clips if available else 2
             source_verified = document.get('provenance', {}).get('kind') == 'local_inference'
             audio_available = (folder(jid)/'audio.wav').is_file()
@@ -213,20 +223,25 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
                 'overlap': 'More than one speaker may be audible. Use a passage where this person speaks alone.',
                 'unverified_audio': 'The original speaker or timing is unverified or was edited. Use an unchanged locally transcribed passage.',
                 'too_short': 'Shorter than 2 seconds. Use a longer turn where this person speaks alone.',
+                'verified_audio_too_short': 'The verified solo portions are each shorter than 2 seconds. The rest of this passage has no verified speaker; use a longer verified portion.',
                 'source_unverified': 'This transcript has no verified local speaker audio. Transcribe a recording locally or record another meeting.'}
             excluded = []
+            offered_segments = {clip.segment_id for clip in choices.values()}
             for segment in segments.values():
                 if segment['speaker'] != track:
                     continue
+                if segment['id'] in offered_segments:
+                    continue
                 reason = 'source_unverified' if not source_verified else speaker_audio_reason(segment, track)
+                if source_verified and reason and speaker_audio_ranges(segment, track):
+                    reason = 'verified_audio_too_short'
                 if not reason and segment['end']-segment['start'] < 2:
                     reason = 'too_short'
                 if reason:
                     excluded.append(dict(segment_id=segment['id'], start=segment['start'], end=segment['end'],
                                          reason=reason, message=reasons[reason]))
             if not available:
-                status, message = 'unavailable', app.extensions['speakerdesk'].get(
-                    'voice_message', 'Voice recognition is unavailable.') + ' Open Settings to finish local model setup, then refresh passages.'
+                status, message = 'unavailable', public['message']
             elif voice_busy():
                 status, message = 'busy', 'Finish the active recording or transcription, then refresh passages. You can save the name now and return later.'
             elif not source_verified:
@@ -241,7 +256,23 @@ def register_people(app, db, get, put, lock, folder, backend=None, calibration=N
                 status, message = 'ready', 'Usable passages are ready. Preview them and choose which to use. No voice is saved until you give consent.'
             return jsonify(revision=job['revision'], track_id=track, status=status, message=message,
                            minimum_clips=minimum, audio_available=audio_available,
+                           readiness_code=public['readiness_code'], next_action=public['next_action'],
                            clips=clips, recommended_ids=recommended, excluded=excluded)
+
+    @app.get('/api/jobs/<jid>/speakers/<track>/voice-preview')
+    def voice_preview(jid,track):
+        from voice_source_audio import clip_audio,validate_voice_audio
+        with lock:
+            job=get(jid)
+            if request.args.get('revision')!=str(job['revision']):
+                abort(409,description='Refresh passages before previewing this audio.')
+            choices=voice_clip_choices(job,track)
+            clip=choices.get(request.args.get('clip'))
+            if clip is None:abort(409,description='This voice passage is no longer current.')
+            path=clip_audio(folder(jid)/'audio.wav',clip)
+            path=validate_voice_audio(folder(jid).parent,path,clip)
+            if not path.is_file():abort(409,description='Original speaker audio is unavailable.')
+            return send_file(path,mimetype='audio/wav',conditional=True)
 
     @app.post('/api/jobs/<jid>/identity-suggestions/<sid>/dismiss')
     def dismiss_suggestion(jid, sid):

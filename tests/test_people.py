@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
 from live_meeting import append_finalized_segment
 from people import introduction_suggestions
-from voice_profiles import Calibration, ClipEmbedding, VoiceModel, propose_match
+from voice_profiles import Calibration, ClipEmbedding, VoiceModel, propose_match, clips_current, clean_clips
 
 MODEL = VoiceModel('synthetic-test-model', 'test-revision', 'a'*64, 2)
 POLICY = Calibration(MODEL, 'synthetic-test-calibration', .8, .1, 20, 100, 0., .05)
@@ -262,6 +262,73 @@ class PeopleTests(unittest.TestCase):
         self.assertEqual(state['clips'], [])
         self.assertEqual([c['reason'] for c in state['excluded']], ['unfinished', 'overlap', 'unverified_audio'])
         self.assertEqual(self.backend.calls, [])
+
+    def test_canonical_solo_crops_survive_names_and_words_but_not_changed_audio_ownership(self):
+        doc = document()
+        row = dict(doc['segments'][0], id='canonical', start=0., end=12., finalized=True,
+                   canonical_state='sealed', canonical_utterance_id='canonical',
+                   start_sample=0, end_sample=192000, audio_revision=3,
+                   speaker_candidates=['speaker_0'], source_speaker_candidates=['speaker_0'],
+                   voice_eligible=False, protected_fields=[], machine_revision=0,
+                   speaker_activity={'audio_revision':3, 'observed_end_sample':192000, 'regions':[
+                       {'start_sample':0, 'end_sample':8000, 'speakers':[]},
+                       {'start_sample':8000, 'end_sample':56000, 'speakers':['speaker_0']},
+                       {'start_sample':56000, 'end_sample':112000, 'speakers':[]},
+                       {'start_sample':112000, 'end_sample':160000, 'speakers':['speaker_0']},
+                       {'start_sample':160000, 'end_sample':192000, 'speakers':[]}]})
+        doc['segments'] = [row]
+        self.replace_document(doc)
+        state = self.clip_state().json
+        self.assertEqual(state['status'], 'ready')
+        self.assertEqual([(c['start'], c['end']) for c in state['clips']], [(.5, 3.5), (7., 10.)])
+        self.assertEqual(state['excluded'], [])
+        self.assertFalse(self.job()['document']['segments'][0]['voice_eligible'])
+        clips = clean_clips(self.job(), 'speaker_0', state['recommended_ids'])
+        pid = self.person(); self.assign(pid)
+        response = self.client.patch(f'/api/jobs/{self.jid}/segments/canonical', headers=self.headers,
+                                     json={'segment_revision':0, 'changes':{'text':'Actual human words'}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.clip_state().json['recommended_ids'], state['recommended_ids'])
+        self.assertTrue(clips_current(self.job(), clips))
+        self.assertEqual(self.enroll(pid, segment_ids=state['recommended_ids']).status_code, 200)
+        profile = self.app.extensions['speakerdesk']['people'].profiles()[0]
+        self.assertEqual([(c['start'], c['end']) for c in profile['clips']], [(.5, 3.5), (7., 10.)])
+        self.assertEqual(self.job()['document']['segments'][0]['text'], 'Actual human words')
+        self.backend.calls.clear()
+        response = self.client.patch(f'/api/jobs/{self.jid}/segments/canonical', headers=self.headers,
+                                     json={'segment_revision':1, 'changes':{'end':11.}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.clip_state().json['clips'], [])
+        self.assertFalse(clips_current(self.job(), clips))
+        self.assertEqual(self.enroll(pid, segment_ids=state['recommended_ids']).status_code, 400)
+        self.assertEqual(self.backend.calls, [])
+
+        # Each negative reaches the crop guard with an otherwise valid anchor.
+        cases = [dict(finalized=False), dict(audio_state='insufficient_speech'),
+                 dict(canonical_unresolved='unresolved_alignment'), dict(protected_fields=['speaker']),
+                 dict(speaker_candidates=['speaker_0','speaker_1']), dict(start=.1),
+                 dict(speaker_activity=dict(row['speaker_activity'], audio_revision=2)),
+                 dict(speaker_activity=dict(row['speaker_activity'], observed_end_sample=160000)),
+                 dict(speaker_activity=dict(row['speaker_activity'], regions=[
+                     {'start_sample':0,'end_sample':192000,'speakers':['speaker_1']}]))]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                broken = copy.deepcopy(doc); broken['segments'][0].update(changes)
+                self.replace_document(broken)
+                self.assertEqual(self.clip_state().json['clips'], [])
+        for key, value in [('audio_state','insufficient_speech'), ('canonical_unresolved','unresolved_alignment')]:
+            broken = copy.deepcopy(doc); broken['segments'][0][key] = value
+            self.replace_document(broken)
+            forged = copy.deepcopy(broken); forged['segments'][0].pop(key)
+            saved = self.client.put(f'/api/jobs/{self.jid}/transcript', headers=self.headers,
+                                    json={'revision':self.job()['revision'],'document':forged})
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(self.clip_state().json['clips'], [])
+        self.replace_document(doc)
+        imported = self.client.put(f'/api/jobs/{self.jid}/transcript', headers=self.headers,
+                                   json={'revision':self.job()['revision'],'document':doc,'imported':True})
+        self.assertEqual(imported.status_code, 200)
+        self.assertEqual(self.clip_state().json['clips'], [])
 
     def test_default_clips_respect_policy_and_nonoverlap_and_old_revision_is_rejected(self):
         doc = document()

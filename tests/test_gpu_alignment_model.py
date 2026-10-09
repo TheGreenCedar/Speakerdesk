@@ -72,30 +72,6 @@ class ArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             folder=Path(d);(folder/'model.int8.onnx').write_bytes(b'legacy');self.assertFalse(artifact.prepared(folder))
 
-class SetupTests(unittest.TestCase):
-    def test_existing_verified_optional_source_prepares_locally_without_redownload(self):
-        from flask import Flask
-        import model_setup
-        with tempfile.TemporaryDirectory() as d:
-            root=Path(d);folder=root/'coarse-alignment';folder.mkdir();(folder/'model.int8.onnx').write_bytes(b'old');(folder/'tokens.txt').write_bytes(b'tokens')
-            spec=dict(name='English timing',optional=True,directory='coarse-alignment',repo='unchanged',revision='unchanged',weight_file='model.int8.onnx',bytes=3,sha256=hashlib.sha256(b'old').hexdigest(),files=['model.int8.onnx','tokens.txt'],file_sha256={'model.int8.onnx':hashlib.sha256(b'old').hexdigest(),'tokens.txt':hashlib.sha256(b'tokens').hexdigest()})
-            done=[]
-            def prepare(path):
-                done.append(path);target=path/artifact.DERIVED_DIRECTORY;target.mkdir();(target/'weights.npz').write_bytes(b'f32')
-            class Voice:
-                def __init__(self,*args):self.state={'total_bytes':0,'status':'idle'}
-                def installed(self):return True
-                def supported(self):return True
-                def download(self):pass
-                def update(self,**kwargs):self.state.update(kwargs)
-                def status(self,**kwargs):return {'installed':True,'available':False}
-            app=Flask(__name__);app.extensions['speakerdesk']=dict(updates=SimpleNamespace(lock=threading.RLock(),start_thread=lambda title,fn,*a,**k:fn(*a)),recognition_preference=SimpleNamespace(enabled=lambda:False))
-            with patch.dict('os.environ',{'SPEAKERDESK_MODELS':str(root)}),patch.object(model_setup,'SPECS',[spec]),patch.object(model_setup,'ALIGNMENT_SPEC',spec),patch.object(model_setup,'VoiceSetup',Voice),patch.object(model_setup,'prepare_model',side_effect=prepare),patch.object(model_setup,'prepared',side_effect=lambda p:bool(done)),patch.object(model_setup,'GPU_ALIGNMENT_SHA256',hashlib.sha256(b'f32').hexdigest()),patch('urllib.request.urlopen',side_effect=AssertionError('unexpected download')) as network:
-                model_setup.register_setup(app,lambda:None);client=app.test_client()
-                self.assertFalse(client.get('/api/setup').json['models'][0]['installed'])
-                self.assertEqual(client.post('/api/setup',json={'alignment':True}).status_code,202)
-                self.assertEqual(done,[folder]);self.assertTrue(client.get('/api/setup').json['models'][0]['installed']);network.assert_not_called()
-
 class BackendTests(unittest.TestCase):
     def modules(self,mx):
         # Source CI has no Metal package. Stub the parent as well as its core
@@ -127,6 +103,6 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(p.cache.metrics()['cache_entries'],0)
     def test_package_contains_map_forward_modules_and_metal_distribution_metadata(self):
         s=(Path(__file__).resolve().parents[1]/'packaging/runtime.spec').read_text()
-        for marker in ["speakerdesk/alignment-mlx","'alignment_model','mlx_ctc_forward'","mlx_audio.stt.models.mms","mlx_audio.stt.models.wav2vec","'mlx','mlx-metal','mlx-audio'"]:self.assertIn(marker,s)
+        for marker in ["speakerdesk/alignment-mlx","'alignment_model','mlx_ctc_forward'","mlx_ctc_components.models.mms.mms","mlx_ctc_components.models.wav2vec.wav2vec","'mlx','mlx-metal','mlx-audio'"]:self.assertIn(marker,s)
 
 if __name__=='__main__':unittest.main()

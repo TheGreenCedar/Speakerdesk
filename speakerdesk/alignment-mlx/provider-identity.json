@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "provider_id": "omnilingual-ctc-mlx-supplied-text-v2",
+  "supported_languages": [
+    "en",
+    "de",
+    "fr",
+    "it",
+    "es",
+    "pt",
+    "el",
+    "nl",
+    "pl",
+    "vi",
+    "zh",
+    "ar",
+    "ja",
+    "ko"
+  ],
+  "timing_accuracy_calibrated_languages": [
+    "en"
+  ],
+  "normalization_policy_id": "omni_ctc_attached_ar_marks_ja_separator_v1",
+  "timing_unit_policy_id": "mixed_script_ctc_character_whitespace_v1",
+  "implementation_source_sha256": {
+    "alignment_provider.py": "bf31063a739c2f12127651eacc8ad7769b9b0f3891c6e4de7e8b9370ee0c4214",
+    "alignment_text.py": "723e5ff50d243be0da70ae55c4f4f6c7ad91bdc17c6af7ab17cebdc87af61e35",
+    "word_alignment.py": "263ee33ab77a7b51130e935ae7e308fb927ebefaa04bcb4dae8b85119b2781f4",
+    "coarse_alignment.py": "336ae5a1a79f3db74e1b965d5cd0c68d2e39a39f9ffef57bb66d735c1a18afbb",
+    "alignment_cache.py": "2ea967802504bea96379dc01f03183163cf33397e3b198ac5ef58b5d00b84b86",
+    "reading_turns.py": "04b3c16e5b55c8fef97fe2ea4d422bb1163abf91d3f8b1c0a465677427d29aac",
+    "canonical_runtime.py": "7f69606e48e87b23b0ac7fd7f29ba3a1f8c02c123ea3019e08ff36381a605b49",
+    "live_refinement.py": "e8d3e49506c0a6b1d9f38edf8291f7fe9945609c8ea7f3b77f8c92ab199c633c",
+    "pipeline.py": "78fcf18053f342f52afe7497327402ce2a7c5fe9be2d359d314b53d78057b432",
+    "inference_worker.py": "ac90166e3e4e27764861a082ef168814eb0347ed8929a1c8d079e17ae40b5779"
+  }
+}

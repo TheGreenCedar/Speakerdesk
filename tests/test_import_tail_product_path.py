@@ -34,7 +34,7 @@ class ReceiptSpeech:
 
 @unittest.skipUnless(RECEIPTS, 'Retained synthetic import tail observations required')
 class ImportTailProductPath(unittest.TestCase):
-    def imported(self, name, case_name='auto-real-thanks', turns=None, texts=None, alignment_provider=None):
+    def imported(self, name, case_name='auto-real-thanks', turns=None, texts=None, alignment_provider=None, expected_status='ready'):
         case=RECEIPTS[case_name];count=case['frames'][-1][1]
         pcm=varying_pcm(count,3,dtype='<i2')
         pcm[max(f[1] for f in case['frames'] if f[3]):]=0
@@ -84,7 +84,10 @@ class ImportTailProductPath(unittest.TestCase):
                     response.request.input_stream.close();self.assertEqual(response.status_code,201)
                     jid=response.json[0]['id'];self.assertEqual(wait(jid,{'preparing'})['status'],'uploaded')
                     self.assertEqual(client.post('/api/jobs/'+jid+'/run',headers=headers).status_code,202)
-                    job=wait(jid,{'queued','processing'});self.assertEqual(job['status'],'ready',job.get('message'))
+                    job=wait(jid,{'queued','processing'});self.assertEqual(job['status'],expected_status,job.get('message'))
+                    if expected_status=='failed':
+                        self.assertIsNone(job.get('document'))
+                        return [],dict(ASR_calls=asr.transcribe.call_count,job=job,neural_models_executed=False)
                     exported=client.get('/api/jobs/'+jid+'/export/txt').get_data(as_text=True)
                 tag=os.environ.get('FAINT_RUN_TAG','review')+'-'+name
                 evidence_dir=EVIDENCE or root
@@ -131,13 +134,12 @@ assert.equal(f.run('JSON.stringify(doc)===original'),true);console.log(JSON.stri
         self.assertEqual([s['speaker'] for s in rows],['speaker_0','speaker_1','speaker_0'])
         self.assertEqual([r['speaker'] for r in evidence['rendered']],['speaker_0','speaker_1','speaker_0'])
 
-    def test_unavailable_provider_retains_continuous_raw_words_unassigned(self):
-        rows,evidence=self.imported('unavailable-provider',alignment_provider=FileNotFoundError('Research weights unavailable'))
+    def test_unavailable_required_provider_does_not_publish_incomplete_import(self):
+        rows,evidence=self.imported('unavailable-provider',alignment_provider=FileNotFoundError('Research weights unavailable'),expected_status='failed')
         self.assertEqual(evidence['ASR_calls'],1)
-        self.assertEqual(rows[0]['text'],RECEIPTS['gpu_continuous_probe']['raw_text'])
-        self.assertEqual(rows[0]['speaker'],'unassigned')
-        self.assertEqual(validated_turns(rows[0]),[])
-        self.assertIn('Research weights unavailable',rows[0]['reading_alignment_error'])
+        self.assertEqual(rows,[])
+        self.assertIn('Required transcript timing failed to load',evidence['job']['message'])
+        self.assertIsNone(evidence['job'].get('document'))
 
     def test_true_overlap_stays_local_and_tail_unassigned(self):
         rows,evidence=self.imported('overlap',turns=['0 2.8 speaker_0','0 2.8 speaker_1'],texts=['Two people.','you'])

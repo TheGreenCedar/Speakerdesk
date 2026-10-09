@@ -31,3 +31,5 @@ __pycache__/
 *.safetensors
 *.dmg
 *.zip
+
+desktop/capture/echo/libspeakerdesk_echo.dylib

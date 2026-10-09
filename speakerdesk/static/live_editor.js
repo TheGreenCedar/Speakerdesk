@@ -154,8 +154,11 @@ function livePassageRows() {
   for(const draft of passageDrafts.values())retain(draft.segment);
   for(const draft of recoverablePassageDrafts.values())retain(draft.segment);
   for(const operation of passageSaveOperations.values())if(operation.jid===selected.id)retain(operation.segment);
-  const order={processed:0,corrections:1,live:2};
-  return Array.from(rows.values()).sort((a,b)=>order[a.section]-order[b.section] || a.segment.start-b.segment.start || a.segment.end-b.segment.end || String(a.segment.id).localeCompare(String(b.segment.id)));
+  // Refinement may finish out of order, and a later fast publication may make
+  // the same canonical ID provisional again. Processing state changes its
+  // presentation in place; it must never change the meeting's reading order.
+  // Replaced human corrections remain outside the canonical machine timeline.
+  return Array.from(rows.values()).sort((a,b)=>(a.section==='corrections')-(b.section==='corrections') || a.segment.start-b.segment.start || a.segment.end-b.segment.end || String(a.segment.id).localeCompare(String(b.segment.id)));
 }
 function renderLiveSegments() {
   const pane=$('transcript-pane'),host=$('segments'),scroll=pane.scrollTop;

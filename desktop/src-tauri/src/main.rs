@@ -12,6 +12,8 @@ use tauri_plugin_shell::{
     ShellExt,
 };
 mod exports;
+#[cfg(target_os = "macos")]
+mod menus;
 mod update_control;
 mod update_location;
 mod updates;
@@ -264,6 +266,8 @@ fn main() {
         .manage(RuntimeChild(Mutex::new(RuntimeState::default())))
         .manage(ExportDownloads::default())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            menus::install(app)?;
             let storage=std::env::var_os("SPEAKERDESK_HOME").map(std::path::PathBuf::from).unwrap_or(app.path().app_data_dir()?);
             std::fs::create_dir_all(&storage)?;
             app.state::<ExportDownloads>().protect_storage(&storage)?;
@@ -272,7 +276,11 @@ fn main() {
             let download_port = port.clone();
             WebviewWindowBuilder::new(app,"main",WebviewUrl::App("index.html".into()))
                 .title("Speakerdesk").inner_size(1280.0,800.0).min_inner_size(1000.0,680.0)
-                .initialization_script("window.speakerdeskNativeExport = true; window.speakerdeskNativeUpdater = true;")
+                .initialization_script(if cfg!(target_os = "macos") {
+                    "window.speakerdeskNativeExport = true; window.speakerdeskNativeUpdater = true; window.speakerdeskNativeMenu = true;"
+                } else {
+                    "window.speakerdeskNativeExport = true; window.speakerdeskNativeUpdater = true;"
+                })
                 .on_navigation(move |url| {
                     let current = navigation_port.load(Ordering::Relaxed);
                     if current == 0 { return url.scheme()=="tauri" || url.host_str()==Some("tauri.localhost"); }

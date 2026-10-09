@@ -8,10 +8,11 @@ from language_detection import language_probe_events
 from utterances import complete_non_speech
 
 
-def activity_references(sources, start_sample, end_sample):
+def activity_references(sources, start_sample, end_sample, capture_source=None):
     """Raw activity only; an ASR envelope does not claim its internal gaps."""
     references=[]
     for row in sources:
+        if row.get('capture_source')!=capture_source:continue
         if row.get('canonical_utterance_id'):
             activity=row.get('speaker_activity') or {}
             parts=activity.get('regions',[])
@@ -139,7 +140,7 @@ class RefinementController:
                 if not self.shutdown_sent:self.shutdown_sent=self.send({'type':'shutdown'})
             self.store(job,plan)
     def canonical(self,jid,result):
-        import hashlib
+        from capture_sources import validate_binding,utterance_id
         with self.manager.lock:
             job=self.manager.get(jid);self.initialize(job)
             sequence=result.get('fast_sequence')
@@ -148,7 +149,8 @@ class RefinementController:
             row=copy.deepcopy(result['candidate']);sid=row['id']
             for key in ('start_sample','end_sample','audio_revision','canonical_machine_revision','language_epoch'):
                 if type(row.get(key)) is not int or row[key]<0:raise ValueError('Invalid canonical revision.')
-            expected='utterance-'+hashlib.sha256(f"{jid}:{row['language_epoch']}:{row['start_sample']}".encode()).hexdigest()[:24]
+            capture_source=validate_binding(job.get('capture_source_catalog'),row)
+            expected=utterance_id(jid,row['language_epoch'],row['start_sample'],capture_source)
             if (sid!=expected or row.get('canonical_utterance_id')!=sid or
                     row.get('canonical_state') not in ('open','sealed') or
                     (round(row['start']*RATE),round(row['end']*RATE))!=(row['start_sample'],row['end_sample'])):
@@ -222,7 +224,7 @@ class RefinementController:
             if self.final and not self.shutdown_sent:self.shutdown_sent=self.send({'type':'shutdown'})
             self.manager.put(job);return
         done=job.setdefault('canonical_refined',{})
-        sources=sorted(job['rolling_sources'].values(),key=lambda row:row['start_sample'])
+        sources=sorted(job['rolling_sources'].values(),key=lambda row:(row['start_sample'],row['id']))
         row=next((row for row in sources if row.get('canonical_state')=='sealed'
             and done.get(row['id'])!=row['audio_revision']),None)
         if row is not None:
@@ -238,7 +240,8 @@ class RefinementController:
                 'window':{'id':row['id'],'start_sample':row['start_sample'],'end_sample':row['end_sample'],
                     'context_start_sample':row['start_sample'],'context_end_sample':row['end_sample']},
                 'expected':{row['id']:segment_version(current)},'references':activity_references(
-                    sources,row['start_sample'],row['end_sample'])}
+                    sources,row['start_sample'],row['end_sample'],row.get('capture_source'))}
+            if row.get('capture_source'):request['capture_source']=copy.deepcopy(row['capture_source'])
             if self.send(request):job['rolling_inflight']=request;job['refinement_status']='refining'
         elif self.final:
             unresolved=(any(row.get('canonical_unresolved') or row.get('canonical_state')!='sealed' for row in sources)
@@ -345,6 +348,8 @@ class RefinementController:
         if result.get('window')!=request['window'] or result.get('language_epoch')!=request['language_epoch']:
             raise ValueError('Canonical refinement does not match its dispatch.')
         row=request['canonical'];candidate=result.get('canonical_candidate')
+        if result.get('capture_source')!=request.get('capture_source'):
+            raise ValueError('Canonical refinement crossed its capture source.')
         job.pop('rolling_inflight',None)
         # One failed attempt remains explicit instead of an infinite retry loop.
         job.setdefault('canonical_refined',{})[row['id']]=row['audio_revision']
@@ -359,12 +364,23 @@ class RefinementController:
         if (candidate.get('id')!=row['id'] or candidate.get('audio_revision')!=row['audio_revision']
                 or candidate.get('start_sample')!=row['start_sample'] or candidate.get('end_sample')!=row['end_sample']):
             raise ValueError('Canonical refinement changed its original anchor.')
+        if candidate.get('capture_source')!=row.get('capture_source'):
+            raise ValueError('Canonical refinement changed its original source.')
         self.manager.put(job)
         self.canonical(jid,{'candidate':candidate,'fast_sequence':result['fast_sequence']})
-    def capture_done(self,jid,*,observed_sample=None,uncertain_samples=None,admission=None):
+    def capture_done(self,jid,*,observed_sample=None,uncertain_samples=None,admission=None,source_admissions=None):
         if observed_sample is not None:
             with self.manager.lock:
                 job=self.manager.get(jid)
+                if job.get('capture_source_catalog') and not self.manager.refining_saved:
+                    from capture_sources import validate_inspections
+                    request=job.get('capture_inspection_request') or {}
+                    received=request.get('through_sample')
+                    if received!=round(job.get('duration',0)*RATE):
+                        raise ValueError('Unbound capture-source Stop endpoint.')
+                    job['source_capture_admissions']=validate_inspections(job,self.manager.folder(jid),source_admissions,
+                        phase='stop',request_id=request.get('request_id'),received_sample=received,
+                        observed_sample=observed_sample,uncertain_samples=uncertain_samples)
                 if job.get('admission_execution') and not self.manager.refining_saved:
                     from admission_receipt import validate_receipt,retained_pcm_digest
                     request=job.get('capture_inspection_request') or {}

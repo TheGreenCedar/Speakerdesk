@@ -158,8 +158,9 @@ class ReadingTurnTests(unittest.TestCase):
         from canonical_runtime import CanonicalRuntime
         from types import SimpleNamespace
         calls=[]
-        models=SimpleNamespace(align_canonical=lambda request,text,**kw:(calls.append((request,text,kw)) or {'words':[]}))
-        runtime=object.__new__(CanonicalRuntime);runtime.engine=SimpleNamespace(models=models)
+        models=SimpleNamespace(alignment_supported=lambda language:language=='en',
+            align_canonical=lambda request,text,**kw:(calls.append((request,text,kw)) or {'words':[]}))
+        runtime=object.__new__(CanonicalRuntime);runtime.engine=SimpleNamespace(models=models,config={})
         for reason,review in [('recent_context',True),('detected',True),('best_effort',True),
                               ('detected',False),('override',False)]:
             result=runtime.align_reading({'start_sample':0,'end_sample':16000},'RAW unchanged',
@@ -229,9 +230,10 @@ class ReadingTurnTests(unittest.TestCase):
         text='clear weak clear';words=[{'text':m.group(),'start_char':m.start(),'end_char':m.end(),
             'status':'aligned','start_sample':a,'end_sample':a+320} for m,a in
             zip(re.finditer(r'\S+',text),(16000,64000,112000))]
-        result={'words':words};calls=[]
+        result={'words':words,'qualified_scope':'bounded_ami_english_coarse_envelopes'};calls=[]
         runtime=object.__new__(CanonicalRuntime)
-        runtime.engine=SimpleNamespace(models=SimpleNamespace(align_canonical=lambda *args,**kw:calls.append(args) or result))
+        runtime.engine=SimpleNamespace(config={},models=SimpleNamespace(alignment_supported=lambda language:language=='en',
+            align_canonical=lambda *args,**kw:calls.append(args) or result))
         passage={'language':'en','review':True,'language_review':True,'language_detection':{'reason':'recent_context','probes':[
             {'start_sample':0,'end_sample':48000,'language':'en','review':False,'decision':{'reason':'detected'}},
             {'start_sample':48000,'end_sample':96000,'language':'en','review':True,'decision':{'reason':'recent_context'}},
@@ -269,7 +271,8 @@ class ReadingTurnTests(unittest.TestCase):
                 'timing_kind':'ctc_emission_cell_envelope','frame_calibration_id':CALIBRATION,
                 'score_calibration_id':CALIBRATION,'words':[dict(w,status=w.get('status','aligned')) for w in words]}
         runtime=object.__new__(CanonicalRuntime)
-        runtime.engine=SimpleNamespace(models=SimpleNamespace(align_canonical=lambda *args,**kw:result))
+        runtime.engine=SimpleNamespace(config={},models=SimpleNamespace(alignment_supported=lambda language:language=='en',
+            align_canonical=lambda *args,**kw:result))
         projections=[]
         for reason,review in [('detected',False),('recent_context',True),('best_effort',True)]:
             current=copy.deepcopy(row)

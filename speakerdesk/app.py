@@ -64,7 +64,7 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
 
     updates=RuntimeUpdates(lock,update_busy)
     app.extensions['speakerdesk']={'executor':executor,'data':data,'updates':updates}
-    register_updates(app,updates)
+    register_updates(app,updates,db)
 
 
     def get(jid, *, metadata=False):
@@ -317,8 +317,8 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
                 protected=set(prior.get('protected_fields',[])) if prior else set()
                 edited={k for k in ('text','speaker','start','end') if prior and segment[k]!=prior[k]}
                 for key in ('audio_anchor','source_start','source_end','source_speaker_candidates','activity_regions','language_epoch','finalized','refinement_window','fast_origin_sample','language_generation','language_mode',
-                            'canonical_utterance_id','canonical_machine_revision','canonical_state','start_sample','end_sample','audio_revision',
-                            'text_audio_anchor','alignment','speech_regions','speaker_activity','assembly_provenance','bounded_decode_provenance','reading_turns','reading_turn_provenance'):
+                            'canonical_utterance_id','canonical_machine_revision','canonical_state','start_sample','end_sample','audio_revision','capture_source','capture_audio',
+                            'text_audio_anchor','alignment','speech_regions','speaker_activity','assembly_provenance','bounded_decode_provenance','reading_turns','reading_turn_provenance','audio_state','canonical_unresolved'):
                     segment.pop(key,None)
                     if prior and key in prior:segment[key]=copy.deepcopy(prior[key])
                 if prior and ('machine_revision' in prior or protected or edited):
@@ -414,10 +414,14 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
         return jsonify(deleted=True)
 
     voice_message='Finish local model setup to recognize saved voices.'
+    owned_voice=[]
     if voice_backend is None and voice_calibration is None and os.getenv('SPEAKERDESK_VOICE_CONFIG'):
         try:
-            from voice_coreml import load_approved_runtime
-            voice_backend,voice_calibration=load_approved_runtime(os.environ['SPEAKERDESK_VOICE_CONFIG'])
+            from voice_gpu_runtime import load_approved_runtime
+            model_dir=Path(os.getenv('SPEAKERDESK_MODELS',ROOT.parent/'models'))/'redimnet2-b6'
+            voice_backend,voice_calibration=load_approved_runtime(os.environ['SPEAKERDESK_VOICE_CONFIG'],
+                model_dir=model_dir,updates=updates,audio_root=data)
+            owned_voice.append(voice_backend)
         except (ValueError, OSError, KeyError, TypeError) as exc:
             voice_message='Voice recognition needs local setup.'
             app.logger.warning('Voice setup is unavailable: %s',exc)
@@ -429,6 +433,13 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
     recognizer=VoiceRecognition(get,put,folder,lock,lambda:app.extensions['speakerdesk']['voice_runtime'],
                                app.extensions['speakerdesk']['people'],preference,app.logger,updates=updates)
     app.extensions['speakerdesk'].update(recognition=recognizer,recognition_preference=preference)
+
+    def close_voice():
+        recognizer.close(wait=True)
+        for backend in list(owned_voice):
+            backend.close()
+            owned_voice.remove(backend)
+    app.extensions['speakerdesk']['close_voice']=close_voice
 
     @app.get('/api/recognition')
     def recognition_status():return jsonify(enabled=preference.enabled())
@@ -447,14 +458,20 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
         return jsonify(enabled=preference.enabled())
 
     def activate_voice(model_dir,calibration_path):
-        from voice_coreml import load_approved_runtime
-        runtime=load_approved_runtime(calibration_path,model_dir=model_dir)
+        from voice_gpu_runtime import load_approved_runtime
+        runtime=load_approved_runtime(calibration_path,model_dir=model_dir,updates=updates,audio_root=data)
         with lock:
+            previous=app.extensions['speakerdesk']['voice_runtime'][0]
             app.extensions['speakerdesk']['voice_runtime']=runtime
+            owned_voice.append(runtime[0])
             app.extensions['speakerdesk']['voice_message']='Saved voices are recognized once when a new speaker appears. You can correct any name.'
+        if previous in owned_voice:
+            previous.close()
+            owned_voice.remove(previous)
     register_setup(app,activate_voice)
     managed_voice=app.extensions['speakerdesk']['voice_setup']
-    if voice_backend is None and managed_voice.released() and managed_voice.supported() and managed_voice.installed():
+    if (voice_backend is None and not os.getenv('SPEAKERDESK_VOICE_CONFIG')
+            and managed_voice.released() and managed_voice.supported() and managed_voice.installed()):
         try:activate_voice(managed_voice.root,managed_voice.calibration_path)
         except (ValueError,OSError,KeyError,TypeError) as exc:app.logger.warning('Managed voice setup is unavailable: %s',exc)
     register_meetings(app,get,put,patch,folder,lock,inference_busy,recognizer,default_language=get_default_language)
@@ -463,4 +480,11 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
 
 if __name__=='__main__':
     app=create_app()
-    app.run(host='127.0.0.1',port=int(os.getenv('PORT','8790')),debug=False,threaded=True,use_reloader=False)
+    try:app.run(host='127.0.0.1',port=int(os.getenv('PORT','8790')),debug=False,threaded=True,use_reloader=False)
+    finally:
+        from pipeline import shutdown_workers
+        shutdown_workers()
+        from voice_worker_registry import cancel_owned_workers
+        cancel_owned_workers()
+        app.extensions['speakerdesk']['meetings'].close()
+        app.extensions['speakerdesk']['close_voice']()

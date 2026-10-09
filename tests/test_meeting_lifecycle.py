@@ -25,6 +25,45 @@ from support.meeting_harness import MeetingHarness
 
 
 class MeetingLifecycleTests(MeetingHarness, unittest.TestCase):
+    def test_bounded_startup_hold_flushes_on_pause_stop_and_binds_saved_sources(self):
+        self.manager.channel_transcription=True;self.manager.source_innovation=True;self.manager.source_startup_hold=True
+        jid=self.start(['microphone','system']);self.wait_for(lambda:self.job(jid)['status']=='recording')
+        self.control(jid,'pause');self.wait_for(lambda:self.job(jid)['status']=='paused')
+        self.assertAlmostEqual(self.client.get('/api/meeting').json['duration'],.1)
+        self.control(jid,'resume');self.wait_for(lambda:self.job(jid)['status']=='recording')
+        self.control(jid,'stop');self.wait_for(lambda:self.manager.jid is None)
+        self.assertEqual(self.job(jid)['status'],'ready');self.assertEqual(self.job(jid)['capture_source_catalog']['schema_version'],3)
+        summary=json.loads((self.root/jid/'innovation-evidence.json').read_text())
+        self.assertEqual(summary['samples'],5600)
+        np.testing.assert_array_equal(self.samples(jid,'microphone_clean.wav'),self.samples(jid,'microphone_native.wav'))
+        np.testing.assert_array_equal(self.samples(jid,'audio.wav'),self.samples(jid,'audio_native.wav'))
+        rows=[json.loads(line) for line in (self.root/jid/'innovation-receipts.jsonl').read_text().splitlines()]
+        self.assertEqual({d['epoch'] for row in rows for d in row['decisions']},{0,1})
+
+    def test_development_source_retention_survives_pause_and_preserves_native_audio(self):
+        import hashlib
+        self.manager.channel_transcription=True;self.manager.source_innovation=True
+        self.manager.source_startup_hold=False  # Explicit older schema-2 contract.
+        jid=self.start(['microphone','system'])
+        self.wait_for(lambda:self.job(jid)['status']=='recording')
+        self.control(jid,'pause');self.wait_for(lambda:self.job(jid)['status']=='paused')
+        self.control(jid,'resume');self.wait_for(lambda:self.job(jid)['status']=='recording')
+        self.control(jid,'stop');self.wait_for(lambda:self.manager.jid is None)
+        self.assertEqual(self.job(jid)['status'],'ready')
+        self.assertEqual(self.job(jid)['capture_source_catalog']['schema_version'],2)
+        folder=self.root/jid;summary=json.loads((folder/'innovation-evidence.json').read_text())
+        self.assertEqual(summary['samples'],5600);self.assertFalse(summary['production_admissible'])
+        # This short constant fixture never qualifies a render path: no initial
+        # local samples may disappear while support is absent or after Pause.
+        np.testing.assert_array_equal(self.samples(jid,'microphone_clean.wav'),self.samples(jid,'microphone_native.wav'))
+        np.testing.assert_array_equal(self.samples(jid,'audio.wav'),self.samples(jid,'audio_native.wav'))
+        rows=[json.loads(line) for line in (folder/'innovation-receipts.jsonl').read_text().splitlines()]
+        self.assertEqual({d['epoch'] for row in rows for d in row['decisions']},{0,1})
+        for source,digest in summary['pcm_sha256'].items():
+            with wave.open(str(folder/(source+'.wav')),'rb') as w:
+                self.assertEqual(w.getnframes(),5600)
+                self.assertEqual(hashlib.sha256(w.readframes(5600)).hexdigest(),digest)
+
     def test_selected_sources_pause_resume_stop_and_reopen_preserve_audio_and_transcript(self):
         for sources in (['microphone'], ['system'], ['microphone', 'system']):
             with self.subTest(sources=sources):
@@ -51,6 +90,12 @@ class MeetingLifecycleTests(MeetingHarness, unittest.TestCase):
                         self.assertFalse((self.root / jid / f'{source}.wav').exists())
                 expected_mix = sum(np.concatenate([np.full(1600, values[source][0]), np.full(4000, values[source][1])]) for source in sources)
                 np.testing.assert_array_equal(self.samples(jid, 'audio.wav'), np.rint(expected_mix.astype(np.float64)*32768).clip(-32768,32767).astype('<i2'))
+                if len(sources)==2:
+                    with wave.open(str(self.root/jid/'system_reference.wav'),'rb') as reference:
+                        self.assertEqual(reference.getnchannels(),2)
+                        self.assertEqual(reference.getnframes(),5600)
+                        samples=np.frombuffer(reference.readframes(5600),dtype='<i2').reshape(-1,2)
+                        for channel in range(2):np.testing.assert_array_equal(samples[:,channel],self.samples(jid,'system.wav'))
                 with self.client.get(f'/api/jobs/{jid}/audio') as response:
                     self.assertEqual(response.status_code, 200)
                 self.assertIn('Synthetic transport result.', self.client.get(f'/api/jobs/{jid}/export/txt').get_data(as_text=True))

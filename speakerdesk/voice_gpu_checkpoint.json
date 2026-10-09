@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "model": {
+    "model_id": "aufklarer/ReDimNet2-B6-CoreML",
+    "revision": "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:mlx-0.32.2:GPU:4db6708c1a1770a5046cb7bf0a27369362a3ec693e7e91a9d0dd249f6c148296",
+    "artifact_sha256": "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+    "dimension": 192,
+    "sample_rate": 16000
+  },
+  "implementation_identity_sha256": "4db6708c1a1770a5046cb7bf0a27369362a3ec693e7e91a9d0dd249f6c148296",
+  "dataset_id": "AMI-disjoint-natural-GPU-calibration-v1:development",
+  "threshold": 0.5827445050278138,
+  "margin": 0.22375670158951808,
+  "minimum_clips": 2,
+  "genuine_trials": 8,
+  "impostor_trials": 8,
+  "false_accept_rate": 0.0,
+  "false_reject_rate": 0.0,
+  "accepted_error_limits": {
+    "maximum_far": 0.0,
+    "maximum_frr": 0.25,
+    "maximum_wrong_identities": 0
+  },
+  "development_data_sha256": "d5ddf4697e253adeb1e3b962474be3dfa96cc9b126cdc8415c051716b5997b93",
+  "plan_payload_sha256": "1c09fb987d2f18c7f43068d1ac316438215e4a4fdad14d06a2df4238c0fbca02",
+  "development_counts": [
+    {
+      "library": "full",
+      "genuine_trials": 8,
+      "unknown_trials": 8,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": false
+    },
+    {
+      "library": "cohort:ES2003",
+      "genuine_trials": 2,
+      "unknown_trials": 2,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "cohort:ES2011",
+      "genuine_trials": 2,
+      "unknown_trials": 2,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "cohort:IS1008",
+      "genuine_trials": 2,
+      "unknown_trials": 2,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "cohort:TS3004",
+      "genuine_trials": 2,
+      "unknown_trials": 2,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "single:AMI:MEE011",
+      "genuine_trials": 1,
+      "unknown_trials": 15,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "single:AMI:MEE009",
+      "genuine_trials": 1,
+      "unknown_trials": 15,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "single:AMI:FEE041",
+      "genuine_trials": 1,
+      "unknown_trials": 15,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "single:AMI:FEE044",
+      "genuine_trials": 1,
+      "unknown_trials": 15,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "single:AMI:MIO086",
+      "genuine_trials": 1,
+      "unknown_trials": 15,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "single:AMI:FIE038",
+      "genuine_trials": 1,
+      "unknown_trials": 15,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "single:AMI:MTD013PM",
+      "genuine_trials": 1,
+      "unknown_trials": 15,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    },
+    {
+      "library": "single:AMI:MTD015UID",
+      "genuine_trials": 1,
+      "unknown_trials": 15,
+      "false_rejects": 0,
+      "false_accepts": 0,
+      "wrong_identities": 0,
+      "meets_error_limits": true,
+      "reused_vector_controls": true
+    }
+  ],
+  "selection_rule": "Midpoint of worst single-profile unknown minimum and weakest true query minimum; half weakest genuine runner-up gap. No held-out input.",
+  "approved_for_recognition": false,
+  "legacy_ALL_compatibility_established": false
+}

@@ -9,7 +9,7 @@
       15
     ],
     "all_publications_exports_and_controls_preserved": true,
-    "scope": "Inherited combined Engine policy; portable activation namespace requires fresh actual qualification.",
+    "scope": "Inherited exact-decoder reuse gates unchanged; queue cadence/open raw-core publication and multilingual supplied-text timing routes changed. Current source namespace requires fresh incremental GPU qualification before integration acceptance. Required timing/readiness and accelerator-only voice refusal source changed; no new execution qualification claimed.",
     "final_namespace_execution_qualified": false
   },
   "identity": {
@@ -43,11 +43,11 @@
       "mlx_speech/models/cohere_asr/tokenizer.py": "a4f5e5d28f792540adbea9d1cf912259a31e75926e0e7e372d0a7cf84492ef71"
     },
     "policy_source_sha256": {
-      "canonical_runtime.py": "3ba83a2557fa58bd647e9f23cf7e7ab2aa928fcf37d597b7207b1a773a27ee05",
+      "canonical_runtime.py": "b51fee43e91c46fdb34c666df5f796d154dd29a15d1954944bcc45250b5f1a6a",
       "final_asr_reuse.py": "6225a77e8ef7cb4fd41eeb9d16329b0cb7324d3634478251c768f5c7e2883718",
       "language_detection.py": "d40ce8d0c0e3caa3cc69a6bbd8a440e6e717219339a054d8ef4e2c47da029f72",
       "language_probe_cache.py": "f865996c6a463e4bd173c1de2cc8b8288e9deb449850257e655a6297315617b6",
-      "live_refinement.py": "199f2f4b73e96df5ab890c35e7836736552faffa09b8fd40c6a1a56be669119a",
+      "live_refinement.py": "bb8ceec926aeedd29e5f53148b84851eb4e668e62d30f662114460e086546c17",
       "meeting_refinement.py": "f5dbcf174766e9f1a25cba2b20baddabbff2f7dbfed19ce45b6535dfcd15c7ef"
     },
     "loaded_provider_state": {

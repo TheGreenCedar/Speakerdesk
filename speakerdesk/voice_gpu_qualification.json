@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "provider_id": "speakerdesk-redimnet2-mlx-gpu-v1",
+  "qualification": "natural_acoustic_and_injected_API_functional_pass",
+  "functional_acoustic_and_API_passed": true,
+  "production_activation_allowed": false,
+  "approved_for_recognition": false,
+  "ordinary_startup_activation_verified": false,
+  "model": {
+    "model_id": "aufklarer/ReDimNet2-B6-CoreML",
+    "revision": "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:mlx-0.32.2:GPU:4db6708c1a1770a5046cb7bf0a27369362a3ec693e7e91a9d0dd249f6c148296",
+    "artifact_sha256": "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+    "dimension": 192,
+    "sample_rate": 16000
+  },
+  "implementation_identity_sha256": "4db6708c1a1770a5046cb7bf0a27369362a3ec693e7e91a9d0dd249f6c148296",
+  "neural_source_sha256": {
+    "voice_mlx_backend.py": "e912be5e3e1f92056f7ebb5764c670db044d2ba70f29813c906f76ed43f6b903",
+    "mlx_voice_mil.py": "c9684ce72fb8f633937f074c5f66fe4a224437e8872f4ac09e6e6eeea86ebd4b",
+    "voice_waveform.py": "a3cc6dbe7f1411e1a8ed1f60a7885c139fcf150da82f659e6ceeb74655d59bee"
+  },
+  "thread_wrapper_sha256": "814d6c4d73f5d2e04e7c24abac11959808307eff2ce00612ec900ce8dc2c76be",
+  "runtime": {
+    "mlx": "0.32.2",
+    "platform": "Darwin",
+    "machine": "arm64",
+    "neural_device": "GPU",
+    "CPU_neural_fallback": false,
+    "CoreML_neural_execution": false
+  },
+  "policy": {
+    "dataset_id": "AMI-disjoint-natural-GPU-calibration-v1:development",
+    "threshold": 0.5827445050278138,
+    "margin": 0.22375670158951808,
+    "minimum_clips": 2,
+    "genuine_trials": 8,
+    "impostor_trials": 8,
+    "false_accept_rate": 0.0,
+    "false_reject_rate": 0.0,
+    "accepted_error_limits": {
+      "maximum_far": 0.0,
+      "maximum_frr": 0.25,
+      "maximum_wrong_identities": 0
+    }
+  },
+  "sealed_policy_file_sha256": "f2e20efab39ad0d3dc63bb4f48c7d69dbb4666691e59786cdab7e0be0b69e36d",
+  "held_full_library": {
+    "known_people": 6,
+    "unknown_people": 6,
+    "false_accepts": 0,
+    "false_rejects": 0,
+    "wrong_identities": 0,
+    "controls_reuse_vectors": true,
+    "fitted_after_test": false
+  },
+  "actual_API_proof": {
+    "execution_id": "voice-api-threading-3b74b6ea6735",
+    "GPU_forwards": 6,
+    "declarations": 4854,
+    "known_match": true,
+    "unknown_rejected": true,
+    "single_inference_owner_joined": true,
+    "legacy_payload_bytes_preserved": true,
+    "real_People_writes": 0,
+    "backend_injected": true
+  },
+  "scope": "Small public English AMI scenario/headset sample; not population FAR, other capture/language accuracy, base-training exclusion, or legacy ALL numerical compatibility.",
+  "legacy_profiles": {
+    "compatibility_rule": "Exact original complete model dictionary equality",
+    "missing_identity_state": "unverified",
+    "mismatched_active_identity_state": "incompatible_runtime",
+    "runtime_unavailable_state": "stored_unavailable",
+    "automatic_migration": false,
+    "automatic_relabeling": false,
+    "automatic_deletion": false,
+    "replacement_requires_explicit_remember_consent": true
+  },
+  "evidence": {
+    "development_checkpoint": {
+      "path": "/Users/albert/Documents/Codex/2026-10-07/task-9/voice-gpu-policy/backend-calibration-preparation/evidence/voice-development-a306676d2b18/CHECKPOINT.json",
+      "sha256": "f2e20efab39ad0d3dc63bb4f48c7d69dbb4666691e59786cdab7e0be0b69e36d"
+    },
+    "held_partial_analysis": {
+      "path": "/Users/albert/Documents/Codex/2026-10-07/task-9/voice-gpu-policy/backend-calibration-preparation/evidence/voice-held-5d938158814a/PARTIAL-JSON-ANALYSIS.json",
+      "sha256": "fc1cf61ded1674e2286578de5647c878d5f191a04f8c6fbb57b1dbc19a953566"
+    },
+    "API_result": {
+      "path": "/Users/albert/Documents/Codex/2026-10-07/task-9/voice-gpu-policy/backend-calibration-preparation/evidence/voice-api-threading-3b74b6ea6735/RESULT.json",
+      "sha256": "60fda7ae7a7389252d8f1fbd2e6608871215309b42db93781ebc1c07f6406cfa"
+    },
+    "API_analysis": {
+      "path": "/Users/albert/Documents/Codex/2026-10-07/task-9/voice-gpu-policy/backend-calibration-preparation/evidence/voice-api-threading-3b74b6ea6735/INDEPENDENT-API-JSON-ANALYSIS.json",
+      "sha256": "4a70de841ceec80c385666348daffd085d765a252695c305742b60b0be684827"
+    },
+    "API_inventory": {
+      "path": "/Users/albert/Documents/Codex/2026-10-07/task-9/voice-gpu-policy/backend-calibration-preparation/API-THREADING-EVIDENCE-INVENTORY.json",
+      "sha256": "d37fe49d65abc01cfef1f1a4c58b274ba62e68cfb11d56905d8c59bbb2e7adc9"
+    },
+    "profile_source_handoff": {
+      "path": "/Users/albert/Documents/Codex/2026-10-07/task-9/voice-gpu-policy/backend-calibration-preparation/SOURCE-PREPARATION-HANDOFF.json",
+      "sha256": "c0992e0d412cd84721041baae4bf8d83e99f20ff9a971f737d6d410ff1aa19de"
+    },
+    "source_clearance": {
+      "path": "/Users/albert/Documents/Codex/2026-10-07/task-9/voice-gpu-policy/backend-calibration-preparation/INDEPENDENT-API-THREADING-CLEARANCE.json",
+      "sha256": "3651f1a43499dacc0123d5e0522539abb9395c313067fa83b865bb29fd359706"
+    },
+    "analyzer_clearance": {
+      "path": "/Users/albert/Documents/Codex/2026-10-07/task-9/voice-gpu-policy/backend-calibration-preparation/review-evidence/api-threading-analyzer-clearance.json",
+      "sha256": "379504e94ff9eb57b9f5cdc2c26b07e9ae9a19296e24f9be3750f5596863c9d6"
+    }
+  },
+  "remaining_required_integration": [
+    "Explicit product acceptance of functional scope/policy",
+    "One shared GPU loader for environment-config and managed setup/startup routes",
+    "Existing owned inference-worker registry/admission and shutdown lifecycle; keep all embedding calls on one inference owner",
+    "Actual noninjected ordinary-startup/managed-activation proof on the integrated source; no such proof claimed here"
+  ]
+}

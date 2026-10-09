@@ -69580,3 +69580,14 @@ Coarse alignment of unchanged Cohere text
 Pinned model: csukuangfj2/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12, revision 6fc542a3b0661c8278cca1230c34deb989f31202. Apache-2.0.
 Runtime: ONNX Runtime 1.30.0 (MIT and bundled third-party notices), CTC segmentation 1.7.4 (Apache-2.0), flatbuffers 25.12.19 (Apache-2.0). Build-only Cython 3.1.4 (Apache-2.0). Existing protobuf 7.36.2 remains unchanged.
 Complete approved model/runtime licenses and ONNX third-party notices are shipped under licenses/alignment-runtime. The model is downloaded locally by setup, not bundled in the installer.
+
+Private CTC forward components
+The MMS, Wav2Vec2 and STTOutput source files are byte-identical copies from MLX Audio 0.5.7 (MIT, copyright 2024 Prince Canuma). Their private package avoids the public STT-family initializer; model math and calibrated weights are unchanged. The full MIT license is shipped under licenses/mlx-ctc-components.
+
+Capture acoustic echo cancellation: WebRTC AEC3, BSD 3-Clause, revision
+852150686748f5cce0c1c96f4fde50e6be43ef73. Includes its PATENTS grant and AUTHORS.
+Ordinary Abseil support is Apache 2.0, upstream revision
+7f008af1930f59d869a816795ac5d445e3628e4d (Chromium third_party pin
+8a83e63525b495aa7f35648a3b4b676279deb864). The bundled Ooura FFT retains
+its permissive license. Full notices: licenses/capture-echo/.
+No neural residual echo estimator, browser runtime, or model is included.

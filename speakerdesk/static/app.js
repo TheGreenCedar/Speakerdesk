@@ -7,6 +7,8 @@ let changingLiveLanguage = false, changingDefaultLanguage = false, defaultLangua
 let pendingExport = null, autosaveTimer = null, setupState = null, undoRemoval = null;
 let updateState = {id: 0, state: 'unavailable'}, updateFrozen = false, updatePolling = false;
 let updatePreparation = null, updateRequesting = false, localMutations = 0;
+let startupUpdateChecked = false, newMeetingOpening = false;
+let dismissedUpdateVersion = '';
 const savedPassageBindings = new WeakMap();
 const readingTurnBindings = new WeakMap();
 let playbackDocument = null, playbackIndexDirty = true, playbackRows = [], playbackEnds = [];
@@ -14,6 +16,8 @@ let playbackSegments = new Map(), playbackCards = new Map(), playingCards = new 
 const narrowLayout = () => matchMedia('(max-width: 900px)').matches;
 const liveStatuses = ['starting','recording','paused','finishing'];
 const isLive = () => selected && liveStatuses.includes(selected.status);
+// One binding map supplies keyboard dispatch and every UI shortcut hint.
+const actionShortcuts = Object.freeze({settings:',','new-meeting':'n','import-recording':'o',find:'f',save:'s'});
 
 function node(tag, text, className) {
   const el = document.createElement(tag);
@@ -110,9 +114,11 @@ async function downloadExport(kind=null) {
 function renderSaveState() {
   const button = $('save');
   button.disabled = updateFrozen || saving || !dirty;
-  button.textContent = saving ? 'Saving…' : dirty ? 'Save now' : 'Saved';
+  (button.querySelector('.shortcut-label') || button).textContent = saving ? 'Saving…' : dirty ? 'Save now' : 'Saved';
   button.classList.toggle('is-dirty', dirty && !saving);
-  button.title = dirty ? 'Edits save automatically. Press ⌘S to save now.' : 'All changes saved on this Mac';
+  button.dataset.shortcutTitle = dirty ? 'Edits save automatically. Save now' : 'All changes saved on this Mac';
+  button.title = button.dataset.shortcutTitle;
+  renderShortcutControl(button);
 }
 function scheduleAutosave() {
   clearTimeout(autosaveTimer);
@@ -171,7 +177,8 @@ function renderJobs() {
   for(const child of Array.from(host.children))if(!retained.has(child))child.remove();
 }
 function languageReady(mode) {
-  return config.readiness.configured && (mode !== 'auto' || config.readiness.automatic_language);
+  return config.readiness.configured && config.readiness.automatic_language
+    && setupState?.core_ready !== false && setupState?.alignment?.ready !== false;
 }
 function setStatus() {
   $('recording-name').textContent = selected.name; $('recording-name').title = selected.name;
@@ -198,6 +205,7 @@ function setStatus() {
   renderLiveLanguage();
   renderExportState();
   renderRefinementStatus();
+  renderShortcutHints();
 }
 async function select(jid) {
   if(hasPendingPassageSaves()){notice('Wait for the passage save to finish before switching meetings.');return;}
@@ -800,19 +808,97 @@ function manual() {
   doc = {schema_version: 1, speakers: {'speaker_0': 'Speaker 1'}, segments: [], provenance: {kind: 'manual', timing: 'User supplied recording times'}, warnings: ['Manual transcript. Enter text and review timing against the recording.']};
   changed(); setStatus(); renderEditor();
 }
+function usableActionControl(id) {
+  const control = $(id);
+  for(let element=control;element;element=element.parentElement) {
+    if(element.hidden || element.inert || element.disabled)return false;
+  }
+  return true;
+}
+async function startNewMeeting() {
+  const blocked=()=>updateFrozen || !usableActionControl('new-meeting') || newMeetingOpening ||
+    liveStatuses.includes(meeting?.status) || isLive() || identityBusy || retrying || hasPendingPassageSaves() || !!undoRemoval;
+  if(blocked())return false;
+  newMeetingOpening=true;
+  try {
+    if(!(await saveBeforeLeaving()))return false;
+    // Recording and focus state may have changed while an autosave was pending.
+    if(updateFrozen || !$('setup').hidden || document.querySelector('dialog[open]') ||
+      liveStatuses.includes(meeting?.status) || isLive() || identityBusy || retrying || hasPendingPassageSaves() || undoRemoval)return false;
+    if((hasPassageDrafts() || hasRecoverablePassageDrafts()) && !confirm('Discard unsaved passage drafts?'))return false;
+    passageDrafts.clear();recoverablePassageDrafts.clear();selected=doc=null;resetPlayback();dirty=false;selectionGeneration++;$('player').pause();$('player').removeAttribute('src');
+    $('workspace').hidden=true;$('empty').hidden=false;renderJobs();renderStartState();renderShortcutHints();$('meeting-title').focus();
+    return true;
+  } finally { newMeetingOpening=false; }
+}
+// Native menus, keyboard shortcuts and matching buttons use one guarded path.
+async function dispatchAction(action) {
+  if(updateFrozen || document.querySelector('dialog[open]'))return false;
+  try {
+    if(action==='settings') { openSettings();return true; }
+    if(action==='check-updates') {
+      if($('update-check').disabled || updateRequesting || updateState.state==='unavailable')return false;
+      openSettings('updates');await requestUpdate('check');return true;
+    }
+    if(action==='download-update') {
+      if(updateState.state!=='available' || updateRequesting || liveStatuses.includes(meeting?.status) || isLive())return false;
+      openSettings('updates');await requestUpdate('download');return true;
+    }
+    if(!$('setup').hidden)return false;
+    if(action==='new-meeting')return await startNewMeeting();
+    if(action==='import-recording' && usableActionControl('files') && !newMeetingOpening && !identityBusy && !retrying) { $('files').click();return true; }
+    if(action==='find') {
+      const id=$('workspace').hidden?'meeting-search':'search';
+      if(!usableActionControl(id))return false;
+      $(id).focus();$(id).select();return true;
+    }
+    if(action==='save' && usableActionControl('save') && !isLive()) { await flushSave();notice('Saved on this Mac.');return true; }
+  } catch(error) { notice(error.message,true); }
+  return false;
+}
+window.speakerdeskAction=dispatchAction;
+function shortcutDisplay(action) {
+  const mac=window.speakerdeskNativeMenu===true || typeof navigator==='undefined' || /Mac|iPhone|iPad/.test(navigator.platform);
+  return {text:`${mac?'⌘':'Ctrl+'}${actionShortcuts[action].toUpperCase()}`,aria:`${mac?'Meta':'Control'}+${actionShortcuts[action].toUpperCase()}`};
+}
+function renderShortcutControl(control) {
+  const action=control.dataset.shortcutAction;
+  if(!actionShortcuts[action])return;
+  const host=control.tagName==='INPUT'?control.closest('label'):control;
+  if(!host)return;
+  const active=action!=='find' || control.id===($('workspace').hidden?'meeting-search':'search');
+  const shortcut=shortcutDisplay(action);
+  let hint=host.querySelector('.shortcut-hint');
+  if(!hint){hint=node('kbd',undefined,'shortcut-hint');hint.setAttribute('aria-hidden','true');host.append(hint);}
+  hint.textContent=shortcut.text;hint.hidden=!active;
+  const title=control.dataset.shortcutTitle || control.getAttribute('aria-label') || action;
+  control.title=host.title=active?`${title} (${shortcut.text})`:title;
+  if(active)control.setAttribute('aria-keyshortcuts',shortcut.aria);
+  else control.removeAttribute('aria-keyshortcuts');
+}
+function renderShortcutHints() {
+  document.querySelectorAll('[data-shortcut-action]').forEach(renderShortcutControl);
+  document.querySelectorAll('[data-shortcut-key]').forEach(hint=>{
+    const shortcut=shortcutDisplay(hint.dataset.shortcutKey);
+    hint.textContent=shortcut.text;
+    hint.setAttribute('aria-label',shortcut.aria.replace('Meta','Command'));
+  });
+}
+function handleActionKey(event) {
+  if(event.defaultPrevented || event.isComposing || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey)return;
+  const action=Object.keys(actionShortcuts).find(action=>actionShortcuts[action]===event.key.toLowerCase());
+  if(!action)return;
+  // Native menu accelerators own Command keys. Leave WebKit's event uncancelled
+  // so it can reach the menu; do not dispatch a second browser action here.
+  if(window.speakerdeskNativeMenu===true && event.metaKey)return;
+  event.preventDefault(); // Suppress browser New Window / Open / Find / Save even when blocked.
+  if(event.repeat)return;
+  void dispatchAction(action);
+}
 function wire() {
   wirePeople();
-  $('new-meeting').addEventListener('click', () => {
-    if(hasPendingPassageSaves()){notice('Wait for the passage save to finish before starting another meeting.');return;}
-    if(meeting && liveStatuses.includes(meeting.status)){select(meeting.id).catch(e=>notice(e.message,true));return;}
-    startNewMeeting().catch(e=>notice(e.message,true));
-  });
-  async function startNewMeeting() {
-    if(!(await saveBeforeLeaving()))return;
-    if(hasPassageDrafts() && !confirm('Discard unsaved passage drafts?'))return;
-    passageDrafts.clear();recoverablePassageDrafts.clear();selected=doc=null;resetPlayback();dirty=false;selectionGeneration++;$('player').pause();$('player').removeAttribute('src');
-    $('workspace').hidden=true;$('empty').hidden=false;renderJobs();renderStartState();$('meeting-title').focus();
-  }
+  renderShortcutHints();
+  $('new-meeting').addEventListener('click', () => void dispatchAction('new-meeting'));
   $('refinement-toggle').addEventListener('click',toggleRefinement);
   $('meeting-search').addEventListener('input',renderJobs);
   $('language').addEventListener('change',()=>changeDefaultLanguage().catch(error=>notice(error.message,true)));
@@ -834,7 +920,7 @@ function wire() {
     event.preventDefault();$('start-meeting').disabled=true;
     try {
       if(changingLiveLanguage || changingDefaultLanguage)throw new Error('Wait for the language change to finish before starting.');
-      if(!languageReady($('language').value)){openSettings('models');throw new Error('Download the local models first, or choose a fixed meeting language in Settings.');}
+      if(!languageReady($('language').value)){openSettings('models');throw new Error('Finish local model setup before starting a meeting.');}
       const sources=[];if($('capture-microphone').checked)sources.push('microphone');if($('capture-system').checked)sources.push('system');
       if(!sources.length)throw new Error('Choose an audio source before starting.');
       const job=await api('/api/meetings',{method:'POST',body:JSON.stringify({name:$('meeting-title').value,language:$('language').value,sources})});
@@ -852,7 +938,7 @@ function wire() {
   ['dragenter', 'dragover'].forEach(event => drop.addEventListener(event, e => { e.preventDefault(); drop.classList.add('dragging'); }));
   ['dragleave', 'drop'].forEach(event => drop.addEventListener(event, e => { e.preventDefault(); drop.classList.remove('dragging'); }));
   drop.addEventListener('drop', e => upload(e.dataTransfer.files).catch(err => notice(err.message, true)));
-  $('setup-toggle').addEventListener('click', () => $('setup').hidden ? openSettings() : closeSettings());
+  $('setup-toggle').addEventListener('click', () => void dispatchAction('settings'));
   $('inspector-close').addEventListener('click', () => {
     const active=document.querySelector('.segment.active');$('inspector').hidden=true;
     document.querySelectorAll('.segment.active').forEach(item => item.classList.remove('active'));
@@ -860,15 +946,12 @@ function wire() {
   });
   $('clear-search').addEventListener('click',()=>{$('search').value='';renderSegments();$('search').focus();});
   $('search').addEventListener('keydown',event=>{if(event.key==='Escape' && $('search').value){event.preventDefault();$('search').value='';renderSegments();}});
-  document.addEventListener('keydown', event => {
-    if(!(event.metaKey || event.ctrlKey) || event.altKey || !$('setup').hidden || document.querySelector('dialog[open]'))return;
-    const key=event.key.toLowerCase();
-    if(key==='f' && !$('workspace').hidden && !$('search').disabled){event.preventDefault();$('search').focus();$('search').select();}
-    if(key==='s' && !$('workspace').hidden){event.preventDefault();flushSave().then(()=>{if(doc && !isLive())notice('Saved on this Mac.');}).catch(e=>notice(e.message,true));}
-  });
+  document.addEventListener('keydown', handleActionKey);
   $('settings-close').addEventListener('click',closeSettings);
-  $('update-check').addEventListener('click',()=>requestUpdate('check').catch(error=>notice(error.message,true)));
-  $('update-download').addEventListener('click',()=>requestUpdate('download').catch(error=>notice(error.message,true)));
+  $('update-check').addEventListener('click',()=>void dispatchAction('check-updates'));
+  $('update-download').addEventListener('click',()=>void dispatchAction('download-update'));
+  $('update-notice-action').addEventListener('click',()=>void dispatchAction('download-update'));
+  $('update-notice-dismiss').addEventListener('click',()=>void dismissUpdateNotice());
   $('update-install').addEventListener('click',()=>requestUpdate('install').catch(error=>notice(error.message,true)));
   $('update-cancel').addEventListener('click',()=>requestUpdate('cancel').catch(error=>notice(error.message,true)));
   document.addEventListener('keydown', event => {
@@ -881,6 +964,7 @@ function wire() {
       else if(!event.shiftKey && document.activeElement===last){event.preventDefault();first.focus();}
     }
   });
+  $('install-alignment').addEventListener('click',()=>alignmentAction('POST').catch(error=>{ $('alignment-status').textContent=error.message; }));
   $('install-models').addEventListener('click',() => installModels().catch(error => { $('model-status').textContent=error.message; }));
   $('recognize-voices').addEventListener('change',async event => {
     const control=event.target;control.disabled=true;
@@ -890,7 +974,7 @@ function wire() {
   });
   $('run').addEventListener('click', async () => { try { selected = await api(`/api/jobs/${selected.id}/run`, {method: 'POST'}); setStatus(); } catch (e) { notice(e.message, true); } });
   $('manual').addEventListener('click', manual);
-  $('save').addEventListener('click', () => flushSave().catch(e => notice(e.message, true)));
+  $('save').addEventListener('click', () => void dispatchAction('save'));
   $('speed').addEventListener('change', () => { $('player').playbackRate = Number($('speed').value); });
   $('player').addEventListener('timeupdate', () => {
     if (!doc) return;
@@ -963,6 +1047,7 @@ async function poll() {
   } catch (e) { notice(e.message, true); } finally { polling = false; }
 }
 async function init() {
+  renderShortcutHints();
   try {
     await refreshConfig();
     Object.entries(config.languages).forEach(([code, name]) => {
@@ -976,7 +1061,7 @@ async function init() {
     else if(meeting?.id && liveStatuses.includes(meeting.status)) await select(meeting.id);
     await refreshSetup();
     setInterval(refreshSetup,1500);
-    await refreshUpdates();setInterval(refreshUpdates,1000);
+    await initializeUpdates();setInterval(refreshUpdates,1000);
     renderIcons();
   } catch (e) { notice(e.message, true); }
 }
@@ -995,35 +1080,67 @@ async function installModels() {
 function renderStartState() {
   if(!config)return;
   const modelsReady=languageReady($('language').value), capture=meeting?.capture_available!==false;
+  const setupBusy=setupState?.status==='downloading';
   const state=setupState, busy=state?.status==='downloading';
   $('setup-card').hidden=modelsReady || !state;
   if(state && !modelsReady) {
     const percent=state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0;
-    const autoOnly=config.readiness.configured && !config.readiness.automatic_language;
     $('setup-card-text').textContent=!state.supported?'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.'
-      :autoOnly?'Automatic language detection needs one more download. Download it, or choose a fixed meeting language.'
       :`Download the local models once (${formatBytes(state.total_bytes)}). After that, meetings are transcribed offline on this Mac.`;
     $('setup-card-progress').hidden=!busy;$('setup-card-progress').value=percent;
     $('setup-card-status').textContent=state.error || (busy?`${state.phase} · ${percent}%`:'');
     $('setup-card-install').disabled=busy || !state.supported || state.voice?.status==='downloading';
     $('setup-card-install').querySelector('span').textContent=busy?'Downloading…':state.status==='failed'?'Resume download':`Download models · ${formatBytes(state.total_bytes)}`;
   }
-  $('start-meeting').disabled=!modelsReady || !capture || changingLiveLanguage || changingDefaultLanguage;
+  $('start-meeting').disabled=setupBusy || !modelsReady || !capture || changingLiveLanguage || changingDefaultLanguage;
   $('start-hint').textContent=!capture?'Live recording isn’t available in this build. Use Import recording in the sidebar to transcribe a file.'
-    :!modelsReady?'Start meeting is available once the models are downloaded.':'';
+    :setupBusy?'Finish model setup before starting a meeting.':!modelsReady?'Start meeting is available once the models are downloaded.':'';
+}
+let alignmentChanging=false,alignmentGeneration=0;
+async function alignmentAction(method,body) {
+  alignmentChanging=true;alignmentGeneration++;
+  $('install-alignment').disabled=true;
+  try { await api('/api/setup/alignment',{method,...(body?{body:JSON.stringify(body)}:{})}); }
+  finally { alignmentChanging=false;alignmentGeneration++;await refreshSetup(); }
+}
+function renderAlignment(state) {
+  const alignment=state.alignment;$('alignment-controls').hidden=!alignment;
+  if(!alignment)return;
+  const busy=alignment.status==='downloading';
+  const languages=alignment.supported_languages.map(code=>config?.languages[code]||code).join(', ');
+  const calibrated=(alignment.timing_accuracy_calibrated_languages||[]).map(code=>config?.languages[code]||code).join(', ');
+  $('alignment-coverage').textContent=`Supported languages: ${languages||'None'}. Timing accuracy measured against references: ${calibrated||'None'}.`;
+  if(alignment.supported_languages.some(code=>!(alignment.timing_accuracy_calibrated_languages||[]).includes(code)))
+    $('alignment-coverage').textContent+=' Accuracy in other supported languages has not been independently measured.';
+  $('alignment-cost').textContent=`${formatBytes(alignment.total_bytes)} download · ${formatBytes(alignment.stored_bytes)} stored · up to ${formatBytes(alignment.required_free_bytes)} free space needed.`;
+  $('alignment-message').textContent=alignment.message;
+  $('alignment-status').textContent=alignment.error || (busy?`${alignment.phase} · ${Math.round(100*alignment.downloaded_bytes/alignment.total_bytes)}%`:alignment.ready?'Ready':'Not ready');
+  $('alignment-progress').hidden=!busy;
+  $('alignment-progress').value=alignment.total_bytes?100*alignment.downloaded_bytes/alignment.total_bytes:0;
+  $('install-alignment').hidden=alignment.ready && alignment.status!=='failed';
+  $('install-alignment').disabled=alignmentChanging || !alignment.can_download;
+  $('install-alignment').textContent=busy?'Setting up…':['failed','interrupted'].includes(alignment.status)?'Retry setup': 'Finish setup';
 }
 async function refreshSetup() {
+  const generation=alignmentGeneration;
   try {
-    const state=await api('/api/setup');setupState=state;
+    const state=await api('/api/setup');
+    if(generation!==alignmentGeneration || alignmentChanging)return;
+    setupState=state;
     const list=$('model-list');list.replaceChildren();
     state.models.forEach(model => {
       const size=formatBytes(model.bytes);
-      const item=node('div',undefined,'model-item'); item.append(node('strong',model.name),node('span',model.installed?'Installed':model.optional?`Optional · ${size}`:size));list.append(item);
+      const item=node('div',undefined,'model-item');
+      const alignment=model.id===state.alignment?.id?state.alignment:null;
+      const label=model.name==='Voice recognition' && state.voice?.released===false?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':model.optional?`Optional · ${size}`:size;
+      item.append(node('strong',model.name),node('span',label));list.append(item);
     });
+    renderAlignment(state);
+    if(state.required_free_bytes)$('setup-disk-note').textContent=`First setup needs an internet connection and about ${formatBytes(state.required_free_bytes)} of free disk space including prepared timing weights.`;
     const busy=state.status==='downloading';
     $('model-progress').hidden=!busy;
     $('model-progress').value=100*state.downloaded_bytes/state.total_bytes;
-    $('model-status').textContent=state.error || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'');
+    $('model-status').textContent=state.error || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'Finish required model setup before transcribing.');
     $('install-models').hidden=state.ready;
     const voice=state.voice,voiceBusy=voice.status==='downloading';
     $('install-models').disabled=busy || voiceBusy || !state.supported;
@@ -1155,6 +1272,7 @@ function freezeForUpdate(frozen) {
   renderSaveState();renderExportState();
 }
 function renderUpdates() {
+  renderUpdateNotice();
   const state = updateState.state, version = updateState.version || '';
   const messages = {idle:'Check for a newer Speakerdesk version.',checking:'Checking for updates…',current:'Speakerdesk is up to date.',
     available:`Speakerdesk ${version} is available.`,downloading:'Downloading the update…',verifying:'Verifying the update…',
@@ -1180,6 +1298,28 @@ function renderUpdates() {
   if (Number.isFinite(updateState.total_bytes) && updateState.total_bytes > 0) {
     progress.max = updateState.total_bytes;progress.value = Math.min(updateState.downloaded_bytes || 0, progress.max);
   } else progress.removeAttribute('value');
+}
+function renderUpdateNotice() {
+  const version = updateState.version;
+  $('update-notice').hidden = updateState.state !== 'available' || !version || version === dismissedUpdateVersion;
+  $('update-notice-text').textContent = version ? `Speakerdesk ${version} is available.` : '';
+  $('update-notice-action').disabled = updateFrozen || updateRequesting || liveStatuses.includes(meeting?.status) || isLive();
+  $('update-notice-action').title = $('update-notice-action').disabled ? 'Finish the recording before updating.' : 'Download this update, then choose when to install and restart.';
+}
+async function dismissUpdateNotice() {
+  if(updateFrozen || updateState.state !== 'available')return;
+  const version = updateState.version;
+  try {
+    const result = await api('/api/preferences/update-notice',{method:'PATCH',body:JSON.stringify({version})});
+    dismissedUpdateVersion = result.dismissed_version;renderUpdateNotice();
+  } catch(error) { notice(error.message,true); }
+}
+async function initializeUpdates() {
+  await refreshUpdates();
+  if(!startupUpdateChecked && window.speakerdeskNativeUpdater===true && updateState.state==='idle') {
+    startupUpdateChecked=true;
+    try { await requestUpdate('check'); } catch { /* Manual Check for Updates remains available. */ }
+  }
 }
 async function requestUpdate(op) {
   if (updateRequesting) return;
@@ -1240,6 +1380,8 @@ async function refreshUpdates() {
     const next = await api('/api/updates');
     if (!Number.isSafeInteger(next.id) || next.id < updateState.id || typeof next.state !== 'string') return;
     updateState = next;
+    // A poll begun before dismissal must not restore its stale preference.
+    if(!dismissedUpdateVersion && typeof next.dismissed_version==='string')dismissedUpdateVersion=next.dismissed_version;
     const protectedState = ['preparing','preparing_install','stopping','shutting_down','installing'].includes(next.state) || !!next.reserved;
     if (updateFrozen && !protectedState) { updatePreparation = null;freezeForUpdate(false); }
     renderUpdates();

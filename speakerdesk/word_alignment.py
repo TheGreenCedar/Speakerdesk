@@ -13,6 +13,9 @@ import math
 import re
 import sys
 import unicodedata
+from alignment_text import (SUPPORTED_LANGUAGES, NORMALIZATION_POLICY_ID,
+    TIMING_UNIT_POLICY_ID, LEGACY_UNIT_POLICY_ID, UPSTREAM_NORMALIZATION_REVISION,
+    kana_character, raw_units)
 
 RATE = 16000
 MAX_AUDIO_SAMPLES = 392000  # Existing 24.5 second refinement bound.
@@ -36,6 +39,7 @@ class PreparedText:
     unsupported: tuple
     text_sha256: str
     acoustic_aliases: tuple = ()
+    language: object = None
 
 
 @dataclass(frozen=True)
@@ -121,14 +125,36 @@ def _normalized_characters(raw_text):
     return mapped
 
 
-def prepare_text(raw_text, vocabulary):
+def prepare_text(raw_text, vocabulary, *, language=None):
     """Keep raw text, digits, repeats and offsets; never drop unknown letters."""
     if not isinstance(raw_text, str) or len(raw_text) > MAX_TEXT_CHARACTERS:
         raise ValueError('Supplied text exceeds the bounded alignment contract.')
+    if language is not None and language not in SUPPORTED_LANGUAGES:
+        raise ValueError('Unsupported supplied-text timing language.')
     lookup = {token: index for index, token in enumerate(vocabulary) if index >= 4}
     targets, unsupported, aliases = [], [], []
     for character, begin, end in _normalized_characters(raw_text):
         category = unicodedata.category(character)
+        if language is not None and ('\u064b' <= character <= '\u0652' or character == 'ー'):
+            preceding = [target for target in targets if target.text != ' ' and target.end_char <= begin]
+            base = preceding[-1] if preceding else None
+            between = raw_text[base.end_char:begin] if base else ''
+            arabic = ('\u064b' <= character <= '\u0652' and base is not None
+                and unicodedata.name(base.text, '').startswith('ARABIC LETTER ')
+                and all('\u064b' <= mark <= '\u0652' for mark in between))
+            japanese = (character == 'ー' and base is not None and kana_character(base.text)
+                and all(mark == 'ー' for mark in between))
+            if arabic or japanese:
+                aliases.append(dict(start_char=begin, end_char=end, raw_text=raw_text[begin:end],
+                    acoustic_token=' ' if japanese else None,
+                    kind='upstream_japanese_separator_alias' if japanese else 'upstream_deleted_arabic_mark',
+                    independent_acoustic_timestamp=False, profile_id=NORMALIZATION_POLICY_ID))
+                if arabic:
+                    continue
+                character = ' '
+            else:
+                unsupported.append(dict(start_char=begin, end_char=end, text=raw_text[begin:end]))
+                continue
         if character.isspace():
             if targets and targets[-1].text == ' ':
                 previous = targets.pop()
@@ -160,7 +186,7 @@ def prepare_text(raw_text, vocabulary):
     while targets and targets[-1].text == ' ':
         targets.pop()
     return PreparedText(raw_text, tuple(targets), tuple(unsupported),
-                        hashlib.sha256(raw_text.encode('utf-8')).hexdigest(),tuple(aliases))
+                        hashlib.sha256(raw_text.encode('utf-8')).hexdigest(),tuple(aliases),language)
 
 
 def _utf16_offset(text, index):
@@ -168,15 +194,7 @@ def _utf16_offset(text, index):
 
 
 def _display_units(prepared):
-    units = []
-    for match in re.finditer(r'\S+', prepared.raw_text):
-        a, b = match.span()
-        units.append({'text': match.group(), 'start_char': a, 'end_char': b,
-                      'start_utf16': _utf16_offset(prepared.raw_text, a),
-                      'end_utf16': _utf16_offset(prepared.raw_text, b),
-                      'unit_kind': 'whitespace_run', 'status': 'unresolved',
-                      'start_sample': None, 'end_sample': None})
-    return units
+    return raw_units(prepared.raw_text, TIMING_UNIT_POLICY_ID if prepared.language else LEGACY_UNIT_POLICY_ID)
 
 
 def _valid_log_probability(value):
@@ -204,6 +222,14 @@ def materialize(prepared, anchors, *, clock, policy, audio_start_sample,
               'words': _display_units(prepared), 'characters': [],
               'unsupported': list(prepared.unsupported),
               'acoustic_aliases': list(prepared.acoustic_aliases), 'non_speech_proof': False}
+    transforms = [item for item in prepared.acoustic_aliases if item['kind'].startswith('upstream_')]
+    if prepared.language is not None:
+        result.update(language=prepared.language, normalization_policy_id=NORMALIZATION_POLICY_ID,
+            timing_unit_policy_id=TIMING_UNIT_POLICY_ID, linguistic_word_claim=False,
+            upstream_normalization_revision=UPSTREAM_NORMALIZATION_REVISION,
+            normalization_spans=[dict(item, start_sample=None, end_sample=None,
+                start_utf16=_utf16_offset(prepared.raw_text,item['start_char']),
+                end_utf16=_utf16_offset(prepared.raw_text,item['end_char'])) for item in transforms])
     if prepared.unsupported:
         result['reason'] = 'unsupported_text'
         return result
@@ -253,20 +279,29 @@ def materialize(prepared, anchors, *, clock, policy, audio_start_sample,
             'frame': anchor.frame, 'log_probability': anchor.log_probability,
             'status': 'aligned' if accepted else 'unresolved',
             'start_sample': begin if accepted else None, 'end_sample': end if accepted else None})
+        if any(item['kind']=='upstream_japanese_separator_alias'
+               and target.start_char <= item['start_char'] < item['end_char'] <= target.end_char
+               for item in transforms):
+            result['characters'][-1].update(independent_acoustic_timestamp=False,
+                acoustic_target_status='aligned' if accepted else 'unresolved',
+                status='not_independently_timed', target_cell_start_sample=begin if accepted else None,
+                target_cell_end_sample=end if accepted else None, start_sample=None, end_sample=None,
+                target_cell_scope='separator emission; not Japanese vowel duration')
     for word in result['words']:
         aliases = [item for item in prepared.acoustic_aliases
                    if word['start_char'] <= item['start_char'] < item['end_char'] <= word['end_char']]
         if aliases:
             word['acoustic_aliases'] = aliases
         characters = [c for c in result['characters']
-                      if word['start_char'] <= c['start_char'] < c['end_char'] <= word['end_char']]
+                      if word['start_char'] <= c['start_char'] < c['end_char'] <= word['end_char']
+                      and c.get('independent_acoustic_timestamp') is not False]
         if not characters:
             word['status'] = 'not_acoustic'
         elif all(c['status'] == 'aligned' for c in characters):
             word.update(status='aligned', start_sample=characters[0]['start_sample'],
                         end_sample=characters[-1]['end_sample'],
                         minimum_token_log_probability=min(c['log_probability'] for c in characters))
-    result['complete'] = (all(c['status'] == 'aligned' for c in result['characters'])
+    result['complete'] = (all(c.get('acoustic_target_status',c['status']) == 'aligned' for c in result['characters'])
                           and all(w['status'] == 'aligned' for w in result['words']))
     result['status'] = 'aligned' if result['complete'] else 'partial'
     result['reason'] = None if result['complete'] else 'insufficient_acoustic_evidence'
@@ -288,15 +323,15 @@ def attachment_for(result, request, current_utterance):
                    for key in ('frame_calibration_id','score_calibration_id'))):
         raise ValueError('Alignment timing kind and calibration identifiers are required.')
     words = result.get('words')
-    raw_units = list(re.finditer(r'\S+', request.raw_text))
-    if not isinstance(words, list) or not words or len(words) != len(raw_units):
+    units = raw_units(request.raw_text,result.get('timing_unit_policy_id',LEGACY_UNIT_POLICY_ID))
+    if not isinstance(words, list) or not words or len(words) != len(units):
         raise ValueError('Alignment does not cover the raw text display units.')
     previous = request.start_sample
-    for word, raw in zip(words, raw_units):
+    for word, raw in zip(words, units):
         a, b = word.get('start_sample'), word.get('end_sample')
-        if (word.get('status') != 'aligned' or word.get('text') != raw.group()
+        if (word.get('status') != 'aligned' or word.get('text') != raw['text']
                 or type(word.get('start_char')) is not int or type(word.get('end_char')) is not int
-                or (word.get('start_char'), word.get('end_char')) != raw.span()
+                or (word.get('start_char'), word.get('end_char')) != (raw['start_char'],raw['end_char'])
                 or type(a) is not int or type(b) is not int or not previous <= a < b <= request.end_sample):
             raise ValueError('Alignment has unresolved, reordered or out-of-range text.')
         previous = b
@@ -344,13 +379,13 @@ def annotate_speakers(result, activity):
 
 
 def align_ctc_scores(raw_text, log_probabilities, vocabulary, *, clock, policy,
-                     audio_start_sample, audio_num_samples, model_sha256=MODEL_SHA256):
+                     audio_start_sample, audio_num_samples, model_sha256=MODEL_SHA256, language=None):
     """Source-only runtime adapter for precomputed, normalized CTC scores.
 
     This does not load or invoke an acoustic model. The source-only test suite
     never calls the optional CTC package or invents a calibrated production policy.
     """
-    prepared = prepare_text(raw_text, vocabulary)
+    prepared = prepare_text(raw_text, vocabulary, language=language)
     unresolved = materialize(prepared, (), clock=clock, policy=policy,
         audio_start_sample=audio_start_sample, audio_num_samples=audio_num_samples,
         model_sha256=model_sha256)

@@ -1,4 +1,4 @@
-"""Supported private release promotion: exact acoustics AND native export gates.
+"""Supported release promotion: exact acoustics AND native export gates.
 
 Local core/native validation runs before any network call. Default preparation
 verifies signing provenance read-only, then prints a reviewable plan. --publish
@@ -180,8 +180,11 @@ def downloaded_digest(asset_id):
         except subprocess.TimeoutExpired:os.killpg(process.pid,signal.SIGKILL);process.wait(timeout=3)
         process.stdout.close()
 
+def verify_repository(repo):
+    require(repo['id']==REPOSITORY_ID and repo['full_name']==REPOSITORY,'Repository identity differs')
+
 def publish(plan):
-    repo=api('repos/'+REPOSITORY);require(repo['id']==REPOSITORY_ID and repo['private'] is True,'Repository privacy/identity differs')
+    verify_repository(api('repos/'+REPOSITORY))
     require(api('repos/'+REPOSITORY+'/commits/main')['sha']==plan['source_commit'],'Candidate is not the current reviewed main')
     check_tag(plan)
     releases=api('repos/'+REPOSITORY+'/releases?per_page=100')

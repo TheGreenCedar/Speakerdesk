@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "qualification": {
+    "execution_id": "gpu-source-reuse-canonical-82501b89c767",
+    "RESULT_sha256": "6e6335e87498f1b0caecb25d11178c448cd20152d433f20be19baca656a3af6e",
+    "LEASE_sha256": "eddcdab20079f15047fcd98796d3e0312d972e939b1fec19f6f08b517676933d",
+    "grant_sha256": "7bc3c562af554ef3c977bb59ef772ff849dd561376e6bc6b92f8be8fead5ce2a",
+    "current_namespace_execution_qualified": true,
+    "actual_GPU_decode_calls": 5,
+    "exact_live_fresh_text_and_tokens_equal": true,
+    "exact_cache_hits_without_decoder": 2,
+    "cross_source_miss_decoded": true,
+    "pipeline_acoustic_evidence": "Separate previously accepted source runtime live/saved public fixtures; not rerun by this observer",
+    "scope": "Raw decoder-result reuse contract only; current VAD/language/timing/ownership execute. No quiet person, physical speech or population qualification."
+  },
+  "identity": {
+    "device": "gpu",
+    "model_file_sha256": {
+      "config.json": "c9f2934c33c22014a339d2451493c72f2fddff289ca83c62cd07c6502fcc092d",
+      "generation_config.json": "a4837377b5696b1d04033536f25a6d0a11d5e613c6d7d75bf20ffc463ae642c6",
+      "preprocessor_config.json": "9f297d330646ecc8ebb9dc5784f48b7c35b118c913e306a1ccd0192f2c976332",
+      "processor_config.json": "d5eff85971bab7f42480856f8fb397d8dd966858d67049def99aa8a665aa87d5",
+      "special_tokens_map.json": "1814ce01458ff6a72b04a6618e75f18ce627be4dc17619cd3a7cd7f71e137f0f",
+      "tokenizer.json": "780ccca2de2ccd289971b1fb7d4f0b5ec2dc908872f6e350181c7eba9db3fa9f",
+      "tokenizer.model": "6d21e6a83b2d0d3e1241a7817e4bef8eb63bcb7cfe4a2675af9a35ff3bbf0e14",
+      "tokenizer_config.json": "b462e16e04c9dbae82289b6ef9b080d8dbad331586ece3ebded0bd09996db636",
+      "README.md": "11b92505082f5707e9601f24141d480960919388d610f427ab2d6f07f5c85e45",
+      "model.safetensors": "ae947c13ba1cb8ce24c8bf72ded2520dcda1894ebf5a54fbb803c03bc28ef7fb"
+    },
+    "runtime_versions": {
+      "mlx": "0.32.2",
+      "mlx-speech": "0.5.3",
+      "numpy": "2.5.3"
+    },
+    "dtype": "bfloat16",
+    "decoder_source_sha256": {
+      "mlx_speech/generation/cohere_asr.py": "231e9a0d294e7c4b85b211211a1c2b5c1588c67c0afd20e632505313ce9f1fc7",
+      "mlx_speech/models/cohere_asr/__init__.py": "de8f31ad72496588985112b941fd595e71638e7a3fde4c41fcf94ce0d2d14112",
+      "mlx_speech/models/cohere_asr/checkpoint.py": "94ba8656a88575c25e5a56352e6fd767e5a9f08a52dac645b728b06630e3a544",
+      "mlx_speech/models/cohere_asr/config.py": "bd140cad3cbf72185188ffeca37413708ba30202a8247f19fc8b243c997b80e1",
+      "mlx_speech/models/cohere_asr/decoder.py": "bc84334a520821a770866f8e7f384cf6dfb400897009b2c931073e47b687132d",
+      "mlx_speech/models/cohere_asr/encoder.py": "18597f8b13ea63b696c2b2efb3273263213d9cf829782d1c1a9de67482cc8b19",
+      "mlx_speech/models/cohere_asr/feature_extraction.py": "0993162fc6de36870b417795aceefee3d7402a7a232b31c6d765af0c45bc8e2a",
+      "mlx_speech/models/cohere_asr/tokenizer.py": "a4f5e5d28f792540adbea9d1cf912259a31e75926e0e7e372d0a7cf84492ef71"
+    },
+    "policy_source_sha256": {
+      "canonical_runtime.py": "7f69606e48e87b23b0ac7fd7f29ba3a1f8c02c123ea3019e08ff36381a605b49",
+      "final_asr_reuse.py": "6225a77e8ef7cb4fd41eeb9d16329b0cb7324d3634478251c768f5c7e2883718",
+      "language_detection.py": "d40ce8d0c0e3caa3cc69a6bbd8a440e6e717219339a054d8ef4e2c47da029f72",
+      "language_probe_cache.py": "f865996c6a463e4bd173c1de2cc8b8288e9deb449850257e655a6297315617b6",
+      "live_refinement.py": "e8d3e49506c0a6b1d9f38edf8291f7fe9945609c8ea7f3b77f8c92ab199c633c",
+      "meeting_refinement.py": "8930e807e64739e2ac5c94f740fc1b35cab7e95508ab3da41ecd6137ac630660",
+      "capture_sources.py": "277876e48250c849b7174d78d2950eaa1c28634bb27dd9503700cd392014322b",
+      "source_runtime.py": "640e360b7896297b52d12c01f1e57521d511f0cc2a19baf0923a77034defbe56",
+      "utterances.py": "cac214d432558e875c5c2322e11475ae9ffc9e3e461484e2cfadd84812d7d6dd"
+    },
+    "loaded_provider_state": {
+      "config": {
+        "encoder": {
+          "hidden_size": 1280,
+          "num_hidden_layers": 48,
+          "num_attention_heads": 8,
+          "intermediate_size": 5120,
+          "hidden_act": "silu",
+          "conv_kernel_size": 9,
+          "subsampling_factor": 8,
+          "subsampling_conv_channels": 256,
+          "num_mel_bins": 128,
+          "subsampling_conv_kernel_size": 3,
+          "subsampling_conv_stride": 2,
+          "max_position_embeddings": 5000,
+          "scale_input": false,
+          "attention_bias": true,
+          "convolution_bias": true,
+          "dropout": 0.0,
+          "dropout_positions": 0.0,
+          "layerdrop": 0.0,
+          "activation_dropout": 0.0,
+          "attention_dropout": 0.0
+        },
+        "decoder": {
+          "vocab_size": 16384,
+          "hidden_size": 1024,
+          "num_hidden_layers": 8,
+          "num_attention_heads": 8,
+          "num_key_value_heads": 8,
+          "intermediate_size": 4096,
+          "hidden_act": "relu",
+          "max_position_embeddings": 1024,
+          "encoder_hidden_size": 1280,
+          "attention_bias": true,
+          "pad_token_id": 2,
+          "eos_token_id": 3,
+          "bos_token_id": 4,
+          "decoder_start_token_id": 13764
+        },
+        "model_type": "cohere_asr",
+        "sample_rate": 16000,
+        "max_audio_clip_s": 35.0,
+        "overlap_chunk_s": 5.0,
+        "extra": {
+          "quantization": {
+            "bits": 4,
+            "group_size": 64,
+            "mode": "affine"
+          }
+        }
+      },
+      "feature_config": {
+        "sr": 16000,
+        "n_fft": 512,
+        "hop_length": 160,
+        "win_length": 400,
+        "n_mels": 128,
+        "fmax": 8000.0,
+        "preemphasis": 0.97,
+        "dither": 1e-05,
+        "max_audio_clip_s": 35.0,
+        "overlap_chunk_s": 5.0,
+        "min_energy_window_samples": 1600
+      },
+      "training": false,
+      "projection_dtype": "mlx.core.uint32"
+    }
+  },
+  "namespace": "source_bound_canonical_v1",
+  "lineage": {
+    "legacy_profile_sha256": "c61ad59ca8cdcf90e47b332fef192ad279f685d1aa85d6a8c467cd27e14ed777",
+    "reuse_algorithm_sha256": "6225a77e8ef7cb4fd41eeb9d16329b0cb7324d3634478251c768f5c7e2883718",
+    "decoder_and_language_policy_unchanged": true
+  }
+}

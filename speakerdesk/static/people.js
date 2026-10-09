@@ -72,7 +72,7 @@ async function openNamePicker(track) {
   const assigned = assignment?.person_id || '';
   personOptions(assigned); $('name-value').value = doc.speakers[track];
   $('name-title').textContent = 'Name speaker';
-  $('name-message').textContent = ''; $('voice-consent').checked = false;
+  $('name-message').textContent = '';
   nameClipState = null; $('voice-clip-list').replaceChildren(); $('voice-excluded-list').replaceChildren();
   $('voice-preview').pause(); $('voice-preview').removeAttribute('src'); $('voice-preview').hidden = true;
   $('name-dialog').showModal(); $('name-value').focus(); $('name-value').select();
@@ -82,28 +82,48 @@ async function openNamePicker(track) {
 function selectedVoiceClips() {
   return Array.from($('voice-clip-list').querySelectorAll('input:checked'), input => input.value);
 }
-function updateNameControls() {
-  if (!nameContext || !$('name-dialog').open) return;
+function voiceEnrollmentState() {
+  if (!nameContext || !$('name-dialog').open) return {ready: false, reason: 'Open a speaker to choose passages.'};
   const assignment = selected?.speaker_assignments?.[nameContext.track];
   const confirmed = assignment?.person_id && assignment.source !== 'automatic_voice' && assignment.confirmed !== false
     && $('name-person').value === assignment.person_id;
   const current = selected?.id === nameContext.jid && selected.revision === nameContext.revision && !dirty;
-  const ids = selectedVoiceClips(), clips = (nameClipState?.clips || []).filter(c => ids.includes(c.id)).sort((a,b)=>a.start-b.start);
-  const enough = ids.length >= (nameClipState?.minimum_clips || 2) && ids.length <= 12
-    && clips.every((c,i)=>!i || clips[i-1].end <= c.start);
   const busy = identityBusy || nameLoading || saving;
+  const ids = selectedVoiceClips();
+  const clips = (nameClipState?.clips || []).filter(c => ids.includes(c.id)).sort((a,b)=>a.start-b.start);
+  const minimum = nameClipState?.minimum_clips || 2;
+  const enough = ids.length >= minimum && ids.length <= 12 && clips.length === ids.length
+    && clips.every((c,i)=>!i || clips[i-1].end <= c.start);
   const usable = nameClipState?.status === 'ready' && current && !busy;
-  $('name-apply').disabled = busy || !current;
-  $('name-add-person').disabled = busy;
-  $('refresh-voice-clips').disabled = busy;
-  $('remember-voice').disabled = !usable || !confirmed || !enough || !$('voice-consent').checked;
-  $('check-voice').hidden = !!assignment;
-  $('check-voice').disabled = !usable || !enough;
-  $('voice-consent').disabled = !usable || !confirmed || !enough;
-  $('voice-note').textContent = !current ? 'The transcript changed. Refresh passages before continuing.'
-    : confirmed ? 'Name confirmed for this meeting. Remembering the voice is optional.'
-    : assignment?.source === 'automatic_voice' ? 'Apply the name to confirm this recognized person before remembering new voice passages.'
-    : 'Save this name in People, then apply it to remember the voice. You can also keep this name in the meeting only.';
+  const person = people.find(p => p.id === assignment?.person_id);
+  const reason = busy ? nameLoading ? 'Checking saved passages…' : 'Wait for the current change to finish.'
+    : !current ? 'The transcript changed. Refresh passages before continuing.'
+    : !nameClipState ? 'Refresh passages to check voice setup and the current audio.'
+    : !usable ? nameClipState.message
+    : !confirmed ? assignment?.source === 'automatic_voice'
+      ? 'Apply the name to confirm this recognized person before remembering their voice.'
+      : $('name-person').value ? 'Apply this saved person to the speaker before remembering their voice.'
+      : 'Save this name in People, then apply it to this speaker. You can also keep the name in this meeting only.'
+    : !enough ? `Select ${minimum}–12 separate, nonoverlapping passages, each 2–10 seconds.`
+    : `Choosing Remember voice ${person?.voice_saved ? 'replaces' : 'saves'} ${person?.name || assignment.name}'s voice on this Mac for future meetings. You can remove it in People.`;
+  return {ready: usable && !!confirmed && enough, reason, assignment, current, busy, usable, enough};
+}
+function updateNameControls() {
+  if (!nameContext || !$('name-dialog').open) return;
+  const state = voiceEnrollmentState();
+  $('name-apply').disabled = state.busy || !state.current;
+  $('name-add-person').disabled = state.busy;
+  $('name-person').disabled = state.busy; $('name-value').disabled = state.busy;
+  $('refresh-voice-clips').disabled = state.busy;
+  $('remember-voice').disabled = !state.ready;
+  $('check-voice').hidden = !!state.assignment;
+  $('check-voice').disabled = !state.usable || !state.enough;
+  $('voice-note').textContent = state.reason;
+  $('voice-availability').hidden = state.reason === $('voice-availability').textContent;
+  $('voice-settings').hidden = nameClipState?.status !== 'unavailable';
+  $('voice-settings').disabled = state.busy;
+  $('voice-settings').textContent = nameClipState?.next_action === 'updates' ? 'Open update settings'
+    : nameClipState?.next_action === 'models' ? 'Set up voice model' : 'Voice settings';
   $('name-voice-section').hidden = false;
 }
 async function refreshVoiceClips() {
@@ -111,7 +131,7 @@ async function refreshVoiceClips() {
   if (!context) return;
   const previousIds = nameClipState ? selectedVoiceClips() : null;
   $('voice-preview').pause(); voicePreviewStart = voicePreviewEnd = null; ++voicePreviewGeneration;
-  nameLoading = true; nameClipState = null; $('voice-consent').checked = false;
+  nameLoading = true; nameClipState = null;
   $('voice-availability').textContent = 'Checking saved passages…'; updateNameControls();
   try {
     const state = await api(`/api/jobs/${context.jid}/speakers/${encodeURIComponent(context.track)}/voice-clips`);
@@ -129,7 +149,7 @@ async function refreshVoiceClips() {
       const row = node('div', undefined, 'voice-clip'), label = node('label'), check = node('input');
       check.type = 'checkbox'; check.value = clip.id;
       check.checked = (previousIds || state.recommended_ids).includes(clip.id); check.disabled = state.status !== 'ready';
-      check.addEventListener('change', () => { $('voice-consent').checked = false; updateNameControls(); });
+      check.addEventListener('change', updateNameControls);
       const description = clip.id === clip.segment_id ? clip.text || 'Audio from this speaker; transcript needs review'
         : 'Audio clip from this speaker’s longer passage';
       label.append(check, node('span', `${passageTime(clip.start)}–${passageTime(clip.end)} · ${description}`));
@@ -151,7 +171,7 @@ async function previewVoiceClip(clip, context) {
     throw new Error('Refresh passages before previewing this audio.');
   const player = $('voice-preview'); $('player').pause(); player.pause();
   player.hidden = false; voicePreviewEnd = clip.end;
-  const src = `/api/jobs/${context.jid}/audio`;
+  const src = `/api/jobs/${context.jid}/speakers/${encodeURIComponent(context.track)}/voice-preview?clip=${encodeURIComponent(clip.id)}&revision=${context.revision}`;
   const generation = ++voicePreviewGeneration;
   if (player.getAttribute('src') !== src) player.src = src;
   if (player.readyState < 1) {
@@ -221,6 +241,10 @@ function wirePeople() {
     if (voicePreviewStart !== null && (player.currentTime < voicePreviewStart || player.currentTime > voicePreviewEnd))
       player.currentTime = Math.max(voicePreviewStart, Math.min(voicePreviewEnd, player.currentTime));
   });
+  $('voice-settings').addEventListener('click', () => {
+    const action = nameClipState?.next_action;
+    $('name-dialog').close(); openSettings(action === 'updates' ? 'updates' : action === 'models' ? 'models' : 'voices');
+  });
   $('refresh-voice-clips').addEventListener('click', () => identityAction(async () => {
     const context = nameContext;
     const result = await api(`/api/jobs/${context.jid}`);
@@ -239,17 +263,16 @@ function wirePeople() {
   $('name-person').addEventListener('change', () => {
     const person = people.find(p => p.id === $('name-person').value);
     if (person) $('name-value').value = person.name;
-    $('voice-consent').checked = false; updateNameControls();
+    updateNameControls();
   });
-  $('name-value').addEventListener('input', () => { $('name-person').value = ''; $('voice-consent').checked = false; updateNameControls(); });
-  $('voice-consent').addEventListener('change', updateNameControls);
+  $('name-value').addEventListener('input', () => { $('name-person').value = ''; updateNameControls(); });
   $('name-add-person').addEventListener('click', () => {
     const context = nameContext, name = $('name-value').value;
     identityAction(async () => {
       const person = await api('/api/people', {method: 'POST', body: JSON.stringify({name})});
       await loadPeople();
       if (nameContext !== context || !$('name-dialog').open || selected?.id !== context.jid) return;
-      personOptions(person.id); $('voice-consent').checked = false;
+      personOptions(person.id);
       $('name-message').textContent = 'Name saved. Apply it to this speaker to continue with voice setup.';
     }).catch(error => { if (nameContext === context) $('name-message').textContent = error.message; });
   });
@@ -261,21 +284,22 @@ function wirePeople() {
         method: 'POST', body: JSON.stringify({revision: context.revision, person_id: $('name-person').value || null, name: $('name-value').value})});
       if (nameContext !== context || !$('name-dialog').open) return;
       acceptIdentityJob(result); context.revision = result.revision;
-      $('voice-consent').checked = false;
       $('name-message').textContent = 'Name applied to this meeting.';
       await refreshVoiceClips();
     }).catch(error => { $('name-message').textContent = error.message; });
   });
   for (const kind of ['remember', 'check']) $(`${kind}-voice`).addEventListener('click', () => {
+    const eligibility = voiceEnrollmentState();
+    if (kind === 'remember' && !eligibility.ready) { $('name-message').textContent = eligibility.reason; return; }
     const context = nameContext;
     identityAction(async () => {
-      if (selected?.id !== context.jid) throw new Error('Open this meeting again to choose passages.');
+      if (!context || selected?.id !== context.jid) throw new Error('Open this meeting again to choose passages.');
       const segment_ids = selectedVoiceClips();
       const body = {revision: context.revision, segment_ids};
       if (kind === 'remember') {
         const pid = selected.speaker_assignments?.[context.track]?.person_id;
         if (!pid || $('name-person').value !== pid) throw new Error('Apply the saved person before remembering their voice.');
-        if (!$('voice-consent').checked) throw new Error('Choose Remember this person’s voice to give consent.');
+        // This deliberate Remember voice activation is the explicit consent.
         await api(`/api/people/${pid}/voice`, {method: 'POST', body: JSON.stringify({...body, meeting_id: context.jid, track_id: context.track, consent: true})});
         $('name-dialog').close(); notice('Voice saved on this Mac for future meetings.');
       } else {

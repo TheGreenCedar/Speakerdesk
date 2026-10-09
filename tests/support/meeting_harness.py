@@ -1,6 +1,7 @@
 """Real pipes and SQLite/WAV persistence with synthetic peers; no devices or AI."""
 import json
 import io
+import platform
 import re
 import subprocess
 import sys
@@ -16,7 +17,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'speakerdesk'))
 from app import create_app
-from live_meeting import RATE
+from live_meeting import RATE, SourceMixer
 
 PROTOCOL = Path(__file__).resolve().parents[1] / 'support' / 'meeting_protocol.py'
 
@@ -48,6 +49,14 @@ class MeetingHarness:
         self.preflight = patch('live_meeting.preflight', return_value=[])
         self.peers.start()
         self.preflight.start()
+        self.platform_peers=[]
+        if platform.system() != 'Darwin':
+            # Linux Source checks exercise protocol/persistence with a native
+            # platform peer. macOS package checks use the actual linked DSP.
+            self.platform_peers=[patch('live_meeting.EchoMixer'),
+                patch('live_meeting.SourceMixer',side_effect=lambda sources,sink,**kw:
+                      SourceMixer(sources,sink,echo_factory=None,**kw))]
+            for peer in self.platform_peers:peer.start()
 
     def tearDown(self):
         self.manager.close()
@@ -58,6 +67,7 @@ class MeetingHarness:
         self.wait_for(lambda: self.manager.jid is None)
         self.peers.stop()
         self.preflight.stop()
+        for peer in reversed(self.platform_peers):peer.stop()
         self.app.extensions['speakerdesk']['executor'].shutdown(wait=True, cancel_futures=True)
         self.temp.cleanup()
 

@@ -25,6 +25,8 @@ class IdentityTests(unittest.TestCase):
                       'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/main.rs',
                       'desktop/src-tauri/Entitlements.plist', 'desktop/capture/MeetingCapture.swift',
                       'desktop/capture/Info.plist', 'desktop/package-lock.json']
+        self.paths+=['desktop/capture/echo/source-lock.json','desktop/capture/echo/speakerdesk_echo.cc',
+                     'scripts/setup_echo.py','scripts/echo_compile_guard.py']
         for name in self.paths:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,6 +40,10 @@ class IdentityTests(unittest.TestCase):
                  ('packaging/runtime.spec', 'runtime-key'),
                  ('packaging/overrides/models.py', 'runtime-key'),
                  ('requirements-voice.lock.txt', 'runtime-key'),
+                 ('desktop/capture/echo/source-lock.json','runtime-key'),
+                 ('desktop/capture/echo/speakerdesk_echo.cc','runtime-key'),
+                 ('scripts/setup_echo.py','runtime-key'),
+                 ('scripts/echo_compile_guard.py','runtime-key'),
                  ('desktop/capture/Info.plist', 'capture-key'),
                  ('desktop/capture/MeetingCapture.swift', 'capture-key'),
                  ('desktop/src-tauri/Cargo.lock', 'cargo-key'),

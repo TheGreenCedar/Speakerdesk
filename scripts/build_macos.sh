@@ -27,6 +27,10 @@ for family in ('vad','stt'):
 PY
 fi
 uv pip check --python .venv-package/bin/python
+.venv-package/bin/python scripts/setup_echo.py
+echo_sign_args=(--force --options runtime --sign "$APPLE_SIGNING_IDENTITY")
+if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then echo_sign_args+=(--timestamp); fi
+codesign "${echo_sign_args[@]}" desktop/capture/echo/libspeakerdesk_echo.dylib
 .venv-package/bin/python scripts/check_source.py
 .venv-package/bin/python -m unittest discover -s tests -v
 package_version="$(.venv-package/bin/python -c 'import json;print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')"
@@ -38,7 +42,7 @@ else
   # Never relax production signature protections to manufacture a green probe.
   echo '{"scope":"capability_unavailable","reason":"Developer ID signed runtime required","models_executed":false,"native_capture":false}' | tee .cache/model-capability.json
 fi
-.venv-package/bin/python scripts/component_cache.py .cache/components/capture "${SPEAKERDESK_CAPTURE_KEY:-}" desktop/capture/speakerdesk-capture -- xcrun swiftc -O -j 1 -num-threads 1 -target arm64-apple-macos15.0 -module-cache-path "$task_root/.cache/swift-capture" desktop/capture/MeetingCapture.swift -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker desktop/capture/Info.plist -o desktop/capture/speakerdesk-capture
+.venv-package/bin/python scripts/component_cache.py .cache/components/capture "${SPEAKERDESK_CAPTURE_KEY:-}" desktop/capture/speakerdesk-capture -- xcrun swiftc -O -j 1 -num-threads 1 -target arm64-apple-macos15.0 -module-cache-path "$task_root/.cache/swift-capture" desktop/capture/MeetingCapture.swift desktop/capture/CaptureAudioConverter.swift -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker desktop/capture/Info.plist -o desktop/capture/speakerdesk-capture
 sign_args=(--force --options runtime --entitlements desktop/src-tauri/Entitlements.plist --sign "$APPLE_SIGNING_IDENTITY")
 if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then sign_args+=(--timestamp); fi
 codesign "${sign_args[@]}" desktop/capture/speakerdesk-capture

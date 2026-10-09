@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "webrtc_revision": "852150686748f5cce0c1c96f4fde50e6be43ef73",
+  "abseil_revision": "8a83e63525b495aa7f35648a3b4b676279deb864",
+  "archives": {
+    "modules/audio_processing": {
+      "url": "https://webrtc.googlesource.com/src/+archive/852150686748f5cce0c1c96f4fde50e6be43ef73/modules/audio_processing.tar.gz",
+      "git_tree": "f505a8c342159c0469e8bf54d81af1074b2c0204"
+    },
+    "api": {
+      "url": "https://webrtc.googlesource.com/src/+archive/852150686748f5cce0c1c96f4fde50e6be43ef73/api.tar.gz",
+      "git_tree": "15de0a95aa3e3238ad4ad136a0465d304c0e4e25"
+    },
+    "common_audio": {
+      "url": "https://webrtc.googlesource.com/src/+archive/852150686748f5cce0c1c96f4fde50e6be43ef73/common_audio.tar.gz",
+      "git_tree": "d1193ada6602021a719e841614ca8f5ebdf6b727"
+    },
+    "rtc_base": {
+      "url": "https://webrtc.googlesource.com/src/+archive/852150686748f5cce0c1c96f4fde50e6be43ef73/rtc_base.tar.gz",
+      "git_tree": "1e5c17103830392ba16a773938a430ab44e5e84d"
+    },
+    "system_wrappers": {
+      "url": "https://webrtc.googlesource.com/src/+archive/852150686748f5cce0c1c96f4fde50e6be43ef73/system_wrappers.tar.gz",
+      "git_tree": "beb3603496504cf387c6cd4899a3b01dd292b4dc"
+    },
+    "third_party/abseil-cpp": {
+      "url": "https://chromium.googlesource.com/chromium/src/third_party/+archive/8a83e63525b495aa7f35648a3b4b676279deb864/abseil-cpp.tar.gz",
+      "git_tree": "d4713ceaf549c5a2aedf4206aa1f883b4a439673"
+    }
+  },
+  "files": {
+    "LICENSE": {
+      "url": "https://webrtc.googlesource.com/src/+/852150686748f5cce0c1c96f4fde50e6be43ef73/LICENSE?format=TEXT",
+      "sha256": "ab00a482b6a3902e40211b43c5d0441962ea99b6cc7c25c0f243fa270b78d482"
+    },
+    "PATENTS": {
+      "url": "https://webrtc.googlesource.com/src/+/852150686748f5cce0c1c96f4fde50e6be43ef73/PATENTS?format=TEXT",
+      "sha256": "01462e2068d1a04c2274f3389773014c14ed9bc3446b28303543bd3e3c064145"
+    },
+    "AUTHORS": {
+      "url": "https://webrtc.googlesource.com/src/+/852150686748f5cce0c1c96f4fde50e6be43ef73/AUTHORS?format=TEXT",
+      "sha256": "398a5df04d0cc85607f501b27d05ffa0d4008bb73825f2b44c407ad9d85c2ec1"
+    },
+    "DEPS": {
+      "url": "https://webrtc.googlesource.com/src/+/852150686748f5cce0c1c96f4fde50e6be43ef73/DEPS?format=TEXT",
+      "sha256": "cc09f677cee5beafcc681bef3b1ee6ba9d5e52a5bac924b5b7d8549111cd23fa"
+    },
+    "experiments/field_trials.py": {
+      "url": "https://webrtc.googlesource.com/src/+/852150686748f5cce0c1c96f4fde50e6be43ef73/experiments/field_trials.py?format=TEXT",
+      "sha256": "722e4ba798d6fa12d17d3ff442f12fb05eb8b93bb5d37d03d9ff18b7ec5f827d"
+    }
+  }
+}

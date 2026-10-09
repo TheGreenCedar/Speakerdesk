@@ -70,7 +70,8 @@ class CanonicalRuntime:
     def __init__(self,engine):
         self.engine=engine
         self.archive=RevisionArchive(Path(engine.path).parent/f'utterance-versions-{uuid.uuid4().hex}.jsonl')
-        self.book=UtteranceBook(engine.config['job_id'],history_limit=2,archive=self.archive)
+        self.book=UtteranceBook(engine.config['job_id'],history_limit=2,archive=self.archive,
+                               capture_source=engine.config.get('capture_source'))
         from authority_store import AuthorityStore
         self.last_decoded={};self.published={};self.authoritative_commitments={}
         self.authoritative_store=AuthorityStore(Path(engine.path).parent/f'authority-{uuid.uuid4().hex}')
@@ -201,15 +202,15 @@ class CanonicalRuntime:
                 if updated['machine_versions'][-1]['complete']:
                     self.update_core_metadata(updated,parts,stamp['language'])
                     if self.reading_alignment_enabled(row):
-                        import re
+                        from alignment_text import raw_units, TIMING_UNIT_POLICY_ID
                         words=[];offset=0
                         for part in parts:
                             request=part['request'];raw=part['text']
                             aligned_words=alignment_words(part.get('reading_alignment'),raw,
                                 request['start_sample'],request['end_sample'])
                             if not aligned_words:
-                                aligned_words=[{'text':m.group(),'start_char':m.start(),'end_char':m.end(),
-                                    'start_sample':None,'end_sample':None} for m in re.finditer(r'\S+',raw)]
+                                aligned_words=[dict(unit,start_sample=None,end_sample=None)
+                                    for unit in raw_units(raw,TIMING_UNIT_POLICY_ID)]
                             for word in aligned_words:
                                 words.append(dict(word,start_char=word['start_char']+offset,end_char=word['end_char']+offset))
                             offset+=len(raw)+1
@@ -234,23 +235,29 @@ class CanonicalRuntime:
 
     def reading_alignment_enabled(self,row):
         models=self.engine.models
+        from alignment_text import SUPPORTED_LANGUAGES
         # Open revisions already have an exact text/audio anchor. Waiting for
         # a VAD seal hides sequential speaker turns during continuous speech.
         return (len(row.get('speaker_candidates',[]))>1
             and hasattr(models,'align_canonical') and hasattr(models,'alignment_supported')
-            and models.alignment_supported('en'))
+            and any(models.alignment_supported(language) for language in SUPPORTED_LANGUAGES))
 
     def align_reading(self,request,text,passage):
-        # Actual English decoder routing establishes this provider's scope.
+        # Actual supported decoder routing establishes functional scope.
         # LID uncertainty remains review metadata, independent of acoustic
         # timing and NVIDIA activity. CTC neither certifies language nor repairs
-        # the transcript. Unsupported/mixed routes and failed ASR stay excluded.
+        # the transcript. Unsupported routes and failed ASR stay excluded;
+        # code switching needs complete supported probe coverage.
         detection=passage.get('language_detection') or {}
         if not isinstance(detection,dict):return None
-        if (passage.get('language')!='en' or passage.get('transcription_review')
-                or detection.get('reason') in ('mixed_languages','unsupported','needs_language','insufficient_speech',
+        from alignment_text import SUPPORTED_LANGUAGES
+        language=passage.get('language')
+        if (language not in SUPPORTED_LANGUAGES or not self.engine.models.alignment_supported(language)
+                or passage.get('transcription_review')
+                or detection.get('reason') in ('unsupported','needs_language','insufficient_speech',
                     'speech_admission_uncertain','speech_evidence_pending')):
             return None
+        if detection.get('reason')=='mixed_languages' and not detection.get('probes'):return None
         probes=detection.get('probes')
         if 'probes' in detection:
             if not isinstance(probes,list) or not probes:return None
@@ -259,16 +266,24 @@ class CanonicalRuntime:
                 if not isinstance(probe,dict) or not isinstance(probe.get('decision',{}),dict):return None
                 a,b=probe.get('start_sample'),probe.get('end_sample')
                 if (type(a) is not int or type(b) is not int or not cursor==a<b<=request['end_sample']
-                        or probe.get('language')!='en'
+                        or probe.get('language') not in SUPPORTED_LANGUAGES
+                        or not self.engine.models.alignment_supported(probe.get('language'))
                         or probe.get('decision',{}).get('reason') in ('unsupported','needs_language',
                             'insufficient_speech','speech_admission_uncertain','speech_evidence_pending')):
                     return None
                 cursor=b
             if cursor!=request['end_sample']:return None
-        result=self.engine.models.align_canonical(request,text,language='en')
+        result=self.engine.models.align_canonical(request,text,language=language)
         if not isinstance(result,dict):return None
+        if self.engine.config.get('capture_source') and result.get('capture_source')!=self.engine.config['capture_source']:
+            raise ValueError('Timing evidence differs from the decoded capture source.')
         result=copy.deepcopy(result)
-        result['reading_timing_qualification']='english_decoder_and_calibrated_acoustic_evidence'
+        english=(language=='en' and result.get('qualified_scope')=='bounded_ami_english_coarse_envelopes'
+            and all(probe.get('language')=='en' for probe in (probes or [])))
+        result['reading_timing_qualification']=('english_decoder_and_calibrated_acoustic_evidence'
+            if english else 'supported_decoder_and_functional_ctc_units')
+        if not english:
+            result.update(qualified_scope='multilingual_functional_ctc_units',timing_accuracy_calibrated_languages=[])
         result['reading_language_review']=bool(passage.get('language_review',passage.get('review')))
         return result
 
@@ -405,6 +420,8 @@ class CanonicalRuntime:
         result={'type':'refinement_result',**{key:request[key] for key in ('operation_id','language_epoch','window')}}
         if e.inbox.cancelled_request(request):return {**result,'cancelled':True}
         supplied=request['canonical'];identity=supplied['id']
+        if supplied.get('capture_source')!=e.config.get('capture_source'):
+            raise ValueError('Refinement differs from its capture source.')
         current=self.book.rows.get(identity)
         if current and (current['audio_revision']!=supplied['audio_revision']
                 or current['machine_revision']!=supplied['canonical_machine_revision']):
@@ -487,9 +504,24 @@ class CanonicalRuntime:
                 'uncertainty_policy':'emission_inside_activity_no_competing_owner_in_margin',
                 'calibration_id':row['reading_word_evidence']['calibration_id'],
                 'model_sha256':row['reading_word_evidence']['model_sha256']}
+            from reading_turns import BEHAVIOR_FIELDS
+            result['reading_turn_provenance'].update({key:row['reading_word_evidence'][key]
+                for key in BEHAVIOR_FIELDS if key in row['reading_word_evidence']})
+            if row['reading_word_evidence'].get('timing_unit_policy_id'):
+                result['reading_turn_provenance']['method']='ctc_units_temporal_nvidia_v3'
         if row.get('canonical_unresolved'):
             result.update(refinement_state='unresolved',voice_eligible=False,
                 transcription_review={'reason':'canonical_ownership_unresolved','partial_text':bool(row['text'].strip())})
+        if e.config.get('capture_source'):
+            from capture_sources import interval_pcm_digest
+            result['capture_source']=copy.deepcopy(e.config['capture_source'])
+            result['capture_audio']={'capture_source':copy.deepcopy(e.config['capture_source']),
+                'audio_revision':row['audio_revision'],'start_sample':row['start_sample'],'end_sample':row['end_sample'],
+                'encoding':'pcm_s16le','sample_rate':RATE,
+                'pcm_sha256':interval_pcm_digest(e.path,row['start_sample'],row['end_sample'])}
+            result['voice_eligible']=False
+            if result.get('reading_turn_provenance'):
+                result['reading_turn_provenance']['capture_source']=copy.deepcopy(e.config['capture_source'])
         return result
 
     def publish(self,row):
@@ -528,9 +560,13 @@ class CanonicalRuntime:
             authoritative=(e.config.get('authoritative_tail',True) and (stamp['language']=='en' or
                 (stamp['language']=='auto' and row.get('language')=='en')) and hasattr(e.models,'align_canonical')
                 and (not hasattr(e.models,'alignment_supported') or e.models.alignment_supported('en')))
-            if row['end_sample']-row['start_sample']>limit and not authoritative:
-                row.setdefault('canonical_unresolved','unresolved_alignment')
-            if changed and due and (row['end_sample']-row['start_sample']<=limit or row['state']=='sealed' or final or authoritative):
+            long_unaligned=row['end_sample']-row['start_sample']>limit and not authoritative
+            # Optional word timing must not become a transcription deadline.
+            # Existing bounded raw cores also recognize open long speech;
+            # six-second revisions cap its extra work without inventing words.
+            if long_unaligned and row['state']=='open' and not final:
+                due=last is None or (decode_open and row['end_sample']-last[0]>=6*RATE)
+            if changed and due:
                 self.decode(row,'live')
             self.publish(row)
         e.cursor=self.book.cursor/RATE

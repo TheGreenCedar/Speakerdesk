@@ -50,6 +50,13 @@ class UpdaterReleaseTests(unittest.TestCase):
                                 'workflow_run':signer,'digest':'sha256:'+promotion.digest_file(archive)}]}]
         with patch.object(promotion,'api',side_effect=replies):promotion.verify_signing(manifest,archive)
 
+    def test_canonical_identity_remains_bound_when_repository_is_public(self):
+        repo={'id':promotion.REPOSITORY_ID,'full_name':promotion.REPOSITORY,'private':False}
+        promotion.verify_repository(repo)
+        for field,value in [('id',1),('full_name','another/Speakerdesk')]:
+            with self.subTest(field=field),self.assertRaisesRegex(ValueError,'identity differs'):
+                promotion.verify_repository(dict(repo,**{field:value}))
+
     def test_exact_six_member_updater_signer_archive_is_accepted(self):
         self.authenticated_archive(self.manifest)
         promotion.verify_updater_files(self.manifest,self.root,self.config)

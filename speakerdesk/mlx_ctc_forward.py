@@ -22,8 +22,8 @@ def load_gpu_model(*, cache_limit_bytes=None, directory):
     require_runtime(conversion)
     conversion = dict(conversion, **allocator_policy)
     import mlx.nn as nn
-    from mlx_audio.stt.models.mms.mms import Model
-    from mlx_audio.stt.models.wav2vec.wav2vec import ModelConfig
+    from mlx_ctc_components.models.mms.mms import Model
+    from mlx_ctc_components.models.wav2vec.wav2vec import ModelConfig
     from mlx.utils import tree_flatten
     config = ModelConfig.from_dict(conversion['config'])
     with mx.stream(mx.gpu):

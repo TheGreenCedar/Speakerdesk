@@ -1,22 +1,23 @@
 """App-managed standard voice-model cache. Downloads bytes; never enrolls or predicts."""
 from pathlib import Path
+import os
 import shutil
 import ssl
 import urllib.error
 import urllib.request
 import certifi
-from voice_coreml import (PIN, approved_calibration, file_digest, model_identity,
-                          read_voice_config, require_runtime, verify_artifact)
+from voice_readiness import readiness
+from voice_gpu_runtime import (PIN, RELEASE_CALIBRATION, file_digest, release_policy,
+                               require_runtime, verify_artifact)
 
 MODEL_DIRECTORY = 'redimnet2-b6'
-RELEASE_CALIBRATION = Path(__file__).with_name('voice_calibration.json')
 DISK_RESERVE = 512*1024**2
 
 
 class VoiceSetup:
     def __init__(self, root, lock, activate, logger):
         self.root = Path(root)/MODEL_DIRECTORY
-        self.calibration_path = RELEASE_CALIBRATION
+        self.calibration_path = Path(os.getenv('SPEAKERDESK_VOICE_CONFIG', RELEASE_CALIBRATION))
         self.lock, self.activate, self.logger = lock, activate, logger
         self.state = {'status': 'idle', 'phase': '', 'downloaded_bytes': 0,
                       'total_bytes': PIN['total_bytes'], 'error': None}
@@ -24,8 +25,7 @@ class VoiceSetup:
 
     def released(self):
         try:
-            config = read_voice_config(self.calibration_path)
-            approved_calibration(config, model_identity(config.get('compute_units', 'ALL')))
+            release_policy(self.calibration_path)
             return True
         except (ValueError, OSError, KeyError, TypeError):
             return False
@@ -58,15 +58,20 @@ class VoiceSetup:
         with self.lock:
             result = self.state.copy()
         released, supported, installed = self.released(), self.supported(), self.installed()
-        message = ('Saved voices are recognized once when a new speaker appears. You can correct any name.' if available else
-                   'Voice recognition requires the current Speakerdesk on an Apple Silicon Mac with macOS 15 or later.' if not supported else
-                   'Voice recognition is not ready in this build. Saved names are available.' if installed and not released else
-                   'Included in local model setup. Save a voice in People to recognize it in future meetings.')
+        available = available and released and supported and installed
+        public = readiness(available=available, supported=supported, released=released, installed=installed)
         if installed and result['status'] not in ('downloading','failed'):
             result['status'] = 'ready'
         return {**result, 'released': released, 'supported': supported, 'installed': installed,
                 'available': available, 'can_download': released and supported and not core_busy,
-                'message': message, 'license': 'MIT', 'name': 'Voice recognition'}
+                **public, 'license': 'MIT', 'name': 'Voice recognition'}
+
+    def readiness(self, *, available=False):
+        if available:
+            return readiness(available=True)
+        supported, released = self.supported(), self.released()
+        return readiness(available=False, supported=supported, released=released,
+                         installed=self.installed() if supported and released else False)
 
     def update(self, **changes):
         with self.lock:

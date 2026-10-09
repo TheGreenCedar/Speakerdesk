@@ -9,7 +9,8 @@ import json
 from pathlib import Path
 import sys
 
-PROFILE_SHA256 = 'a0f67fd3a6e994fe567d381cda916a091c958c65a495f047482a0108d284b4a7'
+PROFILE_SHA256 = 'c61ad59ca8cdcf90e47b332fef192ad279f685d1aa85d6a8c467cd27e14ed777'
+SOURCE_PROFILE_SHA256 = '3d3ac2dfaaca83de54ac9bcafa9fec14c4f3da32444e7284ede224493d5b6e62'
 DATA = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 PROCESS_FIELDS = ('model_instance', 'tokenizer_instance')
 
@@ -29,13 +30,41 @@ def profile():
     return result
 
 
+def current_profile():
+    """An independently sealed current namespace preserves its legacy lineage."""
+    legacy = profile()
+    path = DATA / 'asr-source-reuse-profile.json'
+    if not path.exists():
+        return legacy
+    if file_digest(path) != SOURCE_PROFILE_SHA256:
+        raise ValueError('Current ASR reuse profile differs.')
+    result = json.loads(path.read_text())
+    lineage = result.get('lineage', {})
+    if (result.get('schema_version') != 1 or lineage.get('legacy_profile_sha256') != PROFILE_SHA256
+            or lineage.get('reuse_algorithm_sha256') != legacy['identity']['policy_source_sha256']['final_asr_reuse.py']
+            or result.get('namespace') != 'source_bound_canonical_v1'):
+        raise ValueError('Current ASR reuse lineage differs.')
+    # Only policy identity is extended. Decoder/model/runtime/loaded precision
+    # must remain the exact independently qualified inherited backend.
+    old = {k:v for k,v in legacy['identity'].items() if k != 'policy_source_sha256'}
+    new = {k:v for k,v in result['identity'].items() if k != 'policy_source_sha256'}
+    if old != new:
+        raise ValueError('Current ASR reuse backend lineage differs.')
+    old_policy=legacy['identity']['policy_source_sha256']
+    new_policy=result['identity']['policy_source_sha256']
+    if (not set(old_policy)<=set(new_policy) or any(new_policy[name]!=old_policy[name]
+            for name in ('final_asr_reuse.py','language_detection.py','language_probe_cache.py') if name in old_policy)):
+        raise ValueError('Current ASR reuse algorithm or routing lineage differs.')
+    return result
+
+
 def qualified_identity(directory, provider, mx):
     """Return the verified portable namespace, or raise before enabling reuse."""
     from final_asr_reuse import provider_state
     if (not mx.metal.is_available() or mx.default_device().type != mx.gpu
             or mx.default_stream(mx.gpu).device.type != mx.gpu):
         raise ValueError('ASR reuse requires the qualified GPU device and stream.')
-    approved = profile()
+    approved = current_profile()
     identity = approved['identity']
     for name, expected in identity['model_file_sha256'].items():
         if file_digest(Path(directory) / name) != expected:
@@ -69,12 +98,18 @@ def initialize_reuse(config, provider, mx):
         if mode not in ('reuse', 'observe'):
             raise ValueError('Unsupported ASR reuse mode.')
         identity = qualified_identity(config['cohere_path'], provider, mx)
+        approved = current_profile()
+        current = approved.get('namespace') == 'source_bound_canonical_v1'
+        execution_qualified = approved.get('qualification', {}).get('current_namespace_execution_qualified') is True
+        if current and mode == 'reuse' and not execution_qualified:
+            raise ValueError('Current ASR reuse namespace needs its observer qualification.')
         from final_asr_reuse import FinalAsrReuse, digest
-        cache = FinalAsrReuse(identity, mode=mode, qualification=digest(identity))
+        cache = FinalAsrReuse(identity, mode=mode,
+            qualification=digest(identity) if not current or execution_qualified else None)
         return cache, {'enabled': True, 'mode': mode,
                        'identity_sha256': cache.identity_sha256,
-                       'qualification': 'inherited_combined_engine_policy',
-                       'final_namespace_execution_qualified': False}
+                       'qualification': 'source_bound_observer' if current else 'inherited_combined_engine_policy',
+                       'final_namespace_execution_qualified': execution_qualified if current else False}
     except (ImportError, OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError) as exc:
         # This optimization is optional. Failure never substitutes cached text
         # or changes the fresh recognizer's normal behavior.

@@ -48,23 +48,30 @@ test('unchanged live rows avoid rewriting names; provisional heading and focused
   assert.equal(card.querySelector('.latest-machine-words').textContent,'New machine words');
 });
 
-test('processed and live regions stay separate and chronological across language epochs and duplicate revisions',()=>{
+test('canonical chronology survives mixed processing states, language epochs and duplicate revisions',()=>{
   const f=frontend(root);f.seed(6,'recording');
   f.run(`doc.segments.forEach((s,i)=>{s.refinement_state=i%2?'provisional':'refined';s.language_epoch=Math.floor(i/2);s.text='Repeated words';});
     doc.segments.push({...doc.segments[3],text:'Older duplicate',machine_revision:0});
     doc.segments.reverse();window.original=JSON.stringify(doc);renderSegments()`);
   const host=f.document.getElementById('segments');
-  assert.deepEqual(host.children.map(c=>c.dataset.segmentId),['r0','r2','r4','r1','r3','r5']);
+  assert.deepEqual(host.children.map(c=>c.dataset.segmentId),['r0','r1','r2','r3','r4','r5']);
   assert.deepEqual(host.querySelectorAll('.live-provisional').map(c=>c.dataset.segmentId),['r1','r3','r5']);
-  assert.equal(host.querySelectorAll('.live-section-label').length,1);
-  assert.equal(host.querySelectorAll('.processed-section-label').length,1);
+  assert.equal(host.querySelectorAll('.live-section-label').length,3);
+  assert.equal(host.querySelectorAll('.processed-section-label').length,3);
   assert.equal(host.querySelectorAll('.speaker-continuation.live-section-start').length,0,'Speaker grouping resets at the section boundary');
   assert.equal(host.querySelector('[data-segment-id="r3"] textarea').value,'Repeated words','Newest revision wins only within the same ID');
   assert.equal(host.querySelectorAll('textarea:not([readonly])').filter(t=>t.value==='Repeated words').length,6,'Repeated speech with different IDs is retained');
-  assert.equal(f.run('JSON.stringify(doc)===original'),true,'Partitioning never rewrites the canonical document');
+  assert.equal(f.run('JSON.stringify(doc)===original'),true,'Presentation never rewrites the canonical document');
+  // Processing may finish out of order and a later fast result can make an
+  // earlier passage provisional again. Neither transition reorders speech.
+  for(const state of ['refined','provisional']) {
+    f.run(`doc.segments.find(s=>s.id==='r1' && s.machine_revision===1).refinement_state='${state}';renderSegments()`);
+    assert.deepEqual(host.children.map(c=>c.dataset.segmentId),['r0','r1','r2','r3','r4','r5']);
+    assert.equal(host.querySelector('[data-segment-id="r1"]').classList.contains('live-provisional'),state==='provisional');
+  }
 });
 
-test('refinement moves a focused draft into processed and retains replaced corrections outside the live timeline',()=>{
+test('refinement restyles a focused draft in place and retains replaced corrections outside the timeline',()=>{
   const f=frontend(root);f.seed(3,'recording');
   f.run("doc.segments[0].refinement_state='provisional';doc.segments[2].refinement_state='provisional';renderSegments()");
   const host=f.document.getElementById('segments'),text=host.querySelector('[data-segment-id="r0"] textarea');
@@ -76,7 +83,7 @@ test('refinement moves a focused draft into processed and retains replaced corre
   assert.equal(host.children[0].classList.contains('live-provisional'),false);
   assert.equal(host.children[0].querySelector('.latest-machine-words').textContent,'Refined machine words');
   f.run("doc.segments.splice(0,1);doc.segments[0].start=0;doc.segments[0].end=20;renderSegments()");
-  assert.deepEqual(host.children.map(c=>c.dataset.segmentId),['r1','r0','r2']);
+  assert.deepEqual(host.children.map(c=>c.dataset.segmentId),['r1','r2','r0']);
   assert.equal(host.querySelector('[data-segment-id="r0"]').dataset.transcriptSection,'corrections');
   assert.equal(host.querySelectorAll('.corrections-section-label').length,1);
   assert.equal(host.querySelectorAll('.live-provisional').length,1);

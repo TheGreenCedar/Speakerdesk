@@ -72,7 +72,7 @@ class ContextPolicyTests(unittest.TestCase):
                 self.assertEqual(row['canonical_unresolved'],'unresolved_alignment')
                 self.assertEqual(row['transcription_review']['reason'],'canonical_ownership_unresolved')
                 events=[json.loads(l) for l in case.engine.canonical.archive.path.read_text().splitlines()]
-                retained=next(e for e in events if e['type']=='bounded_machine_version')
+                retained=next(e for e in reversed(events) if e['type']=='bounded_machine_version')
                 self.assertEqual(retained['version']['context_policy'],POLICY)
                 self.assertEqual(len(retained['parts']),3)
                 self.assertTrue(all(p['text']==case.peer.text for p in retained['parts']))

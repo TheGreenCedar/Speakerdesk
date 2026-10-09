@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 import numpy as np
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
@@ -14,7 +15,7 @@ from live_meeting import SourceMixer, RATE
 class MixerTests(unittest.TestCase):
     def setUp(self):
         self.blocks=[]
-        self.mixer=SourceMixer(['microphone','system'],lambda mixed,tracks:self.blocks.append((mixed.copy(),{k:v.copy() for k,v in tracks.items()})))
+        self.mixer=SourceMixer(['microphone','system'],lambda mixed,tracks:self.blocks.append((mixed.copy(),{k:v.copy() for k,v in tracks.items()})),echo_factory=None)
     def audio(self, value, length):return np.full(length,value,dtype='<f4').tobytes()
     def result(self):return np.concatenate([b[0] for b in self.blocks])
     def test_delayed_source_is_aligned_before_watermark(self):
@@ -80,6 +81,15 @@ class MeetingAccessTests(unittest.TestCase):
         self.app.extensions['speakerdesk']['meetings'].helper_path=lambda:self.root/'missing-helper'
         response=self.client.post('/api/meetings',headers=self.headers,json={'name':'Meeting','sources':['microphone'],'language':'en'})
         self.assertEqual(response.status_code,409)
+        self.assertEqual(self.client.get('/api/jobs').json,[])
+    def test_missing_echo_component_stops_before_models_or_recording(self):
+        self.app.extensions['speakerdesk']['meetings'].helper_path=lambda:Path(__file__)
+        with patch('capture_echo.library_path',return_value=self.root/'missing-echo.dylib'), \
+             patch('live_meeting.preflight',side_effect=AssertionError('Model preflight must not run')):
+            response=self.client.post('/api/meetings',headers=self.headers,
+                json={'name':'Meeting','sources':['microphone','system'],'language':'en'})
+        self.assertEqual(response.status_code,409)
+        self.assertIn('echo cancellation is missing',response.json['error'])
         self.assertEqual(self.client.get('/api/jobs').json,[])
     def test_invalid_sources_are_rejected(self):
         for sources in [['microphone','microphone'],['unknown'],[],[{}]]:

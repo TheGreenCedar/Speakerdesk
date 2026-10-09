@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from alignment_text import SUPPORTED_LANGUAGES
 
 
 def utterance_tail_chunks(chunks, utterances, *, rate=16000, max_seconds=18):
@@ -67,6 +68,10 @@ def run(task, request):
     mx.set_memory_limit(5 * 1024**3)
     mx.set_cache_limit(256 * 1024**2)
     start = time.perf_counter()
+    if task=='alignment-check':
+        mx.set_memory_limit(4 * 1024**3)
+        from alignment_provider import gpu_check
+        return gpu_check(request['directory'])
     model_path = Path(request['model_path']).resolve()
     if not (model_path / 'model.safetensors').is_file():
         raise RuntimeError('Missing local model checkpoint.')
@@ -111,7 +116,6 @@ def run(task, request):
         loaded = time.perf_counter()
         regions = []
         aligner = None
-        alignment_error = None
         for chunk in chunks:
             check_memory()
             if 'audio' in chunk:
@@ -133,18 +137,15 @@ def run(task, request):
                 for piece in transcriber.transcribe(audio[begin:end],rate,tuple(chunk['speakers']),
                         start_sample=origin+begin,max_asr_seconds=18):
                     if (chunk.get('decode_context') and request.get('alignment_path')
-                            and piece.get('language') == 'en' and piece.get('text')):
-                        if aligner is None and alignment_error is None:
+                            and piece.get('language') in SUPPORTED_LANGUAGES and piece.get('text')):
+                        if aligner is None:
                             try:
                                 from coarse_alignment import CoarseAlignment
                                 aligner = CoarseAlignment(request['alignment_path'])
                             except Exception as exc:
-                                alignment_error = f'{type(exc).__name__}: {exc}'
-                        if alignment_error is not None:
-                            piece['reading_alignment_error'] = alignment_error
-                        else:
-                            attach_piece_alignment(piece, audio[begin:end], rate,
-                                origin+begin, aligner)
+                                raise RuntimeError('Required transcript timing failed to load. Retry local model setup.') from exc
+                        attach_piece_alignment(piece, audio[begin:end], rate,
+                            origin+begin, aligner)
                     pieces.append({**piece,'start':piece['start']+begin/rate,
                                    'end':piece['end']+begin/rate})
             regions.append(pieces)
@@ -168,15 +169,16 @@ def run(task, request):
 
 
 def attach_piece_alignment(piece, audio, rate, origin, aligner):
-    """Bind supplied English words to their exact original physical PCM slice.
+    """Bind supplied timing units to their exact original physical PCM slice.
 
-    This optional reading evidence never replaces Cohere text. The consumer
-    validates the provider identity, text, sample anchor and PCM hash again.
-    Provider failures leave words unassigned; no alternate neural provider runs.
+    This reading evidence never replaces Cohere text. The consumer validates
+    the provider identity, text, sample anchor and PCM hash again. Runtime
+    failures stop the accuracy pass; no alternate neural provider runs.
     """
     import hashlib
     import numpy as np
-    if rate != 16000 or piece.get('language') != 'en' or not piece.get('text'):
+    language=piece.get('language')
+    if rate != 16000 or language not in SUPPORTED_LANGUAGES or not piece.get('text'):
         return
     a, b = round(piece['start']*rate), round(piece['end']*rate)
     if not 0 <= a < b <= len(audio):
@@ -184,10 +186,9 @@ def attach_piece_alignment(piece, audio, rate, origin, aligner):
     pcm = np.asarray(audio[a:b], dtype=np.float32)
     digest = hashlib.sha256(pcm.astype('<f4').tobytes()).hexdigest()
     try:
-        result = aligner.align(pcm, piece['text'], start_sample=origin+a, language='en')
+        result = aligner.align(pcm, piece['text'], start_sample=origin+a, language=language)
     except Exception as exc:
-        piece['reading_alignment_error'] = f'{type(exc).__name__}: {exc}'
-        return
+        raise RuntimeError('Required transcript timing failed. Retry the transcription after checking model setup.') from exc
     if isinstance(result, dict):
         piece.update(reading_alignment=result, audio_float32_sha256=digest)
 

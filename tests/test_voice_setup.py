@@ -15,7 +15,8 @@ import urllib.error
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
-import voice_coreml as core
+import voice_gpu_runtime as gpu
+import voice_waveform as waveform
 import voice_setup as setup
 from voice_profiles import Calibration, VoiceModel
 
@@ -41,7 +42,7 @@ class VoiceDownloadTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.pin,self.bodies=fake_artifact()
-        for module in (setup,core):
+        for module in (setup,waveform):
             replacement=patch.object(module,'PIN',self.pin);replacement.start();self.addCleanup(replacement.stop)
         disk=patch.object(setup.shutil,'disk_usage',return_value=SimpleNamespace(free=50_000_000_000));disk.start();self.addCleanup(disk.stop)
         self.activation=Mock()
@@ -143,12 +144,13 @@ class ManagedSetupAPITests(unittest.TestCase):
             (root/'models/core').mkdir(parents=True);(root/'models/core/model.safetensors').write_bytes(b'x')
             def response(request,**kwargs):return Response(bodies[request.full_url.split('/cpu-fixture/',1)[1]])
             with (patch.dict('os.environ',{'SPEAKERDESK_MODELS':str(root/'models')}),
-                  patch('model_setup.SPECS',[core_spec]),patch.object(core,'PIN',pin),patch.object(setup,'PIN',pin),
+                  patch('model_setup.SPECS',[core_spec]),
+                  patch('model_setup.AlignmentSetup.ready',return_value=True),patch.object(waveform,'PIN',pin),patch.object(setup,'PIN',pin),
                   patch.object(setup.VoiceSetup,'released',return_value=True),
                   patch.object(setup.VoiceSetup,'supported',return_value=True),
                   patch.object(setup.shutil,'disk_usage',return_value=SimpleNamespace(free=50_000_000_000)),
                   patch.object(setup.urllib.request,'urlopen',side_effect=response) as fetch,
-                  patch.object(core,'load_approved_runtime',return_value=(SimpleNamespace(model=model),policy))):
+                  patch.object(gpu,'load_approved_runtime',return_value=(SimpleNamespace(model=model,close=lambda:None),policy))):
                 app=create_app(root/'data');client=app.test_client()
                 token=re.search(r'name="speakerdesk-token" content="([^"]+)"',client.get('/').text)[1]
                 try:
@@ -156,7 +158,7 @@ class ManagedSetupAPITests(unittest.TestCase):
                     self.assertTrue(initial['core_ready']);self.assertFalse(initial['ready'])
                     self.assertTrue(initial['voice']['enabled'])
                     self.assertEqual(initial['total_bytes'],1+pin['total_bytes'])
-                    self.assertEqual(client.post('/api/setup',headers={'X-Speakerdesk-Token':token}).status_code,202)
+                    self.assertEqual(client.post('/api/setup',headers={'X-Speakerdesk-Token':token},json={}).status_code,202)
                     deadline=time.monotonic()+2
                     while time.monotonic()<deadline and not client.get('/api/setup').json['ready']:time.sleep(.01)
                     state=client.get('/api/setup').json
@@ -172,19 +174,19 @@ class ManagedSetupAPITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);pin,bodies=fake_artifact();started=threading.Event();release=threading.Event()
             model=VoiceModel('cpu-test','fixture','a'*64,2)
-            backend=SimpleNamespace(model=model)
+            backend=SimpleNamespace(model=model,close=lambda:None)
             policy=Calibration(model,'cpu-fixture',.8,.1,2,2,0.,0.)
             calls=[]
             def response(request,**kwargs):
                 calls.append(request.full_url);started.set();release.wait(timeout=3)
                 return Response(bodies[request.full_url.split('/cpu-fixture/',1)[1]])
             with (patch.dict('os.environ',{'SPEAKERDESK_MODELS':str(root/'models')}),
-                  patch.object(core,'PIN',pin),patch.object(setup,'PIN',pin),
+                  patch.object(waveform,'PIN',pin),patch.object(setup,'PIN',pin),
                   patch.object(setup.VoiceSetup,'released',return_value=True),
                   patch.object(setup.VoiceSetup,'supported',return_value=True),
                   patch.object(setup.shutil,'disk_usage',return_value=SimpleNamespace(free=50_000_000_000)),
                   patch.object(setup.urllib.request,'urlopen',side_effect=response),
-                  patch.object(core,'load_approved_runtime',return_value=(backend,policy)) as load):
+                  patch.object(gpu,'load_approved_runtime',return_value=(backend,policy)) as load):
                 app=create_app(root/'data');client=app.test_client()
                 token=re.search(r'name="speakerdesk-token" content="([^"]+)"',client.get('/').get_data(as_text=True))[1]
                 headers={'X-Speakerdesk-Token':token}

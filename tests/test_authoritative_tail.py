@@ -169,7 +169,7 @@ class AuthoritativeTailTests(unittest.TestCase):
                     case.peer.feed(np.zeros(16000,dtype=np.float32),final=True)
                     book._set_end(row,31*16000);book.cursor=31*16000;case.engine.received=31*16000;case.engine.processed=31
                 case.engine.canonical.commit()
-                expected=reason if enabled else 'unresolved_alignment'
+                expected=reason  # Optional alignment absence does not invent a decode failure.
                 self.assertEqual(row.get('canonical_unresolved'),expected)
                 self.assertEqual(case.peer.calls,[])
             finally:case.tearDown()

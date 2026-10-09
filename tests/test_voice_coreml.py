@@ -52,7 +52,8 @@ class CoreMLBoundaryTests(unittest.TestCase):
         self.audio.write_bytes(b'not a wave file')
         with self.assertRaisesRegex(ValueError, 'could not read'): core.read_clip(self.audio, self.clip)
 
-    def test_silence_and_saturation_reject_before_native_load(self):
+    @patch.object(core, 'require_accelerator_policy')
+    def test_silence_and_saturation_reject_before_native_load(self, policy_peer):
         backend = core.ReDimNet2CoreML(self.root/'missing')
         with patch.object(backend, 'validate') as validate:
             for samples in [np.zeros(16000*12, dtype='<i2'), np.full(16000*12, 32767, dtype='<i2')]:
@@ -60,7 +61,8 @@ class CoreMLBoundaryTests(unittest.TestCase):
             validate.assert_not_called()
         self.assertIsNone(backend._predictor)
 
-    def test_lazy_load_prediction_contract_and_invalid_output(self):
+    @patch.object(core, 'require_accelerator_policy')
+    def test_lazy_load_prediction_contract_and_invalid_output(self, policy_peer):
         predictor = Mock(); predictor.predict.return_value = {'embedding': np.ones((1, 192), dtype=np.float32)}
         factory = Mock(return_value=predictor)
         fake = SimpleNamespace(models=SimpleNamespace(CompiledMLModel=factory), ComputeUnit={'CPU_ONLY': 'cpu'})
@@ -120,7 +122,8 @@ class CoreMLBoundaryTests(unittest.TestCase):
                 'held_out': {'dataset_id': 'cpu:held-out', 'genuine_trials': 2, 'impostor_trials': 2,
                              'false_accept_rate': 0., 'false_reject_rate': 0., 'meets_error_limits': True}}
 
-    def test_reviewed_independent_compatible_config_is_required(self):
+    @patch.object(core, 'require_accelerator_policy')
+    def test_reviewed_independent_compatible_config_is_required(self, policy_peer):
         path = self.root/'voice.json'; config = self.measured_config(); path.write_text(json.dumps(config))
         with patch.object(core.ReDimNet2CoreML, 'validate') as validate:
             backend, policy = core.load_approved_runtime(path); validate.assert_called_once()
@@ -139,7 +142,9 @@ class CoreMLBoundaryTests(unittest.TestCase):
         with patch.dict(os.environ, {'SPEAKERDESK_VOICE_CONFIG': str(path)}): app = create_app(self.root/'data')
         try:
             response = app.test_client().get('/api/people'); self.assertEqual(response.status_code, 200)
-            self.assertFalse(response.json['voice_available']); self.assertIn('local setup', response.json['voice_message'])
+            self.assertFalse(response.json['voice_available'])
+            self.assertIn(response.json['readiness_code'], ('runtime_unqualified', 'runtime_unsupported'))
+            self.assertEqual(response.json['next_action'], 'updates')
             self.assertEqual(app.test_client().get('/').status_code, 200)
         finally:
             app.extensions['speakerdesk']['meetings'].close()

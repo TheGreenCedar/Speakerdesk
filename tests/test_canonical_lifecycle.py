@@ -20,6 +20,26 @@ class CanonicalLifecycle(MeetingHarness,unittest.TestCase):
             process=real_popen(command,**kwargs);self.children.append(process);return process
         self.peers=patch('live_meeting.subprocess.Popen',side_effect=peer);self.peers.start()
 
+    def test_default_dual_source_factory_drains_independent_rows_on_one_clock(self):
+        self.assertTrue(self.manager.channel_transcription)
+        self.assertTrue(self.manager.source_innovation)
+        self.assertTrue(self.manager.source_startup_hold)
+        jid=self.start(['microphone','system'])
+        self.wait_for(lambda:self.job(jid)['status']=='recording')
+        self.control(jid,'pause')
+        self.wait_for(lambda:self.job(jid).get('pause_flush',{}).get('state')=='complete')
+        self.control(jid,'resume');self.wait_for(lambda:self.job(jid)['status']=='recording')
+        self.control(jid,'stop');self.wait_for(lambda:self.manager.jid is None)
+        job=self.job(jid);self.assertEqual(job['status'],'ready',job)
+        self.assertEqual(job['capture_source_catalog']['schema_version'],3)
+        rows=[row for row in job['document']['segments'] if row.get('canonical_utterance_id')]
+        self.assertEqual({row['capture_source']['source_id'] for row in rows},{'microphone_clean','system'})
+        self.assertEqual(len({row['id'] for row in rows}),len(rows))
+        self.assertTrue(all(row['canonical_state']=='sealed' for row in rows))
+        self.assertEqual({r['end_sample'] for r in job['source_capture_admissions'].values()},{5600})
+        for name in ('audio.wav','microphone_clean.wav','system.wav'):
+            self.assertEqual(len(self.samples(jid,name)),5600)
+
     def test_pause_ack_open_identity_then_stop_drains_whole_utterance_and_persists(self):
         jid=self.start(['microphone']);self.wait_for(lambda:self.job(jid)['status']=='recording')
         self.control(jid,'pause')

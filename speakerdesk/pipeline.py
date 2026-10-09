@@ -46,11 +46,14 @@ def workers_idle():
 def model_config():
     home=ROOT.parent
     models=Path(os.getenv('SPEAKERDESK_MODELS',home/'models'))
-    return {'diar_path':os.getenv('DIAR_MODEL_PATH',str(models/'nemotron')),
+    from alignment_setup import ALIGNMENT_SPEC, available
+    timing_path=os.getenv('ALIGNMENT_MODEL_PATH',str(models/ALIGNMENT_SPEC['directory']))
+    timing_active=available(timing_path)
+    return {'alignment_enabled':timing_active, 'diar_path':os.getenv('DIAR_MODEL_PATH',str(models/'nemotron')),
             'cohere_path':os.getenv('COHERE_MODEL_PATH',str(models/'cohere-speech')),
             'lid_path':os.getenv('LID_MODEL_PATH',str(models/'whisper-language')),
             'speech_path':os.getenv('SPEECH_MODEL_PATH',str(models/'silero-speech')),
-            'alignment_path':os.getenv('ALIGNMENT_MODEL_PATH',str(models/'coarse-alignment')),
+            'alignment_path':timing_path if timing_active else None,
             'diar_python':os.getenv('DIAR_PYTHON',str(home/'.venv/bin/python')),
             'asr_python':os.getenv('ASR_PYTHON',str(home/'.venv-asr/bin/python')),
             'diar_kind':'nemotron', 'device':'mlx'}
@@ -72,8 +75,10 @@ def preflight(config, language=None):
     if config['device'] != 'mlx':
         issues.append('This Mac setup uses MLX on Apple Silicon.')
     issues.extend(speech_issues(config.get('speech_path','')))
-    if language == 'auto':
-        issues.extend(detector_issues(config.get('lid_path', '')))
+    issues.extend(detector_issues(config.get('lid_path', '')))
+    from alignment_setup import available
+    if not config.get('alignment_path') or not available(config['alignment_path']):
+        issues.append('Required transcript timing is not ready. Finish local model setup or retry timing setup.')
     return issues
 
 
@@ -184,7 +189,8 @@ def attach_import_reading_turns(segment):
     """
     import hashlib
     from reading_turns import alignment_words, bind_words, project_turns
-    if not segment.get('decode_context') or segment.get('language') != 'en':return
+    from alignment_text import SUPPORTED_LANGUAGES
+    if not segment.get('decode_context') or segment.get('language') not in SUPPORTED_LANGUAGES:return
     alignment=segment.get('reading_alignment')
     audio_hash=segment.get('audio_float32_sha256')
     if (not isinstance(alignment,dict) or not isinstance(audio_hash,str)
@@ -218,9 +224,14 @@ def attach_import_reading_turns(segment):
         'uncertainty_policy':'emission_inside_activity_no_competing_owner_in_margin',
         'calibration_id':row['reading_word_evidence']['calibration_id'],
         'model_sha256':row['reading_word_evidence']['model_sha256']}
+    from reading_turns import BEHAVIOR_FIELDS
+    segment['reading_turn_provenance'].update({key:row['reading_word_evidence'][key]
+        for key in BEHAVIOR_FIELDS if key in row['reading_word_evidence']})
+    if row['reading_word_evidence'].get('timing_unit_policy_id'):
+        segment['reading_turn_provenance']['method']='ctc_units_temporal_nvidia_v3'
 
 
-def run_worker(python, task, request, folder):
+def run_worker(python, task, request, folder, *, timeout=7200):
     request_path=folder/f'{task}-request.json'; output_path=folder/f'{task}-output.json'
     request_path.write_text(json.dumps(request))
     env={**os.environ,'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1','HF_DATASETS_OFFLINE':'1',
@@ -234,14 +245,14 @@ def run_worker(python, task, request, folder):
             proc=subprocess.Popen(command,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
             _workers.add(proc)
         try:
-            stdout,stderr=proc.communicate(timeout=7200)
+            stdout,stderr=proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill();proc.communicate()
             raise
         finally:
             with _worker_lock:_workers.discard(proc)
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f'{task} exceeded the two-hour inference limit.') from None
+        raise RuntimeError(f'{task} exceeded the two-hour inference limit.' if timeout==7200 else f'{task} exceeded its {timeout}-second check limit.') from None
     log_path=folder/f'{task}-worker.log'
     log_path.write_text(stdout+'\n'+stderr)
     log_path.chmod(0o600)
@@ -273,7 +284,7 @@ def infer(audio_path, duration, language, folder, progress, config=None):
             path=crop_dir/f'{i}.wav';crop(audio_path,path,chunk['audio_start'],chunk['audio_end']);chunk['audio']=str(path)
         asr=run_worker(config['asr_python'],'transcribe',{'model_path':config['cohere_path'],
             'chunks':chunks,'language':language,'lid_path':config.get('lid_path'),
-            'speech_path':config.get('speech_path'),'alignment_path':config.get('alignment_path'),'audio':str(audio_path),
+            'speech_path':config.get('speech_path'),'alignment_path':config.get('alignment_path') if config.get('alignment_enabled',True) else None,'audio':str(audio_path),
             'device':config['device']},folder) if chunks else {'regions':[],'metrics':{}}
     finally:
         for path in crop_dir.glob('*.wav'):path.unlink()

@@ -243,10 +243,26 @@ class RuntimeUpdates:
             return True
 
 
-def register_updates(app, updates):
+def register_updates(app, updates, db):
     @app.get('/api/updates')
     def update_status():
-        return jsonify(updates.status())
+        with db() as conn:
+            row = conn.execute("SELECT value FROM preferences WHERE key='dismissed_update_version'").fetchone()
+        return jsonify(**updates.status(), dismissed_version=row[0] if row else '')
+
+    @app.patch('/api/preferences/update-notice')
+    def dismiss_update_notice():
+        body = request.get_json(silent=True)
+        with updates.lock:
+            status = updates.status()
+            version = status.get('version')
+            if (not isinstance(body, dict) or set(body) != {'version'} or
+                    not isinstance(version, str) or not version or len(version) > 512 or
+                    body['version'] != version or status['state'] != 'available' or status['reserved']):
+                raise ValueError('Dismiss the currently available update version.')
+            with db() as conn:
+                conn.execute("INSERT OR REPLACE INTO preferences VALUES ('dismissed_update_version',?)", (version,))
+        return jsonify(dismissed_version=version)
 
     @app.post('/api/updates')
     def update_operation():

@@ -69,11 +69,11 @@ async function main() {
       window.focusedText=text;window.beforeScroll=$('transcript-pane').scrollTop;
       doc.segments.find(s=>s.id==='row-20').refinement_state='refined';renderLiveSegments();})()`);
     assert.deepEqual(await evaluate(`({same:document.activeElement===focusedText,value:focusedText.value,caret:[focusedText.selectionStart,focusedText.selectionEnd],tinted:focusedText.closest('article').classList.contains('live-provisional'),labels:[...document.querySelectorAll('.live-section-label')].filter(e=>e.checkVisibility()).length,scroll:Math.abs($('transcript-pane').scrollTop-beforeScroll)})`),
-      {same:true,value:'My exact local correction',caret:[3,9],tinted:false,labels:1,scroll:0});
+      {same:true,value:'My exact local correction',caret:[3,9],tinted:false,labels:2,scroll:0});
     checks.push('A focused drafted passage becoming refined loses its tint in place without replacing its textarea, correction, caret or scroll position.');
     for(const status of ['paused','ready']) {
       await evaluate(`selected.status='${status}';selected.refinement_status='paused';setStatus();renderSegments()`);
-      assert.equal((await state()).labels,1);assert.equal((await state()).tinted.length,5);
+      assert.equal((await state()).labels,2);assert.equal((await state()).tinted.length,5);
     }
     await evaluate(`doc.segments.forEach(s=>s.refinement_state='refined');renderSegments()`);
     assert.equal((await state()).labels,0);assert.equal((await state()).tinted.length,0);

@@ -100,28 +100,28 @@ async function main(){
       await evaluate(`document.documentElement.dataset.theme='light';select('${jid}')`);
     }
     const ids=()=>evaluate("Array.from($('segments').children).map(c=>c.dataset.segmentId)");
-    assert.deepEqual(await ids(),['r0','r2','r4','r1','r3','r5']);
-    assert.equal(await evaluate("document.querySelectorAll('.live-section-label').length"),1);
-    assert.equal(await evaluate("document.querySelectorAll('.processed-section-label').length"),1);
+    assert.deepEqual(await ids(),['r0','r1','r2','r3','r4','r5']);
+    assert.equal(await evaluate("document.querySelectorAll('.live-section-label').length"),3);
+    assert.equal(await evaluate("document.querySelectorAll('.processed-section-label').length"),3);
     assert.equal(await evaluate("document.querySelector('[data-segment-id=r3] textarea').value"),'Synthetic words from epoch 1, passage 3.');
-    checks.push('Shipped renderer partitions three epochs into processed then live; each region is chronological; duplicate ID retains newest revision.');
+    checks.push('Shipped renderer keeps three epochs chronological across mixed live/processed states; duplicate ID retains newest revision.');
     for(const width of [1280,760])for(const theme of ['light','dark']){
       await send('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false});
       await evaluate(`document.documentElement.dataset.theme='${theme}';$('transcript-pane').scrollTop=0`);await delay(100);
-      const m=await evaluate(`(()=>{const processed=document.querySelector('[data-segment-id=r4]'),live=document.querySelector('[data-segment-id=r1]'),label=live.querySelector('.live-section-label'),text=live.querySelector('textarea'),timing=live.querySelector('.rolling-time');const cs=getComputedStyle(live),r=text.getBoundingClientRect(),t=timing.getBoundingClientRect();return {background:cs.backgroundColor,processedBackground:getComputedStyle(processed).backgroundColor,ink:getComputedStyle(text).color,label:getComputedStyle(label).color,font:getComputedStyle(text).fontSize,overlap:t.right>r.left,overflow:document.body.scrollWidth>innerWidth,headingVisible:label.checkVisibility(),liveBelowProcessed:live.getBoundingClientRect().top>=processed.getBoundingClientRect().bottom}})()`);
+      const m=await evaluate(`(()=>{const processed=document.querySelector('[data-segment-id=r0]'),live=document.querySelector('[data-segment-id=r1]'),label=live.querySelector('.live-section-label'),text=live.querySelector('textarea'),timing=live.querySelector('.rolling-time');const cs=getComputedStyle(live),r=text.getBoundingClientRect(),t=timing.getBoundingClientRect();return {background:cs.backgroundColor,processedBackground:getComputedStyle(processed).backgroundColor,ink:getComputedStyle(text).color,label:getComputedStyle(label).color,font:getComputedStyle(text).fontSize,overlap:t.right>r.left,overflow:document.body.scrollWidth>innerWidth,headingVisible:label.checkVisibility(),liveBelowProcessed:live.getBoundingClientRect().top>=processed.getBoundingClientRect().bottom}})()`);
       assert.equal(m.font,'16px');assert.equal(m.overlap,false);assert.equal(m.overflow,false);assert.equal(m.headingVisible,true);assert.equal(m.liveBelowProcessed,true);assert.notEqual(m.background,m.processedBackground);
       const luminance=value=>{const c=value.match(/[\d.]+/g).slice(0,3).map(Number).map(x=>{x/=255;return x<=.04045?x/12.92:((x+.055)/1.055)**2.4});return .2126*c[0]+.7152*c[1]+.0722*c[2];};
       const contrast=(a,b)=>{a=luminance(a);b=luminance(b);return(Math.max(a,b)+.05)/(Math.min(a,b)+.05);};
       m.textContrast=contrast(m.ink,m.background);m.labelContrast=contrast(m.label,m.background);assert(m.textContrast>=4.5);assert(m.labelContrast>=4.5);
       measurements.push({width,theme,...m});await screenshot(`partition-${width}-${theme}.png`);
     }
-    checks.push('Wide/narrow light/dark screenshots show distinct regions, one heading each,16px words, AA contrast, no timing overlap or body overflow.');
+    checks.push('Wide/narrow light/dark screenshots show distinct state runs in chronology,16px words, AA contrast, no timing overlap or body overflow.');
     await evaluate(`(()=>{window.focusedText=document.querySelector('[data-segment-id=r1] textarea');focusedText.focus();focusedText.value='Exact human correction';focusedText.dispatchEvent(new Event('input',{bubbles:true}));focusedText.setSelectionRange(2,8,'backward');window.beforeTop=focusedText.getBoundingClientRect().top;})()`);
     job.document.segments=job.document.segments.filter(s=>s.machine_revision>0);const row=job.document.segments.find(s=>s.id==='r1');row.refinement_state='refined';row.machine_revision=2;row.text='New processed machine words';job.revision++;
     await evaluate('poll()');
     assert.deepEqual(await evaluate(`({same:document.activeElement===focusedText,value:focusedText.value,caret:[focusedText.selectionStart,focusedText.selectionEnd,focusedText.selectionDirection],section:focusedText.closest('article').dataset.transcriptSection,latest:focusedText.closest('article').querySelector('.latest-machine-words').textContent})`),{same:true,value:'Exact human correction',caret:[2,8,'backward'],section:'processed',latest:'New processed machine words'});
     assert.equal(await evaluate(`Math.abs(focusedText.getBoundingClientRect().top-beforeTop)<1 || ($('transcript-pane').scrollTop===0 && focusedText.getBoundingClientRect().top >= $('transcript-pane').getBoundingClientRect().top)`),true,'Retain editor anchor unless the scroll range clamps at the top');
-    checks.push('Real DOM move during polling preserves the identical focused textarea, exact draft, backward caret and displayed new machine revision; viewport remains anchored within available scroll range.');
+    checks.push('Refinement during polling keeps chronological position, identical focused textarea, exact draft, backward caret and displayed new machine revision; viewport remains anchored within available scroll range.');
     job.document.segments=job.document.segments.filter(s=>s.id!=='r1');job.revision++;await evaluate('poll()');
     assert.equal(await evaluate("focusedText.closest('article').dataset.transcriptSection"),'corrections');assert.equal(await evaluate('document.activeElement===focusedText'),true);
     assert.equal(await evaluate("document.querySelectorAll('.corrections-section-label').length"),1);

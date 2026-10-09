@@ -130,7 +130,9 @@ class CanonicalTests(unittest.TestCase):
         self.assertNotIn('alignment',row)
         self.assertLessEqual(max(self.peer.calls),392000)
         journal=[json.loads(line) for line in self.engine.canonical.archive.path.read_text().splitlines()]
-        retained=next(event for event in journal if event['type']=='disjoint_core_machine_version')
+        # Open long speech now also has bounded raw versions. Inspect the
+        # exact final Stop anchor, rather than the first growing revision.
+        retained=next(event for event in reversed(journal) if event['type']=='disjoint_core_machine_version')
         self.assertEqual(len(retained['parts']),3);self.assertTrue(all(part['text']==self.peer.text for part in retained['parts']))
         self.assertEqual(self.peer.padding_calls[-6:],[(0,3200),(0,0),(3200,3200),(0,0),(3200,0),(0,0)])
         self.assertEqual(self.peer.asr_padding,(0,0))

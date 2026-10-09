@@ -14,6 +14,7 @@ import wave
 from pathlib import Path
 from flask import abort, jsonify, request
 from audio import pcm16_bytes
+from capture_echo import EchoMixer
 from pipeline import model_config, preflight
 from language_detection import LANGUAGE_CHOICES, LID_CHECKPOINT
 from meeting_refinement import RefinementController
@@ -28,23 +29,44 @@ LIVE = ('starting', 'recording', 'paused', 'finishing')
 class SourceMixer:
     """Timestamp alignment: watermark protects late packets, memory is bounded.
 
-    Independent tracks are summed with clipping. This is not acoustic echo cancellation.
+    Dual-source capture cleans the microphone against the aligned system reference.
     """
-    def __init__(self, sources, sink):
+    def __init__(self, sources, sink, *, echo_factory=EchoMixer, raw_sink=None, innovation_factory=None):
         import numpy as np
         self.np = np
         self.sources = sources
         self.sink = sink
+        self.raw_sink = raw_sink
+        if innovation_factory and (not echo_factory or set(sources)!={'microphone','system'}):
+            raise ValueError('Innovation source requires dual native capture.')
+        self.innovation = innovation_factory(sink) if innovation_factory else None
+        self.echo = echo_factory(self.innovation.emit if self.innovation else sink) if echo_factory and set(sources)=={'microphone','system'} else None
+        self.capture_epoch = 0
+        self.render_epoch = 0
         self.tiles = {}
         self.cursor = 0
+        self.reset_points = []
+        self.reset_sources = {}
         self.late_samples = 0
         self.levels = {source: 0.0 for source in sources}
         self.last_packet = {source:0. for source in sources}
 
-    def add(self, source, seconds, audio):
+    def add(self, source, seconds, audio, channels=1):
         if source not in self.sources or not math.isfinite(seconds) or seconds < 0:
             raise ValueError('Invalid capture source or timestamp.')
+        if type(channels) is not int or channels not in (1,2) or (source=='microphone' and channels!=1):
+            raise ValueError('Invalid capture channel count.')
         samples = self.np.frombuffer(audio, dtype='<f4')
+        if len(samples)%channels:raise ValueError('Incomplete capture audio frame.')
+        reference = samples.reshape(-1,channels)
+        if not self.np.isfinite(reference).all():raise ValueError('Invalid capture audio packet.')
+        samples = reference.mean(axis=1) if channels==2 else samples
+        if channels==2 and len(samples):
+            # Preserve remote content if phase-inverted stereo would cancel
+            # during mono downmix. The AEC still receives both original paths.
+            power=self.np.mean(reference.astype(self.np.float64)**2,axis=0)
+            if self.np.mean(samples.astype(self.np.float64)**2) < .05*power.max():
+                samples=reference[:,int(power.argmax())]
         if len(samples) > RATE or not self.np.isfinite(samples).all():
             raise ValueError('Invalid capture audio packet.')
         position = round(seconds*RATE)
@@ -62,7 +84,39 @@ class SourceMixer:
             tile = self.tiles.setdefault(tile_index, {})
             buffer = tile.setdefault(source, self.np.zeros(BLOCK, dtype=self.np.float32))
             buffer[within:within+size] = samples[offset:offset+size]
+            if self.innovation:
+                present=tile.setdefault(source+'_present',self.np.zeros(BLOCK,dtype=bool))
+                present[within:within+size]=True
+            if source=='system':
+                ref = tile.setdefault('system_reference',self.np.zeros((BLOCK,2),dtype=self.np.float32))
+                ref[within:within+size] = reference[offset:offset+size]
             offset += size; position += size
+
+    def format_changed(self, source, seconds):
+        if source not in self.sources or not math.isfinite(seconds) or seconds < 0:
+            raise ValueError('Invalid capture format boundary.')
+        position = max(self.cursor, round(seconds*RATE))
+        if position > self.cursor+RATE*5:
+            raise ValueError('Capture format boundary is outside the buffered timeline.')
+        if position not in self.reset_points:
+            if len(self.reset_points) >= 8:
+                raise RuntimeError('Audio format changed too frequently. Audio has been saved.')
+            self.reset_points.append(position)
+            self.reset_points.sort()
+        self.reset_sources.setdefault(position,set()).add(source)
+
+    def _drain_echo(self, *, render_reset=True):
+        if self.echo:
+            self.echo.add({s:self.np.empty(0,self.np.float32) for s in self.sources},final=True)
+            if self.innovation and hasattr(self.innovation,'flush'):self.innovation.flush()
+            self.capture_epoch += 1
+            if render_reset:self.render_epoch += 1
+
+    def _reset_at_cursor(self):
+        while self.reset_points and self.reset_points[0] <= self.cursor:
+            position=self.reset_points.pop(0)
+            changed=self.reset_sources.pop(position,None)
+            self._drain_echo(render_reset=changed is None or 'system' in changed)
 
     def flush(self, seconds, final=False):
         for source in self.sources:
@@ -73,25 +127,47 @@ class SourceMixer:
         if target > self.cursor+RATE*5:
             raise RuntimeError('Capture clock stopped updating. Audio has been saved.')
         while self.cursor < target:
+            self._reset_at_cursor()
             tile_index, within = divmod(self.cursor, BLOCK)
             count = min(BLOCK-within, target-self.cursor)
+            if self.reset_points:
+                count = min(count,self.reset_points[0]-self.cursor)
             tile = self.tiles.get(tile_index, {})
             tracks = {s:tile.get(s,self.np.zeros(BLOCK,dtype=self.np.float32))[within:within+count] for s in self.sources}
             if within+count == BLOCK:
                 self.tiles.pop(tile_index,None)
             mixed = self.np.clip(sum(tracks.values()),-1,1).astype('<f4')
-            self.sink(mixed, tracks)
+            if 'system' in self.sources:
+                tracks['system_reference']=tile.get('system_reference',self.np.zeros((BLOCK,2),dtype=self.np.float32))[within:within+count]
             self.cursor += count
+            if self.innovation:
+                for source in self.sources:
+                    tracks[source+'_present']=tile.get(source+'_present',self.np.zeros(BLOCK,dtype=bool))[within:within+count]
+                tracks['system_reference_epoch']=self.np.full(count,self.render_epoch,dtype=self.np.int64)
+                self.innovation.retain(tracks,self.cursor-count,self.capture_epoch)
+            if self.raw_sink:self.raw_sink(tracks)
+            if self.echo:self.echo.add(tracks)
+            else:self.sink(mixed, tracks)
+        self._reset_at_cursor()
+        if final:self._drain_echo()
 
 
 class MeetingManager:
-    def __init__(self, get, put, patch, folder, lock, inference_busy, recognizer=None, *, updates, default_language=None):
+    def __init__(self, get, put, patch, folder, lock, inference_busy, recognizer=None, *, updates, default_language=None,
+                 channel_transcription=False, source_innovation=False, source_startup_hold=False):
         self.get, self.put, self.patch, self.folder = get, put, patch, folder
         self.lock = lock
         self.inference_busy = inference_busy
         self.recognizer = recognizer
         self.updates = updates
         self.default_language=default_language or (lambda:'auto')
+        # Internal development gate; no user-facing quality/mode selector.
+        self.channel_transcription=channel_transcription
+        if source_innovation and not channel_transcription:
+            raise ValueError('Development innovation requires source-aware transcription.')
+        self.source_innovation=source_innovation
+        if source_startup_hold and not source_innovation:raise ValueError('Startup source requires innovation evidence.')
+        self.source_startup_hold=source_startup_hold
         self.jid = None
         self.capture = self.worker = None
         self.packets = queue.Queue(maxsize=120)  # At most30s audio; recording itself remains independent.
@@ -172,6 +248,10 @@ class MeetingManager:
                 raise ValueError('Choose microphone audio, Mac audio, or both.')
             if not self.helper_path().is_file():
                 abort(409,description='Live capture is not included in this build yet. Recording imports remain available.')
+            if set(sources)=={'microphone','system'}:
+                try:
+                    probe=EchoMixer(lambda mixed,tracks:None);probe.close()
+                except (OSError,RuntimeError) as exc:abort(409,description=str(exc))
             issues = preflight(model_config(), language)
             if issues: abort(409,description='Open Settings to finish local model setup.')
             if shutil.disk_usage(self.folder('')).free < 512*1024**2:
@@ -189,10 +269,15 @@ class MeetingManager:
                        'warnings':['Phrase boundaries may cut words. Overlapping speech needs review.'] +
                            (['Uncertain language uses recent established context or a marked supported-language guess when available. Choose the meeting language if Auto has no supported context. Original audio is preserved.'] if language=='auto' else [])}}
             self.refinement.initialize(job)
+            if self.channel_transcription and set(sources)=={'microphone','system'}:
+                from capture_sources import catalog
+                job['capture_source_catalog']=catalog(jid,innovation=self.source_innovation,startup=self.source_startup_hold)
             try:self.put(job,default_language=language)
             except Exception:
                 dest.rmdir()
                 raise
+            if job.get('capture_source_catalog'):
+                (dest/'capture-sources.json').write_text(json.dumps(job['capture_source_catalog'],sort_keys=True))
             self.jid = jid
             self.duration = self.processed = 0.; self.levels = {}; self.error = None
             self.stopped = threading.Event(); self.packets = queue.Queue(maxsize=120)
@@ -253,6 +338,10 @@ class MeetingManager:
             pending.update(state='complete',received_sample=received,available_sample=available,
                 speech_observed_sample=speech,fast_sequence=result['fast_sequence'],
                 deferred_audio=([{'start_sample':available,'end_sample':received}] if available<received else []))
+            if job.get('capture_source_catalog'):
+                from capture_sources import validate_inspections
+                pending['source_admission_receipts']=validate_inspections(job,self.folder(jid),result.get('source_admission_receipts'),
+                    phase='pause',request_id=pending['request_id'],received_sample=received,observed_sample=speech)
             if job.get('admission_execution'):
                 from admission_receipt import validate_receipt,retained_pcm_digest
                 pending['admission_receipt']=validate_receipt(result.get('admission_receipt'),
@@ -290,6 +379,8 @@ class MeetingManager:
         stop_event = self.stopped
         capture_finished = False
         wav = None
+        clean_track = None
+        innovation_receipts = None
         mixer = None
         tracks = {}
         dest = self.folder(jid)
@@ -335,7 +426,7 @@ class MeetingManager:
                             if not worker_stop_sent.is_set():fail('Capture finalization arrived before Stop. Audio is preserved.')
                             self.refinement.capture_done(jid,observed_sample=result.get('canonical_observed_sample'),
                                 uncertain_samples=result.get('canonical_uncertain_samples'),
-                                admission=result.get('admission_receipt'))
+                                admission=result.get('admission_receipt'),source_admissions=result.get('source_admission_receipts'))
                         elif result['type']=='progress':
                             self.processed=result['processed_seconds'];self.refinement.schedule(jid,force=bool(result.get('flush')))
                         elif result['type']=='flush_ack':self.acknowledge_pause_flush(jid,result)
@@ -363,6 +454,8 @@ class MeetingManager:
         try:
             cfg=model_config();cfg.update(language=language,language_epoch=0,audio_path=str(dest/'audio.wav'),
                                          job_id=jid,canonical_utterances=True)
+            if self.get(jid).get('capture_source_catalog'):
+                cfg['capture_source_catalog']=self.get(jid)['capture_source_catalog']
             python=os.getenv('SPEAKERDESK_LIVE_PYTHON',str(Path(__file__).resolve().parents[1]/'.venv-package/bin/python'))
             command=([sys.executable,'--live-worker',json.dumps(cfg)] if getattr(sys,'frozen',False)
                      else [python,str(Path(__file__).with_name('live_worker.py')),json.dumps(cfg)])
@@ -389,7 +482,15 @@ class MeetingManager:
                 with self.lock:
                     from admission_receipt import validate_execution
                     job=self.get(jid);job['canonical_utterances']=True
-                    job['admission_execution']=validate_execution(ready.get('admission_execution'),jid)
+                    if job.get('capture_source_catalog'):
+                        from capture_sources import SOURCE_IDS
+                        executions=ready.get('source_admission_executions')
+                        if not isinstance(executions,dict) or set(executions)!=set(SOURCE_IDS):
+                            raise ValueError('Missing capture-source execution identities.')
+                        job['source_admission_executions']={s:validate_execution(executions[s],jid) for s in SOURCE_IDS}
+                        if len({r['execution_id'] for r in job['source_admission_executions'].values()})!=len(SOURCE_IDS):
+                            raise ValueError('Capture sources share one inspection execution.')
+                    else:job['admission_execution']=validate_execution(ready.get('admission_execution'),jid)
                     self.put(job)
             self.refinement.ready(jid,self.two_pass)
             if stop_event.is_set():return
@@ -398,15 +499,43 @@ class MeetingManager:
             audio=(dest/'audio.wav').open('w+b');handles.append(audio)
             wav=wave.open(audio,'wb');wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(RATE)
             tracks={}
-            for source in sources:
+            track_handles={}
+            retained_sources = list(sources)
+            if set(sources)=={'microphone','system'}:retained_sources.append('system_reference')
+            for source in retained_sources:
                 f=(dest/f'{source}.wav').open('w+b');handles.append(f)
-                track=wave.open(f,'wb');track.setnchannels(1);track.setsampwidth(2);track.setframerate(RATE);tracks[source]=track
+                track_handles[source]=f
+                track=wave.open(f,'wb');track.setnchannels(2 if source=='system_reference' else 1);track.setsampwidth(2);track.setframerate(RATE);tracks[source]=track
+            clean_track=None
+            if set(sources)=={'microphone','system'}:
+                f=(dest/'microphone_clean.wav').open('w+b');handles.append(f);track_handles['microphone_clean']=f
+                clean_track=wave.open(f,'wb');clean_track.setparams((1,2,RATE,0,'NONE','none'))
+            innovation_factory=None
+            source_version=self.get(jid).get('capture_source_catalog',{}).get('schema_version')
+            if source_version==3:
+                from render_startup import StartupSourceSink,StartupReceiptWriter
+                innovation_receipts=StartupReceiptWriter(dest)
+                innovation_factory=lambda callback:StartupSourceSink(callback,lock=self.lock)
+            elif source_version==2:
+                from render_innovation import InnovationSourceSink, InnovationReceiptWriter
+                innovation_receipts=InnovationReceiptWriter(dest)
+                innovation_factory=InnovationSourceSink
+            def retain_tracks(separate):
+                for source,track in tracks.items():
+                    # Stereo reference is interleaved in its own evidence WAV;
+                    # the canonical/legacy source tracks remain mono.
+                    track.writeframes(pcm16_bytes(separate[source].reshape(-1)))
             def sink(mixed, separate):
                 with self.lock:
                     start_sample=wav.getnframes()
+                    if innovation_receipts:innovation_receipts.write(start_sample,separate)
+                    if clean_track:
+                        if clean_track.getnframes()!=start_sample or len(separate['microphone_clean'])!=len(mixed):
+                            raise ValueError('Processed microphone differs from the shared capture clock.')
+                        clean_track.writeframes(pcm16_bytes(separate['microphone_clean']))
                     wav.writeframes(pcm16_bytes(mixed))
                     audio.flush()  # Finalized voice clips must already be readable by the identity worker.
-                    for source,track in tracks.items():track.writeframes(pcm16_bytes(separate[source]))
+                    for f in track_handles.values():f.flush()
                     self.duration=wav.getnframes()/RATE
                     if not failure:
                         mode,epoch=self.active_language,self.active_epoch
@@ -415,7 +544,7 @@ class MeetingManager:
                         if not self.two_pass:message['pcm']=base64.b64encode(mixed.tobytes()).decode()
                         try:packets.put_nowait(message)
                         except queue.Full:fail('Transcription fell 30 seconds behind. Recording stopped; captured audio has been saved.')
-            mixer=SourceMixer(sources,sink)
+            mixer=SourceMixer(sources,sink,raw_sink=retain_tracks,innovation_factory=innovation_factory)
             capture_log=(dest/'capture.log').open('w');handles.append(capture_log)
             with self.lock:
                 if stop_event.is_set():return
@@ -425,7 +554,9 @@ class MeetingManager:
             for line in self.capture.stdout:
                 result=json.loads(line);kind=result['type']
                 if kind=='audio':
-                    mixer.add(result['source'],result['time'],base64.b64decode(result['pcm'],validate=True))
+                    mixer.add(result['source'],result['time'],base64.b64decode(result['pcm'],validate=True),result.get('channels',1))
+                elif kind=='format_changed':
+                    mixer.format_changed(result['source'],result['time'])
                 elif kind=='clock':
                     mixer.flush(result['time']);self.levels=mixer.levels.copy()
                     self.patch(jid,duration=self.duration)
@@ -459,11 +590,12 @@ class MeetingManager:
             self.patch(jid,status='finishing',message='Finishing transcript…',duration=self.duration)
             wav.close()
             for track in tracks.values():track.close()
+            if clean_track:clean_track.close()
             if failure:raise RuntimeError(failure[0])
             stop_request={'type':'stop'}
             with self.lock:
                 job=self.get(jid)
-                if job.get('admission_execution'):
+                if job.get('admission_execution') or job.get('source_admission_executions'):
                     stop_request['request_id']=uuid.uuid4().hex
                     job['capture_inspection_request']={'request_id':stop_request['request_id'],
                         'through_sample':mixer.cursor}
@@ -494,6 +626,7 @@ class MeetingManager:
             self.error=failure[0]
             terminal={'status':'failed','message':self.error}
         finally:
+            if mixer and mixer.echo:mixer.echo.close()
             stop_event.set()
             transport_closed.set()
             cleanup_failed = False
@@ -501,7 +634,7 @@ class MeetingManager:
                 nonlocal cleanup_failed
                 try:handle.close()
                 except (OSError,ValueError):cleanup_failed=True
-            for recording in [wav, *tracks.values()]:
+            for recording in [wav, clean_track, innovation_receipts, *tracks.values()]:
                 if recording:close_handle(recording)
             for child in (self.capture,self.worker):
                 if child and child.poll() is None:
@@ -583,6 +716,7 @@ class MeetingManager:
                 audio_path=str(dest/'audio.wav'),refinement_only=True,job_id=jid,
                 canonical_utterances=bool(job.get('canonical_utterances')),language_history=job.get('language_history'),
                 fast_sequence=job.get('last_fast_sequence',0))
+            if job.get('capture_source_catalog'):cfg['capture_source_catalog']=job['capture_source_catalog']
             python=os.getenv('SPEAKERDESK_LIVE_PYTHON',str(Path(__file__).resolve().parents[1]/'.venv-package/bin/python'))
             command=([sys.executable,'--live-worker',json.dumps(cfg)] if getattr(sys,'frozen',False)
                      else [python,str(Path(__file__).with_name('live_worker.py')),json.dumps(cfg)])
@@ -648,7 +782,8 @@ def append_finalized_segment(document, result):
 
 def register_meetings(app, get, put, patch, folder, lock, inference_busy, recognizer=None, *, default_language=None):
     manager=MeetingManager(get,put,patch,folder,lock,inference_busy,recognizer,default_language=default_language,
-                           updates=app.extensions['speakerdesk']['updates'])
+                           updates=app.extensions['speakerdesk']['updates'],
+                           channel_transcription=True,source_innovation=True,source_startup_hold=True)
     app.extensions['speakerdesk']['meetings']=manager
     @app.get('/api/meeting')
     def meeting_status():return jsonify(manager.status())

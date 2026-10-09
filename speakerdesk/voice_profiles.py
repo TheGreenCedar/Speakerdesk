@@ -5,8 +5,22 @@ Nemotron's meeting-local slots/cache are deliberately not an embedding adapter.
 """
 from dataclasses import asdict, dataclass
 import math
+import re
 from pathlib import Path
 from typing import Protocol
+
+
+def runtime_available(backend, calibration):
+    """Apply the adapter's execution gate as well as profile/calibration identity."""
+    if backend is None or calibration is None or backend.model != calibration.model:
+        return False
+    check = getattr(backend, 'require_execution_policy', None)
+    if check is not None:
+        try:
+            check()
+        except ValueError:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -110,18 +124,64 @@ def speaker_audio_reason(segment, track_id):
     return None
 
 
+def speaker_audio_ranges(segment, track_id):
+    """Keep whole-anchor eligibility strict; crop only current owned activity.
+
+    Canonical VAD anchors can include speech without a diarized owner at their
+    edges. That does not invalidate a separate, fully observed solo interval.
+    Names and word edits do not change its audio; ownership/timing edits do.
+    Reading slices and their coarse word timestamps are not voice evidence.
+    """
+    if speaker_audio_eligible(segment, track_id):
+        return [(segment['start'], segment['end'])]
+    if (segment.get('speaker') != track_id or segment.get('audio_state')
+            or not re.fullmatch(r'speaker_\d+', track_id)
+            or segment.get('canonical_unresolved')
+            or segment.get('finalized') is not True
+            or segment.get('canonical_state') != 'sealed'
+            or segment.get('canonical_utterance_id') != segment.get('id')
+            or segment.get('speaker_candidates') != [track_id]
+            or segment.get('source_speaker_candidates') != [track_id]
+            or set(segment.get('protected_fields', [])) & {'speaker', 'start', 'end'}):
+        return []
+    a, b, revision = (segment.get(k) for k in ('start_sample', 'end_sample', 'audio_revision'))
+    activity = segment.get('speaker_activity')
+    if (type(a) is not int or type(b) is not int or not 0 <= a < b
+            or type(revision) is not int or revision < 0
+            or (segment['start'], segment['end']) != (a/16000, b/16000)
+            or not isinstance(activity, dict) or activity.get('audio_revision') != revision
+            or activity.get('observed_end_sample') != b
+            or not isinstance(activity.get('regions'), list)):
+        return []
+    ranges, cursor = [], a
+    for region in activity['regions']:
+        if not isinstance(region, dict):
+            return []
+        left, right, owners = (region.get(k) for k in ('start_sample', 'end_sample', 'speakers'))
+        if (type(left) is not int or type(right) is not int or not cursor == left < right <= b
+                or not isinstance(owners, list) or owners not in ([], [track_id])):
+            return []  # Never salvage a mixed/unknown ownership anchor here.
+        if owners:
+            if ranges and ranges[-1][1] == left:
+                ranges[-1] = (ranges[-1][0], right)
+            else:
+                ranges.append((left, right))
+        cursor = right
+    return [(left/16000, right/16000) for left, right in ranges] if cursor == b else []
+
+
 def voice_clip_choices(job, track_id):
     """The exact selection IDs accepted for saved, source-owned audio windows."""
     choices = {}
     for segment in (job.get('document') or {}).get('segments', []):
-        if not speaker_audio_eligible(segment, track_id):
-            continue
-        start = segment['start']
-        while segment['end']-start >= 2:
-            end = min(start+6, segment['end']) if segment['end']-segment['start'] > 10 else segment['end']
-            sid = segment['id'] if segment['end']-segment['start'] <= 10 else f"{segment['id']}@{math.floor(start*16000)}:{math.floor(end*16000)}"
-            choices[sid] = VoiceClip(job['id'], track_id, segment['id'], start, end)
-            start = end
+        for left, right in speaker_audio_ranges(segment, track_id):
+            start = left
+            while right-start >= 2:
+                end = min(start+6, right) if right-left > 10 else right
+                whole = (start, end) == (segment['start'], segment['end'])
+                sid = segment['id'] if whole else f"{segment['id']}@{round(start*16000)}:{round(end*16000)}"
+                choices[sid] = VoiceClip(job['id'], track_id, segment['id'], start, end)
+                start = end
     return choices
 
 
@@ -130,14 +190,10 @@ def automatic_clips(job, track_id, minimum=2):
     if (job.get('document') or {}).get('provenance', {}).get('kind') != 'local_inference':
         return []
     clips, last_end = [], -1.
-    for segment in job['document']['segments']:
-        if not speaker_audio_eligible(segment, track_id):
-            continue
-        start = max(last_end, segment['start'])
-        while segment['end']-start >= 2:
-            end = min(start+6, segment['end']) if segment['end']-start > 10 else segment['end']
-            clips.append(VoiceClip(job['id'], track_id, segment['id'], start, end))
-            last_end = start = end
+    for clip in sorted(voice_clip_choices(job, track_id).values(), key=lambda c: (c.end, c.start)):
+        if clip.start >= last_end:
+            clips.append(clip)
+            last_end = clip.end
             if len(clips) == minimum:
                 return clips
     return []
@@ -147,9 +203,8 @@ def clips_current(job, clips):
     document = job.get('document') or {}
     if document.get('provenance', {}).get('kind') != 'local_inference':
         return False
-    segments = {s['id']: s for s in document['segments']}
-    return all((segment := segments.get(c.segment_id)) and speaker_audio_eligible(segment, c.track_id)
-               and segment['start'] <= c.start < c.end <= segment['end'] for c in clips)
+    choices = {track: tuple(voice_clip_choices(job, track).values()) for track in {c.track_id for c in clips}}
+    return all(c in choices[c.track_id] for c in clips)
 
 
 def clean_clips(job, track_id, segment_ids, minimum=2):

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "approved_for_recognition": true,
+  "fixture_source": "licensed",
+  "model_dir": "redimnet2-b6",
+  "model": {
+    "model_id": "aufklarer/ReDimNet2-B6-CoreML",
+    "revision": "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:mlx-0.32.2:GPU:4db6708c1a1770a5046cb7bf0a27369362a3ec693e7e91a9d0dd249f6c148296",
+    "artifact_sha256": "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+    "dimension": 192,
+    "sample_rate": 16000
+  },
+  "implementation_identity_sha256": "4db6708c1a1770a5046cb7bf0a27369362a3ec693e7e91a9d0dd249f6c148296",
+  "qualification_sha256": "43291bace1ee457f8487c29fe35c904daf598109684effd27366d3252eae6862",
+  "sealed_checkpoint_sha256": "f2e20efab39ad0d3dc63bb4f48c7d69dbb4666691e59786cdab7e0be0b69e36d",
+  "calibration": {
+    "dataset_id": "AMI-disjoint-natural-GPU-calibration-v1:development",
+    "threshold": 0.5827445050278138,
+    "margin": 0.22375670158951808,
+    "minimum_clips": 2,
+    "genuine_trials": 8,
+    "impostor_trials": 8,
+    "false_accept_rate": 0.0,
+    "false_reject_rate": 0.0
+  },
+  "held_out": {
+    "dataset_id": "AMI-disjoint-natural-GPU-calibration-v1:held_out",
+    "genuine_trials": 6,
+    "impostor_trials": 6,
+    "false_accept_rate": 0.0,
+    "false_reject_rate": 0.0,
+    "wrong_identities": 0,
+    "meets_error_limits": true
+  },
+  "scope": "Small public English AMI scenario/headset sample; not population FAR, other capture/language accuracy, base-training exclusion, or legacy ALL numerical compatibility.",
+  "source_candidate_only": true,
+  "installed_activation_performed": false
+}

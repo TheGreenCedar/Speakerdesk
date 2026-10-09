@@ -44,10 +44,19 @@ def require_runtime(metadata):
             continue
         if importlib.metadata.version(name) != version:
             raise RuntimeError('GPU alignment requires the packaged runtime: ' + name)
-    distribution = importlib.metadata.distribution('mlx-audio')
-    for name, expected in metadata['runtime']['component_source_sha256'].items():
-        if digest_file(distribution.locate_file(name)) != expected:
+    # The private copies are byte-identical to the calibrated upstream files,
+    # but bypass its eager public STT-family initializer. Verify the sources
+    # actually used by our adapter, in both ordinary and frozen runtimes.
+    from mlx_ctc_components import source_files, BASE_SOURCE_SHA256
+    files, base = source_files()
+    expected_files = metadata['runtime']['component_source_sha256']
+    if set(files) != set(expected_files):
+        raise RuntimeError('GPU alignment forward component inventory differs.')
+    for name, expected in expected_files.items():
+        if digest_file(files[name]) != expected:
             raise RuntimeError('GPU alignment forward component differs: ' + name)
+    if digest_file(base) != BASE_SOURCE_SHA256:
+        raise RuntimeError('GPU alignment base component differs.')
 
 def prepared(directory):
     """Presence/size check for optional setup status; loader verifies digests."""

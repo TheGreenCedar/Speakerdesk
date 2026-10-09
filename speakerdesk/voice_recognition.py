@@ -5,7 +5,8 @@ import re
 import time
 import uuid
 from people import introduction_suggestions
-from voice_profiles import automatic_clips, clips_current, extract, propose_match
+from voice_profiles import propose_match
+from source_voice import automatic_clips, clips_current, extract
 
 
 class RecognitionPreference:

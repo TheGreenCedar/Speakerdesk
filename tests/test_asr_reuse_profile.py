@@ -154,14 +154,19 @@ class ProfileTests(unittest.TestCase):
 
 
 class ProductionProfileTests(unittest.TestCase):
-    def test_committed_profile_binds_policy_and_actual_inherited_qualification(self):
+    def test_committed_legacy_profile_preserves_actual_inherited_qualification(self):
         p=subject.profile()
         self.assertEqual(p['qualification']['source_commit'],'3a08593e391d527bc15b6f03064aaafcc04f13cb')
         self.assertEqual(p['qualification']['outcome_sha256'],'8c3b34eda40d096b944a4f206316f8d590698eb209235ce1bfe0906c5c0febed')
         self.assertFalse(p['qualification']['final_namespace_execution_qualified'])
         self.assertEqual(len(p['identity']['model_file_sha256']),10)
         self.assertEqual(len(p['identity']['decoder_source_sha256']),8)
-        for name,expected in p['identity']['policy_source_sha256'].items():
+        changed={name for name,expected in p['identity']['policy_source_sha256'].items()
+                 if subject.file_digest(subject.DATA/name)!=expected}
+        self.assertEqual(changed,{'canonical_runtime.py','live_refinement.py','meeting_refinement.py'})
+        current=subject.current_profile()
+        self.assertEqual(current['lineage']['legacy_profile_sha256'],subject.PROFILE_SHA256)
+        for name,expected in current['identity']['policy_source_sha256'].items():
             self.assertEqual(subject.file_digest(subject.DATA/name),expected)
         self.assertNotIn('/Users/',json.dumps(p))
 

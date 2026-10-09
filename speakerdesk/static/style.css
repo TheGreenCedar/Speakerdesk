@@ -10,7 +10,7 @@
 [data-theme=dark] #new-meeting:disabled{background:#2c3336;color:#c4cdca;border-color:#424b4d}
 
 .people-dialog{width:min(520px,calc(100vw - 32px));max-height:85vh;overflow:auto;border:1px solid var(--line);border-radius:14px;padding:25px 30px;background:var(--paper);color:var(--ink);box-shadow:0 20px 70px var(--shadow)}
-.people-dialog::backdrop{background:#1118}.person-form,.name-actions{display:flex;align-items:center;gap:10px}.person-form .field{flex:1}.person-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:16px 0;border-top:1px solid var(--line)}.person-row input{min-width:0;border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--paper)}.person-row .settings-note{margin:0}.people-dialog [role=status]{font-size:12px;line-height:1.6;color:var(--muted)}.voice-clip{display:flex;gap:9px;margin:12px 0;font-size:12px;line-height:1.6}.voice-clip input{flex-shrink:0;accent-color:var(--green)}#voice-clips{border:1px solid var(--line);border-radius:9px;margin:15px 0;padding:10px;max-height:220px;overflow:auto;font-size:12px;color:var(--muted)}#voice-consent-label{display:block;margin:16px 0;line-height:1.7}.name-speaker{border:0;background:transparent;min-height:25px;padding:2px 5px;color:var(--muted)}.name-speaker svg{width:15px;height:15px}.identity-suggestion{border:1px solid var(--line);border-radius:10px;background:var(--sidebar);padding:14px 16px;margin:0 0 16px;font-size:13px}.identity-suggestion p{color:var(--muted);line-height:1.6;overflow-wrap:anywhere}.identity-suggestion button{font-size:12px;margin-right:12px}.identity-suggestion .text-button{min-height:36px}
+.people-dialog::backdrop{background:#1118}.person-form,.name-actions{display:flex;align-items:center;gap:10px}.person-form .field{flex:1}.person-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:16px 0;border-top:1px solid var(--line)}.person-row input{min-width:0;border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--paper)}.person-row .settings-note{margin:0}.people-dialog [role=status]{font-size:12px;line-height:1.6;color:var(--muted)}.voice-clip{display:flex;gap:9px;margin:12px 0;font-size:12px;line-height:1.6}.voice-clip input{flex-shrink:0;accent-color:var(--green)}#voice-clips{border:1px solid var(--line);border-radius:9px;margin:15px 0;padding:10px;max-height:220px;overflow:auto;font-size:12px;color:var(--muted)}.name-speaker{border:0;background:transparent;min-height:25px;padding:2px 5px;color:var(--muted)}.name-speaker svg{width:15px;height:15px}.identity-suggestion{border:1px solid var(--line);border-radius:10px;background:var(--sidebar);padding:14px 16px;margin:0 0 16px;font-size:13px}.identity-suggestion p{color:var(--muted);line-height:1.6;overflow-wrap:anywhere}.identity-suggestion button{font-size:12px;margin-right:12px}.identity-suggestion .text-button{min-height:36px}
 
 .recognition-toggle{display:flex;align-items:center;gap:10px;min-height:42px;font-weight:550}.recognition-toggle input{width:18px;height:18px;accent-color:var(--green)}
 .speaker-name-action{border:1px solid var(--line);border-radius:6px;background:var(--paper);padding:5px 9px;font-size:12px;min-height:30px}
@@ -184,3 +184,15 @@
 
 .reading-unassigned-note{font-size:12px;font-weight:600;color:var(--ink);background:var(--accent);padding:1px 4px;border-radius:3px}
 .reading-turn-unassigned{color:var(--ink);background:var(--accent);text-decoration:underline dashed var(--ink);text-underline-offset:3px}
+
+#alignment-controls{padding:8px 0 16px;border-bottom:1px solid var(--line)}#alignment-controls .setup-card-actions{flex-wrap:wrap;align-items:center;gap:12px}#alignment-status{font-size:12px;color:var(--muted);line-height:1.6}
+
+.update-notice{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 24px;border-bottom:1px solid var(--line);background:var(--sidebar);font-size:13px}.update-notice>span{flex:1}.update-notice .quiet{white-space:nowrap}
+
+/* Small, quiet keycaps share the controls' existing theme and focus targets. */
+.shortcut-hint{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;min-width:27px;padding:2px 5px;border:1px solid var(--line);border-radius:5px;background:var(--sidebar);box-shadow:0 1px 0 var(--line);color:var(--muted);font:500 11px/1.25 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;white-space:nowrap;pointer-events:none;user-select:none}
+.sidebar .shortcut-hint{margin-left:auto}
+.primary .shortcut-hint{background:transparent;border-color:currentColor;box-shadow:none;color:inherit;opacity:.7}
+#new-meeting{gap:8px;padding-left:12px;padding-right:12px}
+.editor-hints kbd{font:inherit}
+@media(max-width:900px){#new-meeting{gap:6px;padding-left:9px;padding-right:9px;font-size:13px}.shortcut-hint{font-size:10px;padding:2px 4px}.transcript-search .shortcut-hint{min-width:25px}}

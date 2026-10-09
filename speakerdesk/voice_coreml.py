@@ -20,6 +20,17 @@ COMPUTE_UNITS = ('ALL', 'CPU_ONLY', 'CPU_AND_GPU', 'CPU_AND_NE')
 RATE, INPUT_SAMPLES, DIMENSION = 16000, 96000, 192
 
 
+def require_accelerator_policy(compute_units):
+    """Core ML's current public policies cannot enforce GPU/ANE-only execution.
+
+    Preserve their historical model identities for saved profile compatibility.
+    A preferred compute-plan device is not a no-CPU execution guarantee.
+    """
+    if compute_units not in COMPUTE_UNITS:
+        raise ValueError('Choose a supported Core ML compute policy.')
+    raise ValueError('Voice recognition needs a verified GPU/ANE runtime. Saved names and voices are kept.')
+
+
 def file_digest(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as handle:
@@ -116,10 +127,16 @@ class ReDimNet2CoreML:
         self._lock = threading.RLock()
 
     def validate(self):
+        self.require_execution_policy()
         verify_artifact(self.root)
         require_runtime()
 
+    def require_execution_policy(self):
+        require_accelerator_policy(self.compute_units)
+
     def embed(self, audio, clip):
+        # Check every call, including a predictor already loaded by older code.
+        require_accelerator_policy(self.compute_units)
         samples = read_clip(audio, clip)
         if float(np.sqrt(np.mean(samples.astype(np.float64)**2))) < 1/32768 or np.any(np.abs(samples) >= 32767/32768):
             return ClipEmbedding((), False)
@@ -189,9 +206,10 @@ def approved_calibration(config, model):
 
 
 def load_approved_runtime(config_path, *, model_dir=None):
-    """A passing shipped calibration enables recognition; smoke results cannot."""
+    """Require both an enforceable accelerator path and measured calibration."""
     config = read_voice_config(config_path)
     backend = ReDimNet2CoreML(model_dir or Path(config_path).parent/config.get('model_dir', ''), config.get('compute_units', 'ALL'))
+    require_accelerator_policy(backend.compute_units)
     calibration = approved_calibration(config, backend.model)
     backend.validate()  # Hash/platform/dependency checks; no Core ML import or prediction.
     return backend, calibration

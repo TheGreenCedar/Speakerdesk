@@ -58,7 +58,12 @@ def validate(document, duration):
             raise ValueError('Segment IDs must be unique strings.')
         identifiers.add(sid)
         s.update(id=sid, start=start, end=end)
-    result['segments'].sort(key=lambda s: (s['start'], s['end']))
+    def order(segment):
+        source=segment.get('capture_source')
+        source_id=source.get('source_id') if isinstance(source,dict) else None
+        source_id=source_id if source_id in ('microphone_clean','system') else ''
+        return segment['start'],segment['end'],source_id,segment['id'] if source_id else ''
+    result['segments'].sort(key=order)
     result['speakers'] = {k:v.strip() for k,v in speakers.items()}
     result['schema_version'] = 1
     return result

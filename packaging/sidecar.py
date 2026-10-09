@@ -55,6 +55,7 @@ def listen_for_control(app, server, stream):
         try:
             # Admission was sealed before this point. No active capture is
             # stopped, and no acknowledgement substitutes for child reaping.
+            app.extensions['speakerdesk']['close_voice']()
             if not workers_idle():raise RuntimeError('Inference cleanup is still finishing.')
             app.extensions['speakerdesk']['meetings'].close_for_update()
             app.extensions['speakerdesk']['executor'].shutdown(wait=True,cancel_futures=True)
@@ -67,12 +68,22 @@ def listen_for_control(app, server, stream):
         server.shutdown()
         return
     if ordinary_shutdown:
-        app.extensions['speakerdesk']['meetings'].close()
+        # Enrollment can hold the app lock while awaiting its child. Cancel
+        # registered inference first so ordinary quit never waits on that lock.
         shutdown_workers()
+        from voice_worker_registry import cancel_owned_workers
+        cancel_owned_workers()
+        app.extensions['speakerdesk']['meetings'].close()
+        app.extensions['speakerdesk']['close_voice']()
         app.extensions['speakerdesk']['executor'].shutdown(wait=False,cancel_futures=True)
         server.shutdown()
 
 if __name__=='__main__':
+    if sys.argv[1:]==['--source-smoke']:
+        from source_smoke import run
+        import json
+        print(json.dumps(run(),sort_keys=True),flush=True)
+        sys.exit(0)
     if len(sys.argv)>1 and sys.argv[1]=='--model-capability':
         import importlib.metadata
         import json
@@ -106,6 +117,13 @@ if __name__=='__main__':
         except Exception as exc:
             import traceback
             traceback.print_exc();emit({'type':'error','error':str(exc)});sys.exit(1)
+        sys.exit(0)
+    if len(sys.argv)>1 and sys.argv[1]=='--voice-worker':
+        import json
+        from voice_gpu_worker import run, emit
+        try:run(json.loads(sys.argv[2]))
+        except Exception:
+            emit({'error':'Voice GPU worker could not complete this request.'});sys.exit(1)
         sys.exit(0)
     if len(sys.argv)>1 and sys.argv[1]=='--worker':
         import json

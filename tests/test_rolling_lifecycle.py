@@ -13,6 +13,10 @@ from test_live_refinement import wav_file
 class RollingLifecycleTests(MeetingHarness,unittest.TestCase):
     def setUp(self):
         super().setUp();self.peers.stop();real_popen=subprocess.Popen
+        # This suite deliberately selects the legacy noncanonical rolling peer.
+        # Default canonical source capture is tested by CanonicalLifecycle.
+        self.manager.channel_transcription=False
+        self.manager.source_innovation=False;self.manager.source_startup_hold=False
         def peer(command,**kwargs):
             folder=Path(kwargs['stderr'].name).parent
             if len(command)>1:
