@@ -22,6 +22,23 @@ from live_meeting import RATE, SourceMixer
 PROTOCOL = Path(__file__).resolve().parents[1] / 'support' / 'meeting_protocol.py'
 
 
+class SyntheticEchoPeer:
+    """Protocol-only Linux peer; passes mic through without claiming AEC."""
+    def __init__(self, sink):
+        self.sink = sink
+
+    def add(self, tracks, final=False):
+        if not len(tracks['microphone']):
+            return
+        originals = {name: tracks[name] for name in ('microphone', 'system')}
+        originals['microphone_clean'] = tracks['microphone'].copy()
+        mixed = np.clip(originals['system'] + originals['microphone_clean'], -1, 1).astype('<f4')
+        self.sink(mixed, originals)
+
+    def close(self):
+        pass
+
+
 class MeetingHarness:
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -53,9 +70,9 @@ class MeetingHarness:
         if platform.system() != 'Darwin':
             # Linux Source checks exercise protocol/persistence with a native
             # platform peer. macOS package checks use the actual linked DSP.
-            self.platform_peers=[patch('live_meeting.EchoMixer'),
+            self.platform_peers=[patch('live_meeting.EchoMixer', SyntheticEchoPeer),
                 patch('live_meeting.SourceMixer',side_effect=lambda sources,sink,**kw:
-                      SourceMixer(sources,sink,echo_factory=None,**kw))]
+                      SourceMixer(sources,sink,echo_factory=SyntheticEchoPeer,**kw))]
             for peer in self.platform_peers:peer.start()
 
     def tearDown(self):
