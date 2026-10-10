@@ -30,6 +30,8 @@ class SourceRuntime:
     def __init__(self, config, models, emit, inbox):
         from live_refinement import Engine
         self.config, self.emit, self.inbox = config, emit, inbox
+        self.model_owner = models
+        self.processing_bound = config.get('source_processing_metadata') is not None
         self.catalog = validate_catalog(config['capture_source_catalog'], config['job_id'])
         if not config.get('canonical_utterances'):
             raise ValueError('Source execution requires canonical utterances.')
@@ -81,6 +83,25 @@ class SourceRuntime:
 
     def handle(self, message):
         kind = message['type']; self.pending = {}
+        if kind == 'capture_processing':
+            if self.received or self.capture_finished or self.processing_bound:
+                raise ValueError('Capture processing cannot change after source execution starts.')
+            from capture_processing import worker_metadata
+            config = {**self.config,'source_processing_metadata':message.get('source_processing_metadata'),
+                      'capture_processing_reference':message.get('capture_processing_reference')}
+            if worker_metadata(config) is None:
+                raise ValueError('Capture processing handshake is empty.')
+            peers = {}
+            for source_id in SOURCE_IDS:
+                source_config = {**config,'audio_path':str(source_path(config['audio_path'],source_id)),
+                                 'capture_source':binding(self.catalog,source_id)}
+                peers[source_id] = (source_config,SourceTracks(self.model_owner.for_source(source_config),source_id))
+            for source_id,(source_config,peer) in peers.items():
+                self.engines[source_id].config=source_config
+                self.engines[source_id].models=peer
+            self.config=config;self.processing_bound=True
+            self.emit({'type':'processing_ready','source_admission_executions':self.admission_executions})
+            return True
         if kind == 'refine':
             actual = validate_binding(self.catalog, message.get('canonical', {}))
             if message.get('capture_source') != actual:

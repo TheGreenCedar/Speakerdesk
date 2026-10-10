@@ -34,7 +34,7 @@ for name in ['voice_gpu_calibration.json','voice_gpu_checkpoint.json','voice_gpu
     data.append((str(root/'speakerdesk'/name),'.'))
 voice_source_modes={name:'pyz+py' for name in ['voice_mlx_backend','mlx_voice_mil',
                     'voice_waveform','thread_bound_backend','voice_profiles']}
-source_modes={name:'pyz+py' for name in ['capture_sources','source_runtime','source_voice','voice_source_audio','render_innovation','render_startup']}
+source_modes={name:'pyz+py' for name in ['capture_sources','source_runtime','source_voice','voice_source_audio','render_innovation','render_startup','capture_processing','speech_conditioning']}
 hidden_source_modules=list(source_modes)
 data.append((str(root/'packaging/licenses/redimnet2/LICENSE'),'licenses/redimnet2'))
 for folder in ['templates','static']:

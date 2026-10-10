@@ -42,10 +42,11 @@ else
   # Never relax production signature protections to manufacture a green probe.
   echo '{"scope":"capability_unavailable","reason":"Developer ID signed runtime required","models_executed":false,"native_capture":false}' | tee .cache/model-capability.json
 fi
-.venv-package/bin/python scripts/component_cache.py .cache/components/capture "${SPEAKERDESK_CAPTURE_KEY:-}" desktop/capture/speakerdesk-capture -- xcrun swiftc -O -j 1 -num-threads 1 -target arm64-apple-macos15.0 -module-cache-path "$task_root/.cache/swift-capture" desktop/capture/MeetingCapture.swift desktop/capture/CaptureAudioConverter.swift -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker desktop/capture/Info.plist -o desktop/capture/speakerdesk-capture
+.venv-package/bin/python scripts/component_cache.py .cache/components/capture "${SPEAKERDESK_CAPTURE_KEY:-}" desktop/capture/speakerdesk-capture -- xcrun swiftc -O -j 1 -num-threads 1 -target arm64-apple-macos15.0 -module-cache-path "$task_root/.cache/swift-capture" desktop/capture/MeetingCapture.swift desktop/capture/CaptureAudioConverter.swift desktop/capture/LosslessRedundantChannels.swift desktop/capture/AppleCaptureRoute.swift -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker desktop/capture/Info.plist -o desktop/capture/speakerdesk-capture
 sign_args=(--force --options runtime --entitlements desktop/src-tauri/Entitlements.plist --sign "$APPLE_SIGNING_IDENTITY")
 if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then sign_args+=(--timestamp); fi
 codesign "${sign_args[@]}" desktop/capture/speakerdesk-capture
+.venv-package/bin/python scripts/capture_capability.py desktop/capture/speakerdesk-capture
 cd desktop
 npm ci
 npm run build -- --target aarch64-apple-darwin --bundles app -- --locked

@@ -22,9 +22,9 @@ class SpeechFramePeer:
  """Predetermined frame score for CPU worker/MLX boundary tests only."""
  def initial_state(self):return 0
  def feed(self,chunk,state):return .8,state+1
- def session(self,start_sample=0,*,archive=None):
+ def session(self,start_sample=0,*,archive=None,conditioning=None):
   from speech_admission import SpeechSession,HOT_FRAMES
-  return SpeechSession(self,start_sample,max_frames=HOT_FRAMES if archive else None,archive=archive)
- def inspect_frames(self,audio,start_sample=0,*,archive=None):
-  session=self.session(start_sample,archive=archive);session.feed(audio,start_sample,final=True)
+  return SpeechSession(self,start_sample,max_frames=HOT_FRAMES if archive else None,archive=archive,conditioning=conditioning)
+ def inspect_frames(self,audio,start_sample=0,*,archive=None,conditioning=None):
+  session=self.session(start_sample,archive=archive,conditioning=conditioning);session.feed(audio,start_sample,final=True)
   return session.evidence
