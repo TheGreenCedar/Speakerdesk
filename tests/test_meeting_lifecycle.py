@@ -25,6 +25,24 @@ from support.meeting_harness import MeetingHarness
 
 
 class MeetingLifecycleTests(MeetingHarness, unittest.TestCase):
+    def test_startup_error_retains_observations_without_claiming_processing_or_audio(self):
+        self.scenario='capture_startup_error'
+        jid=self.start(['microphone','system'])
+        self.wait_for(lambda:self.manager.jid is None)
+        job=self.job(jid)
+        self.assertEqual(job['status'],'failed')
+        self.assertEqual(job['capture_audio'],{'state':'empty','frames':0,'sample_rate':RATE})
+        self.assertNotIn('capture_processing',job)
+        self.assertNotIn('source_processing_metadata',job)
+        events=[json.loads(line) for line in (self.root/jid/'capture-events.jsonl').read_text().splitlines()]
+        self.assertEqual([event['type'] for event in events],['capture_startup','capture_runtime','error'])
+        self.assertEqual(events[0]['job_id'],jid)
+        self.assertGreater(events[0]['owned_pid'],0)
+        self.assertEqual(events[1]['input_output_format']['channels'],9)
+        self.assertEqual(events[2]['code'],10)
+        with wave.open(str(self.root/jid/'audio.wav'),'rb') as stream:self.assertEqual(stream.getnframes(),0)
+        self.assertEqual(self.client.get('/api/meeting').json['status'],'idle')
+
     def test_bounded_startup_hold_flushes_on_pause_stop_and_binds_saved_sources(self):
         self.manager.channel_transcription=True;self.manager.source_innovation=True;self.manager.source_startup_hold=True
         jid=self.start(['microphone','system']);self.wait_for(lambda:self.job(jid)['status']=='recording')

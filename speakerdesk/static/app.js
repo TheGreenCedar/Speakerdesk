@@ -148,6 +148,10 @@ function passageTime(seconds) {
   const ms=Math.round(seconds*1000),minutes=Math.floor(ms/60000),rest=ms%60000;
   return `${String(minutes).padStart(2,'0')}:${String(Math.floor(rest/1000)).padStart(2,'0')}.${String(rest%1000).padStart(3,'0')}`;
 }
+function emptyFailedCapture(job) {
+  return job?.kind==='meeting' && job.status==='failed' &&
+    (job.capture_audio?.state==='empty' || (!job.capture_audio && !job.duration));
+}
 function renderJobs() {
   $('job-count').textContent = jobs.length;
   const host=$('jobs'), existing=new Map(Array.from(host.children).map(child=>[child.dataset.jobId || child.dataset.group,child]));
@@ -192,11 +196,11 @@ function setStatus() {
   $('run').title = languageReady(selected.language) ? '' : 'Download the local models in Settings → Models first.';
   $('manual').hidden = !!doc || busy || !selected.duration;
   $('delete').disabled = busy || !!selected.inference_owned;
-  $('duration').textContent = selected.duration ? time(selected.duration) : 'Preparing…';
+  $('duration').textContent = selected.duration ? time(selected.duration) : emptyFailedCapture(selected)?'No audio':'Preparing…';
   $('segment-count').textContent = doc && !live ? passageCountLabel() : '';
   $('save').hidden = !doc || live; $('search').disabled = !doc;
   $('player').hidden = !selected.duration || live;
-  document.querySelector('.player-panel').hidden=live;
+  document.querySelector('.player-panel').hidden=live || emptyFailedCapture(selected);
   document.querySelector('.export-menu').inert=live || !doc;
   document.querySelector('.export-menu').hidden=live;
   $('speaker-tools').hidden=live;$('add').hidden=live;$('editor-hints').hidden=live || !doc;
