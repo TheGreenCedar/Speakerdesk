@@ -77,6 +77,14 @@ else:
     first = json.loads(sys.stdin.readline())
     record(first)
     sources = [source for source in ('microphone', 'system') if first[source]]
+    if scenario == 'capture_startup_error':
+        emit({'type':'capture_runtime','state_phase':'after_start',
+              'input_output_format':{'sample_rate':48000,'channels':9,'layout':'discrete_float32_noninterleaved'},
+              'output_input_format':{'sample_rate':48000,'channels':9,'layout':'discrete_float32_noninterleaved'},
+              'input_enabled':True,'output_enabled':True,'bypassed':False,'engine_running':True})
+        emit({'type':'error','error':'Microphone startup did not complete.',
+              'domain':'AppleCaptureRoute','code':10,'startup_phase':'awaiting_microphone'})
+        sys.exit(1)
     emit({'type': 'recording'})
     for source in sources:
         audio(source, 0, 1.2 if scenario == 'source_clip' else .2 if source == 'microphone' else .3, 1600)

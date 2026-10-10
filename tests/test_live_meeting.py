@@ -9,7 +9,37 @@ from unittest.mock import patch
 import numpy as np
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'speakerdesk'))
 from app import create_app
-from live_meeting import SourceMixer, RATE
+from live_meeting import SourceMixer, RATE, retain_capture_event, retained_capture_audio
+
+
+class CaptureDiagnosticTests(unittest.TestCase):
+    def test_runtime_is_retained_without_audio_or_untrusted_fields(self):
+        import io
+        output=io.StringIO()
+        retain_capture_event(output,{'type':'capture_runtime','state_phase':'after_start',
+                                    'engine_running':True,'input_output_format':{'channels':9},
+                                    'pcm':'must not persist','path':'must not persist'})
+        retain_capture_event(output,{'type':'audio','pcm':'must not persist'})
+        self.assertEqual(json.loads(output.getvalue()),{'type':'capture_runtime','state_phase':'after_start',
+                                                       'engine_running':True,'input_output_format':{'channels':9}})
+        with self.assertRaises(ValueError):retain_capture_event(output,{'type':'error','error':'x'*16384})
+        self.assertNotIn('must not persist',output.getvalue())
+
+    def test_finalized_header_distinguishes_empty_retained_and_unverified(self):
+        import wave
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            self.assertEqual(retained_capture_audio(root)['state'],'empty')
+            for count in (0,137):
+                with wave.open(str(root/'audio.wav'),'wb') as stream:
+                    stream.setparams((1,2,RATE,0,'NONE','none'));stream.writeframes(b'\0\0'*count)
+                self.assertEqual(retained_capture_audio(root),{'state':'retained' if count else 'empty',
+                                                             'frames':count,'sample_rate':RATE})
+            (root/'audio.wav').write_bytes(b'corrupt')
+            self.assertEqual(retained_capture_audio(root),{'state':'unverified'})
+            with wave.open(str(root/'microphone.wav'),'wb') as stream:
+                stream.setparams((1,2,RATE,0,'NONE','none'));stream.writeframes(b'\0\0'*137)
+            self.assertEqual(retained_capture_audio(root),{'state':'retained','frames':137,'sample_rate':RATE})
 
 
 class MixerTests(unittest.TestCase):

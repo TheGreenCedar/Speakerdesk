@@ -26,6 +26,39 @@ BLOCK = 4000
 LIVE = ('starting', 'recording', 'paused', 'finishing')
 
 
+def retain_capture_event(handle, packet):
+    """Keep non-audio startup observations; these never qualify processing."""
+    fields = {
+        'capture_startup': ('job_id', 'helper_sha256', 'owned_pid'),
+        'capture_runtime': ('state_phase', 'input_output_format', 'output_input_format',
+                            'input_enabled', 'output_enabled', 'bypassed', 'engine_running'),
+        'error': ('error', 'domain', 'code', 'startup_phase', 'pending_system_chunks'),
+    }
+    kind = packet.get('type')
+    if kind not in fields:return
+    event = {'type':kind, **{key:packet[key] for key in fields[kind] if key in packet}}
+    line = json.dumps(event, allow_nan=False)+'\n'
+    if len(line.encode('utf-8')) > 16384 or handle.tell()+len(line.encode('utf-8')) > 65536:
+        raise ValueError('Capture startup diagnostics exceeded their bound.')
+    handle.write(line);handle.flush()
+
+
+def retained_capture_audio(folder):
+    """Inspect fixed retained headers only; frames is the largest source count."""
+    frames=0;unverified=False
+    for name in ('audio','microphone','microphone_clean','system','system_reference','audio_native','microphone_native'):
+        try:
+            with wave.open(str(folder/(name+'.wav')),'rb') as stream:
+                channels=2 if name=='system_reference' else 1
+                if stream.getframerate()!=RATE or stream.getnchannels()!=channels or stream.getsampwidth()!=2:
+                    raise ValueError('Unexpected retained capture format.')
+                frames=max(frames,stream.getnframes())
+        except FileNotFoundError:pass
+        except (OSError, EOFError, ValueError, wave.Error):unverified=True
+    if not frames and unverified:return {'state':'unverified'}
+    return {'state':'retained' if frames else 'empty', 'frames':frames, 'sample_rate':RATE}
+
+
 class SourceMixer:
     """Timestamp alignment: watermark protects late packets, memory is bounded.
 
@@ -613,17 +646,22 @@ class MeetingManager:
             mixer=SourceMixer(sources,sink,raw_sink=retain_tracks,innovation_factory=innovation_factory)
             processing_qualified=False
             capture_log=(dest/'capture.log').open('w');handles.append(capture_log)
+            capture_events=(dest/'capture-events.jsonl').open('w');handles.append(capture_events)
+            os.fchmod(capture_events.fileno(),0o600)
             with self.lock:
                 if stop_event.is_set():return
                 self.capture=subprocess.Popen([str(self.helper_path())],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                     stderr=capture_log,text=True,bufsize=1)
                 start={'type':'start','microphone':'microphone' in sources,'system':'system' in sources}
                 from capture_processing import file_digest, EXPORT_CONTRACT
+                retain_capture_event(capture_events,{'type':'capture_startup','job_id':jid,
+                    'helper_sha256':file_digest(self.helper_path()),'owned_pid':self.capture.pid})
                 if self.get(jid).get('capture_source_catalog') and self.capture_processing_registry.qualification(file_digest(self.helper_path())) is not None:
                     start.update(job_id=jid,capture_export_contract=EXPORT_CONTRACT)
                 self._send(self.capture,start)
             for line in self.capture.stdout:
                 result=json.loads(line);kind=result['type']
+                retain_capture_event(capture_events,result)
                 if kind=='capture_processing':
                     control=self.capture_processing(jid,result)
                     from capture_processing import PROCESSED
@@ -746,7 +784,7 @@ class MeetingManager:
                         from review import retain_unassigned_audio
                         retain_unassigned_audio(job['document'],self.duration)
                         job['revision']+=1;self.put(job)
-                    self.patch(jid,**terminal,duration=self.duration)
+                    self.patch(jid,**terminal,duration=self.duration,capture_audio=retained_capture_audio(dest))
                 finally:self.jid=None
 
     def close(self):

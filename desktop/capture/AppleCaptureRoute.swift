@@ -81,3 +81,53 @@ func observeAppleCapture(_ engine:AVAudioEngine) -> AppleCaptureObservation {
             "manual_rendering":engine.isInManualRenderingMode,"input_muted":engine.inputNode.isVoiceProcessingInputMuted,
             "agc_enabled":engine.inputNode.isVoiceProcessingAGCEnabled])
 }
+
+// System audio must not outrun the first validated processed-microphone tap.
+// AVAudioEngine.start returning is not a microphone callback acknowledgement.
+enum AppleMicrophoneStartupState { case waiting, ready, stopped }
+
+func startSystemAfterAppleMicrophone(timeout: Double = 10,
+    readiness: () -> AppleMicrophoneStartupState,
+    startSystem: () async throws -> Void) async throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    while true {
+        try Task.checkCancellation()
+        switch readiness() {
+        case .ready:
+            try await startSystem()
+            try Task.checkCancellation()
+            guard case .ready = readiness() else {
+                throw NSError(domain:"AppleCaptureRoute",code:11,userInfo:[NSLocalizedDescriptionKey:
+                    "Microphone startup was interrupted while Mac audio capture was starting."])
+            }
+            return
+        case .stopped:
+            throw NSError(domain:"AppleCaptureRoute",code:11,userInfo:[NSLocalizedDescriptionKey:
+                "Microphone startup was interrupted before Mac audio capture began."])
+        case .waiting:
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw NSError(domain:"AppleCaptureRoute",code:10,userInfo:[NSLocalizedDescriptionKey:
+                    "The processed microphone did not deliver a supported callback within 10 seconds. Mac audio capture did not start."])
+            }
+            try await Task.sleep(nanoseconds:20_000_000)
+        }
+    }
+}
+
+// Failure and command paths join one cleanup operation. Keeping the engine
+// active until that owner drains avoids dropping accepted copied callbacks.
+actor AppleCaptureStopOwner {
+    private var operation: Task<Void, Never>?
+
+    func run(_ cleanup: @escaping () async -> Void) async {
+        if let operation {await operation.value;return}
+        let owned=Task {await cleanup()}
+        operation=owned
+        await owned.value
+    }
+
+    func reset() async {
+        if let operation {await operation.value}
+        operation=nil
+    }
+}

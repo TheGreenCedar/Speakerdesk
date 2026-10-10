@@ -29,10 +29,12 @@ function renderPassageSaveState(card) {
 }
 function renderRefinementStatus() {
   const status=selected?.refinement_status;
+  const noAudio=emptyFailedCapture(selected);
+  const unverified=selected?.status==='failed' && selected.capture_audio?.state==='unverified';
   $('refinement-controls').hidden=!selected?.rolling_refinement;
-  $('refinement-status').textContent=({waiting:'Accuracy pass queued · recent words may still change',refining:'Improving earlier phrases with more context',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Accuracy pass stopped'})[status] || '';
+  $('refinement-status').textContent=noAudio?'No audio was recorded.':unverified?'Recorded audio could not be verified.':({waiting:'Accuracy pass queued · recent words may still change',refining:'Improving earlier phrases with more context',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Accuracy pass stopped'})[status] || '';
   $('refinement-status').title='Speakerdesk re-checks recent audio with more context and may correct early words. Your saved corrections are never overwritten.';
-  $('refinement-toggle').hidden=status==='complete';
+  $('refinement-toggle').hidden=noAudio || unverified || status==='complete';
   $('refinement-toggle').textContent=status==='paused'?'Resume accuracy pass':status==='unresolved'?'Retry unresolved phrases':'Pause accuracy pass';
 }
 async function toggleRefinement() {
