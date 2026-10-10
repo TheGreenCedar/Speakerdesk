@@ -74,7 +74,7 @@ class Inbox:
                 if self.refinement and self.refinement['language_epoch']!=self.latest_epoch:self.refinement=None
                 self.messages.append(copy.deepcopy(message))
             elif kind=='shutdown':self.shutdown=True
-            elif kind in ('flush','stop'):self.messages.append(copy.deepcopy(message))
+            elif kind in ('flush','stop','capture_processing'):self.messages.append(copy.deepcopy(message))
             else:raise ValueError('Unexpected resident worker command.')
             if len(self.messages)>128:raise ValueError('Too many pending language/control boundaries.')
             self.condition.notify_all()
@@ -180,6 +180,8 @@ def context_regions(turns,max_seconds=None,*,coverage=None):
 
 class Models:
     def __init__(self,config):
+        from speech_conditioning import resolve
+        self.speech_conditioning=resolve(config)
         from inference_worker import check_memory
         check_memory()
         import mlx.core as mx
@@ -201,10 +203,10 @@ class Models:
         import uuid
         self.speech=SileroModel(config['speech_path'])
         from admission_receipt import execution
-        self.admission_execution=(execution(config['job_id'],uuid.uuid4().hex)
+        self.admission_execution=(execution(config['job_id'],uuid.uuid4().hex,conditioning=self.speech_conditioning)
                                   if config.get('canonical_utterances') else None)
         self.speech_live=self.speech.session(archive=FrameArchive(
-            Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'))
+            Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'),conditioning=self.speech_conditioning)
         self.speech_historical=None
         self.language_context=None;self.transcription_start_sample=0;self.coarse_aligner=None;self.asr_padding=(0,0)
     def for_source(self,config):
@@ -217,11 +219,14 @@ class Models:
         from speech_admission import FrameArchive
         from admission_receipt import execution
         import uuid
+        from speech_conditioning import resolve
+        conditioning=resolve(config)
         result=copy.copy(self);result.config=config;result.shared_model_owner=self
+        result.speech_conditioning=conditioning
         result.state=self.diar.init_streaming_state()
         result.speech_live=self.speech.session(archive=FrameArchive(
-            Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'))
-        result.admission_execution=execution(config['job_id'],uuid.uuid4().hex)
+            Path(config['audio_path']).parent/f'speech-live-{uuid.uuid4().hex}.jsonl'),conditioning=result.speech_conditioning)
+        result.admission_execution=execution(config['job_id'],uuid.uuid4().hex,conditioning=result.speech_conditioning)
         result.language_probe_cache=LanguageProbeCache()
         result.final_asr_reuse=copy.deepcopy(self.final_asr_reuse)
         result.cohere_calls=0;result.speech_historical=None;result.language_context=None
@@ -329,7 +334,8 @@ class Models:
         import uuid
         self.speech_historical=None
         self.speech_historical=self.speech.inspect_frames(audio,start_sample,archive=FrameArchive(
-            Path(self.config['audio_path']).parent/f'speech-refine-{uuid.uuid4().hex}.jsonl'))
+            Path(self.config['audio_path']).parent/f'speech-refine-{uuid.uuid4().hex}.jsonl'),
+            conditioning=getattr(self,'speech_conditioning',None))
     def end_refinement(self):
         self.speech_historical=None
 

@@ -10,10 +10,15 @@ import wave
 from speech_admission import SILERO_SPEC, INPUT_POLICY, RATE
 
 
-def execution(job_id, execution_id):
+def execution(job_id, execution_id, *, conditioning=None):
     result={'schema_version':2,'component':'silero_v6',
             'model_revision':SILERO_SPEC['revision'],'model_sha256':SILERO_SPEC['sha256'],
             'input_policy':INPUT_POLICY,'job_id':job_id,'execution_id':execution_id}
+    if conditioning is not None:
+        from speech_conditioning import SourceConditioning
+        if type(conditioning) is not SourceConditioning:raise ValueError('Unverified conditioning identity.')
+        result.update(input_policy=conditioning.input_policy,
+                      conditioning_sha256=conditioning.contract_sha256,capture_source=dict(conditioning.capture_source))
     return validate_execution(result,job_id)
 
 
@@ -21,6 +26,17 @@ def validate_execution(value,job_id):
     expected={'schema_version':2,'component':'silero_v6',
               'model_revision':SILERO_SPEC['revision'],'model_sha256':SILERO_SPEC['sha256'],
               'input_policy':INPUT_POLICY,'job_id':job_id}
+    from speech_conditioning import SOURCE_UNITY_POLICY, PRODUCTION_UNITY_POLICY
+    if isinstance(value,dict) and value.get('input_policy') in (SOURCE_UNITY_POLICY, PRODUCTION_UNITY_POLICY):
+        source=value.get('capture_source')
+        if (re.fullmatch(r'[0-9a-f]{64}',str(value.get('conditioning_sha256',''))) is None
+                or not isinstance(source,dict) or set(source)!={'catalog_sha256','source_id','source_revision'}
+                or source.get('source_id')!='microphone_clean' or type(source.get('source_revision')) is not int
+                or source['source_revision']!=1
+                or re.fullmatch(r'[0-9a-f]{64}',str(source.get('catalog_sha256',''))) is None):
+            raise ValueError('Invalid source-conditioned inspection identity.')
+        expected.update(input_policy=value['input_policy'],conditioning_sha256=value['conditioning_sha256'],
+                        capture_source=copy.deepcopy(source))
     if (not isinstance(value,dict) or type(value.get('schema_version')) is not int
             or any(value.get(key)!=wanted for key,wanted in expected.items())
             or not isinstance(job_id,str) or re.fullmatch(r'[0-9a-f]{32}',job_id) is None

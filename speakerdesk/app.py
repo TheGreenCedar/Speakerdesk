@@ -31,7 +31,7 @@ ROOT=Path(__file__).resolve().parent
 ACTIVE=('preparing','queued','processing')+LIVE
 
 
-def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
+def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None, capture_processing_registry=None):
     app=Flask(__name__)
     app.config.update(MAX_CONTENT_LENGTH=256*1024*1024, TRUSTED_HOSTS=['localhost','127.0.0.1','[::1]'])
     data=Path(data_dir or os.getenv('SPEAKERDESK_DATA',ROOT/'data')).resolve()
@@ -474,7 +474,8 @@ def create_app(data_dir=None, *, voice_backend=None, voice_calibration=None):
             and managed_voice.released() and managed_voice.supported() and managed_voice.installed()):
         try:activate_voice(managed_voice.root,managed_voice.calibration_path)
         except (ValueError,OSError,KeyError,TypeError) as exc:app.logger.warning('Managed voice setup is unavailable: %s',exc)
-    register_meetings(app,get,put,patch,folder,lock,inference_busy,recognizer,default_language=get_default_language)
+    register_meetings(app,get,put,patch,folder,lock,inference_busy,recognizer,default_language=get_default_language,
+                      capture_processing_registry=capture_processing_registry)
     return app
 
 

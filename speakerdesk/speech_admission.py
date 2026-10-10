@@ -106,9 +106,11 @@ class FrameArchive:
 
 class SpeechFrames:
     """An ordered ledger of actual neural frames; partial audio stays pending."""
-    def __init__(self, start_sample=0, *, max_frames=None, archive=None):
+    def __init__(self, start_sample=0, *, max_frames=None, archive=None, conditioning=None):
         if type(start_sample) is not int or start_sample < 0:
             raise ValueError('Invalid speech-evidence origin.')
+        self.conditioning = conditioning
+        self.input_policy = conditioning.input_policy if conditioning is not None else INPUT_POLICY
         self.start_sample = self.end_sample = start_sample
         self.origin_sample = start_sample
         if max_frames is not None and (type(max_frames) is not int or max_frames < 1 or archive is None):
@@ -158,9 +160,15 @@ class SpeechFrames:
                   'decision': 'pending', 'speech_regions': []}
         if not covered:
             return result
-        conditioned=all(len(frame)==5 and frame[4].get('input_policy')==INPUT_POLICY for frame in selected)
+        conditioned=all(len(frame)==5 and frame[4].get('input_policy')==self.input_policy
+            and (self.conditioning is None or frame[4].get('conditioning_sha256')==self.conditioning.contract_sha256)
+            and (self.conditioning is None or frame[4].get('capture_source')==dict(self.conditioning.capture_source))
+            for frame in selected)
         if conditioned:
-            result['input_policy']=INPUT_POLICY
+            result['input_policy']=self.input_policy
+            if self.conditioning is not None:
+                result['conditioning_sha256']=self.conditioning.contract_sha256
+                result['capture_source']=dict(self.conditioning.capture_source)
             result['maximum_model_probability']=max(
                 max(frame[4].get('raw_probability',frame[2]),
                     frame[4].get('normalized_probability',frame[2])) for frame in selected)
@@ -255,11 +263,11 @@ class SileroModel:
         self.mx.eval(probability, recurrent)
         return float(probability.item()), (recurrent, audio[:, -64:])
 
-    def session(self, start_sample=0, *, archive=None):
-        return SpeechSession(self, start_sample, max_frames=HOT_FRAMES if archive else None, archive=archive)
+    def session(self, start_sample=0, *, archive=None, conditioning=None):
+        return SpeechSession(self, start_sample, max_frames=HOT_FRAMES if archive else None, archive=archive, conditioning=conditioning)
 
-    def inspect_frames(self, audio, start_sample=0, *, archive=None):
-        session = self.session(start_sample,archive=archive)
+    def inspect_frames(self, audio, start_sample=0, *, archive=None, conditioning=None):
+        session = self.session(start_sample,archive=archive,conditioning=conditioning)
         session.feed(audio, start_sample, final=True)
         return session.evidence
 
@@ -269,11 +277,15 @@ class SileroModel:
 
 class SpeechSession:
     """Carry64 context samples and LSTM state across contiguous capture packets."""
-    def __init__(self, model, start_sample=0, *, max_frames=None, archive=None):
+    def __init__(self, model, start_sample=0, *, max_frames=None, archive=None, conditioning=None):
         import numpy as np
         self.model, self.state = model, model.initial_state()
         self.normalized_state=model.initial_state() if getattr(model,'normalized_view',False) else None
-        self.evidence = SpeechFrames(start_sample, max_frames=max_frames, archive=archive)
+        from speech_conditioning import SourceConditioning
+        if conditioning is not None and type(conditioning) is not SourceConditioning:
+            raise ValueError('Unverified speech conditioning.')
+        self.conditioning = conditioning
+        self.evidence = SpeechFrames(start_sample, max_frames=max_frames, archive=archive, conditioning=conditioning)
         self.received = start_sample
         self.pending = np.empty(0, dtype=np.float32)
         self.closed = False
@@ -303,15 +315,19 @@ class SpeechSession:
                     # Conditioning is only for a second VAD view. Original PCM,
                     # NVIDIA and Cohere input are untouched. Gain is independent
                     # of labels, window size, packets and language; no clipping.
-                    gain=min(256.,max(1.,.25/peak)) if peak else 1.
+                    gain=(self.conditioning.gain(peak) if self.conditioning is not None
+                          else min(256.,max(1.,.25/peak)) if peak else 1.)
                     normalized_probability,normalized_state=self.model.feed(chunk*gain,self.normalized_state)
                     if (not math.isfinite(normalized_probability) or not 0<=normalized_probability<=1
                             or not math.isfinite(probability) or not 0<=probability<=1):
                         raise ValueError('Invalid neural speech probability.')
-                    observation={'input_policy':INPUT_POLICY,'raw_probability':probability,
+                    observation={'input_policy':self.evidence.input_policy,'raw_probability':probability,
                         'normalized_probability':normalized_probability,'gain':gain,
                         'constant_value':float(raw[0]) if (bool(np.all(raw==raw[0]))
                             and (self.previous_sample is None or self.previous_sample==float(raw[0]))) else None}
+                    if self.conditioning is not None:
+                        observation['conditioning_sha256']=self.conditioning.contract_sha256
+                        observation['capture_source']=dict(self.conditioning.capture_source)
                     probability=max(probability,normalized_probability)
                     # Recurrent neural probability can remain high after speech
                     # ends. An exactly constant physical frame has no speech
@@ -350,7 +366,10 @@ class SpeechSession:
     def inspection(self):
         if self.failed or not getattr(self.model,'normalized_view',False):
             raise ValueError('Verified neural inspection is unavailable.')
-        return {'inspection_state':'observed_prefix','start_sample':self.evidence.origin_sample,
+        policy = ({'input_policy':self.evidence.input_policy,
+                   'conditioning_sha256':self.conditioning.contract_sha256,
+                   'capture_source':dict(self.conditioning.capture_source)} if self.conditioning is not None else {})
+        return {**policy,'inspection_state':'observed_prefix','start_sample':self.evidence.origin_sample,
                 'end_sample':self.evidence.end_sample,'received_sample':self.received,'closed':self.closed,
                 'audio_encoding':'pcm_s16le','pcm_sha256':self.inspected_pcm.hexdigest(),
                 **self.inspected_counts,

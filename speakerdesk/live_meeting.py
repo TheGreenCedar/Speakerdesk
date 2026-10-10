@@ -152,15 +152,33 @@ class SourceMixer:
         if final:self._drain_echo()
 
 
+def processed_microphone_mixer(sources, sink, *, raw_sink):
+    """Qualified producer output retained once, without a second mic DSP pass."""
+    def retain(mixed, separate):
+        sink(mixed,{**separate,'microphone_clean':separate['microphone']})
+    return SourceMixer(sources,retain,raw_sink=raw_sink,echo_factory=None)
+
+
+def validate_processing_boundary(qualified, kind):
+    if qualified and kind in ('format_changed','paused'):
+        raise ValueError('Qualified microphone processing epoch changed. Audio is preserved; restart recording.')
+
+
 class MeetingManager:
     def __init__(self, get, put, patch, folder, lock, inference_busy, recognizer=None, *, updates, default_language=None,
-                 channel_transcription=False, source_innovation=False, source_startup_hold=False):
+                 channel_transcription=False, source_innovation=False, source_startup_hold=False,
+                 capture_processing_registry=None):
         self.get, self.put, self.patch, self.folder = get, put, patch, folder
         self.lock = lock
         self.inference_busy = inference_busy
         self.recognizer = recognizer
         self.updates = updates
         self.default_language=default_language or (lambda:'auto')
+        from capture_processing import ProducerRegistry
+        self.capture_processing_registry = (ProducerRegistry.for_helper(self.helper_path())
+            if capture_processing_registry is None else capture_processing_registry)
+        if type(self.capture_processing_registry) is not ProducerRegistry:
+            raise ValueError('Capture processing registry must come from trusted app construction.')
         # Internal development gate; no user-facing quality/mode selector.
         self.channel_transcription=channel_transcription
         if source_innovation and not channel_transcription:
@@ -174,6 +192,7 @@ class MeetingManager:
         self.stopped = threading.Event()
         self.levels = {}; self.processed = 0.; self.duration = 0.
         self.error = None
+        self.capture_pcm_seen = False
         self.thread = None
         self.stop_timer = None
         self.worker_controls = queue.Queue(maxsize=8)
@@ -203,6 +222,23 @@ class MeetingManager:
     def queue_worker(self, message):
         try:self.worker_controls.put_nowait(message);return True
         except queue.Full:return False
+
+    def capture_processing(self, jid, packet):
+        """Owned helper stdout only; install before the first retained sample.
+
+        No HTTP route accepts this operation. Runtime changes after capture
+        begins fail closed and preserve audio rather than silently changing
+        the conditioning policy or borrowing a previous capture epoch.
+        """
+        from capture_processing import install, configure
+        with self.lock:
+            if jid != self.jid or self.duration != 0 or self.capture_pcm_seen:
+                raise ValueError('Capture processing arrived after its recording boundary.')
+            job = self.get(jid)
+            install(job,self.folder(jid),packet,self.capture_processing_registry,self.helper_path())
+            self.put(job)
+            config = configure({},job,self.folder(jid),self.capture_processing_registry)
+            return {'type':'capture_processing',**config}
 
     def change_language(self, jid, language, revision):
         if not isinstance(language,str) or language not in LANGUAGE_CHOICES or type(revision) is not int or revision<0:
@@ -271,7 +307,10 @@ class MeetingManager:
             self.refinement.initialize(job)
             if self.channel_transcription and set(sources)=={'microphone','system'}:
                 from capture_sources import catalog
-                job['capture_source_catalog']=catalog(jid,innovation=self.source_innovation,startup=self.source_startup_hold)
+                from capture_processing import file_digest
+                direct_candidate=self.capture_processing_registry.qualification(file_digest(self.helper_path())) is not None
+                job['capture_source_catalog']=catalog(jid,innovation=self.source_innovation and not direct_candidate,
+                                                     startup=self.source_startup_hold and not direct_candidate)
             try:self.put(job,default_language=language)
             except Exception:
                 dest.rmdir()
@@ -280,6 +319,7 @@ class MeetingManager:
                 (dest/'capture-sources.json').write_text(json.dumps(job['capture_source_catalog'],sort_keys=True))
             self.jid = jid
             self.duration = self.processed = 0.; self.levels = {}; self.error = None
+            self.capture_pcm_seen = False
             self.stopped = threading.Event(); self.packets = queue.Queue(maxsize=120)
             self.worker_controls=queue.Queue(maxsize=8);self.two_pass=False
             self.refining_saved=False
@@ -418,6 +458,30 @@ class MeetingManager:
                                 raise ValueError('Invalid worker language acknowledgement.')
                             job['language_acknowledged_revision']=max(job['language_acknowledged_revision'],epoch['generation']);self.put(job)
                         elif result['type']=='refinement_result':self.refinement.result(jid,result)
+                        elif result['type']=='processing_ready':
+                            from admission_receipt import validate_execution
+                            from capture_sources import SOURCE_IDS
+                            from capture_processing import configure
+                            from speech_conditioning import resolve
+                            with self.lock:
+                                job=self.get(jid)
+                                config=configure({'job_id':jid,'audio_path':str(dest/'audio.wav'),
+                                    'capture_source_catalog':job['capture_source_catalog']},job,dest,self.capture_processing_registry)
+                                executions=result.get('source_admission_executions')
+                                if not isinstance(executions,dict) or set(executions)!=set(SOURCE_IDS):
+                                    raise ValueError('Processing handshake has no source executions.')
+                                from capture_sources import binding
+                                from admission_receipt import execution
+                                checked={}
+                                for source in SOURCE_IDS:
+                                    checked[source]=validate_execution(executions[source],jid)
+                                    policy=resolve({**config,'audio_path':str(dest/(source+'.wav')),
+                                                    'capture_source':binding(job['capture_source_catalog'],source)})
+                                    expected=execution(jid,checked[source]['execution_id'],conditioning=policy)
+                                    if expected!=checked[source]:raise ValueError('Processing handshake differs from retained source policy.')
+                                if len({x['execution_id'] for x in checked.values()})!=len(SOURCE_IDS):
+                                    raise ValueError('Processing source executions are not independent.')
+                                job['source_admission_executions']=checked;self.put(job)
                         elif result['type']=='boundary_candidate':
                             job=self.get(jid);job['boundary_candidate']=result
                             key=f"{result['language_epoch']}:{result['start']}:{result['end']}"
@@ -456,6 +520,8 @@ class MeetingManager:
                                          job_id=jid,canonical_utterances=True)
             if self.get(jid).get('capture_source_catalog'):
                 cfg['capture_source_catalog']=self.get(jid)['capture_source_catalog']
+            from capture_processing import configure
+            cfg=configure(cfg,self.get(jid),dest,self.capture_processing_registry)
             python=os.getenv('SPEAKERDESK_LIVE_PYTHON',str(Path(__file__).resolve().parents[1]/'.venv-package/bin/python'))
             command=([sys.executable,'--live-worker',json.dumps(cfg)] if getattr(sys,'frozen',False)
                      else [python,str(Path(__file__).with_name('live_worker.py')),json.dumps(cfg)])
@@ -545,17 +611,32 @@ class MeetingManager:
                         try:packets.put_nowait(message)
                         except queue.Full:fail('Transcription fell 30 seconds behind. Recording stopped; captured audio has been saved.')
             mixer=SourceMixer(sources,sink,raw_sink=retain_tracks,innovation_factory=innovation_factory)
+            processing_qualified=False
             capture_log=(dest/'capture.log').open('w');handles.append(capture_log)
             with self.lock:
                 if stop_event.is_set():return
                 self.capture=subprocess.Popen([str(self.helper_path())],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                     stderr=capture_log,text=True,bufsize=1)
-                self._send(self.capture,{'type':'start','microphone':'microphone' in sources,'system':'system' in sources})
+                start={'type':'start','microphone':'microphone' in sources,'system':'system' in sources}
+                from capture_processing import file_digest, EXPORT_CONTRACT
+                if self.get(jid).get('capture_source_catalog') and self.capture_processing_registry.qualification(file_digest(self.helper_path())) is not None:
+                    start.update(job_id=jid,capture_export_contract=EXPORT_CONTRACT)
+                self._send(self.capture,start)
             for line in self.capture.stdout:
                 result=json.loads(line);kind=result['type']
-                if kind=='audio':
+                if kind=='capture_processing':
+                    control=self.capture_processing(jid,result)
+                    from capture_processing import PROCESSED
+                    processing_qualified=control['source_processing_metadata']['classification']==PROCESSED
+                    if processing_qualified:
+                        if mixer.echo:mixer.echo.close()
+                        mixer=processed_microphone_mixer(sources,sink,raw_sink=retain_tracks)
+                    packets.put(control,timeout=2)
+                elif kind=='audio':
+                    self.capture_pcm_seen=True
                     mixer.add(result['source'],result['time'],base64.b64decode(result['pcm'],validate=True),result.get('channels',1))
                 elif kind=='format_changed':
+                    validate_processing_boundary(processing_qualified,kind)
                     mixer.format_changed(result['source'],result['time'])
                 elif kind=='clock':
                     mixer.flush(result['time']);self.levels=mixer.levels.copy()
@@ -563,6 +644,9 @@ class MeetingManager:
                     for handle in handles:handle.flush()
                     if shutil.disk_usage(dest).free < 256*1024**2:raise RuntimeError('Recording stopped because disk space is low. Audio has been saved.')
                 elif kind in ('recording','paused'):
+                    if processing_qualified and kind=='paused':
+                        mixer.flush(result['time'],final=True)
+                        validate_processing_boundary(processing_qualified,kind)
                     flush=None
                     with self.lock:
                         if kind=='paused':
@@ -717,6 +801,8 @@ class MeetingManager:
                 canonical_utterances=bool(job.get('canonical_utterances')),language_history=job.get('language_history'),
                 fast_sequence=job.get('last_fast_sequence',0))
             if job.get('capture_source_catalog'):cfg['capture_source_catalog']=job['capture_source_catalog']
+            from capture_processing import configure
+            cfg=configure(cfg,job,dest,self.capture_processing_registry)
             python=os.getenv('SPEAKERDESK_LIVE_PYTHON',str(Path(__file__).resolve().parents[1]/'.venv-package/bin/python'))
             command=([sys.executable,'--live-worker',json.dumps(cfg)] if getattr(sys,'frozen',False)
                      else [python,str(Path(__file__).with_name('live_worker.py')),json.dumps(cfg)])
@@ -780,10 +866,12 @@ def append_finalized_segment(document, result):
     document['segments'].append(result['segment'])
 
 
-def register_meetings(app, get, put, patch, folder, lock, inference_busy, recognizer=None, *, default_language=None):
+def register_meetings(app, get, put, patch, folder, lock, inference_busy, recognizer=None, *, default_language=None,
+                      capture_processing_registry=None):
     manager=MeetingManager(get,put,patch,folder,lock,inference_busy,recognizer,default_language=default_language,
                            updates=app.extensions['speakerdesk']['updates'],
-                           channel_transcription=True,source_innovation=True,source_startup_hold=True)
+                           channel_transcription=True,source_innovation=True,source_startup_hold=True,
+                           capture_processing_registry=capture_processing_registry)
     app.extensions['speakerdesk']['meetings']=manager
     @app.get('/api/meeting')
     def meeting_status():return jsonify(manager.status())
