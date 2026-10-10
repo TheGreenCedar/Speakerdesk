@@ -166,9 +166,36 @@ class ProductionProfileTests(unittest.TestCase):
         self.assertEqual(changed,{'canonical_runtime.py','live_refinement.py','meeting_refinement.py'})
         current=subject.current_profile()
         self.assertEqual(current['lineage']['legacy_profile_sha256'],subject.PROFILE_SHA256)
-        for name,expected in current['identity']['policy_source_sha256'].items():
-            self.assertEqual(subject.file_digest(subject.DATA/name),expected)
+        current_changed={name for name,expected in current['identity']['policy_source_sha256'].items()
+                         if subject.file_digest(subject.DATA/name)!=expected}
+        self.assertEqual(current_changed,{'live_refinement.py','source_runtime.py'})
         self.assertNotIn('/Users/',json.dumps(p))
+
+    def test_changed_Apple_route_declines_current_reuse_without_changing_seals(self):
+        current=subject.current_profile();identity=current['identity']
+        self.assertEqual(subject.file_digest(subject.DATA/'asr-reuse-profile.json'),subject.PROFILE_SHA256)
+        self.assertEqual(subject.file_digest(subject.DATA/'asr-source-reuse-profile.json'),subject.SOURCE_PROFILE_SHA256)
+        model_root=Path('/synthetic-asr-profile-model')
+        runtime_root=Path('/synthetic-asr-profile-runtime')
+        real_digest=subject.file_digest
+        external={model_root/name:value for name,value in identity['model_file_sha256'].items()}
+        external.update({runtime_root/name:value for name,value in identity['decoder_source_sha256'].items()})
+        def measured_digest(path):
+            path=Path(path)
+            return external[path] if path in external else real_digest(path)
+        mx=SimpleNamespace(gpu='gpu',metal=SimpleNamespace(is_available=lambda:True),
+            default_device=lambda:SimpleNamespace(type='gpu'),
+            default_stream=lambda device:SimpleNamespace(device=SimpleNamespace(type='gpu')))
+        distribution=SimpleNamespace(locate_file=lambda name:runtime_root/name)
+        with patch.object(subject,'file_digest',side_effect=measured_digest), \
+                patch.object(subject.importlib.metadata,'version',side_effect=identity['runtime_versions'].__getitem__), \
+                patch.object(subject.importlib.metadata,'distribution',return_value=distribution):
+            with self.assertRaisesRegex(ValueError,'ASR policy differs: (live_refinement|source_runtime).py'):
+                subject.qualified_identity(model_root,None,mx)
+            cache,status=subject.initialize_reuse({'cohere_path':str(model_root)},None,mx)
+        self.assertIsNone(cache)
+        self.assertFalse(status['enabled'])
+        self.assertIn('ASR policy differs:',status['reason'])
 
     def test_package_ships_profile_own_policy_raw_files_and_decoder_raw_sources(self):
         root=Path(__file__).resolve().parents[1];spec=(root/'packaging/runtime.spec').read_text()
