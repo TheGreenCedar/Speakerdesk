@@ -25,6 +25,18 @@ class CaptureDiagnosticTests(unittest.TestCase):
         with self.assertRaises(ValueError):retain_capture_event(output,{'type':'error','error':'x'*16384})
         self.assertNotIn('must not persist',output.getvalue())
 
+    def test_refusal_retains_fixed_predicate_and_callback_state(self):
+        import io
+        output=io.StringIO()
+        observation={'input_output':{'channels':9},'output_input':{'channels':2},
+                     'callback':{'channels':9},'readbacks':{'bypassed':False}}
+        retain_capture_event(output,{'type':'error','failed_checks':['render_format'],
+                                    'capture_observation':observation,'pcm':'excluded'})
+        event=json.loads(output.getvalue())
+        self.assertEqual(event['failed_checks'],['render_format'])
+        self.assertEqual(event['capture_observation'],observation)
+        self.assertNotIn('pcm',event)
+
     def test_finalized_header_distinguishes_empty_retained_and_unverified(self):
         import wave
         with tempfile.TemporaryDirectory() as folder:
