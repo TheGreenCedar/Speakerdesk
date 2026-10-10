@@ -47,9 +47,13 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let value=error as NSError
         let phase=stateLock.withLock {startupPhase}
         // This runs on audioQueue, or after stop has drained that queue.
-        emit(["type":"error","error":value.localizedDescription,
+        var packet:[String:Any] = ["type":"error","error":value.localizedDescription,
               "domain":value.domain,"code":value.code,"startup_phase":phase,
-              "pending_system_chunks":pendingSystemChunks.count])
+              "pending_system_chunks":pendingSystemChunks.count]
+        for key in ["failed_checks","capture_observation"] {
+            if let observation=value.userInfo[key] {packet[key]=observation}
+        }
+        emit(packet)
     }
     private func hostSeconds() -> Double { AVAudioTime.seconds(forHostTime: mach_absolute_time()) }
     private func elapsed() -> Double {
@@ -236,10 +240,15 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 if processingJobID != nil {
                     emit(["type":"capture_runtime","state_phase":"after_start",
                           "input_output_format":captureFormat(engine.inputNode.outputFormat(forBus:0)),
-                          "output_input_format":captureFormat(engine.outputNode.inputFormat(forBus:0)),
+                          "output_input_format":renderFormat(engine.outputNode.inputFormat(forBus:0)),
+                          "input_output_details":captureFormatDetails(engine.inputNode.outputFormat(forBus:0)),
+                          "output_input_details":captureFormatDetails(engine.outputNode.inputFormat(forBus:0)),
                           "input_enabled":engine.inputNode.isVoiceProcessingEnabled,
                           "output_enabled":engine.outputNode.isVoiceProcessingEnabled,
-                          "bypassed":engine.inputNode.isVoiceProcessingBypassed,"engine_running":engine.isRunning])
+                          "bypassed":engine.inputNode.isVoiceProcessingBypassed,"engine_running":engine.isRunning,
+                          "manual_rendering":engine.isInManualRenderingMode,
+                          "input_muted":engine.inputNode.isVoiceProcessingInputMuted,
+                          "agc_enabled":engine.inputNode.isVoiceProcessingAGCEnabled])
                 }
             }
             if audioSuspended {audioQueue.resume();audioSuspended=false}

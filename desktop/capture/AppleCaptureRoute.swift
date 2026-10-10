@@ -22,6 +22,34 @@ func captureFormatMatches(_ a: AVAudioFormat, _ b: AVAudioFormat) -> Bool {
         a.channelLayout?.layoutTag == b.channelLayout?.layoutTag
 }
 
+// The microphone tap and render bus have different roles. VoiceProcessingIO
+// may expose replicated microphone channels alongside a stereo render bus.
+// Keep exact microphone/callback matching; admit only the explicit stereo
+// Float32 render layout in addition to the previously identical I/O format.
+func appleStereoRenderFormat(_ format: AVAudioFormat) -> Bool {
+    let tag = format.channelLayout?.layoutTag
+    return format.channelCount == 2 && format.commonFormat == .pcmFormatFloat32 &&
+        !format.isInterleaved && (tag == nil || tag == kAudioChannelLayoutTag_Stereo)
+}
+
+func renderFormat(_ format: AVAudioFormat) -> [String:Any] {
+    if appleStereoRenderFormat(format) {
+        return ["sample_rate":Int(format.sampleRate),"channels":2,"layout":"stereo_float32_noninterleaved"]
+    }
+    return captureFormat(format)
+}
+
+func captureFormatDetails(_ format: AVAudioFormat) -> [String:Any] {
+    ["sample_rate":format.sampleRate,"channels":Int(format.channelCount),
+     "common_format":Int(format.commonFormat.rawValue),"interleaved":format.isInterleaved,
+     "channel_layout_tag":Int(format.channelLayout?.layoutTag ?? 0)]
+}
+
+func appleRenderMatches(_ microphone: AVAudioFormat, _ render: AVAudioFormat) -> Bool {
+    captureFormatMatches(microphone,render) ||
+        (microphone.sampleRate == render.sampleRate && appleStereoRenderFormat(render))
+}
+
 func ownedCaptureHash() throws -> String {
     let url=URL(fileURLWithPath:CommandLine.arguments[0]).standardizedFileURL
     return SHA256.hash(data:try Data(contentsOf:url)).map{String(format:"%02x",$0)}.joined()
@@ -43,11 +71,26 @@ func appleMicrophoneCopy(_ input:AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
 
 func appleRoutePacket(jobID:String, helperHash:String, input:AVAudioFormat, output:AVAudioFormat,
                       callback:AVAudioFormat, readbacks:[String:Bool]) throws -> [String:Any] {
-    guard captureFormatMatches(input,output),captureFormatMatches(input,callback),
-          readbacks["input_enabled"] == true, readbacks["output_enabled"] == true,
-          readbacks["engine_running"] == true,readbacks["bypassed"] == false,
-          readbacks["manual_rendering"] == false,readbacks["input_muted"] == false else {
-        throw NSError(domain:"AppleCaptureRoute",code:2,userInfo:[NSLocalizedDescriptionKey:"Apple microphone runtime state or negotiated I/O format is unsupported."])
+    let checks:[(String,Bool)] = [
+        ("render_format",appleRenderMatches(input,output)),
+        ("microphone_callback_format",captureFormatMatches(input,callback)),
+        ("input_enabled",readbacks["input_enabled"] == true),
+        ("output_enabled",readbacks["output_enabled"] == true),
+        ("engine_running",readbacks["engine_running"] == true),
+        ("bypass_off",readbacks["bypassed"] == false),
+        ("manual_rendering_off",readbacks["manual_rendering"] == false),
+        ("input_unmuted",readbacks["input_muted"] == false)]
+    let failures=checks.filter{!$0.1}.map{$0.0}
+    guard failures.isEmpty else {
+        throw NSError(domain:"AppleCaptureRoute",code:2,userInfo:[
+            NSLocalizedDescriptionKey:"Apple microphone runtime state or negotiated I/O format is unsupported.",
+            "failed_checks":failures,
+            "capture_observation":["input_output":captureFormat(input),
+                                   "output_input":renderFormat(output),
+                                   "callback":captureFormat(callback),"readbacks":readbacks,
+                                   "input_output_details":captureFormatDetails(input),
+                                   "output_input_details":captureFormatDetails(output),
+                                   "callback_details":captureFormatDetails(callback)]])
     }
     let format=captureFormat(callback)
     guard format["layout"] as? String != "unsupported" else {throw NSError(domain:"AppleCaptureRoute",code:3)}
@@ -58,7 +101,7 @@ func appleRoutePacket(jobID:String, helperHash:String, input:AVAudioFormat, outp
             "format":["sample_rate":16000,"channels":1,"layout":"mono"],
             "route":["node":"inputNode","bus":0,"tap_scope":"output"],"state_phase":"after_start",
             "channel_mapping":callback.channelCount == 1 ? "mono_direct" : "nine_discrete_exact_replicas",
-            "callback_format":format,"io_formats":["input_output":captureFormat(input),"output_input":captureFormat(output)],
+            "callback_format":format,"io_formats":["input_output":captureFormat(input),"output_input":renderFormat(output)],
             "readbacks":readbacks]
 }
 

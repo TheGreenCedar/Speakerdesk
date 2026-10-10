@@ -629,7 +629,12 @@ class CaptureProcessingReceiptTests(unittest.TestCase):
             packet.update(callback_format=copy.deepcopy(fmt), channel_mapping='nine_discrete_exact_replicas',
                           io_formats={key: copy.deepcopy(fmt) for key in ('input_output', 'output_input')})
         # This is a server receipt-schema control, not proof of real callback channel equality.
+        def stereo_render(packet):
+            packet['io_formats']['output_input'] = {
+                'sample_rate': 48000, 'channels': 2, 'layout': 'stereo_float32_noninterleaved'}
         for label, mutate in [('mono', lambda p: None), ('replica-declaration', nine),
+                              ('mono-stereo-render', stereo_render),
+                              ('replica-stereo-render', lambda p:(nine(p), stereo_render(p))),
                               ('agc-true', lambda p: p['readbacks'].update(agc_enabled=True))]:
             with self.subTest(eligible=label), tempfile.TemporaryDirectory() as folder:
                 packet=producer_packet(self.jid,self.helper); mutate(packet)
@@ -642,6 +647,10 @@ class CaptureProcessingReceiptTests(unittest.TestCase):
             ('input-tap',lambda p:p['route'].update(tap_scope='input')),
             ('unknown-capability',lambda p:p.update(capability_version='unknown')),
             ('io-mismatch',lambda p:p['io_formats']['output_input'].update(sample_rate=44100)),
+            ('render-rate-mismatch',lambda p:(stereo_render(p),p['io_formats']['output_input'].update(sample_rate=44100))),
+            ('render-unknown-layout',lambda p:(stereo_render(p),p['io_formats']['output_input'].update(layout='unknown'))),
+            ('render-unknown-channels',lambda p:(stereo_render(p),p['io_formats']['output_input'].update(channels=3))),
+            ('stereo-mic-not-render',lambda p:(stereo_render(p),p['callback_format'].update(channels=2,layout='stereo_float32_noninterleaved'),p['io_formats']['input_output'].update(channels=2,layout='stereo_float32_noninterleaved'))),
             ('callback-mismatch',lambda p:p['callback_format'].update(sample_rate=44100)),
             ('nine-distinct',lambda p:(nine(p),p.update(channel_mapping='nine_distinct'))),
             ('unknown-mapping',lambda p:p.update(channel_mapping='unknown'))]

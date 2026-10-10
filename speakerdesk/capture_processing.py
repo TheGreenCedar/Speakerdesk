@@ -104,6 +104,12 @@ def validate_metadata(value, job_id, catalog, registry=None):
                          or (callback_format['channels'] == 9
                              and callback_format['layout'] == 'discrete_float32_noninterleaved'
                              and packet['channel_mapping'] == 'nine_discrete_exact_replicas'))
+    # Render channels are not microphone channels. Preserve the original
+    # identical-format case and explicitly accept same-rate stereo render.
+    render_format = io_formats['output_input']
+    render_supported = (render_format == callback_format or render_format == {
+        'sample_rate': callback_format['sample_rate'], 'channels': 2,
+        'layout': 'stereo_float32_noninterleaved'})
     qualification = value['qualification']
     supported = (packet['processor'] == 'apple_voice_processing_io'
         and packet['capability_version'] == CAPABILITY_VERSION
@@ -112,7 +118,7 @@ def validate_metadata(value, job_id, catalog, registry=None):
         and type(packet['route'].get('bus')) is int and packet['state_phase'] == 'after_start'
         and packet['stage'] == 'retained_source_pcm' and packet['postprocessing'] == 'identity'
         and audio_format == {'sample_rate':16000,'channels':1,'layout':'mono'}
-        and mapping_supported and callback_format == io_formats['input_output'] == io_formats['output_input']
+        and mapping_supported and callback_format == io_formats['input_output'] and render_supported
         and readbacks['input_enabled'] and readbacks['output_enabled'] and readbacks['engine_running']
         and not readbacks['bypassed'] and not readbacks['manual_rendering'] and not readbacks['input_muted'])
     if qualification is not None:

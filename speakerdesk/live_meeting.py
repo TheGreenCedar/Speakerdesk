@@ -31,8 +31,11 @@ def retain_capture_event(handle, packet):
     fields = {
         'capture_startup': ('job_id', 'helper_sha256', 'owned_pid'),
         'capture_runtime': ('state_phase', 'input_output_format', 'output_input_format',
-                            'input_enabled', 'output_enabled', 'bypassed', 'engine_running'),
-        'error': ('error', 'domain', 'code', 'startup_phase', 'pending_system_chunks'),
+                            'input_enabled', 'output_enabled', 'bypassed', 'engine_running',
+                            'manual_rendering', 'input_muted', 'agc_enabled',
+                            'input_output_details', 'output_input_details'),
+        'error': ('error', 'domain', 'code', 'startup_phase', 'pending_system_chunks',
+                  'failed_checks', 'capture_observation'),
     }
     kind = packet.get('type')
     if kind not in fields:return
