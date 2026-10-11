@@ -6,6 +6,7 @@
 //! queued on [`crate::worker::JobWorker`]. Tests use temporary SQLite stores and
 //! [`ImportModels`] so nothing here downloads weights or spawns MLX.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,7 @@ use speakerdesk_core::ids::JobId;
 use speakerdesk_core::security::{self, MAX_UPLOAD_BYTES};
 use speakerdesk_core::store::{JobStore, SqliteJobStore};
 use speakerdesk_core::{export, languages, limits, messages, transcript};
+use tokio_util::sync::CancellationToken;
 
 use crate::http::{security_headers, token_header};
 use crate::worker::JobWorker;
@@ -76,7 +78,7 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 /// Implementations must not download models or spawn MLX. The default reports
 /// that setup is unfinished.
 pub trait ImportModels: Send + Sync {
-    fn infer(&self, job: &Job) -> Result<Document, String>;
+    fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String>;
 }
 
 /// Turns an uploaded file into a duration in seconds.
@@ -89,7 +91,11 @@ pub trait AudioPrep: Send + Sync {
 pub struct UnavailableModels;
 
 impl ImportModels for UnavailableModels {
-    fn infer(&self, _job: &Job) -> Result<Document, String> {
+    fn infer(
+        &self,
+        _job: &Job,
+        _cancellation: &tokio_util::sync::CancellationToken,
+    ) -> Result<Document, String> {
         Err(messages::SETUP_BEFORE_TRANSCRIPTION.to_string())
     }
 }
@@ -127,6 +133,7 @@ struct Shared {
     _owner: fs::File,
     pub(crate) meeting_manager: Arc<Mutex<crate::meeting::MeetingManager>>,
     models: Mutex<Arc<dyn ImportModels>>,
+    operations: Mutex<HashMap<JobId, (u64, CancellationToken)>>,
     prepare: Mutex<Arc<dyn AudioPrep>>,
     meeting: Mutex<Option<JobId>>,
     issues: Mutex<Vec<String>>,
@@ -181,6 +188,7 @@ impl AppState {
                 _owner: owner,
                 meeting_manager: Arc::new(Mutex::new(crate::meeting::MeetingManager::new())),
                 models: Mutex::new(Arc::new(UnavailableModels)),
+                operations: Mutex::new(HashMap::new()),
                 prepare: Mutex::new(Arc::new(WavPrepare)),
                 meeting: Mutex::new(None),
                 issues: Mutex::new(default_issues()),
@@ -249,6 +257,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{jid}/segments/{sid}", patch(edit_passage))
         .route("/api/jobs/{jid}/export/{kind}", get(export_job))
         .route("/api/jobs/{jid}/run", post(run_job))
+        .route("/api/jobs/{jid}/cancel", post(cancel_job))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
@@ -545,7 +554,15 @@ async fn delete_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
             Ok(job) => job,
             Err(error) => return from_api(error),
         };
-        if ACTIVE.contains(&job.status.as_str()) || meeting_id(&app.shared).as_ref() == Some(&id) {
+        if ACTIVE.contains(&job.status.as_str())
+            || app
+                .shared
+                .operations
+                .lock()
+                .expect("operations")
+                .contains_key(&id)
+            || meeting_id(&app.shared).as_ref() == Some(&id)
+        {
             return error_response(StatusCode::CONFLICT, messages::DELETE_BUSY);
         }
         if let Err(error) = directory.delete(&id) {
@@ -574,7 +591,14 @@ async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -
             Ok(job) => job,
             Err(error) => return from_api(error),
         };
-        if ACTIVE.contains(&job.status.as_str()) {
+        if ACTIVE.contains(&job.status.as_str())
+            || app
+                .shared
+                .operations
+                .lock()
+                .expect("operations")
+                .contains_key(&id)
+        {
             return error_response(StatusCode::CONFLICT, messages::JOB_ALREADY_RUNNING);
         }
         if has_segments(&job) {
@@ -601,13 +625,68 @@ async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -
         if let Err(error) = directory.put(&job, None) {
             return store_failure(&error);
         }
+        let cancellation = CancellationToken::new();
+        app.shared
+            .operations
+            .lock()
+            .expect("operations")
+            .insert(id.clone(), (generation, cancellation.clone()));
         drop(directory);
         let body = stored_job_json(&job);
         let shared = Arc::clone(&app.shared);
         let queued = id.clone();
         app.worker
-            .enqueue(move || execute_import(&shared, &queued, generation));
+            .enqueue(move || execute_import(&shared, &queued, generation, &cancellation));
         (StatusCode::ACCEPTED, Json(body)).into_response()
+    })
+    .await
+}
+
+async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -> Response {
+    blocking(move || {
+        let id = match require_job_id(&jid) {
+            Ok(id) => id,
+            Err(error) => return from_api(error),
+        };
+        let result = app.store().update_job(&id, |job| {
+            if job.kind != JobKind::Import
+                || !["queued", "processing"].contains(&job.status.as_str())
+            {
+                return Err(ApiError::new(
+                    409,
+                    "There is no import transcription to cancel.",
+                ));
+            }
+            let generation = job
+                .extra
+                .get("operation_generation")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            job.extra
+                .insert("operation_generation".into(), json!(generation + 1));
+            job.status = "uploaded".into();
+            job.message = "Transcription cancelled. Saved audio is kept.".into();
+            let cancellation = app
+                .shared
+                .operations
+                .lock()
+                .expect("operations")
+                .get(&id)
+                .filter(|(current, _)| *current == generation)
+                .map(|(_, cancellation)| cancellation.clone());
+            Ok::<_, ApiError>(cancellation)
+        });
+        match result {
+            Ok(Some((job, cancellation))) => {
+                // Invalidate publication durably before notifying the worker.
+                if let Some(cancellation) = cancellation {
+                    cancellation.cancel();
+                }
+                Json(stored_job_json(&job)).into_response()
+            }
+            Ok(None) => error_response(StatusCode::NOT_FOUND, NOT_FOUND),
+            Err(error) => from_api(error),
+        }
     })
     .await
 }
@@ -707,26 +786,61 @@ fn prepare_job(shared: &Shared, id: &JobId) {
     };
     let prepare = Arc::clone(&*shared.prepare.lock().expect("prepare"));
     let result = prepare.prepare(&shared.data_dir, &job);
-    let mut directory = shared.store.lock().expect("jobs");
-    let Ok(Some(mut job)) = directory.get(id, false) else {
-        return;
-    };
-    match result {
-        Ok(duration) => {
-            job.status = "uploaded".to_string();
-            job.duration = Some(duration);
-            job.message = READY_FOR_INFERENCE.to_string();
-        }
-        Err(message) => {
-            job.status = "failed".to_string();
-            job.message = message;
-        }
-    }
-    job.updated = unix_now();
-    let _ = directory.put(&job, None);
+    let _ = shared
+        .store
+        .lock()
+        .expect("jobs")
+        .update_job(id, |current| {
+            if current.status != job.status
+                || current.extra.get("operation_generation")
+                    != job.extra.get("operation_generation")
+            {
+                return Err(ApiError::new(
+                    409,
+                    "Audio preparation is no longer current.",
+                ));
+            }
+            match result {
+                Ok(duration) => {
+                    if current.status != "queued" {
+                        current.status = "uploaded".to_string();
+                    }
+                    current.duration = Some(duration);
+                    current.message = READY_FOR_INFERENCE.to_string();
+                }
+                Err(message) => {
+                    current.status = "failed".to_string();
+                    current.message = message;
+                }
+            }
+            Ok::<_, ApiError>(())
+        });
 }
 
-fn execute_import(shared: &Shared, id: &JobId, generation: u64) {
+struct OperationGuard<'a> {
+    shared: &'a Shared,
+    id: &'a JobId,
+    generation: u64,
+}
+
+impl Drop for OperationGuard<'_> {
+    fn drop(&mut self) {
+        let mut operations = self.shared.operations.lock().expect("operations");
+        if operations
+            .get(self.id)
+            .is_some_and(|(current, _)| *current == self.generation)
+        {
+            operations.remove(self.id);
+        }
+    }
+}
+
+fn execute_import(shared: &Shared, id: &JobId, generation: u64, cancellation: &CancellationToken) {
+    let _operation = OperationGuard {
+        shared,
+        id,
+        generation,
+    };
     let current = shared.store.lock().expect("store").get(id, false);
     if !matches!(current, Ok(Some(ref job)) if job.status == "queued" && job.extra.get("operation_generation").and_then(Value::as_u64) == Some(generation))
     {
@@ -735,38 +849,38 @@ fn execute_import(shared: &Shared, id: &JobId, generation: u64) {
     if !audio_ready(shared, id) {
         return;
     }
-    {
-        let mut directory = shared.store.lock().expect("jobs");
-        let Ok(Some(mut job)) = directory.get(id, false) else {
-            return;
-        };
-        if job.status == "failed" {
-            return;
+    let started = shared.store.lock().expect("jobs").update_job(id, |job| {
+        if cancellation.is_cancelled()
+            || job.status != "queued"
+            || job
+                .extra
+                .get("operation_generation")
+                .and_then(Value::as_u64)
+                != Some(generation)
+        {
+            return Err(ApiError::new(
+                409,
+                "The inference operation is no longer current.",
+            ));
         }
         job.status = "processing".to_string();
         job.message = STARTING_INFERENCE.to_string();
-        job.updated = unix_now();
-        if directory.put(&job, None).is_err() {
-            return;
-        }
-    }
-    let job = {
-        let directory = shared.store.lock().expect("jobs");
-        match directory.get(id, false) {
-            Ok(Some(job)) => job,
-            _ => return,
-        }
+        Ok::<_, ApiError>(())
+    });
+    let Ok(Some((job, ()))) = started else {
+        return;
     };
     let models = Arc::clone(&*shared.models.lock().expect("models"));
     let inferred = models
-        .infer(&job)
+        .infer(&job, cancellation)
         .and_then(|document| checked_document(document, job.duration.unwrap_or(0.0)));
     let result = shared
         .store
         .lock()
         .expect("store")
         .update_job(id, |current| {
-            if current.status != "processing"
+            if cancellation.is_cancelled()
+                || current.status != "processing"
                 || current.revision != job.revision
                 || current
                     .extra
@@ -1352,7 +1466,11 @@ mod tests {
     }
 
     impl ImportModels for GateModels {
-        fn infer(&self, _job: &Job) -> Result<Document, String> {
+        fn infer(
+            &self,
+            _job: &Job,
+            _cancellation: &tokio_util::sync::CancellationToken,
+        ) -> Result<Document, String> {
             self.entered.fetch_add(1, Ordering::SeqCst);
             let (lock, cond) = &*self.release;
             let mut ready = lock.lock().expect("release");
@@ -1441,7 +1559,9 @@ mod tests {
                 document: document("Late model words", 0),
             }));
             let shared = state.shared.clone();
-            let thread = std::thread::spawn(move || super::execute_import(&shared, &id, 1));
+            let thread = std::thread::spawn(move || {
+                super::execute_import(&shared, &id, 1, &tokio_util::sync::CancellationToken::new())
+            });
             let deadline = std::time::Instant::now() + Duration::from_secs(3);
             while entered.load(Ordering::SeqCst) == 0 {
                 assert!(std::time::Instant::now() < deadline);
@@ -1466,7 +1586,138 @@ mod tests {
                 saved.document.unwrap().segments[0].text,
                 "Protected correction"
             );
-            assert_eq!(saved.revision, 8);
+            assert_eq!(saved.revision, 9);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_persists_before_notifying_the_import_worker() {
+        struct GatePrepare {
+            entered: Arc<AtomicUsize>,
+            release: Arc<(Mutex<bool>, Condvar)>,
+        }
+        impl super::AudioPrep for GatePrepare {
+            fn prepare(&self, _: &std::path::Path, _: &Job) -> Result<f64, String> {
+                self.entered.fetch_add(1, Ordering::SeqCst);
+                let (lock, wake) = &*self.release;
+                drop(
+                    wake.wait_while(lock.lock().unwrap(), |ready| !*ready)
+                        .unwrap(),
+                );
+                Ok(10.0)
+            }
+        }
+        for during_prepare in [false, true] {
+            let state = AppState::new();
+            state.set_issues(Vec::new());
+            let mut stored = job(JOB_A, "uploaded", 1.0);
+            stored.document = None;
+            if during_prepare {
+                stored.duration = None;
+            }
+            let id = stored.id.clone();
+            state.insert_job(stored);
+            let entered = Arc::new(AtomicUsize::new(0));
+            let release = Arc::new((Mutex::new(false), Condvar::new()));
+            if during_prepare {
+                *state.shared.prepare.lock().unwrap() = Arc::new(GatePrepare {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                });
+            }
+            state.set_models(Arc::new(GateModels {
+                entered: entered.clone(),
+                release: release.clone(),
+                document: document("Cancelled late output", 0),
+            }));
+            let running = Running::spawn(state.clone()).await;
+            let response = running
+                .authed(
+                    running
+                        .client
+                        .post(running.url(&format!("/api/jobs/{JOB_A}/run"))),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 202);
+            wait_until(&entered, 1).await;
+            let cancellation = state.shared.operations.lock().unwrap()[&id].1.clone();
+            let cancelled = running
+                .authed(
+                    running
+                        .client
+                        .post(running.url(&format!("/api/jobs/{JOB_A}/cancel"))),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(cancelled.status(), 200);
+            assert!(cancellation.is_cancelled());
+            let persisted = state.store().get(&id, false).unwrap().unwrap();
+            assert_eq!(persisted.extra["operation_generation"], 2);
+            assert_eq!(persisted.status, "uploaded");
+            assert!(persisted.document.is_none());
+            assert!(
+                state.shared.operations.lock().unwrap().contains_key(&id),
+                "acknowledgement is not completion"
+            );
+            let (retry, delete) = tokio::join!(
+                running
+                    .authed(
+                        running
+                            .client
+                            .post(running.url(&format!("/api/jobs/{JOB_A}/run")))
+                    )
+                    .send(),
+                running
+                    .authed(
+                        running
+                            .client
+                            .delete(running.url(&format!("/api/jobs/{JOB_A}")))
+                    )
+                    .send(),
+            );
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            state.drain();
+            assert_eq!(
+                retry.unwrap().status(),
+                409,
+                "retry must wait for terminal cleanup"
+            );
+            assert_eq!(
+                delete.unwrap().status(),
+                409,
+                "audio is still owned by the worker"
+            );
+            assert!(state.shared.operations.lock().unwrap().is_empty());
+            assert_eq!(
+                state.store().get(&id, false).unwrap().unwrap().status,
+                "uploaded",
+                "cancelled preparation must not revive processing"
+            );
+            assert!(
+                state
+                    .store()
+                    .get(&id, false)
+                    .unwrap()
+                    .unwrap()
+                    .document
+                    .is_none()
+            );
+            let retry = running
+                .authed(
+                    running
+                        .client
+                        .post(running.url(&format!("/api/jobs/{JOB_A}/run"))),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(retry.status(), 202);
+            state.drain();
+            running.shutdown().await;
         }
     }
 

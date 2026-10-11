@@ -1202,9 +1202,6 @@ mod tests {
     }
 
     impl Models for Scripted {
-        fn hello(&self, build_id: &str) -> Result<(String, String), crate::error::ChildError> {
-            UnimplementedModels.hello(build_id)
-        }
         fn vad_open(
             &self,
             conditioning: Option<GainPolicy>,
@@ -1212,7 +1209,10 @@ mod tests {
             let _ = conditioning;
             *self.cursor.lock().unwrap() = 0;
             self.events.lock().unwrap().push(Event::Vad);
-            Ok(Handle(1))
+            Ok(Handle {
+                generation: 1,
+                session: 1,
+            })
         }
         fn vad_feed(
             &self,
@@ -1309,12 +1309,6 @@ mod tests {
         }
         fn metrics(&self) -> Result<ipc::MetricsOut, crate::error::ChildError> {
             UnimplementedModels.metrics()
-        }
-        fn cancel(&self, request_id: u64) -> Result<(), crate::error::ChildError> {
-            UnimplementedModels.cancel(request_id)
-        }
-        fn shutdown(&self) -> Result<(), crate::error::ChildError> {
-            UnimplementedModels.shutdown()
         }
     }
 

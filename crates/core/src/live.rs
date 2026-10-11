@@ -3210,11 +3210,11 @@ mod tests {
     }
 
     impl Models for FakeModels {
-        fn hello(&self, _build_id: &str) -> Result<(String, String), ChildError> {
-            Ok(("fake".into(), "0".into()))
-        }
         fn vad_open(&self, _conditioning: Option<GainPolicy>) -> Result<Handle, ChildError> {
-            Ok(Handle(1))
+            Ok(Handle {
+                generation: 1,
+                session: 1,
+            })
         }
         fn vad_feed(
             &self,
@@ -3247,7 +3247,10 @@ mod tests {
             Ok(())
         }
         fn diar_open(&self, _preset: DiarPreset) -> Result<Handle, ChildError> {
-            Ok(Handle(2))
+            Ok(Handle {
+                generation: 1,
+                session: 2,
+            })
         }
         fn diar_feed(
             &self,
@@ -3323,12 +3326,6 @@ mod tests {
                 peak_mlx_bytes: 0,
                 rss_bytes: 0,
             })
-        }
-        fn cancel(&self, _request_id: u64) -> Result<(), ChildError> {
-            Ok(())
-        }
-        fn shutdown(&self) -> Result<(), ChildError> {
-            Ok(())
         }
     }
 

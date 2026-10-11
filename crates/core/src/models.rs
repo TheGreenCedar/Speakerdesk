@@ -8,7 +8,6 @@ use crate::ipc::{
 /// Sync model seam. `ChildModels`, `FakeModels`, and `ReplayModels` implement it.
 /// Model calls must not run under the job-store lock.
 pub trait Models: Send + Sync {
-    fn hello(&self, build_id: &str) -> Result<(String, String), ChildError>;
     fn vad_open(&self, conditioning: Option<GainPolicy>) -> Result<Handle, ChildError>;
     fn vad_feed(
         &self,
@@ -34,8 +33,6 @@ pub trait Models: Send + Sync {
     fn embed_voice(&self, pcm: &[f32]) -> Result<Vec<f32>, ChildError>;
     fn setup_check(&self, models: &[String]) -> Result<Vec<SetupModelReport>, ChildError>;
     fn metrics(&self) -> Result<MetricsOut, ChildError>;
-    fn cancel(&self, request_id: u64) -> Result<(), ChildError>;
-    fn shutdown(&self) -> Result<(), ChildError>;
 }
 
 /// Scripted double for unit tests. Every call returns [`ChildError::Unimplemented`]
@@ -43,9 +40,6 @@ pub trait Models: Send + Sync {
 pub struct UnimplementedModels;
 
 impl Models for UnimplementedModels {
-    fn hello(&self, _build_id: &str) -> Result<(String, String), ChildError> {
-        Err(ChildError::Unimplemented)
-    }
     fn vad_open(&self, _conditioning: Option<GainPolicy>) -> Result<Handle, ChildError> {
         Err(ChildError::Unimplemented)
     }
@@ -101,12 +95,6 @@ impl Models for UnimplementedModels {
         Err(ChildError::Unimplemented)
     }
     fn metrics(&self) -> Result<MetricsOut, ChildError> {
-        Err(ChildError::Unimplemented)
-    }
-    fn cancel(&self, _request_id: u64) -> Result<(), ChildError> {
-        Err(ChildError::Unimplemented)
-    }
-    fn shutdown(&self) -> Result<(), ChildError> {
         Err(ChildError::Unimplemented)
     }
 }

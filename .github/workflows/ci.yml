@@ -79,7 +79,7 @@ jobs:
       - name: Ledger and crate tests
         run: |
           cargo xtask ledger --check
-          cargo test --locked -p speakerdesk-core -p speakerdesk-host -p xtask
+          cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p xtask
   rust-macos:
     runs-on: macos-15
     timeout-minutes: 45
@@ -96,7 +96,7 @@ jobs:
           xcodebuild -downloadComponent MetalToolchain
           xcrun -sdk macosx metal --version
       - name: Test native crates with locked dependencies
-        run: cargo test --locked -p speakerdesk-core -p speakerdesk-host -p speakerdesk-models -p speakerdesk-echo -p xtask
+        run: cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p speakerdesk-models -p speakerdesk-echo -p xtask
       - name: Compile desktop boundary without packaging resources
         env:
           TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'

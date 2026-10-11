@@ -8,7 +8,10 @@ use crate::error::ChildError;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Handle(pub u64);
+pub struct Handle {
+    pub generation: u64,
+    pub session: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GainPolicy {
@@ -184,4 +187,56 @@ pub fn request_timeout(request: &Request) -> Option<Duration> {
         | Request::Shutdown => 10,
     };
     Some(Duration::from_secs(seconds))
+}
+
+pub fn read_envelope<R: std::io::Read>(reader: &mut R) -> std::io::Result<Envelope> {
+    let mut length_bytes = [0u8; 4];
+    reader.read_exact(&mut length_bytes[..1])?;
+    reader
+        .read_exact(&mut length_bytes[1..])
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let length = u32::from_be_bytes(length_bytes) as usize;
+    if length > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame exceeds 64 MiB",
+        ));
+    }
+    let mut payload = vec![0u8; length];
+    reader
+        .read_exact(&mut payload)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    decode_envelope(&payload)
+}
+
+pub fn write_envelope<W: std::io::Write>(
+    writer: &mut W,
+    envelope: Envelope,
+) -> std::io::Result<()> {
+    let payload = postcard::to_allocvec(&envelope)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+    if payload.len() > MAX_FRAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame exceeds 64 MiB",
+        ));
+    }
+    let length = u32::try_from(payload.len())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+    writer.write_all(&length.to_be_bytes())?;
+    writer.write_all(&payload)?;
+    writer.flush()?;
+    Ok(())
+}
+
+pub fn decode_envelope(payload: &[u8]) -> std::io::Result<Envelope> {
+    let (envelope, trailing) = postcard::take_from_bytes(payload)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+    if !trailing.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "trailing bytes in inference frame",
+        ));
+    }
+    Ok(envelope)
 }

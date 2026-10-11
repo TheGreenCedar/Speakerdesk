@@ -1,21 +1,10 @@
-//! Inference supervisor over the child stdio protocol.
-//!
-//! A frame is a big-endian `u32` length plus a postcard [`Envelope`]. The
-//! resident child is this executable started as `speakerdesk --inference`
-//! (ADR-0001). Its stdin and stdout are the streams
-//! `speakerdesk_models::serve_on` reads and writes. [`inference_child_command`]
-//! builds that process. Unit tests do not spawn it or MLX. They pass a
-//! postcard peer to [`InferenceSupervisor::spawn_thread`] on a [`UnixStream`]
-//! pair.
-
-use std::ffi::OsStr;
-use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
-use std::thread::JoinHandle;
+//! One resident process, portable pipes, and a serial parent queue.
+//! Model calls run on blocking workers. Lifecycle and operation cancellation belong here.
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use speakerdesk_core::error::ChildError;
@@ -25,159 +14,122 @@ use speakerdesk_core::ipc::{
     VadFrame, request_timeout,
 };
 use speakerdesk_core::models::Models;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
-/// Stand-in for the duration-scaled `DiarizeFile` limit.
-///
-/// [`request_timeout`] returns `None` for that request. This two-hour ceiling
-/// matches the legacy inference bound and is not a measurement of the file.
-const DIARIZE_FILE_TIMEOUT_DOUBLE: Duration = Duration::from_secs(2 * 60 * 60);
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+const FILE_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
-struct Link {
-    stream: UnixStream,
-    child: Option<JoinHandle<()>>,
-    closed: bool,
-    failed: bool,
+struct Call {
+    request: Request,
+    cancellation: CancellationToken,
+    reply: oneshot::Sender<Result<Response, ChildError>>,
 }
 
-/// Parent end of the inference-child frame protocol.
 pub struct InferenceSupervisor {
-    link: Mutex<Link>,
-    next_id: AtomicU64,
-    /// Replaces [`request_timeout`] when a unit test needs a short deadline.
-    #[cfg(test)]
-    timeout_override: Mutex<Option<Duration>>,
+    calls: mpsc::Sender<Call>,
+    stop: CancellationToken,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    pid: Arc<AtomicU32>,
 }
 
-/// Command line for the resident inference child.
-///
-/// The parent spawns this with piped stdin and stdout and speaks
-/// length-prefixed postcard frames. The child loop is
-/// `speakerdesk_models::serve_on`.
-pub fn inference_child_command(executable: impl AsRef<OsStr>) -> Command {
-    let mut command = Command::new(executable);
-    command
-        .arg("--inference")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    command
+/// A model view belongs to one operation; cancelling it cannot poison another operation.
+pub struct ChildModels {
+    supervisor: Arc<InferenceSupervisor>,
+    cancellation: CancellationToken,
 }
 
 impl InferenceSupervisor {
-    /// Spawn `serve` on a background thread connected by a Unix socket pair.
-    ///
-    /// Sends [`Request::Hello`] and requires [`Response::Ready`] to echo
-    /// `build_id`. Tests pass a postcard peer. The production child is a
-    /// process from [`inference_child_command`], not this thread.
-    pub fn spawn_thread<F>(build_id: &str, serve: F) -> Result<Self, ChildError>
-    where
-        F: FnOnce(UnixStream) + Send + 'static,
-    {
-        let (child_end, parent_end) = UnixStream::pair().map_err(io_to_child)?;
-        let child = std::thread::spawn(move || serve(child_end));
-        let supervisor = Self::from_stream(parent_end, child);
-        match supervisor.hello(build_id) {
-            Ok((ready_build, _)) if ready_build == build_id => Ok(supervisor),
-            Ok((ready_build, _)) => {
-                let _ = supervisor.shutdown();
-                Err(ChildError::failed(
-                    format!("inference child build id mismatch: {ready_build}"),
-                    false,
-                ))
-            }
-            Err(error) => {
-                let _ = supervisor.shutdown();
-                Err(error)
-            }
+    pub fn new(
+        executable: impl Into<PathBuf>,
+        build_id: impl Into<String>,
+    ) -> Result<Arc<Self>, ChildError> {
+        let (calls, receiver) = mpsc::channel(1);
+        let stop = CancellationToken::new();
+        let pid = Arc::new(AtomicU32::new(0));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(io_to_child)?;
+        let executable = executable.into();
+        let build_id = build_id.into();
+        let actor_stop = stop.clone();
+        let actor_pid = pid.clone();
+        let worker = std::thread::Builder::new()
+            .name("inference-control".into())
+            .spawn(move || {
+                runtime.block_on(run(receiver, actor_stop, actor_pid, executable, build_id));
+            })
+            .map_err(io_to_child)?;
+        Ok(Arc::new(Self {
+            calls,
+            stop,
+            worker: Mutex::new(Some(worker)),
+            pid,
+        }))
+    }
+
+    pub fn models(self: &Arc<Self>, cancellation: CancellationToken) -> ChildModels {
+        ChildModels {
+            supervisor: self.clone(),
+            cancellation,
         }
     }
 
-    fn from_stream(stream: UnixStream, child: JoinHandle<()>) -> Self {
-        Self {
-            link: Mutex::new(Link {
-                stream,
-                child: Some(child),
-                closed: false,
-                failed: false,
-            }),
-            next_id: AtomicU64::new(1),
-            #[cfg(test)]
-            timeout_override: Mutex::new(None),
+    pub fn child_pid(&self) -> Option<u32> {
+        match self.pid.load(Ordering::Acquire) {
+            0 => None,
+            pid => Some(pid),
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Link> {
-        self.link
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// Waits for the owned process to be reaped. Call off the async executor.
+    pub fn shutdown(&self) {
+        self.stop.cancel();
+        if let Some(worker) = self.worker.lock().expect("inference worker").take() {
+            let _ = worker.join();
+        }
     }
+}
 
-    fn timeout_for(&self, request: &Request) -> Duration {
-        timeout_for_request(request, self.timeout_override())
+impl Drop for InferenceSupervisor {
+    fn drop(&mut self) {
+        self.shutdown();
     }
+}
 
-    #[cfg(test)]
-    fn timeout_override(&self) -> Option<Duration> {
-        *self
-            .timeout_override
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    #[cfg(not(test))]
-    fn timeout_override(&self) -> Option<Duration> {
-        let _ = self;
-        None
-    }
-
-    #[cfg(test)]
-    fn set_timeout_override(&self, timeout: Duration) {
-        *self
-            .timeout_override
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(timeout);
-    }
-
+impl ChildModels {
     fn exchange(&self, request: Request) -> Result<Response, ChildError> {
-        let timeout = self.timeout_for(&request);
-        let mut link = self.lock();
-        if link.closed {
-            return Err(ChildError::failed("inference child is closed", false));
+        // Session cleanup remains available after its owning operation is cancelled.
+        let cancellation = if matches!(
+            request,
+            Request::VadClose { .. } | Request::DiarClose { .. }
+        ) {
+            CancellationToken::new()
+        } else {
+            self.cancellation.clone()
+        };
+        if cancellation.is_cancelled() || self.supervisor.stop.is_cancelled() {
+            return Err(ChildError::Cancelled);
         }
-        if link.failed {
-            return Err(ChildError::failed(
-                "inference child connection failed",
-                false,
-            ));
-        }
-        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        match write_and_read(&mut link.stream, request_id, request, timeout) {
-            Ok(result) => result,
-            Err(error) => {
-                link.failed = true;
-                Err(error)
-            }
-        }
+        let (reply, receive) = oneshot::channel();
+        self.supervisor
+            .calls
+            .blocking_send(Call {
+                request,
+                cancellation,
+                reply,
+            })
+            .map_err(|_| ChildError::failed("inference supervisor stopped", false))?;
+        receive
+            .blocking_recv()
+            .map_err(|_| ChildError::failed("inference supervisor stopped", true))?
     }
 }
 
-fn timeout_for_request(request: &Request, override_timeout: Option<Duration>) -> Duration {
-    if let Some(timeout) = override_timeout {
-        return timeout;
-    }
-    request_timeout(request).unwrap_or(DIARIZE_FILE_TIMEOUT_DOUBLE)
-}
-
-impl Models for InferenceSupervisor {
-    fn hello(&self, build_id: &str) -> Result<(String, String), ChildError> {
-        match self.exchange(Request::Hello {
-            build_id: build_id.to_owned(),
-        })? {
-            Response::Ready { build_id, device } => Ok((build_id, device)),
-            other => Err(unexpected(&other)),
-        }
-    }
-
+impl Models for ChildModels {
     fn vad_open(&self, conditioning: Option<GainPolicy>) -> Result<Handle, ChildError> {
         match self.exchange(Request::VadOpen { conditioning })? {
             Response::Handle(handle) => Ok(handle),
@@ -303,57 +255,281 @@ impl Models for InferenceSupervisor {
             other => Err(unexpected(&other)),
         }
     }
+}
 
-    fn cancel(&self, request_id: u64) -> Result<(), ChildError> {
-        ack(self.exchange(Request::Cancel { request_id })?)
+struct Process {
+    child: Child,
+    input: ChildStdin,
+    replies: mpsc::Receiver<Result<Envelope, ChildError>>,
+    reader: tokio::task::JoinHandle<()>,
+    generation: u64,
+}
+
+impl Process {
+    async fn start(executable: &Path, generation: u64) -> Result<Self, ChildError> {
+        let mut child = Command::new(executable)
+            .arg("--inference")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(io_to_child)?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| ChildError::failed("child stdin unavailable", false))?;
+        let output = child
+            .stdout
+            .take()
+            .ok_or_else(|| ChildError::failed("child stdout unavailable", false))?;
+        let (send, replies) = mpsc::channel(2);
+        let reader = tokio::spawn(read_responses(output, send));
+        Ok(Self {
+            child,
+            input,
+            replies,
+            reader,
+            generation,
+        })
     }
 
-    fn shutdown(&self) -> Result<(), ChildError> {
-        let (child, result) = {
-            let mut link = self.lock();
-            if link.closed {
-                return Ok(());
-            }
-            let result = if link.failed {
-                Ok(())
-            } else {
-                let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                let timeout = self.timeout_for(&Request::Shutdown);
-                match write_and_read(&mut link.stream, request_id, Request::Shutdown, timeout) {
-                    Ok(Ok(Response::Ack)) => Ok(()),
-                    Ok(Ok(other)) => {
-                        link.failed = true;
-                        Err(unexpected(&other))
-                    }
-                    Ok(Err(error)) => Err(error),
-                    Err(error) => {
-                        link.failed = true;
-                        Err(error)
-                    }
-                }
-            };
-            link.closed = true;
-            let child = if result.is_ok() && !link.failed {
-                link.child.take()
-            } else {
-                // A wedged or already-dead peer must not block shutdown on join.
-                link.child.take();
-                None
-            };
-            (child, result)
-        };
-        if let Some(child) = child
-            && child.join().is_err()
-        {
-            return Err(ChildError::failed("inference child panicked", false));
+    async fn send(&mut self, id: u64, request: Request) -> Result<(), ChildError> {
+        let bytes = postcard::to_allocvec(&Envelope {
+            request_id: id,
+            body: EnvelopeBody::Request(request),
+        })
+        .map_err(|e| ChildError::failed(e.to_string(), false))?;
+        if bytes.len() > MAX_FRAME_BYTES {
+            return Err(ChildError::failed("frame exceeds 64 MiB", false));
         }
-        result
+        self.input
+            .write_u32(bytes.len() as u32)
+            .await
+            .map_err(io_to_child)?;
+        self.input.write_all(&bytes).await.map_err(io_to_child)?;
+        self.input.flush().await.map_err(io_to_child)
+    }
+
+    async fn response(&mut self, id: u64) -> Result<Result<Response, ChildError>, ChildError> {
+        let envelope = self
+            .replies
+            .recv()
+            .await
+            .ok_or_else(|| ChildError::failed("inference child exited", true))??;
+        if envelope.request_id != id {
+            return Err(ChildError::failed(
+                "inference response request_id mismatch",
+                true,
+            ));
+        }
+        match envelope.body {
+            EnvelopeBody::Response(result) => Ok(result),
+            _ => Err(ChildError::failed("child sent a request", true)),
+        }
+    }
+
+    async fn reap(mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill().await;
+        }
+        let _ = self.child.wait().await;
+        self.reader.abort();
+        let _ = self.reader.await;
     }
 }
 
-impl Drop for InferenceSupervisor {
-    fn drop(&mut self) {
-        let _ = self.shutdown();
+async fn read_responses(mut output: ChildStdout, send: mpsc::Sender<Result<Envelope, ChildError>>) {
+    loop {
+        let result = async {
+            let len = output.read_u32().await.map_err(io_to_child)? as usize;
+            if len > MAX_FRAME_BYTES {
+                return Err(ChildError::failed("frame exceeds 64 MiB", false));
+            }
+            let mut payload = vec![0; len];
+            output.read_exact(&mut payload).await.map_err(io_to_child)?;
+            speakerdesk_core::ipc::decode_envelope(&payload).map_err(io_to_child)
+        }
+        .await;
+        let failed = result.is_err();
+        if send.send(result).await.is_err() || failed {
+            break;
+        }
+    }
+}
+
+async fn run(
+    mut calls: mpsc::Receiver<Call>,
+    stop: CancellationToken,
+    pid: Arc<AtomicU32>,
+    executable: PathBuf,
+    build_id: String,
+) {
+    let mut process: Option<Process> = None;
+    let mut generation = 0_u64;
+    let mut next_id = 1_u64;
+    loop {
+        let call = tokio::select! { biased; _ = stop.cancelled() => break, call = calls.recv() => match call {Some(call) => call,None => break} };
+        if call.cancellation.is_cancelled() {
+            let _ = call.reply.send(Err(ChildError::Cancelled));
+            continue;
+        }
+        if process.is_none() {
+            generation += 1;
+            let started = Process::start(&executable, generation).await;
+            match started {
+                Ok(mut child) => {
+                    pid.store(child.child.id().unwrap_or(0), Ordering::Release);
+                    let hello_id = next_id;
+                    next_id += 1;
+                    let hello = tokio::time::timeout(CONTROL_TIMEOUT, async {
+                        child
+                            .send(
+                                hello_id,
+                                Request::Hello {
+                                    build_id: build_id.clone(),
+                                },
+                            )
+                            .await?;
+                        child.response(hello_id).await
+                    })
+                    .await;
+                    match hello {
+                        Ok(Ok(Ok(Response::Ready {
+                            build_id: ready, ..
+                        }))) if ready == build_id => process = Some(child),
+                        _ => {
+                            child.reap().await;
+                            pid.store(0, Ordering::Release);
+                            let _ = call
+                                .reply
+                                .send(Err(ChildError::failed("inference handshake failed", true)));
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = call.reply.send(Err(error));
+                    continue;
+                }
+            }
+        }
+        let child = process.as_mut().expect("started child");
+        let mut request = call.request;
+        if let Some(handle) = request_handle(&mut request) {
+            if handle.generation != child.generation {
+                let _ = call.reply.send(Err(ChildError::failed(
+                    "stale model session after child restart",
+                    false,
+                )));
+                continue;
+            }
+            handle.generation = 0;
+        }
+        let id = next_id;
+        next_id += 1;
+        let timeout = request_timeout(&request).unwrap_or(FILE_TIMEOUT);
+        let result = tokio::select! {
+            _ = stop.cancelled() => Err(ChildError::Cancelled),
+            result = execute(child, id, request, timeout, &call.cancellation, &mut next_id) => result,
+        };
+        let result = match result {
+            Ok(Ok(Response::Handle(mut handle))) => {
+                handle.generation = generation;
+                Ok(Response::Handle(handle))
+            }
+            Ok(result) => result,
+            Err(error) => {
+                process.take().expect("child").reap().await;
+                pid.store(0, Ordering::Release);
+                Err(error)
+            }
+        };
+        let _ = call.reply.send(result);
+    }
+    if let Some(mut child) = process.take() {
+        let id = next_id;
+        let _ = tokio::time::timeout(CONTROL_TIMEOUT, async {
+            child.send(id, Request::Shutdown).await?;
+            child.response(id).await
+        })
+        .await;
+        child.reap().await;
+        pid.store(0, Ordering::Release);
+    }
+}
+
+async fn execute(
+    child: &mut Process,
+    id: u64,
+    request: Request,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+    next_id: &mut u64,
+) -> Result<Result<Response, ChildError>, ChildError> {
+    tokio::time::timeout(timeout, async {
+        let cleanup = match &request {
+            Request::VadFeed { handle, .. } => Some(Request::VadClose { handle: *handle }),
+            Request::DiarFeed { handle, .. } => Some(Request::DiarClose { handle: *handle }),
+            _ => None,
+        };
+        let vad_open = matches!(request, Request::VadOpen { .. });
+        let diar_open = matches!(request, Request::DiarOpen { .. });
+        tokio::select! {
+            // A partial frame cannot be followed by a Cancel frame. Reap this child.
+            biased;
+            _ = cancellation.cancelled() => return Err(ChildError::Cancelled),
+            result = child.send(id, request) => result?,
+        }
+        let result = tokio::select! {
+            result = child.response(id) => result?,
+            _ = cancellation.cancelled() => {
+                let cancel_id = *next_id; *next_id += 1;
+                tokio::time::timeout(CONTROL_TIMEOUT, async {
+                    child.send(cancel_id, Request::Cancel { request_id: id }).await?;
+                    let mut acked = false;
+                    let mut terminal = None;
+                    while !acked || terminal.is_none() {
+                        let envelope = child.replies.recv().await.ok_or_else(|| ChildError::failed("child exited during cancellation", true))??;
+                        match (envelope.request_id, envelope.body) {
+                            (received, EnvelopeBody::Response(result)) if received == id && terminal.is_none() => terminal = Some(result),
+                            (received, EnvelopeBody::Response(Ok(Response::Ack))) if received == cancel_id && !acked => acked = true,
+                            _ => return Err(ChildError::failed("unexpected cancellation response", true)),
+                        }
+                    }
+                    Ok(terminal.expect("terminal reply"))
+                }).await.unwrap_or(Err(ChildError::Timeout))?
+            }
+        };
+        if cancellation.is_cancelled() {
+            // A successful response can race Cancel after the child considers work complete.
+            let close = match &result {
+                Ok(Response::Handle(handle)) if vad_open => Some(Request::VadClose { handle: *handle }),
+                Ok(Response::Handle(handle)) if diar_open => Some(Request::DiarClose { handle: *handle }),
+                Err(ChildError::Cancelled) => None,
+                _ => cleanup,
+            };
+            if let Some(close) = close {
+                let close_id = *next_id; *next_id += 1;
+                tokio::time::timeout(CONTROL_TIMEOUT, async {
+                    child.send(close_id, close).await?;
+                    ack(child.response(close_id).await??)
+                }).await.unwrap_or(Err(ChildError::Timeout))?;
+            }
+            Ok(Err(ChildError::Cancelled))
+        } else {
+            Ok(result)
+        }
+    }).await.unwrap_or(Err(ChildError::Timeout))
+}
+
+fn request_handle(request: &mut Request) -> Option<&mut Handle> {
+    match request {
+        Request::VadFeed { handle, .. }
+        | Request::VadClose { handle }
+        | Request::DiarFeed { handle, .. }
+        | Request::DiarClose { handle } => Some(handle),
+        _ => None,
     }
 }
 
@@ -363,273 +539,12 @@ fn ack(response: Response) -> Result<(), ChildError> {
         other => Err(unexpected(&other)),
     }
 }
-
 fn unexpected(response: &Response) -> ChildError {
     ChildError::failed(
         format!("unexpected inference response: {response:?}"),
         false,
     )
 }
-
 fn io_to_child(error: io::Error) -> ChildError {
-    match error.kind() {
-        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => ChildError::Timeout,
-        _ => ChildError::failed(error.to_string(), true),
-    }
-}
-
-fn write_and_read(
-    stream: &mut UnixStream,
-    request_id: u64,
-    request: Request,
-    timeout: Duration,
-) -> Result<Result<Response, ChildError>, ChildError> {
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(io_to_child)?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(io_to_child)?;
-    write_envelope(
-        stream,
-        &Envelope {
-            request_id,
-            body: EnvelopeBody::Request(request),
-        },
-    )?;
-    let envelope = read_envelope(stream)?;
-    if envelope.request_id != request_id {
-        return Err(ChildError::failed(
-            "inference response request_id mismatch",
-            false,
-        ));
-    }
-    match envelope.body {
-        EnvelopeBody::Response(result) => Ok(result),
-        EnvelopeBody::Request(_) => Err(ChildError::failed(
-            "inference child sent a request frame",
-            false,
-        )),
-    }
-}
-
-fn read_envelope(reader: &mut impl Read) -> Result<Envelope, ChildError> {
-    let mut length_bytes = [0u8; 4];
-    reader.read_exact(&mut length_bytes).map_err(io_to_child)?;
-    let length = usize::try_from(u32::from_be_bytes(length_bytes))
-        .map_err(|error| ChildError::failed(error.to_string(), false))?;
-    if length > MAX_FRAME_BYTES {
-        return Err(ChildError::failed("frame exceeds 64 MiB", false));
-    }
-    let mut payload = vec![0u8; length];
-    reader.read_exact(&mut payload).map_err(io_to_child)?;
-    postcard::from_bytes(&payload).map_err(|error| ChildError::failed(error.to_string(), false))
-}
-
-fn write_envelope(writer: &mut impl Write, envelope: &Envelope) -> Result<(), ChildError> {
-    let payload = postcard::to_allocvec(envelope)
-        .map_err(|error| ChildError::failed(error.to_string(), false))?;
-    if payload.len() > MAX_FRAME_BYTES {
-        return Err(ChildError::failed("frame exceeds 64 MiB", false));
-    }
-    let length = u32::try_from(payload.len())
-        .map_err(|error| ChildError::failed(error.to_string(), false))?;
-    writer
-        .write_all(&length.to_be_bytes())
-        .map_err(io_to_child)?;
-    writer.write_all(&payload).map_err(io_to_child)?;
-    writer.flush().map_err(io_to_child)?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-    use std::time::Duration;
-
-    use speakerdesk_core::error::ChildError;
-    use speakerdesk_core::ipc::{
-        Envelope, EnvelopeBody, MAX_FRAME_BYTES, Request, Response, request_timeout,
-    };
-    use speakerdesk_core::models::Models;
-
-    use super::{
-        DIARIZE_FILE_TIMEOUT_DOUBLE, InferenceSupervisor, inference_child_command,
-        timeout_for_request,
-    };
-
-    #[test]
-    fn hello_checks_ready_build_and_device() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let record = Arc::clone(&seen);
-        let supervisor = InferenceSupervisor::spawn_thread("build-7", move |stream| {
-            serve_fake(stream, Some(record), None);
-        })
-        .unwrap();
-        let requests = seen.lock().unwrap().clone();
-        assert!(
-            matches!(requests.first(), Some(Request::Hello { build_id }) if build_id == "build-7")
-        );
-        let (build_id, device) = supervisor.hello("build-7").unwrap();
-        assert_eq!(build_id, "build-7");
-        assert_eq!(device, "unavailable");
-        supervisor.shutdown().unwrap();
-    }
-
-    #[test]
-    fn transcribe_returns_unimplemented() {
-        let supervisor =
-            InferenceSupervisor::spawn_thread("build", |stream| serve_fake(stream, None, None))
-                .unwrap();
-        let error = supervisor.transcribe(&[], "en", (0, 0)).unwrap_err();
-        assert_eq!(error, ChildError::Unimplemented);
-        supervisor.shutdown().unwrap();
-    }
-
-    #[test]
-    fn shutdown_writes_shutdown_and_joins() {
-        let joined = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&joined);
-        let supervisor = InferenceSupervisor::spawn_thread("build", move |stream| {
-            serve_fake(stream, None, Some(flag));
-        })
-        .unwrap();
-        supervisor.shutdown().unwrap();
-        assert!(joined.load(Ordering::Acquire));
-        supervisor.shutdown().unwrap();
-    }
-
-    #[test]
-    fn timed_out_response_is_child_timeout() {
-        let supervisor = InferenceSupervisor::spawn_thread("build", hang_after_hello).unwrap();
-        supervisor.set_timeout_override(Duration::from_millis(200));
-        let error = supervisor.metrics().unwrap_err();
-        assert_eq!(error, ChildError::Timeout);
-    }
-
-    #[test]
-    fn diarize_file_uses_the_generous_timeout_double() {
-        let hello = Request::Hello {
-            build_id: "b".into(),
-        };
-        assert_eq!(
-            timeout_for_request(&hello, None),
-            request_timeout(&hello).unwrap()
-        );
-        let file = Request::DiarizeFile {
-            path: PathBuf::from("meeting.wav"),
-        };
-        assert!(request_timeout(&file).is_none());
-        assert_eq!(
-            timeout_for_request(&file, None),
-            DIARIZE_FILE_TIMEOUT_DOUBLE
-        );
-    }
-
-    #[test]
-    fn documents_the_inference_process_spawn() {
-        let command = inference_child_command("speakerdesk");
-        assert_eq!(command.get_program(), "speakerdesk");
-        let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args, ["--inference"]);
-    }
-
-    fn serve_fake(
-        mut stream: UnixStream,
-        seen: Option<Arc<Mutex<Vec<Request>>>>,
-        joined: Option<Arc<AtomicBool>>,
-    ) {
-        loop {
-            let envelope = match read_frame(&mut stream) {
-                Ok(envelope) => envelope,
-                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return,
-                Err(error) => panic!("fake child read failed: {error}"),
-            };
-            let EnvelopeBody::Request(request) = envelope.body else {
-                panic!("fake child received a response frame");
-            };
-            if let Some(seen) = &seen {
-                seen.lock().unwrap().push(request.clone());
-            }
-            let shutting_down = matches!(request, Request::Shutdown);
-            write_frame(
-                &mut stream,
-                &Envelope {
-                    request_id: envelope.request_id,
-                    body: fake_response(request),
-                },
-            )
-            .unwrap();
-            if shutting_down {
-                if let Some(joined) = joined {
-                    thread::sleep(Duration::from_millis(80));
-                    joined.store(true, Ordering::Release);
-                }
-                return;
-            }
-        }
-    }
-
-    fn hang_after_hello(mut stream: UnixStream) {
-        let hello = read_frame(&mut stream).unwrap();
-        let EnvelopeBody::Request(Request::Hello { build_id }) = hello.body else {
-            panic!("expected hello, got {:?}", hello.body);
-        };
-        write_frame(
-            &mut stream,
-            &Envelope {
-                request_id: hello.request_id,
-                body: EnvelopeBody::Response(Ok(Response::Ready {
-                    build_id,
-                    device: "unavailable".into(),
-                })),
-            },
-        )
-        .unwrap();
-        let _request = read_frame(&mut stream).unwrap();
-        let mut byte = [0u8; 1];
-        let _ = stream.read(&mut byte);
-    }
-
-    fn fake_response(request: Request) -> EnvelopeBody {
-        match request {
-            Request::Hello { build_id } => EnvelopeBody::Response(Ok(Response::Ready {
-                build_id,
-                device: "unavailable".into(),
-            })),
-            Request::Shutdown => EnvelopeBody::Response(Ok(Response::Ack)),
-            Request::Transcribe { .. } => EnvelopeBody::Response(Err(ChildError::Unimplemented)),
-            _ => EnvelopeBody::Response(Err(ChildError::Unimplemented)),
-        }
-    }
-
-    /// Independent length-prefixed postcard reader, matching `serve_on`.
-    fn read_frame(stream: &mut UnixStream) -> std::io::Result<Envelope> {
-        let mut length_bytes = [0u8; 4];
-        stream.read_exact(&mut length_bytes)?;
-        let length = usize::try_from(u32::from_be_bytes(length_bytes)).unwrap();
-        assert!(length <= MAX_FRAME_BYTES);
-        let mut payload = vec![0u8; length];
-        stream.read_exact(&mut payload)?;
-        postcard::from_bytes(&payload).map_err(|error| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-        })
-    }
-
-    fn write_frame(stream: &mut UnixStream, envelope: &Envelope) -> std::io::Result<()> {
-        let payload = postcard::to_allocvec(envelope).map_err(|error| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
-        })?;
-        assert!(payload.len() <= MAX_FRAME_BYTES);
-        let length = u32::try_from(payload.len()).unwrap();
-        stream.write_all(&length.to_be_bytes())?;
-        stream.write_all(&payload)?;
-        stream.flush()?;
-        Ok(())
-    }
+    ChildError::failed(error.to_string(), true)
 }

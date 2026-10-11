@@ -13,13 +13,13 @@ Local implementation branch: `codex/python-free-mac`.
 ## Sequence and current state
 
 1. Source repairs verified: updater/export/bundle/parser/readiness and truthful
-   tests. Mac CI added; local full build remains blocked by missing Metal.
+   tests. Mac CI added; prebuilt MLX linkage demonstrated (details below).
    Independent verifier architecture_capture found three issues, all corrected.
 2. In progress: data slice implemented and independently reviewed. Explicit-root
    AppState uses SQLite for jobs, identities and preferences, immediate edit
    transactions, guarded import publication, consistent migration snapshots,
-   private journal recovery and legacy audio copy-on-write. Process lifecycle,
-   operation cancellation and active meeting state integration remain pending.
+   private journal recovery and legacy audio copy-on-write. Process lifecycle and
+   operation cancellation implemented; active meeting state integration remains pending.
 3. Pending: Silero, offline Nemotron and Cohere through the real desktop;
    edit/save/quit/reopen/export with a short public fixture and measured Metal.
 4. Pending: automatic language, CTC, native Core ML ReDimNet, identity and setup.
@@ -39,8 +39,10 @@ The review evidence is outside the checkout in the calling chat's review artifac
 ## Environment constraints
 
 Apple M5, macOS 27, Rust 1.99.0. Only Command Line Tools are installed; the Metal
-compiler is absent. This blocks actual model/desktop build proof until the Metal
-toolchain is available. Continue independent work; do not claim GPU acceptance.
+compiler was absent at the initial build. The prebuilt MLX route below removes
+that prerequisite. Xcode appeared and became selected during implementation;
+its license is pending, so subsequent builds explicitly select the existing
+Command Line Tools. No global toolchain settings or license acceptance changed.
 
 ## Foundation proof
 
@@ -53,8 +55,8 @@ toolchain is available. Continue independent work; do not claim GPU acceptance.
   proves parser/protocol helpers only, not the normal models crate or inference.
 - `cargo build --locked -p speakerdesk-models` reaches MLX native build and fails
   generating Metal JIT sources: xcrun Metal toolchain unavailable. No retry will
-  resolve this without installing/configuring the toolchain. Desktop, acceleration,
-  actual updater, and package qualification remain unverified.
+  resolve the source-build path without the toolchain. Prebuilt linkage below
+  provides an alternative. Desktop, actual updater and package remain unverified.
 - New synthetic FLAC fixture independently round-trips through afconvert. Saved
   reading-turn receipts originate from the baseline Python validator. Neither
   fixture contains user recordings.
@@ -78,3 +80,37 @@ fs4 1.1 no longer provides file locks; storage ownership uses its standard-libra
 successor, File::try_lock, available in the pinned Rust toolchain. Core ML, capture,
 process lifecycle, actual editor/model integration and the release gates remain
 open; data slice completion does not satisfy batch 2 or the replacement outcome.
+
+## Process slice proof
+
+One Tokio subprocess actor uses bounded portable pipes, an independent response
+reader and a serial parent queue. Domain Models no longer owns process lifecycle.
+Handles carry a child generation; protocol corruption, timeout and crash kill
+and reap the owned child before lazy restart. Cancel waits for its targeted ack
+and terminal result. A blocked partial write forces reaping; discarded successful
+session creation/feed responses trigger bounded targeted cleanup. Explicit close
+works after operation cancellation. The child keeps a control reader available
+while a serial executor runs, and invalidates stateful work it cancels.
+
+Job cancellation commits a new operation generation before signalling its token.
+Retry and deletion stay blocked until the old worker relinquishes ownership.
+The HTTP retry regression failed before the correction (202 rather than 409).
+Core 128, host 46 and six real disposable subprocess tests pass; Clippy denies
+warnings. Fixture-owned barriers exercise cancellation deterministically, including
+ack-before-terminal, cancelled open/feed races, blocked stdin and unresponsive
+termination. These subprocesses replay protocol responses, not acoustic inference.
+The no-MLX component harness passes 33 tests with six unsupported acoustic tests
+ignored. The production model forward passes and decoder cancellation boundaries
+are still incomplete.
+
+## Prebuilt MLX investigation
+
+Official MLX 0.32.2 backend wheel, macOS 14 arm64, SHA256
+`3825fff379dbc107dd3413e564a06caeaa24819910ec49c0439e454c06a1b9b8`, contains
+libmlx.dylib, mlx.metallib, native headers and CMake configuration. The dylib links
+only Apple/system libraries. A build-only mlx-sys patch uses mlx-c's existing
+MLX_C_USE_SYSTEM_MLX option to compile unchanged upstream bindings with Command
+Line Tools and link the prebuilt runtime. An optimized standalone Rust executable
+evaluated GPU matmul with exact result [7,10,15,22]; no Python or Metal compiler ran.
+This is linkage/initialization proof, not speech-model or performance acceptance.
+Integration will pin the macOS 15 distribution to match Speakerdesk's minimum OS.
