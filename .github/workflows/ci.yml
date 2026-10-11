@@ -76,9 +76,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.99.0
-      - name: Install ffmpeg for FLAC decode tests
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Ledger and crate tests
         run: |
           cargo xtask ledger --check
-          cargo test -p speakerdesk-core -p speakerdesk-host -p xtask
+          cargo test --locked -p speakerdesk-core -p speakerdesk-host -p xtask
+  rust-macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.99.0
+      - name: Verify Apple Silicon and Metal compiler
+        run: |
+          test "$(uname -m)" = arm64
+          xcodebuild -downloadComponent MetalToolchain
+          xcrun -sdk macosx metal --version
+      - name: Test native crates with locked dependencies
+        run: cargo test --locked -p speakerdesk-core -p speakerdesk-host -p speakerdesk-models -p speakerdesk-echo -p xtask
+      - name: Compile desktop boundary without packaging resources
+        env:
+          TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
+        run: cargo build --release --locked -p speakerdesk

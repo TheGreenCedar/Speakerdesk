@@ -28,6 +28,6 @@ mod tests {
     #[test]
     #[ignore = "weights spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51e and upstream appautomaton/mlx-speech@4577ad28"]
     fn parity_cohere() {
-        // Encoder, decoder, tokenizer, dither, log-mel, and 4-bit weights stay on Metal.
+        panic!("Not implemented: real model comparison has not run.");
     }
 }

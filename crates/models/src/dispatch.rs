@@ -6,11 +6,8 @@ use speakerdesk_core::ipc::{Request, Response};
 use crate::{cohere, ctc, memory, redimnet, silero, sortformer, whisper_lid};
 
 pub fn device_name() -> String {
-    if cfg!(target_os = "macos") {
-        "metal".to_string()
-    } else {
-        "unavailable".to_string()
-    }
+    // Model implementations must establish readiness before advertising a backend.
+    "unavailable".to_string()
 }
 
 pub fn dispatch(request: Request, cancel: &AtomicBool) -> Result<Response, ChildError> {

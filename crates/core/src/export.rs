@@ -15,20 +15,7 @@ pub struct Export {
     pub content_type: &'static str,
 }
 
-struct TurnSlice {
-    text: String,
-    speaker: String,
-    attribution: String,
-    start: Option<f64>,
-    end: Option<f64>,
-}
-
-/// `transcript.export`.
-///
-/// Reading-turn hashes belong to the timing agent. This projection treats a
-/// missing `reading_turns` value as no turns. When the JSON array is present,
-/// plain text always splits and subtitles split only if every attribution is
-/// known (`single` or `overlap`, never `unknown`).
+/// Export current product text. Reading projections must still match their source.
 pub fn export(document: &Document, kind: &str) -> Result<Export, ExportTooLarge> {
     if kind == "json" {
         let value = serde_json::to_value(document).expect("transcript document serializes");
@@ -81,55 +68,17 @@ fn render_lines(document: &Document, kind: &str) -> Vec<String> {
     lines
 }
 
-/// Present `reading_turns` JSON only. Absent JSON is no turns.
-fn local_turns(segment: &Segment) -> Vec<TurnSlice> {
-    let Some(Value::Array(turns)) = &segment.reading_turns else {
+fn local_turns(segment: &Segment) -> Vec<crate::timing::ReadingTurn> {
+    let Ok(value) = serde_json::to_value(segment) else {
         return Vec::new();
     };
-    if turns.is_empty() {
+    let Ok(reading) = serde_json::from_value::<crate::timing::ReadingSegment>(value) else {
         return Vec::new();
-    }
-    let mut parsed = Vec::with_capacity(turns.len());
-    for turn in turns {
-        let Some(slice) = parse_turn(turn) else {
-            return Vec::new();
-        };
-        parsed.push(slice);
-    }
-    parsed
+    };
+    crate::timing::validated_turns(&reading)
 }
 
-fn parse_turn(value: &Value) -> Option<TurnSlice> {
-    let object = value.as_object()?;
-    let text = object.get("text").and_then(Value::as_str)?.to_string();
-    let speaker = object.get("speaker").and_then(Value::as_str)?.to_string();
-    let attribution = object
-        .get("attribution")
-        .and_then(Value::as_str)?
-        .to_string();
-    if !matches!(attribution.as_str(), "single" | "overlap" | "unknown") {
-        return None;
-    }
-    let start = optional_time(object.get("start"))?;
-    let end = optional_time(object.get("end"))?;
-    Some(TurnSlice {
-        text,
-        speaker,
-        attribution,
-        start,
-        end,
-    })
-}
-
-fn optional_time(value: Option<&Value>) -> Option<Option<f64>> {
-    match value {
-        None | Some(Value::Null) => Some(None),
-        Some(Value::Number(number)) => number.as_f64().map(Some),
-        Some(_) => None,
-    }
-}
-
-fn slice_segment(parent: &Segment, turn: &TurnSlice) -> Segment {
+fn slice_segment(parent: &Segment, turn: &crate::timing::ReadingTurn) -> Segment {
     let mut slice = parent.clone();
     slice.text = turn.text.clone();
     slice.speaker = turn.speaker.clone();
@@ -371,23 +320,9 @@ mod tests {
 
     #[test]
     fn export_projects_known_reading_turns() {
-        let mut segment = bare_segment("one", 0.0, 1.0, "multiple_speakers", "Hello there");
-        segment.reading_turns = Some(json!([
-            {
-                "text": "Hello ",
-                "speaker": "speaker_0",
-                "attribution": "single",
-                "start": 0.0,
-                "end": 0.4
-            },
-            {
-                "text": "there",
-                "speaker": "speaker_1",
-                "attribution": "single",
-                "start": 0.4,
-                "end": 1.0
-            }
-        ]));
+        let cases: Vec<crate::document::Segment> =
+            serde_json::from_str(include_str!("../tests/testdata/reading-turns.json")).unwrap();
+        let segment = cases[0].clone();
         let document = bare_document(
             &[
                 ("multiple_speakers", "Multiple speakers"),
@@ -407,23 +342,7 @@ mod tests {
         assert!(srt.body.contains("Ada: Hello\n"));
         assert!(srt.body.contains("Bea: there\n"));
 
-        let mut mixed = bare_segment("one", 0.0, 1.0, "multiple_speakers", "Hello there");
-        mixed.reading_turns = Some(json!([
-            {
-                "text": "Hello ",
-                "speaker": "speaker_0",
-                "attribution": "single",
-                "start": 0.0,
-                "end": 0.4
-            },
-            {
-                "text": "there",
-                "speaker": "unassigned",
-                "attribution": "unknown",
-                "start": null,
-                "end": null
-            }
-        ]));
+        let mixed = cases[1].clone();
         let mixed_document = bare_document(
             &[
                 ("multiple_speakers", "Multiple speakers"),
@@ -453,11 +372,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn export_preserves_source_qualified_reading_turns() {
+        let cases: Vec<crate::document::Segment> =
+            serde_json::from_str(include_str!("../tests/testdata/reading-turns.json")).unwrap();
+        let mut segment = cases[0].clone();
+        let source =
+            json!({"catalog_sha256": "abc", "source_id": "microphone", "source_revision": 1});
+        segment.capture_source = Some(source.clone());
+        segment.reading_turn_provenance.as_mut().unwrap()["capture_source"] = source;
+        let document = bare_document(&[("speaker_0", "Ada"), ("speaker_1", "Bea")], vec![segment]);
+        let body = export(&document, "srt").unwrap().body;
+        assert!(body.contains("Ada: Hello\n"));
+        assert!(body.contains("Bea: there\n"));
+        assert_eq!(body.matches("-->").count(), 2);
+    }
+
     fn with_text(text: &str) -> crate::document::Document {
         bare_document(
             &[("speaker_0", "Zoë")],
             vec![bare_segment("words", 0.0, 1.0, "speaker_0", text)],
         )
+    }
+
+    #[test]
+    fn stale_reading_turns_export_current_text_and_bounds() {
+        let cases: Vec<crate::document::Segment> =
+            serde_json::from_str(include_str!("../tests/testdata/reading-turns.json")).unwrap();
+        for mutation in [
+            "text",
+            "protected",
+            "bounds",
+            "revision",
+            "speaker",
+            "missing_receipt",
+        ] {
+            let mut segment = cases[0].clone();
+            match mutation {
+                "text" => segment.text = "Corrected café 日本語".into(),
+                "protected" => segment.protected_fields = Some(vec!["text".into()]),
+                "bounds" => {
+                    segment.start = 3.0;
+                    segment.end = 4.0;
+                }
+                "revision" => segment.audio_revision = Some(2),
+                "speaker" => {
+                    segment.reading_turns.as_mut().unwrap()[0]["speaker"] = json!("speaker_9")
+                }
+                "missing_receipt" => segment.reading_turn_provenance = None,
+                _ => unreachable!(),
+            }
+            let expected_text = segment.text.clone();
+            let expected_start = crate::transcript::timestamp(segment.start, ".");
+            let document =
+                bare_document(&[("multiple_speakers", "Current speaker")], vec![segment]);
+            for kind in ["txt", "srt", "vtt"] {
+                let output = export(&document, kind).unwrap().body;
+                assert!(
+                    output.contains(&expected_text),
+                    "{mutation}/{kind}: {output}"
+                );
+                assert!(
+                    output.replace(',', ".").contains(&expected_start),
+                    "{mutation}/{kind}: {output}"
+                );
+                assert!(!output.contains("speaker_9"), "{mutation}/{kind}: {output}");
+            }
+        }
     }
 
     #[test]

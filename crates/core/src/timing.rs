@@ -8,6 +8,7 @@
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use unicode_general_category::get_general_category;
@@ -72,7 +73,7 @@ pub struct RawUnit {
     pub end_sample: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AudioAnchor {
     pub start_sample: i64,
     pub end_sample: i64,
@@ -104,14 +105,14 @@ pub struct ReadingWordEvidence {
     pub words: Vec<TimedWord>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ActivityRegion {
     pub start_sample: i64,
     pub end_sample: i64,
     pub speakers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SpeakerActivity {
     pub audio_revision: i64,
     pub observed_end_sample: Option<i64>,
@@ -134,7 +135,7 @@ pub struct ReadingRow {
     pub installed_provider_identity: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ReadingTurn {
     pub text: String,
     pub start_offset: usize,
@@ -145,14 +146,14 @@ pub struct ReadingTurn {
     pub end: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TurnProvenance {
     pub utterance_id: String,
     pub machine_revision: i64,
     pub canonical_machine_revision: i64,
     pub audio_revision: i64,
     pub language_epoch: i64,
-    pub capture_source: Option<String>,
+    pub capture_source: Option<serde_json::Value>,
     pub text_sha256: String,
     pub audio_anchor: AudioAnchor,
     pub activity_sha256: String,
@@ -166,22 +167,25 @@ pub struct TurnProvenance {
     pub normalization_policy_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ReadingSegment {
     pub text: String,
+    #[serde(default)]
     pub protected_fields: Vec<String>,
     pub canonical_utterance_id: String,
     pub machine_revision: i64,
     pub canonical_machine_revision: i64,
     pub audio_revision: i64,
     pub language_epoch: i64,
-    pub capture_source: Option<String>,
+    pub capture_source: Option<serde_json::Value>,
     pub text_audio_anchor: AudioAnchor,
     pub speaker_activity: Option<SpeakerActivity>,
     pub start: f64,
     pub end: f64,
     pub reading_turns: Vec<ReadingTurn>,
     pub reading_turn_provenance: Option<TurnProvenance>,
+    // Installed provider identity is trusted runtime state, never document input.
+    #[serde(skip)]
     pub installed_provider_identity: Option<String>,
 }
 

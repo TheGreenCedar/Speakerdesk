@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,25 +25,38 @@ pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
 }
 
 fn python_artifacts(root: &Path) -> anyhow::Result<Vec<String>> {
+    let root = fs::canonicalize(root).context("resolve bundle root")?;
     let mut hits = Vec::new();
-    visit(root, root, &mut hits)?;
+    visit(&root, &root, &mut HashSet::new(), &mut hits)?;
     hits.sort();
     Ok(hits)
 }
 
-fn visit(root: &Path, path: &Path, hits: &mut Vec<String>) -> anyhow::Result<()> {
-    let meta = fs::symlink_metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    if path != root && is_python_artifact(path) {
+fn visit(
+    root: &Path,
+    path: &Path,
+    visited: &mut HashSet<PathBuf>,
+    hits: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    let resolved = fs::canonicalize(path).with_context(|| format!("resolve {}", path.display()))?;
+    if !resolved.starts_with(root) {
+        bail!("bundle link escapes root: {}", path.display());
+    }
+    if is_python_artifact(path) || is_python_artifact(&resolved) {
         hits.push(relative(root, path));
         return Ok(());
     }
+    if !visited.insert(resolved.clone()) {
+        return Ok(());
+    }
+    let meta = fs::metadata(&resolved).with_context(|| format!("stat {}", resolved.display()))?;
     if meta.file_type().is_dir() {
-        for entry in fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
+        for entry in
+            fs::read_dir(&resolved).with_context(|| format!("read {}", resolved.display()))?
+        {
             let entry = entry.with_context(|| format!("read {}", path.display()))?;
-            visit(root, &entry.path(), hits)?;
+            visit(root, &entry.path(), visited, hits)?;
         }
-    } else if path == root && is_python_artifact(path) {
-        hits.push(relative(root, path));
     }
     Ok(())
 }
@@ -95,6 +109,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("app.js"), b"ok").unwrap();
         run(Some(dir.path().to_path_buf())).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follows_bundle_and_framework_links_without_skipping_python() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("actual.app");
+        let version = root.join("Frameworks/Native.framework/Versions/A");
+        fs::create_dir_all(&version).unwrap();
+        fs::write(version.join("Native"), b"native fixture").unwrap();
+        symlink("A", version.parent().unwrap().join("Current")).unwrap();
+        symlink(
+            "Versions/Current/Native",
+            root.join("Frameworks/Native.framework/Native"),
+        )
+        .unwrap();
+        let alias = dir.path().join("Speakerdesk.app");
+        symlink(&root, &alias).unwrap();
+        run(Some(alias.clone())).unwrap();
+        fs::write(version.join("helper.py"), b"python fixture").unwrap();
+        assert!(
+            run(Some(alias))
+                .unwrap_err()
+                .to_string()
+                .contains("Python remains")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_escaping_broken_and_cyclic_links() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        fs::create_dir(&root).unwrap();
+        fs::write(dir.path().join("outside"), b"outside").unwrap();
+        let link = root.join("innocent");
+        for target in ["../outside", "missing", "innocent"] {
+            symlink(target, &link).unwrap();
+            assert!(run(Some(root.clone())).is_err(), "{target}");
+            fs::remove_file(&link).unwrap();
+        }
     }
 
     #[test]

@@ -242,20 +242,6 @@ fn recover_runtime(app: &tauri::AppHandle) -> Result<(), String> {
     start_runtime(app)
 }
 
-/// In-process update channel installed by a later admission change.
-///
-/// The slot is intentionally type-erased so that change can pass its channel
-/// without editing this file.
-#[allow(dead_code)]
-static UPDATE_BRIDGE: Mutex<Option<Box<dyn std::any::Any + Send>>> = Mutex::new(None);
-
-#[allow(dead_code)]
-pub fn set_update_bridge<T: Send + 'static>(channel: T) {
-    *UPDATE_BRIDGE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(channel));
-}
-
 fn recovery_description(app: &tauri::AppHandle) -> String {
     let settings = app.state::<RuntimeSettings>();
     let backup = Some(&settings.executable).and_then(|exe| {

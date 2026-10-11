@@ -1,24 +1,37 @@
-# ADR-0001: Python-free Rust core with mlx-rs in a resident inference child
+# ADR-0001: Rust application with a resident inference child
 
 ## Status
 
-Accepted
-
-## Context
-
-Speakerdesk 0.6.6 runs product behavior in a Python sidecar beside the Tauri shell. Model work uses MLX on Apple Silicon. A Metal abort or an out-of-memory failure in that process can take down the recording writer and the saved job.
+Accepted design; application integration and model qualification are unfinished.
 
 ## Decision
 
-The shipped app is a Rust core. axum serves the existing frontend and JSON API on `127.0.0.1` inside the Tauri process. MLX runs only in one resident child, the same executable started as `speakerdesk --inference`, using mlx-rs 0.32.x bound to the MLX version 0.6.6 ships. The parent owns import, speech admission, language routing, the live engine, refinement, and persistence. The child holds weights and streaming state.
+Rust owns product behavior, persistence, publication and capture coordination.
+Axum serves the existing frontend inside Tauri. One resident child isolates
+native inference failures from recordings and the editor. Swift capture remains.
 
-## Alternatives
+Speech model graphs and decoding use Rust with mlx-rs 0.32.0. Its locked native
+runtime is MLX 0.32.2; the Python baseline uses 0.32.3. Qualify behavior and
+performance rather than asserting identical runtimes. ReDimNet uses its existing
+compiled artifact through objc2-core-ml; do not build a generic MIL interpreter.
 
-- In-process MLX inside Tauri. A Metal failure would kill the UI and the recording.
-- ONNX Runtime. It would not run the pinned MLX graphs the 0.6.6 models use.
-- candle. It is a different graph runtime and would not match the pinned mlx-audio and mlx-speech behavior.
-- Raw mlx-c bindings. mlx-rs already wraps that surface at the required 0.32 pin.
+Heavy inference requires measured acceleration. Ordinary CPU preprocessing and
+mixed Core ML execution are allowed. Compare CPU_AND_GPU and ALL on equivalent
+voice fixtures; ANE preference is not evidence of faster execution or compatible
+embeddings. Saved profiles retain their original model identities.
 
-## Consequences
+The parent owns operation cancellation and child lifecycle. Control remains
+serviceable during inference; termination is a bounded fallback followed by
+reaping and generation invalidation. Model protocol types may change to carry
+valid lengths, stream positions and operation identities correctly.
 
-Orchestration can be tested with model doubles. A child crash loses model state only. There is no CPU neural fallback when Metal is unavailable. Windows is a later port of the same `Models` trait.
+## Alternatives and limits
+
+In-process inference would expose capture and the editor to runtime aborts.
+MLX is the starting Mac backend, not a requirement to preserve Python APIs or
+internal graphs. A runtime/operator or performance blocker requires a measured
+reassessment. No project-owned C++ model implementation is planned.
+
+Keep domain types independent of Metal and MLX. Windows implementation follows
+Mac qualification; an ONNX Runtime/Windows ML route still needs graph/operator
+qualification and separate AMD, NVIDIA and Intel hardware evidence.

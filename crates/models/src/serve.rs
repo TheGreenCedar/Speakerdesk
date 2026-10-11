@@ -9,6 +9,7 @@ use crate::dispatch;
 use crate::metallib;
 
 pub fn serve() -> std::io::Result<()> {
+    metallib::prepare(None).map_err(std::io::Error::other)?;
     serve_on(std::io::stdin(), std::io::stdout())
 }
 
@@ -17,7 +18,6 @@ where
     R: Read,
     W: Write,
 {
-    let _ = metallib::prepare(None);
     let cancel = Arc::new(AtomicBool::new(false));
     loop {
         let envelope = match read_envelope(&mut reader) {

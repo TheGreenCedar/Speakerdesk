@@ -576,13 +576,7 @@ mod tests {
         assert!(middle.iter().all(|sample| (*sample - 8192).abs() <= 8));
 
         let flac = dir.join("tone.flac");
-        let status = std::process::Command::new("ffmpeg")
-            .args(["-nostdin", "-v", "error", "-y", "-i"])
-            .arg(&wav)
-            .arg(&flac)
-            .status()
-            .expect("ffmpeg is required to encode the FLAC fixture");
-        assert!(status.success());
+        fs::write(&flac, include_bytes!("../tests/testdata/stereo-48k.flac")).unwrap();
         let flac_out = dir.join("flac-16k.wav");
         normalize(&flac, &flac_out).unwrap();
         let flac_pcm: Vec<i16> = WavReader::open(&flac_out)

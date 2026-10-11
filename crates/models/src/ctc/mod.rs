@@ -3,7 +3,6 @@
 use speakerdesk_core::error::ChildError;
 use speakerdesk_core::ipc::CtcScoresOut;
 
-mod json;
 pub mod manifest;
 
 pub fn ctc_scores(_pcm: &[f32], _token_ids: &[i32]) -> Result<CtcScoresOut, ChildError> {
@@ -16,5 +15,7 @@ mod tests {
     /// compare scores and require max absolute delta <= 1e-4.
     #[test]
     #[ignore = "safetensors gate |delta| <= 1e-4"]
-    fn parity_ctc() {}
+    fn parity_ctc() {
+        panic!("Not implemented: real model comparison has not run.");
+    }
 }

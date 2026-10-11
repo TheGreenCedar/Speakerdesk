@@ -170,6 +170,6 @@ mod tests {
     #[test]
     #[ignore = "weights mlx-community/Nemotron-3-Diarization@59ed2db"]
     fn parity_sortformer() {
-        panic!("parity requires mlx-community/Nemotron-3-Diarization@59ed2db");
+        panic!("Not implemented: real model comparison has not run.");
     }
 }

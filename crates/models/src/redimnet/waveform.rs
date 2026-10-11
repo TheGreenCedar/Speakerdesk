@@ -78,8 +78,8 @@ pub fn reuses_identity(cosine: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CLIP_ABS, IDENTITY_REUSE_COSINE, INPUT_SAMPLES, MAX_SAMPLES, MIN_SAMPLES, SILENCE_RMS,
-        is_clipped, is_silent, prepared_audio, reuses_identity,
+        CLIP_ABS, INPUT_SAMPLES, MAX_SAMPLES, MIN_SAMPLES, SILENCE_RMS, is_clipped, is_silent,
+        prepared_audio,
     };
 
     fn ramp(len: usize) -> Vec<f32> {
@@ -186,9 +186,6 @@ mod tests {
     #[test]
     #[ignore = "cosine >= 0.9999 decides identity reuse (D7); do not mint a new identity"]
     fn parity_redimnet() {
-        assert!(reuses_identity(IDENTITY_REUSE_COSINE));
-        assert!(reuses_identity(0.9999));
-        assert!(reuses_identity(1.0));
-        assert!(!reuses_identity(0.999899999999));
+        panic!("Not implemented: real embedding compatibility has not been measured.");
     }
 }

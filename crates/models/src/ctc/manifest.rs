@@ -6,7 +6,10 @@
 //! `UINT8_dequantize_then_I-O_to_O-I`. Reading stops at those bytes. This
 //! module does not open `weights.npz`.
 
-use super::json::{self, Json};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use std::collections::HashSet;
+use std::fmt;
 
 /// Failure while reading the alignment manifest or applying a transform.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -24,40 +27,47 @@ impl ManifestError {
 }
 
 /// How a source initializer is stored in the ONNX blob.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum Dtype {
     /// Little-endian IEEE-754 binary32 (`<f4`).
+    #[serde(rename = "<f4")]
     F32Le,
     /// Unsigned byte (`u1`).
+    #[serde(rename = "u1")]
     U8,
 }
 
 /// Layout change applied after the source bytes are decoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum Transform {
     /// Copy a float32 tensor unchanged.
+    #[serde(rename = "identity")]
     Identity,
     /// `ndarray.transpose(0, 2, 1)` on an `[O, I, kernel]` weight.
+    #[serde(rename = "OI-kernel_to_O-kernel-I")]
     OiKernelToOKernelI,
     /// `(uint8 - zero) * scale`, then transpose `[I, O]` to `[O, I]`.
+    #[serde(rename = "UINT8_dequantize_then_I-O_to_O-I")]
     Uint8DequantizeThenIoToOi,
 }
 
 /// One ONNX initializer named by the manifest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Initializer {
+    #[serde(skip)]
     pub name: String,
     pub shape: Vec<usize>,
     pub dtype: Dtype,
     /// Byte offset into the source model. Absent for `scalar_hex` values.
     pub offset: Option<u64>,
     /// Byte length of the file span. Absent for `scalar_hex` values.
+    #[serde(rename = "bytes")]
     pub nbytes: Option<u64>,
     pub scalar_hex: Option<String>,
 }
 
 /// One converted parameter and the sources it reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Parameter {
     pub target: String,
     pub shape: Vec<usize>,
@@ -74,9 +84,10 @@ pub struct ByteSpan {
 }
 
 /// Parsed `parameters` and `initializers` from the alignment manifest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Manifest {
     pub parameters: Vec<Parameter>,
+    #[serde(deserialize_with = "deserialize_initializers")]
     pub initializers: Vec<Initializer>,
 }
 
@@ -119,26 +130,39 @@ impl Manifest {
 
 /// Parse the alignment manifest. Unknown keys are ignored.
 pub fn parse_manifest(text: &str) -> Result<Manifest, ManifestError> {
-    let root = json::parse(text)?;
-    let fields = object(&root)?;
-    let parameters = array(required(fields, "parameters")?)?
-        .iter()
-        .map(parse_parameter)
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut initializers = Vec::new();
-    for (name, value) in object(required(fields, "initializers")?)? {
-        if initializers
-            .iter()
-            .any(|item: &Initializer| item.name == *name)
-        {
-            return Err(ManifestError::new(format!("duplicate initializer {name}")));
+    serde_json::from_str(text).map_err(|error| ManifestError::new(error.to_string()))
+}
+
+// Preserve manifest order and reject duplicate initializer identities.
+fn deserialize_initializers<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Initializer>, D::Error> {
+    struct Initializers;
+    impl<'de> Visitor<'de> for Initializers {
+        type Value = Vec<Initializer>;
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a map of unique initializer names")
         }
-        initializers.push(parse_initializer(name, value)?);
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut names = HashSet::new();
+            let mut result = Vec::new();
+            while let Some((name, mut value)) = map.next_entry::<String, Initializer>()? {
+                if !names.insert(name.clone()) {
+                    return Err(de::Error::custom(format!("duplicate initializer {name}")));
+                }
+                if value.scalar_hex.is_none() && (value.offset.is_none() || value.nbytes.is_none())
+                {
+                    return Err(de::Error::custom(format!(
+                        "{name} needs offset and bytes, or scalar_hex"
+                    )));
+                }
+                value.name = name;
+                result.push(value);
+            }
+            Ok(result)
+        }
     }
-    Ok(Manifest {
-        parameters,
-        initializers,
-    })
+    deserializer.deserialize_map(Initializers)
 }
 
 /// Read one initializer from `source` or from its inline scalar.
@@ -312,58 +336,6 @@ fn uint8_dequantize_then_transpose(inputs: &[SourceTensor]) -> Result<FloatTenso
     })
 }
 
-fn parse_parameter(value: &Json) -> Result<Parameter, ManifestError> {
-    let fields = object(value)?;
-    Ok(Parameter {
-        target: string(required(fields, "target")?)?,
-        shape: shape(required(fields, "shape")?)?,
-        sources: array(required(fields, "sources")?)?
-            .iter()
-            .map(string)
-            .collect::<Result<Vec<_>, _>>()?,
-        transform: parse_transform(&string(required(fields, "transform")?)?)?,
-    })
-}
-
-fn parse_initializer(name: &str, value: &Json) -> Result<Initializer, ManifestError> {
-    let fields = object(value)?;
-    let scalar_hex = optional(fields, "scalar_hex").map(string).transpose()?;
-    let offset = optional(fields, "offset").map(u64_field).transpose()?;
-    let nbytes = optional(fields, "bytes").map(u64_field).transpose()?;
-    if scalar_hex.is_none() && (offset.is_none() || nbytes.is_none()) {
-        return Err(ManifestError::new(format!(
-            "{name} needs offset and bytes, or scalar_hex"
-        )));
-    }
-    Ok(Initializer {
-        name: name.to_string(),
-        shape: shape(required(fields, "shape")?)?,
-        dtype: parse_dtype(&string(required(fields, "dtype")?)?)?,
-        offset,
-        nbytes,
-        scalar_hex,
-    })
-}
-
-fn parse_transform(name: &str) -> Result<Transform, ManifestError> {
-    match name {
-        "identity" => Ok(Transform::Identity),
-        "OI-kernel_to_O-kernel-I" => Ok(Transform::OiKernelToOKernelI),
-        "UINT8_dequantize_then_I-O_to_O-I" => Ok(Transform::Uint8DequantizeThenIoToOi),
-        _ => Err(ManifestError::new("Unknown pinned tensor transform.")),
-    }
-}
-
-fn parse_dtype(name: &str) -> Result<Dtype, ManifestError> {
-    match name {
-        "<f4" => Ok(Dtype::F32Le),
-        "u1" => Ok(Dtype::U8),
-        _ => Err(ManifestError::new(format!(
-            "unknown initializer dtype {name}"
-        ))),
-    }
-}
-
 fn expected_nbytes(initializer: &Initializer) -> Result<u64, ManifestError> {
     let count = element_count(&initializer.shape)?;
     let width: u64 = match initializer.dtype {
@@ -394,57 +366,6 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, ManifestError> {
         raw.push(byte);
     }
     Ok(raw)
-}
-
-fn object(value: &Json) -> Result<&[(String, Json)], ManifestError> {
-    match value {
-        Json::Object(fields) => Ok(fields),
-        _ => Err(ManifestError::new("expected JSON object")),
-    }
-}
-
-fn array(value: &Json) -> Result<&[Json], ManifestError> {
-    match value {
-        Json::Array(items) => Ok(items),
-        _ => Err(ManifestError::new("expected JSON array")),
-    }
-}
-
-fn required<'a>(fields: &'a [(String, Json)], key: &str) -> Result<&'a Json, ManifestError> {
-    optional(fields, key).ok_or_else(|| ManifestError::new(format!("missing field {key}")))
-}
-
-fn optional<'a>(fields: &'a [(String, Json)], key: &str) -> Option<&'a Json> {
-    fields
-        .iter()
-        .find(|(name, _)| name == key)
-        .map(|(_, value)| value)
-}
-
-fn string(value: &Json) -> Result<String, ManifestError> {
-    match value {
-        Json::String(text) => Ok(text.clone()),
-        _ => Err(ManifestError::new("expected JSON string")),
-    }
-}
-
-fn shape(value: &Json) -> Result<Vec<usize>, ManifestError> {
-    array(value)?
-        .iter()
-        .map(|item| {
-            let number = u64_field(item)?;
-            usize::try_from(number).map_err(|_| ManifestError::new("shape dimension overflows"))
-        })
-        .collect()
-}
-
-fn u64_field(value: &Json) -> Result<u64, ManifestError> {
-    match value {
-        Json::Number(text) if !text.is_empty() && !text.contains(['-', '.', 'e', 'E']) => text
-            .parse()
-            .map_err(|_| ManifestError::new("expected unsigned integer")),
-        _ => Err(ManifestError::new("expected unsigned integer")),
-    }
 }
 
 #[cfg(test)]
@@ -560,6 +481,22 @@ mod tests {
           }
         }"#;
         let error = parse_manifest(text).unwrap_err();
-        assert_eq!(error.to_string(), "Unknown pinned tensor transform.");
+        assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_invalid_initializer_bytes() {
+        for fields in [
+            r#""x":{"shape":[],"dtype":"u1","offset":-1,"bytes":1}"#,
+            r#""x":{"shape":[],"dtype":"u1","offset":18446744073709551616,"bytes":1}"#,
+            r#""x":{"shape":[],"dtype":"u1","offset":0.5,"bytes":1}"#,
+            r#""x":{"shape":[],"dtype":"u1","scalar_hex":"01"},"x":{"shape":[],"dtype":"u1","scalar_hex":"02"}"#,
+        ] {
+            let text = format!(r#"{{"parameters":[],"initializers":{{{fields}}}}}"#);
+            assert!(parse_manifest(&text).is_err(), "{text}");
+        }
+        let text = r#"{"parameters":[],"initializers":{"x":{"shape":[],"dtype":"u1","scalar_hex":"日本"}}}"#;
+        let manifest = parse_manifest(text).unwrap();
+        assert!(read_initializer(&[], &manifest.initializers[0]).is_err());
     }
 }

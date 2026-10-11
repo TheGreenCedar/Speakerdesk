@@ -23,5 +23,7 @@ mod tests {
     /// (`77fa3f52b482ec80d086df55f893065a9baab172`). This child does not call mlx-rs.
     #[test]
     #[ignore = "macOS weights mlx-community/whisper-tiny-asr-fp16@77fa3f5"]
-    fn parity_whisper_lid() {}
+    fn parity_whisper_lid() {
+        panic!("Not implemented: real model comparison has not run.");
+    }
 }

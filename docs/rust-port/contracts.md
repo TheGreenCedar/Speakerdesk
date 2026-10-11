@@ -1,6 +1,6 @@
-# Frozen contracts
+# Integration contracts
 
-Coordinator-owned types. Later agents call these and do not change the signatures or the message text.
+Preserve product behavior and saved data. Change incomplete internal interfaces together with their callers and tests when the assembled application requires it.
 
 ## Toolchain
 
@@ -18,11 +18,11 @@ Rust **1.99.0** (`rust-toolchain.toml`), edition 2024. This is the stable 1.99 r
 
 `speakerdesk_core::models::Models` is the sync trait. Payloads are `speakerdesk_core::ipc::Request` and `Response`. A frame is a big-endian `u32` length plus a postcard `Envelope` (`request_id` and `Result`). `DiarizeFile` has no fixed timeout; the supervisor scales it. Other timeouts are `request_timeout`.
 
-Hello returns the build id and `"unavailable"` off macOS. Other model arms return `ChildError::Unimplemented` until the owning model agent fills them.
+Hello currently reports `"unavailable"` on every platform; OS identity is not initialized model capability. Other model arms return `ChildError::Unimplemented` until the owning model agent fills them.
 
 ## Jobs
 
-`Job` and `Document` round-trip the product fields named in `document.rs`. A missing `kind` deserializes as `import`. Job ids are 32 lowercase hex characters. `store::SCHEMA_V1` is the new database. `import_legacy` is the one-way importer and still returns `Unimplemented`.
+`Job` and `Document` round-trip the product fields named in `document.rs`. A missing `kind` deserializes as `import`. Job ids are 32 lowercase hex characters. `store::SCHEMA_V1` is the new database. `import_legacy` is the one-way importer; hot-journal recovery and production startup integration remain unfinished.
 
 ## Messages and security
 

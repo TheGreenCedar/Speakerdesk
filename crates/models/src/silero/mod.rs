@@ -185,8 +185,8 @@ pub fn hysteresis_flag(was_speaking: bool, probability: f32, constant_pcm: bool)
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTEXT_SAMPLES, FRAME_SAMPLES, MODEL_SAMPLES, WEIGHT_PIN, context_tail, hysteresis_flag,
-        index_frames, model_input, next_frame, peak_gain, vad_open,
+        CONTEXT_SAMPLES, FRAME_SAMPLES, MODEL_SAMPLES, context_tail, hysteresis_flag, index_frames,
+        model_input, next_frame, peak_gain,
     };
 
     #[test]
@@ -288,13 +288,6 @@ mod tests {
     #[test]
     #[ignore = "runs on macOS with pinned weights mlx-community/silero-vad-v6@2ebf4a5"]
     fn parity_silero() {
-        assert_eq!(WEIGHT_PIN, "mlx-community/silero-vad-v6@2ebf4a5");
-        assert_eq!(FRAME_SAMPLES, 512);
-        assert_eq!(CONTEXT_SAMPLES, 64);
-        let error = vad_open(None).expect_err("GPU Silero loads only on macOS");
-        assert!(matches!(
-            error,
-            speakerdesk_core::error::ChildError::Unimplemented
-        ));
+        panic!("Not implemented: real model comparison has not run.");
     }
 }
