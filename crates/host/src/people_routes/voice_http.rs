@@ -273,7 +273,7 @@ fn run_voice(
                 .ok_or_else(|| conflict("Revision exhausted"))?;
         }
         let operation = app
-            .begin_voice_operation(&mut store, &mut job)
+            .begin_refinement_operation(&mut store, &mut job)
             .map_err(|e| conflict(e.message))?;
         (job, clips, generation, catalog, operation)
     };

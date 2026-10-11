@@ -40,6 +40,8 @@ use crate::admission::{Activity, Admission as UpdateAdmission};
 use crate::http::{security_headers, token_header};
 use crate::worker::JobWorker;
 
+mod retry;
+
 const NOT_FOUND: &str = "The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.";
 const PREPARING_AUDIO: &str = "Preparing local audio…";
 const READY_FOR_INFERENCE: &str = "Ready for local inference or manual editing.";
@@ -79,6 +81,14 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 /// The production implementation uses the resident inference supervisor.
 pub trait ApplicationModels: Send + Sync {
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String>;
+    fn retry_passage(
+        &self,
+        _pcm: &[f32],
+        _language: &str,
+        _cancellation: &CancellationToken,
+    ) -> Result<speakerdesk_core::import::PassageCandidate, String> {
+        Err("Passage retry is unavailable in this build.".into())
+    }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
         None
     }
@@ -271,7 +281,7 @@ impl AppState {
         self.shared.models.lock().expect("models").clone()
     }
 
-    pub(crate) fn begin_voice_operation(
+    pub(crate) fn begin_refinement_operation(
         &self,
         store: &mut SqliteJobStore,
         job: &mut Job,
@@ -289,7 +299,7 @@ impl AppState {
         {
             return Err(ApiError::new(
                 409,
-                "Finish the active recording or transcription before checking voices.",
+                "Finish the active recording or transcription before starting this operation.",
             ));
         }
         let generation = job
@@ -380,6 +390,14 @@ impl AppState {
                 {
                     job.extra
                         .insert("operation_generation".into(), json!(generation + 1));
+                    if job
+                        .extra
+                        .remove("passage_retry")
+                        .is_some_and(|value| !value.is_null())
+                    {
+                        job.message =
+                            "Passage retry interrupted. Existing words are retained.".into();
+                    }
                     if ["queued", "processing"].contains(&job.status.as_str()) {
                         job.status = "uploaded".into();
                         job.message = "Transcription interrupted. Saved audio is kept.".into();
@@ -407,6 +425,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{jid}/segments/{sid}", patch(edit_passage))
         .route("/api/jobs/{jid}/export/{kind}", get(export_job))
         .route("/api/jobs/{jid}/run", post(run_job))
+        .route("/api/jobs/{jid}/retry", post(retry::retry_passage))
         .route("/api/jobs/{jid}/cancel", post(cancel_job))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
@@ -852,7 +871,7 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
                 .expect("operations")
                 .get(&id)
                 .cloned();
-            let voice = running.as_ref().is_some_and(|op| {
+            let refinement = running.as_ref().is_some_and(|op| {
                 op.activity == Activity::Refinement
                     && job
                         .extra
@@ -860,7 +879,7 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
                         .and_then(Value::as_u64)
                         == Some(op.generation)
             });
-            if !voice
+            if !refinement
                 && (job.kind != JobKind::Import
                     || !["queued", "processing"].contains(&job.status.as_str()))
             {
@@ -876,7 +895,14 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
                 .unwrap_or(0);
             job.extra
                 .insert("operation_generation".into(), json!(generation + 1));
-            if !voice {
+            if job
+                .extra
+                .remove("passage_retry")
+                .is_some_and(|value| !value.is_null())
+            {
+                job.message = "Passage retry cancelled. Existing words are retained.".into();
+            }
+            if !refinement {
                 job.status = "uploaded".into();
                 job.message = "Transcription cancelled. Saved audio is kept.".into();
             }
@@ -1495,6 +1521,7 @@ pub(crate) async fn blocking(work: impl FnOnce() -> Response + Send + 'static) -
 
 #[cfg(test)]
 mod tests {
+    mod retry;
     use speakerdesk_core::store::JobStore;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};

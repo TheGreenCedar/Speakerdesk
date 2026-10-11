@@ -43,6 +43,21 @@ struct ImportInference {
 }
 
 impl ApplicationModels for ImportInference {
+    fn retry_passage(
+        &self,
+        pcm: &[f32],
+        language: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<speakerdesk_core::import::PassageCandidate, String> {
+        speakerdesk_core::import::retry_passage(
+            &self.supervisor.models(cancellation.clone()),
+            pcm,
+            0.,
+            pcm.len() as f64 / 16000.,
+            language,
+        )
+        .map_err(|error| error.to_string())
+    }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
         self.voice.get().cloned()
     }

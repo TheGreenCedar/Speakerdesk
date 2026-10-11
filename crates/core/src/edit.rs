@@ -40,6 +40,7 @@ const SERVER_REST_KEYS: &[&str] = &[
     "end_sample",
     "capture_audio",
     "text_audio_anchor",
+    "reading_alignment",
     "decode_context",
     "speech_regions",
     "assembly_provenance",
@@ -369,6 +370,7 @@ fn clear_alignment_bundle(segment: &mut Segment) {
     segment.reading_turn_provenance = None;
     for key in [
         "alignment",
+        "reading_alignment",
         "assembly_provenance",
         "bounded_decode_provenance",
         "reading_turns",

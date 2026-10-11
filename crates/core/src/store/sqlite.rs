@@ -576,6 +576,16 @@ fn overlay_duration(duration: Option<f64>, checkpoint: Option<f64>) -> Option<f6
 fn recover_one(stored: StoredJob, active: &[&str]) -> Option<Job> {
     let mut changed = stored.checkpoint.is_some();
     let mut job = overlay_checkpoint(stored);
+    let retry_interrupted = job
+        .extra
+        .get("passage_retry")
+        .is_some_and(|value| !value.is_null());
+    if retry_interrupted {
+        job.extra.remove("passage_retry");
+        job.message = "Passage retry interrupted. Existing words are retained.".into();
+        job.revision += 1;
+        changed = true;
+    }
     if let Some(checks) = job
         .extra
         .get_mut("voice_checks")
@@ -589,7 +599,7 @@ fn recover_one(stored: StoredJob, active: &[&str]) -> Option<Job> {
             check["status"] = Value::String("cancelled".into());
             cancelled = true;
         }
-        if cancelled {
+        if cancelled && !retry_interrupted {
             job.revision += 1;
             changed = true;
         }

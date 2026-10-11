@@ -722,3 +722,53 @@ Remaining acceptance: native passage retry/language repair, long-file diarizatio
 model download/setup, live capture/recovery, Python-free default packaging/updater,
 and full cold/warm/live performance gates. Synthetic voice evidence does not
 establish human-population accuracy or compatibility with legacy embedding spaces.
+
+## Passage retry in the native editor
+
+The editor's Repair action now reaches `POST /api/jobs/{id}/retry` through the
+existing authenticated router. A ready transcript stays editable while the same
+serial worker reads only the selected WAV range and runs resident Silero/Cohere
+with an explicit language. The result is a candidate; only “Use this text” changes
+the words. Publication checks the operation generation and target passage/audio
+snapshot, then merges into the fresh document. Unrelated edits survive. Cancellation
+invalidates publication before notifying inference and retains admission through
+cleanup. Pending retries recover once; completed legacy `passage_retry: null`
+records remain unchanged.
+
+Before this change the actual editor displayed “The string did not match the
+expected pattern” because the route was missing. The HTTP regression reproduces
+404 before implementation. File-backed router replays cover exact nonzero/fractional
+crop samples, unrelated saves, target text/bounds/speaker/language/audio changes,
+queued and active cancellation, shutdown, model failure, explicit acceptance,
+stale saves, and restart. These are retained-output tests, not acoustic proof.
+CTC metadata is now restored from the server and cleared when words or bounds
+change. The renderer includes retry ownership in its cache key and offers Cancel.
+
+Independent review found two further failures and verified their corrections:
+legacy null retry records were misclassified as interrupted, and candidate
+publication could advance revision before dirty text autosaved. A controller test
+reproduces the latter 409 before the fix. A single guarded retry compares the last
+server document with the current one, excluding only candidate metadata; actual
+word, speaker, timing or name changes still conflict. Newer local typing survives.
+
+The optimized isolated Tauri app ran a real retry on saved synthetic Daniel audio.
+It retained a deliberate placeholder until the user action selected the model
+candidate. Revision 10 preserved the placeholder as `replaced_text`, recorded
+manual passage language, and removed stale alignment. Whole-app quit reaped
+PIDs 82205/82222/82223. Reopen returned the identical saved document and revision;
+the native Save dialog exported the accepted words, and a revision-9 PUT returned
+409 without changing them. Evidence: `retry-ui-{before,candidate,accepted,reopened,
+stale}.json` and `retry-ui-export.txt` under
+`/private/tmp/speakerdesk-native-desktop.WJKAde/`.
+
+Core 145 and host 52 tests pass. Renderer checks pass 45 with one optional external
+fixture skipped. Strict core/host Clippy and the locked release build pass (the
+previously recorded upstream mlx-sys warnings remain). Release SHA256:
+`20f949a712067cee240079654cf3cf2f5c60f71a14cf97f9b4e0e95c3b114ef9`;
+ad-hoc signed preview SHA256:
+`39e9d324f70d3356536dc2cf177acf4323c63c08d8e6987bde2d44ca36f7f392`.
+
+The complete replacement remains unfinished. Next work is long-file diarization,
+model download/setup, live capture and saved-audio recovery, Python-free default
+packaging/updater, and the full cold/warm/live performance gates. The installed
+application, production data and existing model cache remain untouched.

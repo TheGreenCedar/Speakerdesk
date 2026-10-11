@@ -46,7 +46,7 @@ async function api(path, options = {}) {
     const operation=(async()=>{
       const response = await fetch(path, {...requestOptions, headers,...(controller?{signal:controller.signal}:{})});
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Local request failed.');
+      if (!response.ok) throw Object.assign(new Error(data.error || 'Local request failed.'),{status:response.status});
       return data;
     })();
     if(!updater)return await operation;
@@ -456,7 +456,7 @@ function refreshReadingTurnView(card,segment) {
 }
 function savedPassageSignature(segment) {
   return JSON.stringify([segment,doc.speakers,doc.provenance,selected.speaker_assignments?.[segment.speaker],
-    ['preparing','processing','queued'].includes(selected.status)]);
+    ['preparing','processing','queued'].includes(selected.status),!!selected.passage_retry]);
 }
 function savedCard(segment) {
   const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;card.dataset.speaker=segment.speaker;
@@ -556,9 +556,9 @@ function appendPassageRepair(body,segment,reason) {
     }
     language.value=segment.language || '';
     const retry=node('button','Retry passage locally');
-    const busy=['preparing','processing','queued'].includes(selected.status);
+    const busy=['preparing','processing','queued'].includes(selected.status),retryPending=!!selected.passage_retry;
     const tooLong=segment.end-segment.start>24.5;
-    retry.disabled=busy || tooLong;language.disabled=busy;
+    retry.disabled=busy || retryPending || tooLong;language.disabled=busy || retryPending;
     if(tooLong)retry.title='Choose a passage of at most 24.5 seconds before retrying.';
     retry.addEventListener('click',async()=>{
       try {
@@ -574,6 +574,20 @@ function appendPassageRepair(body,segment,reason) {
       finally{retrying=false;if(selected)setStatus();}
     });
     tools.append(language,retry);repair.append(tools);body.append(repair);
+    if(selected.passage_retry?.segment_id===segment.id) {
+      const cancel=node('button','Cancel passage retry');
+      cancel.addEventListener('click',async()=>{
+        try {
+          await flushSave();
+          const jid=selected.id,generation=++selectionGeneration;retrying=true;cancel.disabled=true;setStatus();
+          const next=await api(`/api/jobs/${jid}/cancel`,{method:'POST'});
+          if(selected?.id!==jid || generation!==selectionGeneration)return;
+          selected=next;doc=structuredClone(next.document);setStatus();renderEditor();
+        } catch(error){cancel.disabled=false;notice(error.message,true);}
+        finally{retrying=false;if(selected)setStatus();}
+      });
+      tools.append(cancel);
+    }
     if(reason && segment.text.trim()) {
       const reviewed=node('button','Mark words reviewed');reviewed.disabled=busy;
       reviewed.addEventListener('click',()=>{segment.review_resolution='words_reviewed';segment.review=hasOverlappingSpeakers(segment);changed();renderSegments();});
@@ -784,18 +798,41 @@ async function save({quiet = false} = {}) {
   if (saving) throw new Error('A save is in progress. Try again when it finishes.');
   clearTimeout(autosaveTimer); autosaveTimer = null;
   if (undoRemoval) { clearTimeout(undoRemoval.timer); undoRemoval = null; if (document.querySelector('#notice .notice-action')) notice(''); }
-  const generation = editGeneration, jid = selected.id;
+  const generation = editGeneration, jid = selected.id,base=selected,submitted=structuredClone(doc);
   saving = true; renderSaveState();
   try {
-    const result = await api(`/api/jobs/${jid}/transcript`, {method: 'PUT', updateSave: true, body: JSON.stringify({revision: selected.revision, document: doc})});
+    const put=revision=>api(`/api/jobs/${jid}/transcript`, {method: 'PUT', updateSave: true, body: JSON.stringify({revision, document: submitted})});
+    let result;
+    try {result=await put(base.revision);}
+    catch(error) {
+      if(error.status!==409 || !base.passage_retry)throw error;
+      const latest=await api(`/api/jobs/${jid}`);
+      // Only candidate publication may advance this save; authoritative edits still conflict.
+      const withoutCandidates=document=>{
+        const copy=structuredClone(document);for(const segment of copy?.segments || [])delete segment.retry_candidate;
+        return JSON.stringify(copy);
+      };
+      if(selected?.id!==jid || latest.status!==base.status || latest.duration!==base.duration ||
+        withoutCandidates(latest.document)!==withoutCandidates(base.document))throw error;
+      result=await put(latest.revision);
+    }
     if (selected?.id !== jid) return;
     selected = result;
+    const savedSegments=new Map(result.document.segments.map(segment=>[segment.id,segment]));
+    for(const segment of doc.segments) {
+      const saved=savedSegments.get(segment.id);
+      if(saved && saved.start===segment.start && saved.end===segment.end && saved.speaker===segment.speaker) {
+        if(saved.retry_candidate)segment.retry_candidate=structuredClone(saved.retry_candidate);
+        else delete segment.retry_candidate;
+      }
+    }
     if (generation === editGeneration) {
       dirty = false;
       // Keep the live document while someone is typing so the caret and the
       // passage handlers stay attached; adopt the saved copy otherwise.
       if (!$('editor').contains(document.activeElement)) { doc = structuredClone(result.document); renderEditor(); }
     }
+    if(base.passage_retry && $('editor').contains(document.activeElement))renderSegments();
     setStatus();
     if (!quiet) notice('Saved on this Mac.');
   } finally { saving = false; renderSaveState(); if (dirty) scheduleAutosave(); }
