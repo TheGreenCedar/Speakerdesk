@@ -15,6 +15,63 @@ fn supervisor() -> std::sync::Arc<InferenceSupervisor> {
 
 #[test]
 #[ignore = "requires SPEAKERDESK_TEST_CHILD desktop binary and SPEAKERDESK_TEST_MODELS disposable model root"]
+fn actual_desktop_child_returns_native_voice_identity_and_reaps() {
+    let host = InferenceSupervisor::new(
+        std::env::var_os("SPEAKERDESK_TEST_CHILD").expect("desktop binary"),
+        env!("CARGO_PKG_VERSION"),
+        std::env::var_os("SPEAKERDESK_TEST_MODELS").expect("model directory"),
+    )
+    .unwrap();
+    let models = host.models(CancellationToken::new());
+    let report = models.setup_check(&["redimnet2-b6".into()]).unwrap();
+    let revision =
+        "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU";
+    assert_eq!(report.len(), 1);
+    assert!(report[0].ok);
+    assert_eq!(report[0].model, revision);
+    let pid = host.child_pid().unwrap();
+    let reference: serde_json::Value = serde_json::from_str(include_str!(
+        "../../models/tests/data/redimnet-mlx-reference.json"
+    ))
+    .unwrap();
+    let mut reader = hound::WavReader::open(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../models/tests/data/two-voice.wav"),
+    )
+    .unwrap();
+    let pcm: Vec<f32> = reader
+        .samples::<i16>()
+        .map(|s| f32::from(s.unwrap()) / 32768.)
+        .collect();
+    let output = models.embed_voice(&pcm[..64000]).unwrap();
+    assert_eq!(output.model.revision, revision);
+    assert_eq!(output.model.model_id, "aufklarer/ReDimNet2-B6-CoreML");
+    assert_eq!(
+        output.model.artifact_sha256,
+        "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9"
+    );
+    assert_eq!(output.model.dimension, 192);
+    assert_eq!(output.model.sample_rate, 16000);
+    assert!(output.clip.clean);
+    assert_eq!(output.clip.vector.len(), 192);
+    let cosine: f64 = output
+        .clip
+        .vector
+        .iter()
+        .zip(reference["cases"][0]["vector"].as_array().unwrap())
+        .map(|(a, b)| a * b.as_f64().unwrap())
+        .sum();
+    assert!(cosine >= speakerdesk_core::voice::IDENTITY_REUSE_COSINE);
+    assert!(models.embed_voice(&[]).is_err());
+    let silence = models.embed_voice(&[0.; 32000]).unwrap();
+    assert!(!silence.clip.clean && silence.clip.vector.is_empty());
+    assert_eq!(silence.model, output.model);
+    assert_eq!(host.child_pid(), Some(pid));
+    host.shutdown();
+    reaped(pid);
+}
+
+#[test]
+#[ignore = "requires SPEAKERDESK_TEST_CHILD desktop binary and SPEAKERDESK_TEST_MODELS disposable model root"]
 fn actual_desktop_child_runs_speech_models_and_reaps() {
     let child = std::env::var_os("SPEAKERDESK_TEST_CHILD").expect("desktop binary");
     let model_root = std::env::var_os("SPEAKERDESK_TEST_MODELS").expect("model directory");

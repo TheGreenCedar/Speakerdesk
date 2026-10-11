@@ -3377,8 +3377,8 @@ mod tests {
             self.ctc_calls.fetch_add(1, Ordering::SeqCst);
             Err(ChildError::Unimplemented)
         }
-        fn embed_voice(&self, _pcm: &[f32]) -> Result<Vec<f32>, ChildError> {
-            Ok(vec![0.0])
+        fn embed_voice(&self, _pcm: &[f32]) -> Result<crate::ipc::VoiceEmbedding, ChildError> {
+            Err(ChildError::Unimplemented)
         }
         fn setup_check(&self, _models: &[String]) -> Result<Vec<SetupModelReport>, ChildError> {
             Ok(Vec::new())

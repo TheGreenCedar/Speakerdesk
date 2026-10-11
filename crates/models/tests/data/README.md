@@ -91,3 +91,23 @@ the checkpoint's token metadata. It does not invoke Rust or generate text.
 SPEAKERDESK_TEST_WHISPER=/path/to/models/whisper-language \
   cargo test --release --locked -p speakerdesk-models --test whisper -- --ignored --nocapture
 ```
+
+`redimnet-mlx-reference.json` records two speaker crops from the same WAV through
+the unchanged 0.6.6 MLX voice graph and waveform preparation on MLX 0.32.2.
+`generate_redimnet_reference.py` verifies the baseline Python source and artifact
+manifest hashes before running; it takes source, model, WAV and new output paths.
+The Rust Core ML test compares both compute policies with these independent
+vectors using the existing identity-reuse cosine bound. It also checks repeat
+calls, silence, clipping, invalid PCM and cancellation. A separate artifact test
+mutates only a temporary copy. These two synthetic clips establish conversion
+consistency, not human recognition accuracy or universal saved-profile compatibility.
+
+```sh
+SPEAKERDESK_TEST_VOICE=/path/to/models/redimnet2-b6 \
+SPEAKERDESK_VOICE_RESULT=/new/result.json \
+  cargo test --release --locked -p speakerdesk-models --test redimnet -- --ignored --nocapture
+```
+
+For process-scoped timing/memory comparison, run the policy test separately with
+`SPEAKERDESK_TEST_COMPUTE_POLICY=CPU_AND_GPU` and `ALL`, each with a fresh result
+path. Metal capture is a separate test and is excluded from timing measurements.

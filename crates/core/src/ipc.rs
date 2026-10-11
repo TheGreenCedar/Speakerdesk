@@ -86,6 +86,12 @@ pub struct CtcScoresOut {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoiceEmbedding {
+    pub model: crate::voice::VoiceModel,
+    pub clip: crate::voice::ClipEmbedding,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetupModelReport {
     pub model: String,
     pub ok: bool,
@@ -170,7 +176,7 @@ pub enum Response {
     Probe(LanguageProbeOut),
     Text(AsrText),
     Ctc(CtcScoresOut),
-    Embedding(Vec<f32>),
+    Embedding(VoiceEmbedding),
     Setup(Vec<SetupModelReport>),
     Metrics(MetricsOut),
     Ack,

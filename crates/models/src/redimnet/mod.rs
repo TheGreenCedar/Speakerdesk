@@ -1,6 +1,9 @@
-//! ReDimNet2 B6 MIL executor. Ported from `mlx_voice_mil.py`.
+//! ReDimNet2 B6 through the system Core ML runtime; waveform policy stays in Rust.
 //! Weights: `aufklarer/ReDimNet2-B6-CoreML@112dd8f`.
 mod waveform;
+
+#[cfg(target_os = "macos")]
+pub mod coreml;
 
 use speakerdesk_core::error::ChildError;
 
@@ -9,6 +12,6 @@ pub use waveform::{
     SILENCE_RMS, is_clipped, is_silent, prepared_audio, reuses_identity, waveform_rms,
 };
 
-pub fn embed_voice(_pcm: &[f32]) -> Result<Vec<f32>, ChildError> {
+pub fn embed_voice(_pcm: &[f32]) -> Result<speakerdesk_core::ipc::VoiceEmbedding, ChildError> {
     Err(ChildError::Unimplemented)
 }

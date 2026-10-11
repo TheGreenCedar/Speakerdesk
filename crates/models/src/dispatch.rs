@@ -13,6 +13,7 @@ pub struct Runtime {
     cohere: Option<cohere::network::Network>,
     whisper: Option<whisper_lid::network::Network>,
     ctc: Option<ctc::network::Network>,
+    voice: Option<redimnet::coreml::Network>,
     vad_sessions: std::collections::HashMap<u64, crate::silero::session::Session>,
     next_session: u64,
 }
@@ -30,6 +31,7 @@ impl Runtime {
             cohere: None,
             whisper: None,
             ctc: None,
+            voice: None,
             vad_sessions: Default::default(),
             next_session: 1,
         })
@@ -55,7 +57,7 @@ impl Runtime {
                                 &self.model_root.join(model),
                             )?);
                         }
-                        crate::silero::WEIGHT_PIN
+                        crate::silero::WEIGHT_PIN.to_string()
                     }
                     "nemotron" => {
                         if self.nemotron.is_none() {
@@ -63,7 +65,7 @@ impl Runtime {
                                 &self.model_root.join(model),
                             )?);
                         }
-                        sortformer::WEIGHT_PIN
+                        sortformer::WEIGHT_PIN.to_string()
                     }
                     "cohere-speech" => {
                         if self.cohere.is_none() {
@@ -71,7 +73,7 @@ impl Runtime {
                                 &self.model_root.join(model),
                             )?);
                         }
-                        cohere::WEIGHT_PIN
+                        cohere::WEIGHT_PIN.to_string()
                     }
                     "whisper-language" => {
                         if self.whisper.is_none() {
@@ -79,14 +81,27 @@ impl Runtime {
                                 &self.model_root.join(model),
                             )?);
                         }
-                        whisper_lid::WEIGHT_PIN
+                        whisper_lid::WEIGHT_PIN.to_string()
                     }
                     "coarse-alignment" => {
                         if self.ctc.is_none() {
                             self.ctc =
                                 Some(ctc::network::Network::load(&self.model_root.join(model))?);
                         }
-                        speakerdesk_core::alignment::CHECKPOINT
+                        speakerdesk_core::alignment::CHECKPOINT.to_string()
+                    }
+                    "redimnet2-b6" => {
+                        if self.voice.is_none() {
+                            self.voice = Some(redimnet::coreml::Network::load(
+                                &self.model_root.join(model),
+                                redimnet::coreml::ComputePolicy::CpuAndGpu,
+                            )?);
+                        }
+                        self.voice
+                            .as_ref()
+                            .expect("loaded above")
+                            .identity()
+                            .revision
                     }
                     _ => return Err(ChildError::Unimplemented),
                 };
@@ -94,7 +109,7 @@ impl Runtime {
                     return Err(ChildError::Cancelled);
                 }
                 reports.push(speakerdesk_core::ipc::SetupModelReport {
-                    model: pin.into(),
+                    model: pin,
                     ok: true,
                     timing_ms: started.elapsed().as_millis() as u64,
                 });
@@ -119,6 +134,9 @@ impl Runtime {
                     self.ctc
                         .as_ref()
                         .map(|_| speakerdesk_core::alignment::CHECKPOINT.into()),
+                    self.voice
+                        .as_ref()
+                        .map(|network| network.identity().revision),
                 ]
                 .into_iter()
                 .flatten()
@@ -217,6 +235,19 @@ impl Runtime {
                     .expect("loaded above")
                     .scores(&pcm, &token_ids, cancel)
                     .map(Response::Ctc)
+            }
+            Request::EmbedVoice { pcm } => {
+                if self.voice.is_none() {
+                    self.voice = Some(redimnet::coreml::Network::load(
+                        &self.model_root.join("redimnet2-b6"),
+                        redimnet::coreml::ComputePolicy::CpuAndGpu,
+                    )?);
+                }
+                let network = self.voice.as_ref().expect("loaded above");
+                Ok(Response::Embedding(speakerdesk_core::ipc::VoiceEmbedding {
+                    model: network.identity(),
+                    clip: network.embed(&pcm, cancel)?,
+                }))
             }
             other => dispatch(other, cancel),
         }

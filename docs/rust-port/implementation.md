@@ -470,9 +470,17 @@ multilingual acoustic benchmark.
 
 The optimized native Tauri preview loaded all five models and published two aligned
 passages from Auto import through its real HTTP/store path. TXT/SRT/VTT/JSON exports
-passed; JSON segments equal the persisted document. The specific CTC editor
-edit/restart check remains pending because the Mac locked during this work. Earlier
-explicit-language and Auto editor/restart proof remains valid for unchanged behavior.
+passed; JSON segments equal the persisted document. In the actual editor, job
+`56151c37d75b47349dd6029ab7134a56` was edited to change words, name a speaker,
+assign the passage and move its start to 100 ms. A full quit reaped the Tauri,
+host and inference PIDs (42917/42932/42933). Reopening preserved the entire
+document at revision 7. The native Save dialog's `ctc-ui-reopened.json` matches
+SQLite; TXT/SRT/VTT use the protected words and boundary instead of stale CTC
+projections. A revision-6 PUT returns 409 and leaves revision 7 unchanged.
+Edited/reopened JSON and exports are retained in
+`/private/tmp/speakerdesk-native-desktop.WJKAde/`. The tested preview executable
+SHA-256 is `849233493374cdd1f4b20bdc7cda260bd25bcd2a4d023430ac97e9619d569f0c`;
+it contains the CTC path but not the subsequent native Core ML adapter.
 
 For a closer comparison, an APFS copy of installed 0.6.6 runs under its own bundle
 identifier and disposable storage. Both previews use the same pinned artifacts,
@@ -510,3 +518,57 @@ capture test passes. Application Clippy passes with warnings denied, apart from
 the previously recorded upstream mlx-sys allocator signatures. This slice does
 not complete voice, model setup, retry/language repair, long imports, live capture,
 packaging or full cold/warm/live performance acceptance.
+
+## Native Core ML voice extraction
+
+ReDimNet now loads the pinned compiled B6 artifact through `objc2-core-ml`.
+Waveform preparation, quality screening, normalization and model identity remain
+Rust-owned. The model stays on its construction thread; the child control reader
+runs separately so cancellation remains serviceable without an unsafe `Send`
+implementation. The result carries both the embedding and its complete model
+identity over ordinary postcard IPC. Setup reports the actual initialized policy.
+
+Artifact validation makes one load-time pass over the eight pinned files and the
+compiled tree. Tests reject linked roots/directories/files, extra compiled files
+or directories, and same-size byte corruption. No per-prediction artifact rereads
+or qualification receipts were added. Cancellation is checked around the bounded
+synchronous Core ML call; the existing parent timeout remains the escape path.
+
+An initial direct `MLMultiArray.dataPointer` copy passed ordinary predictions but
+failed under Metal capture (cosine -0.0199 against the ordinary output). The adapter
+now writes through Core ML's scoped mutable-buffer API and validates that callback's
+capacity and strides. Ordinary, traced and subsequent predictions then agree
+(cosine 1.0). The passing trace is
+`/private/tmp/speakerdesk-redimnet-scoped-metal-20261011.gputrace`, one captured
+frame, 3.18 GB. Xcode replay remains unperformed; capture overhead is excluded below.
+
+Optimized policy tests ran separately on the M5/macOS 27 host, on the same two
+synthetic speaker crops, three calls per crop. Neither test includes application
+startup, publication or a live capture workload. Peak physical footprint is the
+process value from `/usr/bin/time -l`, not an aggregate system or service peak.
+
+| Core ML policy | Model load | Warm extraction | Peak process footprint | Minimum cosine vs legacy MLX |
+|---|---:|---:|---:|---:|
+| CPU_AND_GPU | 0.345 s | 29.8–30.0 ms | 375 MB | 0.9999986 |
+| ALL | 5.713 s | 119.8–122.8 ms | 144 MB | 0.9999931 |
+
+Both policies reproduce the independent baseline MLX vectors and reject invalid,
+silent or saturated inputs as expected. GPU remains the integration default based
+on its lower latency; ALL's lower memory footprint remains relevant to the final
+whole-application memory gate. No ANE placement claim follows from requesting ALL.
+Outputs/logs are retained as `native-coreml-scoped-{gpu,all}.json` under
+`/private/tmp/speakerdesk-model-qualification/` and
+`/tmp/speakerdesk-coreml-scoped-{gpu,all}.log`.
+
+The actual optimized desktop child loads the model, reports its initialized
+identity, returns a reference-matching embedding over IPC, survives invalid input
+and silence, and is reaped on shutdown. This is extraction and process-boundary
+evidence. Native enrollment/recognition, calibration and broader saved-profile
+compatibility remain unfinished; HTTP voice readiness stays unavailable and the
+native embedding identity remains distinct from legacy MLX/ALL identities.
+
+Core 140, host 46, model 36, six child lifecycle replays and the native-host
+cleanup matrix pass. The separate real-child voice and artifact-boundary tests
+pass. Clippy with warnings denied includes the desktop this time; upstream
+mlx-sys still emits its two previously documented allocator-signature warnings.
+Independent review found no remaining blocker in this bounded extraction slice.

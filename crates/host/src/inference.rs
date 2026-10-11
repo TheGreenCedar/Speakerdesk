@@ -232,7 +232,10 @@ impl Models for ChildModels {
         }
     }
 
-    fn embed_voice(&self, pcm: &[f32]) -> Result<Vec<f32>, ChildError> {
+    fn embed_voice(
+        &self,
+        pcm: &[f32],
+    ) -> Result<speakerdesk_core::ipc::VoiceEmbedding, ChildError> {
         match self.exchange(Request::EmbedVoice { pcm: pcm.to_vec() })? {
             Response::Embedding(embedding) => Ok(embedding),
             other => Err(unexpected(&other)),

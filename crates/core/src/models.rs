@@ -25,7 +25,7 @@ pub trait Models: Send + Sync {
         padding: (u32, u32),
     ) -> Result<AsrText, ChildError>;
     fn ctc_scores(&self, pcm: &[f32], token_ids: &[i32]) -> Result<CtcScoresOut, ChildError>;
-    fn embed_voice(&self, pcm: &[f32]) -> Result<Vec<f32>, ChildError>;
+    fn embed_voice(&self, pcm: &[f32]) -> Result<crate::ipc::VoiceEmbedding, ChildError>;
     fn setup_check(&self, models: &[String]) -> Result<Vec<SetupModelReport>, ChildError>;
     fn metrics(&self) -> Result<MetricsOut, ChildError>;
 }
@@ -83,7 +83,7 @@ impl Models for UnimplementedModels {
     fn ctc_scores(&self, _pcm: &[f32], _token_ids: &[i32]) -> Result<CtcScoresOut, ChildError> {
         Err(ChildError::Unimplemented)
     }
-    fn embed_voice(&self, _pcm: &[f32]) -> Result<Vec<f32>, ChildError> {
+    fn embed_voice(&self, _pcm: &[f32]) -> Result<crate::ipc::VoiceEmbedding, ChildError> {
         Err(ChildError::Unimplemented)
     }
     fn setup_check(&self, _models: &[String]) -> Result<Vec<SetupModelReport>, ChildError> {

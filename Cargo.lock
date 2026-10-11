@@ -3072,6 +3072,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-ml"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "201b055e6acfa0f9f15568255d3f03ce2b54bc86d1814442dc69138e36813e18"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-core-text"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4699,15 +4710,20 @@ dependencies = [
 name = "speakerdesk-models"
 version = "0.6.6"
 dependencies = [
+ "block2",
  "hound",
  "mlx-rs",
  "mlx-sys",
+ "objc2",
+ "objc2-core-ml",
+ "objc2-foundation",
  "postcard",
  "safetensors",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "speakerdesk-core",
+ "tempfile",
  "thiserror 2.0.21",
  "tokenizers",
 ]

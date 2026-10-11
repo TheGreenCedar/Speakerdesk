@@ -26,14 +26,14 @@ pub fn serve(model_root: std::path::PathBuf) -> std::io::Result<()> {
     }
 }
 
-pub fn serve_on<R: Read, W: Write + Send>(reader: R, writer: W) -> std::io::Result<()> {
+pub fn serve_on<R: Read + Send, W: Write + Send>(reader: R, writer: W) -> std::io::Result<()> {
     serve_with(reader, writer, dispatch::dispatch)
 }
 
-fn serve_with<R: Read, W: Write + Send>(
+fn serve_with<R: Read + Send, W: Write + Send>(
     mut reader: R,
     writer: W,
-    mut execute: impl FnMut(Request, &AtomicBool) -> Result<Response, ChildError> + Send,
+    mut execute: impl FnMut(Request, &AtomicBool) -> Result<Response, ChildError>,
 ) -> std::io::Result<()> {
     let writer = Arc::new(Mutex::new(writer));
     let active: Active = Arc::new(Mutex::new(None));
@@ -41,7 +41,62 @@ fn serve_with<R: Read, W: Write + Send>(
         let (send, receive) = mpsc::sync_channel::<(u64, Request, Arc<AtomicBool>)>(1);
         let output = writer.clone();
         let worker_active = active.clone();
-        let worker = scope.spawn(move || -> std::io::Result<()> {
+        let control = scope.spawn(move || {
+            let result = (|| {
+                let mut last_id = 0;
+                loop {
+                    let envelope = match read_envelope(&mut reader) {
+                        Ok(envelope) => envelope,
+                        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                            break Ok(());
+                        }
+                        Err(error) => break Err(error),
+                    };
+                    if envelope.request_id <= last_id {
+                        break Err(std::io::Error::other("non-monotonic request id"));
+                    }
+                    last_id = envelope.request_id;
+                    match envelope.body {
+                        EnvelopeBody::Request(Request::Cancel { request_id }) => {
+                            if let Some((id, flag)) = &*active.lock().expect("active operation")
+                                && *id == request_id
+                            {
+                                flag.store(true, Ordering::Release);
+                            }
+                            reply(&writer, envelope.request_id, Ok(Response::Ack))?;
+                        }
+                        EnvelopeBody::Request(Request::Shutdown) => {
+                            reply(&writer, envelope.request_id, Ok(Response::Ack))?;
+                            break Ok(());
+                        }
+                        EnvelopeBody::Request(request) => {
+                            let flag = Arc::new(AtomicBool::new(false));
+                            let mut current = active.lock().expect("active operation");
+                            if current.is_some() {
+                                reply(
+                                    &writer,
+                                    envelope.request_id,
+                                    Err(ChildError::failed("inference already active", true)),
+                                )?;
+                                continue;
+                            }
+                            *current = Some((envelope.request_id, flag.clone()));
+                            send.try_send((envelope.request_id, request, flag))
+                                .map_err(std::io::Error::other)?;
+                        }
+                        EnvelopeBody::Response(_) => {
+                            break Err(std::io::Error::other("child received a response"));
+                        }
+                    }
+                }
+            })();
+            if let Some((_, flag)) = &*active.lock().expect("active operation") {
+                flag.store(true, Ordering::Release);
+            }
+            drop(send);
+            result
+        });
+        let result = (|| -> std::io::Result<()> {
             for (id, request, cancelled) in receive {
                 let vad_open = matches!(request, Request::VadOpen { .. });
                 let diar_open = matches!(request, Request::DiarOpen { .. });
@@ -73,60 +128,10 @@ fn serve_with<R: Read, W: Write + Send>(
                 reply(&output, id, result)?;
             }
             Ok(())
-        });
-        let result = (|| {
-            let mut last_id = 0;
-            loop {
-                let envelope = match read_envelope(&mut reader) {
-                    Ok(envelope) => envelope,
-                    Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break Ok(()),
-                    Err(error) => break Err(error),
-                };
-                if envelope.request_id <= last_id {
-                    break Err(std::io::Error::other("non-monotonic request id"));
-                }
-                last_id = envelope.request_id;
-                match envelope.body {
-                    EnvelopeBody::Request(Request::Cancel { request_id }) => {
-                        if let Some((id, flag)) = &*active.lock().expect("active operation")
-                            && *id == request_id
-                        {
-                            flag.store(true, Ordering::Release);
-                        }
-                        reply(&writer, envelope.request_id, Ok(Response::Ack))?;
-                    }
-                    EnvelopeBody::Request(Request::Shutdown) => {
-                        reply(&writer, envelope.request_id, Ok(Response::Ack))?;
-                        break Ok(());
-                    }
-                    EnvelopeBody::Request(request) => {
-                        let flag = Arc::new(AtomicBool::new(false));
-                        let mut current = active.lock().expect("active operation");
-                        if current.is_some() {
-                            reply(
-                                &writer,
-                                envelope.request_id,
-                                Err(ChildError::failed("inference already active", true)),
-                            )?;
-                            continue;
-                        }
-                        *current = Some((envelope.request_id, flag.clone()));
-                        send.try_send((envelope.request_id, request, flag))
-                            .map_err(std::io::Error::other)?;
-                    }
-                    EnvelopeBody::Response(_) => {
-                        break Err(std::io::Error::other("child received a response"));
-                    }
-                }
-            }
         })();
-        if let Some((_, flag)) = &*active.lock().expect("active operation") {
-            flag.store(true, Ordering::Release);
-        }
-        drop(send);
-        worker
+        control
             .join()
-            .map_err(|_| std::io::Error::other("inference executor panicked"))??;
+            .map_err(|_| std::io::Error::other("control reader panicked"))??;
         result
     })
 }
@@ -253,8 +258,11 @@ mod tests {
         let closed = Arc::new(Mutex::new(Vec::new()));
         let observed = closed.clone();
         let worker = thread::spawn(move || {
+            // Native model objects stay on their construction thread without unsafe Send.
+            let owner = std::rc::Rc::new(thread::current().id());
             super::serve_with(input, child, move |request, cancel| match request {
                 Request::VadFeed { .. } => {
+                    assert_eq!(thread::current().id(), *owner);
                     started.send(()).unwrap();
                     while !cancel.load(Ordering::Acquire) {
                         thread::yield_now();

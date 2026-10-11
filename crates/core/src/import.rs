@@ -1433,7 +1433,10 @@ mod tests {
         ) -> Result<ipc::CtcScoresOut, crate::error::ChildError> {
             UnimplementedModels.ctc_scores(pcm, token_ids)
         }
-        fn embed_voice(&self, pcm: &[f32]) -> Result<Vec<f32>, crate::error::ChildError> {
+        fn embed_voice(
+            &self,
+            pcm: &[f32],
+        ) -> Result<crate::ipc::VoiceEmbedding, crate::error::ChildError> {
             UnimplementedModels.embed_voice(pcm)
         }
         fn setup_check(

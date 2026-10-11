@@ -75,7 +75,7 @@ pub fn caller_may_reuse_identity(cosine: f64) -> bool {
     cosine.is_finite() && cosine >= IDENTITY_REUSE_COSINE
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VoiceModel {
     pub model_id: String,
     pub revision: String,
@@ -224,7 +224,7 @@ impl VoiceClip {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClipEmbedding {
     pub vector: Vec<f64>,
     pub clean: bool,
