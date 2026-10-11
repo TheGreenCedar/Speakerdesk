@@ -78,6 +78,7 @@ fn main() {
                     Ok(Response::Text(AsrText {
                         text: "armed".into(),
                         raw_text: "armed".into(),
+                        token_count: 1,
                     })),
                 );
                 continue;
@@ -89,6 +90,7 @@ fn main() {
                     Ok(Response::Text(AsrText {
                         text: "armed".into(),
                         raw_text: "armed".into(),
+                        token_count: 1,
                     })),
                 );
                 let mut prefix = [0; 4];
@@ -126,6 +128,7 @@ fn main() {
             Request::Transcribe { .. } => Ok(Response::Text(AsrText {
                 text: "Replay transcript".into(),
                 raw_text: "Replay transcript".into(),
+                token_count: 2,
             })),
             Request::Cancel { request_id } => {
                 if let Some((running, flag)) = &active

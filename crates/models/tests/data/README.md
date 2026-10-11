@@ -56,3 +56,21 @@ or AOSC speaker-cache behavior.
 SPEAKERDESK_TEST_NEMOTRON=/path/to/models/nemotron \
   cargo test --release --locked -p speakerdesk-models --test nemotron -- --ignored --nocapture
 ```
+
+`cohere-reference.json` records the same WAV through the pinned mlx-speech
+encoder, decoder, tokenizer and feature extractor. It yields the complete spoken
+text and 31 tokens. `generate_cohere_reference.py` takes the same arguments as
+the Nemotron generator and validates the upstream sources and checkpoint hash.
+It requires `tokenizers` in the disposable Python reference environment.
+
+Rust uses MLX's explicitly keyed normal generator for the same 1e-5 dither
+distribution; the reference uses NumPy's generator. Feature tensors therefore
+are not claimed to match bit-for-bit. Decoded text and token count match this
+fixture. Valid frame counts exclude the extra centered STFT frame, while padded
+shapes pass through the subsampling masks. Encoder and cross-attention activation
+dtypes follow the reference's mixed Float32/BF16 execution.
+
+```sh
+SPEAKERDESK_TEST_COHERE=/path/to/models/cohere-speech \
+  cargo test --release --locked -p speakerdesk-models --test cohere -- --ignored --nocapture
+```

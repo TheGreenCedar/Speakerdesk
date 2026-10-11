@@ -669,6 +669,20 @@ impl UtteranceBook {
         self.closed = true;
     }
 
+    /// Ordered utterance endpoints and admitted regions for offline crop planning.
+    pub(crate) fn speech_regions(&self) -> impl Iterator<Item = (SampleSpan, &[SampleSpan])> {
+        self.order.iter().map(|id| {
+            let row = &self.rows[id];
+            (
+                SampleSpan {
+                    start_sample: row.start_sample,
+                    end_sample: row.end_sample,
+                },
+                row.speech_regions.as_slice(),
+            )
+        })
+    }
+
     fn apply_model(
         &mut self,
         identity: &str,
@@ -1655,7 +1669,7 @@ impl<M: Models> Recognizer for ModelRecognizer<M> {
         } else {
             text.raw_text
         };
-        let token_count = raw.split_whitespace().count();
+        let token_count = text.token_count as usize;
         Ok(AsrOutput {
             text: raw,
             token_count,
@@ -3400,6 +3414,7 @@ mod tests {
             Ok(AsrText {
                 text: text.into(),
                 raw_text: text.into(),
+                token_count: 1,
             })
         }
         fn ctc_scores(&self, pcm: &[f32], token_ids: &[i32]) -> Result<CtcScoresOut, ChildError> {

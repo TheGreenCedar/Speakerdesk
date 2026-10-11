@@ -60,6 +60,39 @@ fn actual_desktop_child_runs_speech_models_and_reaps() {
             },
         ]
     );
+    let text = models.transcribe(&pcm, "en", (0, 0)).unwrap();
+    assert_eq!(
+        text.text,
+        "I checked the recording this morning. The transcript needs a speaker name. I can review it after lunch. Please save the final version."
+    );
+    assert_eq!(text.token_count, 31);
+    let document = speakerdesk_core::import::import_recording(&models, &pcm, "en").unwrap();
+    let exported = speakerdesk_core::export::export(&document, "txt").unwrap();
+    eprintln!("Actual child import transcript: {}", exported.body);
+    assert!(
+        exported
+            .body
+            .contains("I checked the recording this morning")
+    );
+    assert!(exported.body.contains("Please save the final version"));
+    let spoken: Vec<_> = document
+        .segments
+        .iter()
+        .filter(|s| !s.text.is_empty())
+        .collect();
+    assert_eq!(spoken.len(), 2, "no separately decoded VAD tails");
+    for (index, row) in spoken.iter().enumerate() {
+        assert_eq!(
+            row.speaker, "unassigned",
+            "unaligned tail context cannot establish word ownership"
+        );
+        assert_eq!(
+            row.rest["speaker_candidates"],
+            serde_json::json!([format!("speaker_{index}")])
+        );
+        assert_eq!(row.rest["voice_eligible"], false);
+        assert_eq!(row.review, Some(true));
+    }
     let pid = host.child_pid().unwrap();
     host.shutdown();
     reaped(pid);

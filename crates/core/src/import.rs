@@ -15,15 +15,16 @@ use crate::error::ChildError;
 use crate::export;
 use crate::ipc::Turn;
 use crate::language::{
-    self, AsrOutput, LanguageChoice, LanguageDetection, LanguageDetector, LanguageError, Passage,
+    AsrOutput, LanguageChoice, LanguageDetection, LanguageDetector, LanguageError, Passage,
     Recognizer, RouteError, SpeechTranscriber, TranscribeOptions, TranscriptionReview,
 };
 use crate::languages;
 use crate::limits;
+use crate::live::UtteranceBook;
 use crate::messages;
 use crate::models::Models;
 use crate::review;
-use crate::speech::{self, Admission, BlockedSpeech, SpeechLedger};
+use crate::speech::{self, Admission, BlockedSpeech, SampleSpan, SpeechLedger};
 use crate::timing;
 use crate::transcript::{self, TranscriptError};
 
@@ -88,6 +89,7 @@ pub struct DecodeRegion {
     pub activity_regions: Option<Vec<ActivitySlice>>,
     pub audio_start: f64,
     pub audio_end: f64,
+    pub utterance_tail_boundary: Option<i64>,
 }
 
 /// A passage retry is a candidate. Existing words stay until an editor applies it.
@@ -236,7 +238,10 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
         return Err(ImportError::new(messages::TOO_MANY_TRANSITIONS));
     }
     let ledger = admit(models, pcm)?;
-    let work = plan_work(&ledger, pcm, &chunks)?;
+    let book = canonical_utterances(&ledger, pcm.len() as i64)?;
+    chunks = utterance_tail_chunks(chunks, &book, pcm.len() as i64);
+    let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
+    let work = plan_work(&ledger, pcm, &chunks, &spans)?;
     let mut transcriber = if work.iter().any(|item| item.blocked.is_none()) {
         Some(open_transcriber(models, language, ledger)?)
     } else {
@@ -254,7 +259,16 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
             let Some((start, end)) = clip_span(start, end, 0.0, duration) else {
                 continue;
             };
-            let speaker = chunk_speaker(chunk);
+            let speaker = if chunk.utterance_tail_boundary.is_some()
+                && chunk.activity_regions.as_ref().is_some_and(|activity| {
+                    activity.iter().any(|part| {
+                        part.speakers.is_empty() && part.start < end && part.end > start
+                    })
+                }) {
+                "unassigned".to_string()
+            } else {
+                chunk_speaker(chunk)
+            };
             ensure_speaker(&mut speakers, &speaker);
             let review = row.review
                 || speaker == "unassigned"
@@ -320,7 +334,9 @@ pub fn retry_passage<M: Models + ?Sized + 'static>(
     }
     let slice = &pcm[origin as usize..stop as usize];
     let ledger = admit(models, slice)?;
-    let windows = examine_range(&ledger, slice, 0, slice.len() as i64)?;
+    let book = canonical_utterances(&ledger, slice.len() as i64)?;
+    let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
+    let windows = examine_range(&ledger, slice, &spans, 0, slice.len() as i64)?;
     let mut transcriber = if windows.iter().any(|item| item.blocked.is_none()) {
         Some(open_transcriber(models, language, ledger)?)
     } else {
@@ -346,6 +362,7 @@ fn region_from(slice: &ActivitySlice) -> DecodeRegion {
         end: slice.end,
         speakers: slice.speakers.clone(),
         activity_regions: None,
+        utterance_tail_boundary: None,
         audio_start: slice.start,
         audio_end: slice.end,
     }
@@ -521,6 +538,76 @@ fn chunk_speaker(chunk: &DecodeRegion) -> String {
     }
 }
 
+fn canonical_utterances(ledger: &SpeechLedger, samples: i64) -> Result<UtteranceBook, ImportError> {
+    let mut book =
+        UtteranceBook::new("import").map_err(|error| ImportError::new(error.to_string()))?;
+    book.observe(&ledger.admission(0, samples).map_err(speech_err)?)
+        .map_err(|error| ImportError::new(error.to_string()))?;
+    book.finish();
+    Ok(book)
+}
+
+fn utterance_tail_chunks(
+    chunks: Vec<DecodeRegion>,
+    book: &UtteranceBook,
+    samples: i64,
+) -> Vec<DecodeRegion> {
+    let mut utterances = book.speech_regions().peekable();
+    let mut remaining = chunks.into_iter().peekable();
+    let mut planned = Vec::with_capacity(remaining.len());
+    while let Some(mut current) = remaining.next() {
+        let boundary = seconds_to_sample(current.end, samples);
+        while utterances
+            .peek()
+            .is_some_and(|(span, _)| span.end_sample <= boundary)
+        {
+            utterances.next();
+        }
+        if let Some(following) = remaining.peek_mut()
+            && current.speakers.len() == 1
+            && current.activity_regions.is_none()
+            && following.speakers.is_empty()
+            && (current.end - following.start).abs() <= BOUNDARY_EPSILON
+            && let Some(&(span, regions)) = utterances.peek()
+            && regions.first().is_some_and(|first| {
+                seconds_to_sample(current.start, samples) <= first.start_sample
+                    && first.start_sample < boundary
+            })
+            && span.end_sample <= seconds_to_sample(following.end, samples)
+            && span.end_sample - seconds_to_sample(current.audio_start, samples)
+                <= (IMPORT_MAX_SECONDS * f64::from(limits::SAMPLE_RATE)) as i64
+            && regions
+                .iter()
+                .any(|part| part.start_sample < boundary && boundary < part.end_sample)
+        {
+            let end = span.end_sample as f64 / f64::from(limits::SAMPLE_RATE);
+            current.activity_regions = Some(vec![
+                ActivitySlice {
+                    start: current.start,
+                    end: current.end,
+                    speakers: current.speakers.clone(),
+                },
+                ActivitySlice {
+                    start: following.start,
+                    end,
+                    speakers: Vec::new(),
+                },
+            ]);
+            current.utterance_tail_boundary = Some(boundary);
+            current.end = end;
+            current.audio_end = end;
+            if end < following.end {
+                following.start = end;
+                following.audio_start = end;
+            } else {
+                remaining.next();
+            }
+        }
+        planned.push(current);
+    }
+    planned
+}
+
 struct Window {
     start: i64,
     end: i64,
@@ -553,6 +640,7 @@ fn plan_work(
     ledger: &SpeechLedger,
     pcm: &[f32],
     chunks: &[DecodeRegion],
+    spans: &[SampleSpan],
 ) -> Result<Vec<Examined>, ImportError> {
     let mut work = Vec::new();
     let len = pcm.len() as i64;
@@ -562,7 +650,7 @@ fn plan_work(
         if end <= start {
             continue;
         }
-        let windows = examine_range(ledger, pcm, start, end)?;
+        let windows = examine_range(ledger, pcm, spans, start, end)?;
         let silent = windows.iter().all(|item| item.blocked.is_some());
         if chunk.speakers.is_empty() && silent {
             continue;
@@ -578,48 +666,30 @@ fn plan_work(
 fn examine_range(
     ledger: &SpeechLedger,
     pcm: &[f32],
+    spans: &[SampleSpan],
     start: i64,
     end: i64,
 ) -> Result<Vec<Examined>, ImportError> {
     let mut examined = Vec::new();
-    for window in plan_windows(ledger, start, end)? {
+    for window in plan_windows(spans, start, end) {
         examined.push(examine(ledger, pcm, window)?);
     }
     Ok(examined)
 }
 
-fn plan_windows(ledger: &SpeechLedger, start: i64, end: i64) -> Result<Vec<Window>, ImportError> {
+fn plan_windows(spans: &[SampleSpan], start: i64, end: i64) -> Vec<Window> {
     if end <= start {
-        return Ok(Vec::new());
-    }
-    let admission = ledger.admission(start, end).map_err(speech_err)?;
-    if !admission.complete || admission.speech_regions.is_empty() {
-        return Ok(vec![Window { start, end }]);
-    }
-    let pad = i64::from(language::CANONICAL_PAD_SAMPLES);
-    let mut covered = Vec::new();
-    for region in &admission.speech_regions {
-        let lead = (region.start_sample - pad).max(start);
-        let trail = (region.end_sample + pad).min(end);
-        let region_start = lead.min(region.start_sample).max(start);
-        let region_end = trail.max(region.end_sample).min(end);
-        if region_start >= region_end {
-            continue;
-        }
-        if let Some((_, last_end)) = covered.last_mut()
-            && region_start <= *last_end
-        {
-            *last_end = (*last_end).max(region_end);
-        } else {
-            covered.push((region_start, region_end));
-        }
-    }
-    if covered.is_empty() {
-        return Ok(vec![Window { start, end }]);
+        return Vec::new();
     }
     let mut windows = Vec::new();
     let mut cursor = start;
-    for (region_start, region_end) in covered {
+    let first = spans.partition_point(|span| span.end_sample <= start);
+    for span in spans[first..]
+        .iter()
+        .take_while(|span| span.start_sample < end)
+    {
+        let region_start = span.start_sample.max(start);
+        let region_end = span.end_sample.min(end);
         if region_start > cursor {
             windows.push(Window {
                 start: cursor,
@@ -635,7 +705,7 @@ fn plan_windows(ledger: &SpeechLedger, start: i64, end: i64) -> Result<Vec<Windo
     if cursor < end {
         windows.push(Window { start: cursor, end });
     }
-    Ok(windows)
+    windows
 }
 
 fn examine(ledger: &SpeechLedger, pcm: &[f32], window: Window) -> Result<Examined, ImportError> {
@@ -855,6 +925,19 @@ fn segment_from_row(
             ),
         );
     }
+    if speaker == "unassigned"
+        && let Some(boundary) = chunk.utterance_tail_boundary
+    {
+        rest.insert(
+            "decode_context".into(),
+            json!({
+                "policy": "speech_utterance_tail_context_v1",
+                "start_sample": (chunk.audio_start * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                "end_sample": (chunk.audio_end * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                "boundary_sample": boundary,
+            }),
+        );
+    }
     Segment {
         id,
         start,
@@ -1068,7 +1151,7 @@ impl<M: Models + ?Sized> Recognizer for BorrowedModels<M> {
         } else {
             decoded.raw_text
         };
-        let token_count = text.split_whitespace().count();
+        let token_count = decoded.token_count as usize;
         Ok(AsrOutput { text, token_count })
     }
 }
@@ -1164,6 +1247,7 @@ mod tests {
     struct Scripted {
         turns: Vec<Turn>,
         speech: Vec<(usize, usize)>,
+        token_count: u32,
         cursor: Mutex<usize>,
         events: Mutex<Vec<Event>>,
     }
@@ -1173,6 +1257,7 @@ mod tests {
             Self {
                 turns,
                 speech,
+                token_count: 1,
                 cursor: Mutex::new(0),
                 events: Mutex::new(Vec::new()),
             }
@@ -1297,6 +1382,7 @@ mod tests {
             Ok(AsrText {
                 text: format!("{language}:Hello"),
                 raw_text: format!("  {language}:Hello  "),
+                token_count: self.token_count,
             })
         }
         fn ctc_scores(
@@ -1445,6 +1531,7 @@ mod tests {
                     end: slice.end,
                     speakers: slice.speakers,
                     activity_regions: None,
+                    utterance_tail_boundary: None,
                     audio_start: slice.start,
                     audio_end: slice.end,
                 })
@@ -1525,6 +1612,183 @@ mod tests {
         let exported = export::export(&document, "txt").unwrap();
         assert_eq!(exported.body.matches("en:Hello").count(), 1);
         assert!(exported.body.contains("Speaker 1"));
+    }
+
+    #[test]
+    fn import_keeps_a_speech_tail_in_one_decode_without_claiming_word_ownership() {
+        // Replayed VAD and ASR; acoustic acceptance lives in the actual-child test.
+        let models = Scripted::new(
+            vec![Turn {
+                start: 0.0,
+                end: 2.8,
+                speaker: "speaker_0".into(),
+            }],
+            vec![(0, 49_152)],
+        );
+        let document = import_recording(&models, &tone(64_000), "en").unwrap();
+        assert_eq!(
+            models.calls().len(),
+            1,
+            "a continuing utterance must not decode its tail separately"
+        );
+        let spoken: Vec<_> = document
+            .segments
+            .iter()
+            .filter(|s| !s.text.is_empty())
+            .collect();
+        assert_eq!(spoken.len(), 1);
+        let row = spoken[0];
+        assert_eq!(row.speaker, "unassigned");
+        assert_eq!(
+            row.rest["speaker_candidates"],
+            serde_json::json!(["speaker_0"])
+        );
+        assert_eq!(row.rest["voice_eligible"], false);
+        assert_eq!(row.review, Some(true));
+        assert_eq!(row.rest["decode_context"]["boundary_sample"], 44_800);
+        assert_eq!(row.rest["activity_regions"][0]["end"], 2.8);
+        assert_eq!(
+            row.rest["activity_regions"][1]["speakers"],
+            serde_json::json!([])
+        );
+        assert_eq!(document.diarization[0]["end"], 2.8);
+        assert_eq!(
+            export::export(&document, "txt")
+                .unwrap()
+                .body
+                .matches("en:Hello")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn canonical_pause_inside_tail_context_does_not_split_import_or_retry() {
+        let pcm = tone(48_000);
+        let models = Scripted::new(
+            vec![Turn {
+                start: 0.0,
+                end: 2.4,
+                speaker: "speaker_0".into(),
+            }],
+            vec![(0, 16_384), (23_552, 39_936)],
+        );
+        import_recording(&models, &pcm, "en").unwrap();
+        assert_eq!(
+            models.calls().len(),
+            1,
+            "448 ms pause stays in one canonical utterance"
+        );
+        let retry = Scripted::new(Vec::new(), models.speech.clone());
+        retry_passage(&retry, &pcm, 0.0, 3.0, "en").unwrap();
+        assert_eq!(retry.calls().len(), 1);
+    }
+
+    #[test]
+    fn utterance_tail_respects_activity_speech_and_decode_limits() {
+        let models = Scripted::new(Vec::new(), vec![(0, 49_152)]);
+        let ledger = super::admit(&models, &tone(64_000)).unwrap();
+        let book = super::canonical_utterances(&ledger, 64_000).unwrap();
+        let base = decode_regions(
+            &[Turn {
+                start: 0.0,
+                end: 2.8,
+                speaker: "speaker_0".into(),
+            }],
+            Some(18.0),
+            Some((0.0, 4.0)),
+        );
+        for case in [
+            "switch",
+            "overlap",
+            "bridged",
+            "earlier_speech",
+            "short_gap",
+            "noncontiguous",
+        ] {
+            let mut chunks = base.clone();
+            match case {
+                "switch" => chunks[1].speakers.push("speaker_1".into()),
+                "overlap" => chunks[0].speakers.push("speaker_1".into()),
+                "bridged" => {
+                    chunks[0].activity_regions = Some(vec![super::ActivitySlice {
+                        start: 0.0,
+                        end: 2.8,
+                        speakers: vec!["speaker_0".into()],
+                    }])
+                }
+                "earlier_speech" => chunks[0].start = 0.1,
+                "short_gap" => chunks[1].end = 3.0,
+                "noncontiguous" => chunks[1].start = 2.9,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                super::utterance_tail_chunks(chunks.clone(), &book, 64_000),
+                chunks,
+                "{case}"
+            );
+        }
+        let no_crossing =
+            super::admit(&Scripted::new(Vec::new(), vec![(0, 32_000)]), &tone(64_000)).unwrap();
+        let book = super::canonical_utterances(&no_crossing, 64_000).unwrap();
+        assert_eq!(
+            super::utterance_tail_chunks(base.clone(), &book, 64_000),
+            base
+        );
+
+        let long = decode_regions(
+            &[Turn {
+                start: 0.0,
+                end: 17.8,
+                speaker: "speaker_0".into(),
+            }],
+            Some(18.0),
+            Some((0.0, 20.0)),
+        );
+        let ledger = super::admit(
+            &Scripted::new(Vec::new(), vec![(0, 289_792)]),
+            &tone(320_000),
+        )
+        .unwrap();
+        let book = super::canonical_utterances(&ledger, 320_000).unwrap();
+        assert_eq!(
+            super::utterance_tail_chunks(long.clone(), &book, 320_000),
+            long
+        );
+
+        let eof =
+            super::admit(&Scripted::new(Vec::new(), vec![(0, 64_000)]), &tone(64_000)).unwrap();
+        let book = super::canonical_utterances(&eof, 64_000).unwrap();
+        let joined = super::utterance_tail_chunks(base, &book, 64_000);
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0].end, 4.0);
+        assert_eq!(joined[0].utterance_tail_boundary, Some(44_800));
+    }
+
+    #[test]
+    fn decoder_token_limit_preserves_text_and_marks_it_partial() {
+        let mut models = Scripted::new(
+            vec![Turn {
+                start: 0.0,
+                end: 1.0,
+                speaker: "speaker_0".into(),
+            }],
+            vec![(0, 16000)],
+        );
+        models.token_count = 448;
+        let document = import_recording(&models, &tone(16000), "en").unwrap();
+        let spoken = document
+            .segments
+            .iter()
+            .find(|segment| !segment.text.is_empty())
+            .unwrap();
+        assert_eq!(spoken.text, "en:Hello");
+        let review = spoken
+            .transcription_review
+            .as_ref()
+            .expect("token limit review");
+        assert_eq!(review["reason"], "token_limit");
+        assert_eq!(review["partial_text"], true);
     }
 
     #[test]
@@ -1781,7 +2045,7 @@ mod tests {
     #[test]
     fn retry_keeps_raw_text_from_each_admitted_island_and_skips_the_gap() {
         let samples = 16_384usize;
-        let models = Scripted::new(Vec::new(), vec![(0, 512), (7_680, 8_192)]);
+        let models = Scripted::new(Vec::new(), vec![(0, 512), (8_704, 9_216)]);
         let candidate =
             retry_passage(&models, &tone(samples), 0.0, seconds(samples as i64), "en").unwrap();
         let calls = models.calls();

@@ -69,6 +69,7 @@ pub struct LanguageProbeOut {
 pub struct AsrText {
     pub text: String,
     pub raw_text: String,
+    pub token_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

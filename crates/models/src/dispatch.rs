@@ -10,6 +10,7 @@ pub struct Runtime {
     model_root: std::path::PathBuf,
     silero: Option<crate::silero::network::Network>,
     nemotron: Option<sortformer::network::Network>,
+    cohere: Option<cohere::network::Network>,
     vad_sessions: std::collections::HashMap<u64, crate::silero::session::Session>,
     next_session: u64,
 }
@@ -22,6 +23,7 @@ impl Runtime {
             model_root,
             silero: None,
             nemotron: None,
+            cohere: None,
             vad_sessions: Default::default(),
             next_session: 1,
         })
@@ -47,6 +49,7 @@ impl Runtime {
                     self.nemotron
                         .as_ref()
                         .map(|_| sortformer::WEIGHT_PIN.into()),
+                    self.cohere.as_ref().map(|_| cohere::WEIGHT_PIN.into()),
                 ]
                 .into_iter()
                 .flatten()
@@ -105,6 +108,22 @@ impl Runtime {
                     .expect("loaded above")
                     .probabilities(&pcm, cancel)?;
                 Ok(Response::Turns(sortformer::frames_to_turns(&probabilities)))
+            }
+            Request::Transcribe {
+                pcm,
+                language,
+                padding,
+            } => {
+                if self.cohere.is_none() {
+                    self.cohere = Some(cohere::network::Network::load(
+                        &self.model_root.join("cohere-speech"),
+                    )?);
+                }
+                self.cohere
+                    .as_mut()
+                    .expect("loaded above")
+                    .transcribe(&pcm, &language, padding, cancel)
+                    .map(Response::Text)
             }
             other => dispatch(other, cancel),
         }

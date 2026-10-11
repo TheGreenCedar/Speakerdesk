@@ -20,9 +20,10 @@ Local implementation branch: `codex/python-free-mac`.
    transactions, guarded import publication, consistent migration snapshots,
    private journal recovery and legacy audio copy-on-write. Process lifecycle and
    operation cancellation implemented; active meeting state integration remains pending.
-3. In progress: Silero runs in the real native child (proof below). Offline
-   Nemotron and Cohere remain pending through the real desktop;
-   edit/save/quit/reopen/export with a short public fixture and measured Metal.
+3. In progress: Silero, the first offline Nemotron window and Cohere run through
+   the actual native child and assembled import pipeline (proof below).
+   The desktop editor, edit/save/quit/reopen/export with public audio and
+   end-to-end performance qualification remain pending.
 4. Pending: automatic language, CTC, native Core ML ReDimNet, identity and setup.
 5. Pending: native capture coordination, streaming tails/recovery and bounded work.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
@@ -193,3 +194,41 @@ with project warnings denied. The same two upstream binding warnings remain.
 Long diarization, streaming speaker identity, Cohere, the actual editor workflow
 and later batches remain open. Cohere's pinned checkpoint has been downloaded
 and checksum verified in disposable scratch storage for the next implementation.
+
+## Cohere and the first assembled model import
+
+The child retains the pinned 4-bit Cohere network. Rust composes its 48-layer
+FastConformer encoder, 8-layer cached decoder and feature extraction through
+maintained MLX and tokenizer operations. Weight layouts, valid frame masks,
+mixed Float32/BF16 activations and decoder prompt match the independent upstream
+reference. Decoder caches belong to one transcription, and cancellation is
+checked between decoding steps. The 448-token cap retains partial text and sends
+the actual token count to import/live review policy; a whitespace estimate lost
+that warning. Its regression fails with the old estimate.
+
+The independent generator and source/artifact hashes are retained. The nine-second
+TTS fixture produces the same complete text and 31 tokens as the reference.
+MLX's keyed dither has the same distribution but differs from NumPy's RNG;
+bitwise feature equality is not claimed. Optimized warm native transcription
+took about 272 ms versus 287 ms for the matching reference component. Native
+load including artifact verification took 2.65 s. These are component observations,
+not baseline end-to-end latency or memory qualification.
+
+The actual desktop executable's inference child also runs Silero, Nemotron and
+Cohere through core import and export. This assembled test exposed a missing
+0.6.6 behavior: short VAD continuations past a diarization boundary decoded
+separately and hallucinated “you”. Import now reuses the live canonical utterance
+policy and extends only eligible single-speaker crops into adjacent unassigned
+tails. Activity and candidate identities remain intact; without alignment the
+straddling text is unassigned, reviewed and ineligible for voice enrollment.
+Import/retry also preserve canonical pauses between 400 and 500 ms. Both failures
+have regressions that fail before the correction. Planning reuses one utterance
+book and scans only spans intersecting each crop.
+
+Core 134, host 46 and six replay-process tests pass. The actual child test passes
+in 4.07 s including direct model checks and the assembled import, yielding two
+complete passages without standalone tails; this is not time-to-editor evidence.
+The child is reaped. Cohere's explicit acoustic test was separately run and
+passes; unavailable language/timing/voice paths remain explicit. Current input
+limits are the first 27.2-second Nemotron window and bounded Cohere crops.
+Normal desktop startup still uses Python; the existing editor is the next join.
