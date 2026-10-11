@@ -1,0 +1,30 @@
+{
+  "input": {
+    "document": {
+      "segments": [
+        {
+          "end": 1,
+          "id": "dup",
+          "speaker": "speaker_0",
+          "start": 0,
+          "text": "one"
+        },
+        {
+          "end": 3,
+          "id": "dup",
+          "speaker": "speaker_0",
+          "start": 2,
+          "text": "two"
+        }
+      ],
+      "speakers": {
+        "speaker_0": "A"
+      }
+    },
+    "duration": 30.0
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Segment IDs must be unique strings."
+  }
+}

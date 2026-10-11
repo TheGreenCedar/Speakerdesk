@@ -1,0 +1,36 @@
+{
+  "input": {
+    "coverage": null,
+    "max_seconds": 24.5,
+    "turns": [
+      {
+        "end": 4.0,
+        "speaker": "speaker_0",
+        "start": 1.0
+      },
+      {
+        "end": 9.0,
+        "speaker": "speaker_1",
+        "start": 7.0
+      }
+    ]
+  },
+  "output": {
+    "value": [
+      {
+        "end": 4.0,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 1.0
+      },
+      {
+        "end": 9.0,
+        "speakers": [
+          "speaker_1"
+        ],
+        "start": 7.0
+      }
+    ]
+  }
+}

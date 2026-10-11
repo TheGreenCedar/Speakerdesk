@@ -1,0 +1,13 @@
+{
+  "input": {
+    "document": {
+      "segments": [],
+      "speakers": {}
+    },
+    "duration": 30.0
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Supply 1–64 speaker names."
+  }
+}

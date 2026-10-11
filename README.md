@@ -34,7 +34,7 @@ Choose a saved person or apply a name to this meeting.
 
 ## Development
 
-Install Node.js 24, Rust 1.97.1, `uv`, and Apple command line tools. Then run:
+Install Node.js 24, Rust 1.99.0, `uv`, and Apple command line tools. Then run:
 
 ```sh
 ./scripts/setup.sh

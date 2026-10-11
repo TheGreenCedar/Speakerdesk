@@ -1,0 +1,64 @@
+{
+  "input": {
+    "coverage": null,
+    "max_seconds": 24.5,
+    "turns": [
+      {
+        "end": 4.0,
+        "speaker": "speaker_0",
+        "start": 0.0
+      },
+      {
+        "end": 4.3,
+        "speaker": "speaker_0",
+        "start": 4.0
+      },
+      {
+        "end": 4.3,
+        "speaker": "speaker_1",
+        "start": 4.0
+      },
+      {
+        "end": 8.0,
+        "speaker": "speaker_0",
+        "start": 4.3
+      }
+    ]
+  },
+  "output": {
+    "value": [
+      {
+        "activity_regions": [
+          {
+            "end": 4.0,
+            "speakers": [
+              "speaker_0"
+            ],
+            "start": 0.0
+          },
+          {
+            "end": 4.3,
+            "speakers": [
+              "speaker_0",
+              "speaker_1"
+            ],
+            "start": 4.0
+          },
+          {
+            "end": 8.0,
+            "speakers": [
+              "speaker_0"
+            ],
+            "start": 4.3
+          }
+        ],
+        "end": 8.0,
+        "speakers": [
+          "speaker_0",
+          "speaker_1"
+        ],
+        "start": 0.0
+      }
+    ]
+  }
+}

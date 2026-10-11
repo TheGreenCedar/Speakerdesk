@@ -1,0 +1,15 @@
+{
+  "input": {
+    "document": {
+      "segments": [],
+      "speakers": {
+        "speaker_0": "Ada"
+      }
+    },
+    "kind": "vtt"
+  },
+  "output": {
+    "content": "WEBVTT\n\n",
+    "mimetype": "text/vtt; charset=utf-8"
+  }
+}

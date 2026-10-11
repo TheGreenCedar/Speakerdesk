@@ -1,0 +1,27 @@
+{
+  "input": {
+    "document": {
+      "segments": [
+        {
+          "end": 1,
+          "speaker": "speaker_0",
+          "start": 0,
+          "text": {
+            "$repeat_text": {
+              "count": 20001,
+              "text": "x"
+            }
+          }
+        }
+      ],
+      "speakers": {
+        "speaker_0": "A"
+      }
+    },
+    "duration": 30.0
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Segment 1: invalid speaker or text."
+  }
+}

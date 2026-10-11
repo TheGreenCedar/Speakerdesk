@@ -1,0 +1,275 @@
+{
+  "input": {
+    "request": {
+      "body": {
+        "document": {
+          "schema_version": 1,
+          "segments": [
+            {
+              "alignment": {
+                "score": 0.99
+              },
+              "assembly_provenance": {
+                "kind": "server"
+              },
+              "bounded_decode_provenance": {
+                "kind": "server"
+              },
+              "decode_core_plan": {
+                "plan": "server-owned"
+              },
+              "end": 8.0,
+              "id": "seg-0",
+              "machine_revision": 0,
+              "reading_turn_provenance": {
+                "turn": 1
+              },
+              "reading_turns": [
+                {
+                  "turn": 1
+                }
+              ],
+              "refinement_state": "final",
+              "speaker": "speaker_0",
+              "speaker_candidates": [
+                "speaker_0"
+              ],
+              "start": 0.0,
+              "text": "First passage here.",
+              "text_audio_anchor": {
+                "end_sample": 128000,
+                "start_sample": 0
+              },
+              "voice_eligible": true
+            },
+            {
+              "end": 15.0,
+              "id": "seg-1",
+              "machine_revision": 2,
+              "protected_fields": [
+                "text"
+              ],
+              "refinement_state": "edited",
+              "retry_candidate": {
+                "created": 1600000000.0,
+                "end": 15.0,
+                "id": "retry-1",
+                "language": "en",
+                "original_text": "Second passage here.",
+                "speaker": "speaker_1",
+                "start": 9.0,
+                "text": "Corrected retry words."
+              },
+              "speaker": "speaker_1",
+              "start": 9.0,
+              "text": "Second passage here."
+            },
+            {
+              "end": 20.0,
+              "id": "seg-2",
+              "speaker": "unassigned",
+              "start": 16.0,
+              "text": "Unlabeled speech."
+            }
+          ],
+          "speakers": {
+            "speaker_0": "Ada",
+            "speaker_1": "Ben",
+            "unassigned": "Unknown speaker"
+          }
+        },
+        "revision": 0
+      },
+      "method": "PUT",
+      "path": "/api/jobs/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee3/transcript"
+    },
+    "seed_jobs": {
+      "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee3": {
+        "created": 1700000000.0,
+        "document": {
+          "schema_version": 1,
+          "segments": [
+            {
+              "alignment": {
+                "score": 0.99
+              },
+              "assembly_provenance": {
+                "kind": "server"
+              },
+              "bounded_decode_provenance": {
+                "kind": "server"
+              },
+              "decode_core_plan": {
+                "plan": "server-owned"
+              },
+              "end": 8.0,
+              "id": "seg-0",
+              "machine_revision": 0,
+              "reading_turn_provenance": {
+                "turn": 1
+              },
+              "reading_turns": [
+                {
+                  "turn": 1
+                }
+              ],
+              "refinement_state": "final",
+              "speaker": "speaker_0",
+              "speaker_candidates": [
+                "speaker_0"
+              ],
+              "start": 0.0,
+              "text": "First passage here.",
+              "text_audio_anchor": {
+                "end_sample": 128000,
+                "start_sample": 0
+              },
+              "voice_eligible": true
+            },
+            {
+              "end": 15.0,
+              "id": "seg-1",
+              "machine_revision": 2,
+              "protected_fields": [
+                "text"
+              ],
+              "refinement_state": "edited",
+              "retry_candidate": {
+                "created": 1600000000.0,
+                "end": 15.0,
+                "id": "retry-1",
+                "language": "en",
+                "original_text": "Second passage here.",
+                "speaker": "speaker_1",
+                "start": 9.0,
+                "text": "Corrected retry words."
+              },
+              "speaker": "speaker_1",
+              "start": 9.0,
+              "text": "Second passage here."
+            },
+            {
+              "end": 20.0,
+              "id": "seg-2",
+              "speaker": "unassigned",
+              "start": 16.0,
+              "text": "Unlabeled speech."
+            }
+          ],
+          "speakers": {
+            "speaker_0": "Ada",
+            "speaker_1": "Ben",
+            "unassigned": "Unknown speaker"
+          }
+        },
+        "duration": 30.0,
+        "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee3",
+        "kind": "import",
+        "language": "en",
+        "message": "Starting local inference…",
+        "name": "Still Running",
+        "revision": 0,
+        "source_file": "source.wav",
+        "status": "processing",
+        "updated": 1700000000.0
+      }
+    }
+  },
+  "output": {
+    "body": {
+      "error": "Wait for audio preparation and inference to finish."
+    },
+    "status": 409,
+    "stored_jobs": {
+      "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee3": {
+        "created": 1700000000.0,
+        "document": {
+          "schema_version": 1,
+          "segments": [
+            {
+              "alignment": {
+                "score": 0.99
+              },
+              "assembly_provenance": {
+                "kind": "server"
+              },
+              "bounded_decode_provenance": {
+                "kind": "server"
+              },
+              "decode_core_plan": {
+                "plan": "server-owned"
+              },
+              "end": 8.0,
+              "id": "seg-0",
+              "machine_revision": 0,
+              "reading_turn_provenance": {
+                "turn": 1
+              },
+              "reading_turns": [
+                {
+                  "turn": 1
+                }
+              ],
+              "refinement_state": "final",
+              "speaker": "speaker_0",
+              "speaker_candidates": [
+                "speaker_0"
+              ],
+              "start": 0.0,
+              "text": "First passage here.",
+              "text_audio_anchor": {
+                "end_sample": 128000,
+                "start_sample": 0
+              },
+              "voice_eligible": true
+            },
+            {
+              "end": 15.0,
+              "id": "seg-1",
+              "machine_revision": 2,
+              "protected_fields": [
+                "text"
+              ],
+              "refinement_state": "edited",
+              "retry_candidate": {
+                "created": 1600000000.0,
+                "end": 15.0,
+                "id": "retry-1",
+                "language": "en",
+                "original_text": "Second passage here.",
+                "speaker": "speaker_1",
+                "start": 9.0,
+                "text": "Corrected retry words."
+              },
+              "speaker": "speaker_1",
+              "start": 9.0,
+              "text": "Second passage here."
+            },
+            {
+              "end": 20.0,
+              "id": "seg-2",
+              "speaker": "unassigned",
+              "start": 16.0,
+              "text": "Unlabeled speech."
+            }
+          ],
+          "speakers": {
+            "speaker_0": "Ada",
+            "speaker_1": "Ben",
+            "unassigned": "Unknown speaker"
+          }
+        },
+        "duration": 30.0,
+        "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee3",
+        "kind": "import",
+        "language": "en",
+        "message": "Starting local inference…",
+        "name": "Still Running",
+        "revision": 0,
+        "source_file": "source.wav",
+        "status": "processing",
+        "updated": 1700000000.0
+      }
+    }
+  }
+}

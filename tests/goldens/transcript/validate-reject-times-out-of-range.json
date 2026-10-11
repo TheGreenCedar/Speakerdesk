@@ -1,0 +1,22 @@
+{
+  "input": {
+    "document": {
+      "segments": [
+        {
+          "end": 30.5,
+          "speaker": "speaker_0",
+          "start": 29.0,
+          "text": "x"
+        }
+      ],
+      "speakers": {
+        "speaker_0": "A"
+      }
+    },
+    "duration": 30.0
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Segment 1: times must fall within the recording and end after start."
+  }
+}

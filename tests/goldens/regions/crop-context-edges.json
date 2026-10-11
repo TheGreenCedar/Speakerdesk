@@ -1,0 +1,44 @@
+{
+  "input": {
+    "chunks": [
+      {
+        "end": 2.0,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 0.1
+      },
+      {
+        "end": 19.9,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 18.0
+      }
+    ],
+    "duration": 20.0,
+    "padding": 0.22
+  },
+  "output": {
+    "chunks": [
+      {
+        "audio_end": 2.22,
+        "audio_start": 0.05,
+        "end": 2.0,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 0.1
+      },
+      {
+        "audio_end": 19.95,
+        "audio_start": 17.78,
+        "end": 19.9,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 18.0
+      }
+    ]
+  }
+}

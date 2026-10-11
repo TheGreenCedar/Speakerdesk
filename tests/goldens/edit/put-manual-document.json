@@ -1,0 +1,123 @@
+{
+  "input": {
+    "request": {
+      "body": {
+        "document": {
+          "segments": [
+            {
+              "end": 5.0,
+              "speaker": "speaker_0",
+              "start": 1.0,
+              "text": "Typed in by a person."
+            }
+          ],
+          "speakers": {
+            "speaker_0": "Ada"
+          }
+        },
+        "revision": 0
+      },
+      "method": "PUT",
+      "path": "/api/jobs/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee2/transcript"
+    },
+    "seed_jobs": {
+      "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee2": {
+        "created": 1700000000.0,
+        "document": null,
+        "duration": 12.0,
+        "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee2",
+        "kind": "import",
+        "language": "en",
+        "message": "Ready for local inference or manual editing.",
+        "name": "Manual Entry",
+        "revision": 0,
+        "source_file": "source.wav",
+        "status": "uploaded",
+        "updated": 1700000000.0
+      }
+    }
+  },
+  "output": {
+    "body": {
+      "created": 1700000000.0,
+      "document": {
+        "edited_at": 1700000000.0,
+        "provenance": {
+          "kind": "manual",
+          "timing": "User supplied recording times"
+        },
+        "schema_version": 1,
+        "segments": [
+          {
+            "end": 5.0,
+            "id": "seg-0",
+            "speaker": "speaker_0",
+            "speaker_candidates": [],
+            "start": 1.0,
+            "text": "Typed in by a person.",
+            "voice_eligible": false
+          }
+        ],
+        "speakers": {
+          "speaker_0": "Ada"
+        },
+        "warnings": [
+          "This transcript contains manually entered or imported text and timing."
+        ]
+      },
+      "duration": 12.0,
+      "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee2",
+      "kind": "import",
+      "language": "en",
+      "message": "Saved locally.",
+      "name": "Manual Entry",
+      "revision": 1,
+      "source_file": "source.wav",
+      "speaker_assignments": {},
+      "status": "ready",
+      "updated": 1700000000.0
+    },
+    "status": 200,
+    "stored_jobs": {
+      "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee2": {
+        "created": 1700000000.0,
+        "document": {
+          "edited_at": 1700000000.0,
+          "provenance": {
+            "kind": "manual",
+            "timing": "User supplied recording times"
+          },
+          "schema_version": 1,
+          "segments": [
+            {
+              "end": 5.0,
+              "id": "seg-0",
+              "speaker": "speaker_0",
+              "speaker_candidates": [],
+              "start": 1.0,
+              "text": "Typed in by a person.",
+              "voice_eligible": false
+            }
+          ],
+          "speakers": {
+            "speaker_0": "Ada"
+          },
+          "warnings": [
+            "This transcript contains manually entered or imported text and timing."
+          ]
+        },
+        "duration": 12.0,
+        "id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee2",
+        "kind": "import",
+        "language": "en",
+        "message": "Saved locally.",
+        "name": "Manual Entry",
+        "revision": 1,
+        "source_file": "source.wav",
+        "speaker_assignments": {},
+        "status": "ready",
+        "updated": 1700000000.0
+      }
+    }
+  }
+}

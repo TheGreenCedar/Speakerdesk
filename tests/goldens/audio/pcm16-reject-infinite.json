@@ -1,0 +1,13 @@
+{
+  "input": {
+    "audio": [
+      {
+        "$float": "inf"
+      }
+    ]
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Capture requires finite mono audio."
+  }
+}

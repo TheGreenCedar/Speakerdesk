@@ -1,0 +1,54 @@
+{
+  "input": {
+    "chunks": [
+      {
+        "audio_end": 10.2,
+        "audio_start": 0.0,
+        "end": 10.0,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 0.0
+      },
+      {
+        "audio_end": 12.0,
+        "audio_start": 10.0,
+        "end": 12.0,
+        "speakers": [],
+        "start": 10.0
+      }
+    ],
+    "max_seconds": 18,
+    "utterances": [
+      {
+        "end_sample": 150000,
+        "speech_regions": [
+          {
+            "end_sample": 150000,
+            "start_sample": 80000
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "value": [
+      {
+        "audio_end": 10.2,
+        "audio_start": 0.0,
+        "end": 10.0,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 0.0
+      },
+      {
+        "audio_end": 12.0,
+        "audio_start": 10.0,
+        "end": 12.0,
+        "speakers": [],
+        "start": 10.0
+      }
+    ]
+  }
+}

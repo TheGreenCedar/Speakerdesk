@@ -1,0 +1,52 @@
+{
+  "input": {
+    "document": {
+      "segments": [
+        {
+          "end": 9.5,
+          "id": "a",
+          "speaker": "speaker_1",
+          "start": 6.0,
+          "text": "Later passage."
+        },
+        {
+          "end": 4.0,
+          "id": "b",
+          "speaker": "speaker_0",
+          "start": 0.5,
+          "text": "Earlier passage."
+        }
+      ],
+      "speakers": {
+        "speaker_0": "Ada Lovelace",
+        "speaker_1": "Ben Gunn"
+      }
+    },
+    "duration": 30.0
+  },
+  "output": {
+    "value": {
+      "schema_version": 1,
+      "segments": [
+        {
+          "end": 4.0,
+          "id": "b",
+          "speaker": "speaker_0",
+          "start": 0.5,
+          "text": "Earlier passage."
+        },
+        {
+          "end": 9.5,
+          "id": "a",
+          "speaker": "speaker_1",
+          "start": 6.0,
+          "text": "Later passage."
+        }
+      ],
+      "speakers": {
+        "speaker_0": "Ada Lovelace",
+        "speaker_1": "Ben Gunn"
+      }
+    }
+  }
+}

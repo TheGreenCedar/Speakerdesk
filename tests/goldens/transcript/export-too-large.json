@@ -1,0 +1,31 @@
+{
+  "input": {
+    "document": {
+      "segments": {
+        "$repeat_segments": {
+          "count": 20000,
+          "segment": {
+            "end": 100,
+            "speaker": "speaker_0",
+            "start": 0,
+            "text": {
+              "$repeat_text": {
+                "count": 900,
+                "text": "word "
+              }
+            }
+          }
+        }
+      },
+      "speakers": {
+        "speaker_0": "Ada"
+      }
+    },
+    "kind": "txt",
+    "note": "input described parametrically: 20,000 segments x 900-word text exceeds the 16 MiB export limit without materializing the document in this file"
+  },
+  "output": {
+    "error": "ExportTooLarge",
+    "message": "Export exceeds the 16 MiB download limit. The saved meeting is unchanged."
+  }
+}

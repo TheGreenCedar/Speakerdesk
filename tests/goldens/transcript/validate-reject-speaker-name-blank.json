@@ -1,0 +1,15 @@
+{
+  "input": {
+    "document": {
+      "segments": [],
+      "speakers": {
+        "speaker_0": "   "
+      }
+    },
+    "duration": 30.0
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Speaker names must be nonempty text, up to 100 characters."
+  }
+}

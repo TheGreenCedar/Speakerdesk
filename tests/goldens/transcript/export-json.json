@@ -1,0 +1,350 @@
+{
+  "input": {
+    "document": {
+      "schema_version": 1,
+      "segments": [
+        {
+          "end": 4.25,
+          "id": "s-hello",
+          "speaker": "speaker_0",
+          "start": 0.5,
+          "text": "Hello, everyone."
+        },
+        {
+          "end": 7.0,
+          "id": "s-unassigned",
+          "speaker": "unassigned",
+          "start": 4.75,
+          "text": "A stray voice joins."
+        },
+        {
+          "end": 11.0,
+          "id": "s-symbols",
+          "speaker": "speaker_1",
+          "start": 7.5,
+          "text": "Arrows --> and <tags> and café 👩🏽‍💻 unicode."
+        },
+        {
+          "end": 13.5,
+          "id": "s-blank",
+          "speaker": "speaker_1",
+          "start": 12.0,
+          "text": "   "
+        },
+        {
+          "end": 16.0,
+          "id": "s-overlap",
+          "speaker": "overlap_speaker_0_speaker_1",
+          "start": 14.0,
+          "text": "Both speak at once."
+        },
+        {
+          "coarse_timing": true,
+          "end": 21.0,
+          "id": "s-coarse",
+          "speaker": "speaker_0",
+          "start": 17.0,
+          "text": "Only coarse timing survived."
+        },
+        {
+          "end": 25.5,
+          "id": "s-parent-slice",
+          "reading_slice": true,
+          "speaker": "speaker_1",
+          "start": 22.0,
+          "text": "Reading slice parent timing."
+        },
+        {
+          "audio_revision": 0,
+          "canonical_machine_revision": 0,
+          "canonical_utterance_id": "slice-turns",
+          "end": 32.0,
+          "end_sample": 512000,
+          "id": "slice-turns",
+          "language_epoch": 0,
+          "machine_revision": 0,
+          "protected_fields": [],
+          "reading_turn_provenance": {
+            "activity_sha256": "bac9057eb805161b956ff49e24963def5380702e9d07284b96f7ae6d8d45dcdd",
+            "audio_anchor": {
+              "end_sample": 512000,
+              "start_sample": 416000
+            },
+            "audio_revision": 0,
+            "calibration_id": "ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75",
+            "canonical_machine_revision": 0,
+            "language_epoch": 0,
+            "machine_revision": 0,
+            "model_sha256": "38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d",
+            "text_sha256": "bab7fd6e5bd624f4ea0c33f7e7219262a6fa93a945a8964d9f110148286b7b37",
+            "turns_sha256": "a219f3dc2e12d148f5ffc5f62d93cdc312bf773b13374cf605b101519c856852",
+            "utterance_id": "slice-turns"
+          },
+          "reading_turns": [
+            {
+              "attribution": "single",
+              "end": 27.7,
+              "end_offset": 8,
+              "speaker": "speaker_0",
+              "start": 26.3,
+              "start_offset": 0,
+              "text": "one two "
+            },
+            {
+              "attribution": "overlap",
+              "end": 29.7,
+              "end_offset": 19,
+              "speaker": "overlap_speaker_0_speaker_1",
+              "start": 28.3,
+              "start_offset": 8,
+              "text": "three four "
+            },
+            {
+              "attribution": "single",
+              "end": 31.7,
+              "end_offset": 27,
+              "speaker": "speaker_1",
+              "start": 30.3,
+              "start_offset": 19,
+              "text": "five six"
+            }
+          ],
+          "reading_word_evidence": {
+            "audio_anchor": {
+              "end_sample": 512000,
+              "start_sample": 416000
+            },
+            "audio_revision": 0,
+            "calibration_id": "ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75",
+            "machine_revision": 0,
+            "model_sha256": "38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d",
+            "text_sha256": "bab7fd6e5bd624f4ea0c33f7e7219262a6fa93a945a8964d9f110148286b7b37",
+            "timing_kind": "ctc_emission_cell_envelope",
+            "words": [
+              {
+                "end_char": 3,
+                "end_sample": 427200,
+                "start_char": 0,
+                "start_sample": 420800,
+                "text": "one"
+              },
+              {
+                "end_char": 7,
+                "end_sample": 443200,
+                "start_char": 4,
+                "start_sample": 436800,
+                "text": "two"
+              },
+              {
+                "end_char": 13,
+                "end_sample": 459200,
+                "start_char": 8,
+                "start_sample": 452800,
+                "text": "three"
+              },
+              {
+                "end_char": 18,
+                "end_sample": 475200,
+                "start_char": 14,
+                "start_sample": 468800,
+                "text": "four"
+              },
+              {
+                "end_char": 23,
+                "end_sample": 491200,
+                "start_char": 19,
+                "start_sample": 484800,
+                "text": "five"
+              },
+              {
+                "end_char": 27,
+                "end_sample": 507200,
+                "start_char": 24,
+                "start_sample": 500800,
+                "text": "six"
+              }
+            ]
+          },
+          "speaker": "speaker_0",
+          "speaker_activity": {
+            "audio_revision": 0,
+            "observed_end_sample": 512000,
+            "regions": [
+              {
+                "end_sample": 448000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 416000
+              },
+              {
+                "end_sample": 480000,
+                "speakers": [
+                  "speaker_0",
+                  "speaker_1"
+                ],
+                "start_sample": 448000
+              },
+              {
+                "end_sample": 512000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 480000
+              }
+            ]
+          },
+          "speaker_candidates": [
+            "speaker_0"
+          ],
+          "start": 26.0,
+          "start_sample": 416000,
+          "text": "one two three four five six",
+          "text_audio_anchor": {
+            "end_sample": 512000,
+            "start_sample": 416000
+          }
+        },
+        {
+          "audio_revision": 0,
+          "canonical_machine_revision": 0,
+          "canonical_utterance_id": "slice-mixed",
+          "end": 38.0,
+          "end_sample": 608000,
+          "id": "slice-mixed",
+          "language_epoch": 0,
+          "machine_revision": 0,
+          "protected_fields": [],
+          "reading_turn_provenance": {
+            "activity_sha256": "481ae80084242c5d4763263e3e1dca242e7ec210f991b24722305e2e9696e3b7",
+            "audio_anchor": {
+              "end_sample": 608000,
+              "start_sample": 528000
+            },
+            "audio_revision": 0,
+            "calibration_id": "ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75",
+            "canonical_machine_revision": 0,
+            "language_epoch": 0,
+            "machine_revision": 0,
+            "model_sha256": "38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d",
+            "text_sha256": "7665e7b94c02d23ed7338c3ae2c44ebf04e43370e61de907b34f36fb6a42b13b",
+            "turns_sha256": "89514fe665e2fa09ac0d146dac59bbed0a0147e9e46e066d4268e57f6ba7e121",
+            "utterance_id": "slice-mixed"
+          },
+          "reading_turns": [
+            {
+              "attribution": "single",
+              "end": 33.875,
+              "end_offset": 6,
+              "speaker": "speaker_0",
+              "start": 33.375,
+              "start_offset": 0,
+              "text": "alpha "
+            },
+            {
+              "attribution": "unknown",
+              "end": null,
+              "end_offset": 11,
+              "speaker": "unassigned",
+              "start": null,
+              "start_offset": 6,
+              "text": "beta "
+            },
+            {
+              "attribution": "single",
+              "end": 37.625,
+              "end_offset": 22,
+              "speaker": "speaker_1",
+              "start": 35.875,
+              "start_offset": 11,
+              "text": "gamma delta"
+            }
+          ],
+          "reading_word_evidence": {
+            "audio_anchor": {
+              "end_sample": 608000,
+              "start_sample": 528000
+            },
+            "audio_revision": 0,
+            "calibration_id": "ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75",
+            "machine_revision": 0,
+            "model_sha256": "38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d",
+            "text_sha256": "7665e7b94c02d23ed7338c3ae2c44ebf04e43370e61de907b34f36fb6a42b13b",
+            "timing_kind": "ctc_emission_cell_envelope",
+            "words": [
+              {
+                "end_char": 5,
+                "end_sample": 542000,
+                "start_char": 0,
+                "start_sample": 534000,
+                "text": "alpha"
+              },
+              {
+                "end_char": 10,
+                "end_sample": null,
+                "start_char": 6,
+                "start_sample": null,
+                "text": "beta"
+              },
+              {
+                "end_char": 16,
+                "end_sample": 582000,
+                "start_char": 11,
+                "start_sample": 574000,
+                "text": "gamma"
+              },
+              {
+                "end_char": 22,
+                "end_sample": 602000,
+                "start_char": 17,
+                "start_sample": 594000,
+                "text": "delta"
+              }
+            ]
+          },
+          "speaker": "speaker_0",
+          "speaker_activity": {
+            "audio_revision": 0,
+            "observed_end_sample": 608000,
+            "regions": [
+              {
+                "end_sample": 568000,
+                "speakers": [
+                  "speaker_0"
+                ],
+                "start_sample": 528000
+              },
+              {
+                "end_sample": 608000,
+                "speakers": [
+                  "speaker_1"
+                ],
+                "start_sample": 568000
+              }
+            ]
+          },
+          "speaker_candidates": [
+            "speaker_0"
+          ],
+          "start": 33.0,
+          "start_sample": 528000,
+          "text": "alpha beta gamma delta",
+          "text_audio_anchor": {
+            "end_sample": 608000,
+            "start_sample": 528000
+          }
+        }
+      ],
+      "speakers": {
+        "speaker_0": "Ada Lovelace",
+        "speaker_1": "Ben Gunn",
+        "unassigned": "Unknown speaker"
+      }
+    },
+    "kind": "json"
+  },
+  "output": {
+    "content": "{\n  \"schema_version\": 1,\n  \"speakers\": {\n    \"speaker_0\": \"Ada Lovelace\",\n    \"speaker_1\": \"Ben Gunn\",\n    \"unassigned\": \"Unknown speaker\"\n  },\n  \"segments\": [\n    {\n      \"id\": \"s-hello\",\n      \"speaker\": \"speaker_0\",\n      \"start\": 0.5,\n      \"end\": 4.25,\n      \"text\": \"Hello, everyone.\"\n    },\n    {\n      \"id\": \"s-unassigned\",\n      \"speaker\": \"unassigned\",\n      \"start\": 4.75,\n      \"end\": 7.0,\n      \"text\": \"A stray voice joins.\"\n    },\n    {\n      \"id\": \"s-symbols\",\n      \"speaker\": \"speaker_1\",\n      \"start\": 7.5,\n      \"end\": 11.0,\n      \"text\": \"Arrows --> and <tags> and café 👩🏽‍💻 unicode.\"\n    },\n    {\n      \"id\": \"s-blank\",\n      \"speaker\": \"speaker_1\",\n      \"start\": 12.0,\n      \"end\": 13.5,\n      \"text\": \"   \"\n    },\n    {\n      \"id\": \"s-overlap\",\n      \"speaker\": \"overlap_speaker_0_speaker_1\",\n      \"start\": 14.0,\n      \"end\": 16.0,\n      \"text\": \"Both speak at once.\"\n    },\n    {\n      \"id\": \"s-coarse\",\n      \"speaker\": \"speaker_0\",\n      \"start\": 17.0,\n      \"end\": 21.0,\n      \"text\": \"Only coarse timing survived.\",\n      \"coarse_timing\": true\n    },\n    {\n      \"id\": \"s-parent-slice\",\n      \"speaker\": \"speaker_1\",\n      \"start\": 22.0,\n      \"end\": 25.5,\n      \"text\": \"Reading slice parent timing.\",\n      \"reading_slice\": true\n    },\n    {\n      \"id\": \"slice-turns\",\n      \"canonical_utterance_id\": \"slice-turns\",\n      \"machine_revision\": 0,\n      \"canonical_machine_revision\": 0,\n      \"audio_revision\": 0,\n      \"language_epoch\": 0,\n      \"start_sample\": 416000,\n      \"end_sample\": 512000,\n      \"start\": 26.0,\n      \"end\": 32.0,\n      \"text\": \"one two three four five six\",\n      \"text_audio_anchor\": {\n        \"start_sample\": 416000,\n        \"end_sample\": 512000\n      },\n      \"protected_fields\": [],\n      \"speaker\": \"speaker_0\",\n      \"speaker_candidates\": [\n        \"speaker_0\"\n      ],\n      \"speaker_activity\": {\n        \"audio_revision\": 0,\n        \"observed_end_sample\": 512000,\n        \"regions\": [\n          {\n            \"start_sample\": 416000,\n            \"end_sample\": 448000,\n            \"speakers\": [\n              \"speaker_0\"\n            ]\n          },\n          {\n            \"start_sample\": 448000,\n            \"end_sample\": 480000,\n            \"speakers\": [\n              \"speaker_0\",\n              \"speaker_1\"\n            ]\n          },\n          {\n            \"start_sample\": 480000,\n            \"end_sample\": 512000,\n            \"speakers\": [\n              \"speaker_1\"\n            ]\n          }\n        ]\n      },\n      \"reading_word_evidence\": {\n        \"text_sha256\": \"bab7fd6e5bd624f4ea0c33f7e7219262a6fa93a945a8964d9f110148286b7b37\",\n        \"machine_revision\": 0,\n        \"audio_revision\": 0,\n        \"audio_anchor\": {\n          \"start_sample\": 416000,\n          \"end_sample\": 512000\n        },\n        \"words\": [\n          {\n            \"text\": \"one\",\n            \"start_char\": 0,\n            \"end_char\": 3,\n            \"start_sample\": 420800,\n            \"end_sample\": 427200\n          },\n          {\n            \"text\": \"two\",\n            \"start_char\": 4,\n            \"end_char\": 7,\n            \"start_sample\": 436800,\n            \"end_sample\": 443200\n          },\n          {\n            \"text\": \"three\",\n            \"start_char\": 8,\n            \"end_char\": 13,\n            \"start_sample\": 452800,\n            \"end_sample\": 459200\n          },\n          {\n            \"text\": \"four\",\n            \"start_char\": 14,\n            \"end_char\": 18,\n            \"start_sample\": 468800,\n            \"end_sample\": 475200\n          },\n          {\n            \"text\": \"five\",\n            \"start_char\": 19,\n            \"end_char\": 23,\n            \"start_sample\": 484800,\n            \"end_sample\": 491200\n          },\n          {\n            \"text\": \"six\",\n            \"start_char\": 24,\n            \"end_char\": 27,\n            \"start_sample\": 500800,\n            \"end_sample\": 507200\n          }\n        ],\n        \"calibration_id\": \"ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75\",\n        \"model_sha256\": \"38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d\",\n        \"timing_kind\": \"ctc_emission_cell_envelope\"\n      },\n      \"reading_turns\": [\n        {\n          \"text\": \"one two \",\n          \"start_offset\": 0,\n          \"end_offset\": 8,\n          \"speaker\": \"speaker_0\",\n          \"attribution\": \"single\",\n          \"start\": 26.3,\n          \"end\": 27.7\n        },\n        {\n          \"text\": \"three four \",\n          \"start_offset\": 8,\n          \"end_offset\": 19,\n          \"speaker\": \"overlap_speaker_0_speaker_1\",\n          \"attribution\": \"overlap\",\n          \"start\": 28.3,\n          \"end\": 29.7\n        },\n        {\n          \"text\": \"five six\",\n          \"start_offset\": 19,\n          \"end_offset\": 27,\n          \"speaker\": \"speaker_1\",\n          \"attribution\": \"single\",\n          \"start\": 30.3,\n          \"end\": 31.7\n        }\n      ],\n      \"reading_turn_provenance\": {\n        \"utterance_id\": \"slice-turns\",\n        \"machine_revision\": 0,\n        \"canonical_machine_revision\": 0,\n        \"audio_revision\": 0,\n        \"language_epoch\": 0,\n        \"text_sha256\": \"bab7fd6e5bd624f4ea0c33f7e7219262a6fa93a945a8964d9f110148286b7b37\",\n        \"audio_anchor\": {\n          \"start_sample\": 416000,\n          \"end_sample\": 512000\n        },\n        \"activity_sha256\": \"bac9057eb805161b956ff49e24963def5380702e9d07284b96f7ae6d8d45dcdd\",\n        \"turns_sha256\": \"a219f3dc2e12d148f5ffc5f62d93cdc312bf773b13374cf605b101519c856852\",\n        \"calibration_id\": \"ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75\",\n        \"model_sha256\": \"38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d\"\n      }\n    },\n    {\n      \"id\": \"slice-mixed\",\n      \"canonical_utterance_id\": \"slice-mixed\",\n      \"machine_revision\": 0,\n      \"canonical_machine_revision\": 0,\n      \"audio_revision\": 0,\n      \"language_epoch\": 0,\n      \"start_sample\": 528000,\n      \"end_sample\": 608000,\n      \"start\": 33.0,\n      \"end\": 38.0,\n      \"text\": \"alpha beta gamma delta\",\n      \"text_audio_anchor\": {\n        \"start_sample\": 528000,\n        \"end_sample\": 608000\n      },\n      \"protected_fields\": [],\n      \"speaker\": \"speaker_0\",\n      \"speaker_candidates\": [\n        \"speaker_0\"\n      ],\n      \"speaker_activity\": {\n        \"audio_revision\": 0,\n        \"observed_end_sample\": 608000,\n        \"regions\": [\n          {\n            \"start_sample\": 528000,\n            \"end_sample\": 568000,\n            \"speakers\": [\n              \"speaker_0\"\n            ]\n          },\n          {\n            \"start_sample\": 568000,\n            \"end_sample\": 608000,\n            \"speakers\": [\n              \"speaker_1\"\n            ]\n          }\n        ]\n      },\n      \"reading_word_evidence\": {\n        \"text_sha256\": \"7665e7b94c02d23ed7338c3ae2c44ebf04e43370e61de907b34f36fb6a42b13b\",\n        \"machine_revision\": 0,\n        \"audio_revision\": 0,\n        \"audio_anchor\": {\n          \"start_sample\": 528000,\n          \"end_sample\": 608000\n        },\n        \"words\": [\n          {\n            \"text\": \"alpha\",\n            \"start_char\": 0,\n            \"end_char\": 5,\n            \"start_sample\": 534000,\n            \"end_sample\": 542000\n          },\n          {\n            \"text\": \"beta\",\n            \"start_char\": 6,\n            \"end_char\": 10,\n            \"start_sample\": null,\n            \"end_sample\": null\n          },\n          {\n            \"text\": \"gamma\",\n            \"start_char\": 11,\n            \"end_char\": 16,\n            \"start_sample\": 574000,\n            \"end_sample\": 582000\n          },\n          {\n            \"text\": \"delta\",\n            \"start_char\": 17,\n            \"end_char\": 22,\n            \"start_sample\": 594000,\n            \"end_sample\": 602000\n          }\n        ],\n        \"calibration_id\": \"ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75\",\n        \"model_sha256\": \"38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d\",\n        \"timing_kind\": \"ctc_emission_cell_envelope\"\n      },\n      \"reading_turns\": [\n        {\n          \"text\": \"alpha \",\n          \"start_offset\": 0,\n          \"end_offset\": 6,\n          \"speaker\": \"speaker_0\",\n          \"attribution\": \"single\",\n          \"start\": 33.375,\n          \"end\": 33.875\n        },\n        {\n          \"text\": \"beta \",\n          \"start_offset\": 6,\n          \"end_offset\": 11,\n          \"speaker\": \"unassigned\",\n          \"attribution\": \"unknown\",\n          \"start\": null,\n          \"end\": null\n        },\n        {\n          \"text\": \"gamma delta\",\n          \"start_offset\": 11,\n          \"end_offset\": 22,\n          \"speaker\": \"speaker_1\",\n          \"attribution\": \"single\",\n          \"start\": 35.875,\n          \"end\": 37.625\n        }\n      ],\n      \"reading_turn_provenance\": {\n        \"utterance_id\": \"slice-mixed\",\n        \"machine_revision\": 0,\n        \"canonical_machine_revision\": 0,\n        \"audio_revision\": 0,\n        \"language_epoch\": 0,\n        \"text_sha256\": \"7665e7b94c02d23ed7338c3ae2c44ebf04e43370e61de907b34f36fb6a42b13b\",\n        \"audio_anchor\": {\n          \"start_sample\": 528000,\n          \"end_sample\": 608000\n        },\n        \"activity_sha256\": \"481ae80084242c5d4763263e3e1dca242e7ec210f991b24722305e2e9696e3b7\",\n        \"turns_sha256\": \"89514fe665e2fa09ac0d146dac59bbed0a0147e9e46e066d4268e57f6ba7e121\",\n        \"calibration_id\": \"ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75\",\n        \"model_sha256\": \"38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d\"\n      }\n    }\n  ]\n}\n",
+    "mimetype": "application/json"
+  }
+}

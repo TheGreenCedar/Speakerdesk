@@ -1,0 +1,15 @@
+{
+  "input": {
+    "document": {
+      "segments": [],
+      "speakers": {
+        "speaker_0": "Ada"
+      }
+    },
+    "kind": "txt"
+  },
+  "output": {
+    "content": "\n",
+    "mimetype": "text/plain; charset=utf-8"
+  }
+}

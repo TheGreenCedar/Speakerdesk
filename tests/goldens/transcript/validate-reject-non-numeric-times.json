@@ -1,0 +1,22 @@
+{
+  "input": {
+    "document": {
+      "segments": [
+        {
+          "end": 9,
+          "speaker": "speaker_0",
+          "start": "late",
+          "text": "x"
+        }
+      ],
+      "speakers": {
+        "speaker_0": "A"
+      }
+    },
+    "duration": 30.0
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Segment 1: supply numeric start and end times."
+  }
+}

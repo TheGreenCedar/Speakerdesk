@@ -1,0 +1,54 @@
+{
+  "input": {
+    "coverage": [
+      0.0,
+      30.0
+    ],
+    "max_seconds": 24.5,
+    "turns": [
+      {
+        "end": 8.0,
+        "speaker": "speaker_0",
+        "start": 5.0
+      },
+      {
+        "end": 24.0,
+        "speaker": "speaker_1",
+        "start": 20.0
+      }
+    ]
+  },
+  "output": {
+    "value": [
+      {
+        "end": 5.0,
+        "speakers": [],
+        "start": 0.0
+      },
+      {
+        "end": 8.0,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 5.0
+      },
+      {
+        "end": 20.0,
+        "speakers": [],
+        "start": 8.0
+      },
+      {
+        "end": 24.0,
+        "speakers": [
+          "speaker_1"
+        ],
+        "start": 20.0
+      },
+      {
+        "end": 30.0,
+        "speakers": [],
+        "start": 24.0
+      }
+    ]
+  }
+}

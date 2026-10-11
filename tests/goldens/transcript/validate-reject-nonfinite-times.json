@@ -1,0 +1,24 @@
+{
+  "input": {
+    "document": {
+      "segments": [
+        {
+          "end": {
+            "$float": "inf"
+          },
+          "speaker": "speaker_0",
+          "start": 0,
+          "text": "x"
+        }
+      ],
+      "speakers": {
+        "speaker_0": "A"
+      }
+    },
+    "duration": 30.0
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Segment 1: times must fall within the recording and end after start."
+  }
+}

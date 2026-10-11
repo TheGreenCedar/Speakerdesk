@@ -1,0 +1,25 @@
+{
+  "input": {
+    "document": {
+      "segments": {
+        "$repeat_segments": {
+          "count": 20001,
+          "segment": {
+            "end": 1,
+            "speaker": "speaker_0",
+            "start": 0,
+            "text": "x"
+          }
+        }
+      },
+      "speakers": {
+        "speaker_0": "A"
+      }
+    },
+    "duration": 30.0
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Supply a segment list with at most 20,000 entries."
+  }
+}

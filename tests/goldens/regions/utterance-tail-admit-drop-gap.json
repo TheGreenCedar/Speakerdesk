@@ -1,0 +1,67 @@
+{
+  "input": {
+    "chunks": [
+      {
+        "audio_end": 10.2,
+        "audio_start": 0.0,
+        "end": 10.0,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 0.0
+      },
+      {
+        "audio_end": 12.0,
+        "audio_start": 10.0,
+        "end": 12.0,
+        "speakers": [],
+        "start": 10.0
+      }
+    ],
+    "max_seconds": 18,
+    "utterances": [
+      {
+        "end_sample": 192000,
+        "speech_regions": [
+          {
+            "end_sample": 192000,
+            "start_sample": 80000
+          }
+        ]
+      }
+    ]
+  },
+  "output": {
+    "value": [
+      {
+        "activity_regions": [
+          {
+            "end": 10.0,
+            "speakers": [
+              "speaker_0"
+            ],
+            "start": 0.0
+          },
+          {
+            "end": 12.0,
+            "speakers": [],
+            "start": 10.0
+          }
+        ],
+        "audio_end": 12.0,
+        "audio_start": 0.0,
+        "decode_context": {
+          "boundary_sample": 160000,
+          "end_sample": 192000,
+          "policy": "speech_utterance_tail_context_v1",
+          "start_sample": 0
+        },
+        "end": 12.0,
+        "speakers": [
+          "speaker_0"
+        ],
+        "start": 0.0
+      }
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "input": {
+    "audio": [
+      [
+        0.0,
+        0.5
+      ],
+      [
+        0.25,
+        -0.5
+      ]
+    ]
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Capture requires finite mono audio."
+  }
+}

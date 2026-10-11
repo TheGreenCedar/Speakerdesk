@@ -1,0 +1,14 @@
+{
+  "input": {
+    "document": [
+      "not",
+      "a",
+      "dict"
+    ],
+    "duration": 30.0
+  },
+  "output": {
+    "error": "ValueError",
+    "message": "Transcript must be a JSON object."
+  }
+}
