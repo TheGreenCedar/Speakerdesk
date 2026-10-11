@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -54,9 +53,50 @@ pub struct Turn {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiarTurn {
+    /// Absolute sample coordinates within this session.
+    pub start: u64,
+    pub end: u64,
+    pub speaker: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiarFeedOut {
-    pub turns: Vec<Turn>,
-    pub frames_processed: u64,
+    pub turns: Vec<DiarTurn>,
+    pub received: u64,
+    /// Exclusive observation endpoint; lookahead and a final sub-hop tail may remain.
+    pub observed: u64,
+}
+
+impl DiarFeedOut {
+    pub fn validate(&self, received: u64, previous: u64) -> Result<(), ChildError> {
+        if self.received != received
+            || self.observed < previous
+            || self.observed > received
+            || self.turns.iter().any(|turn| {
+                turn.start < previous
+                    || turn.start >= turn.end
+                    || turn.end > self.observed
+                    || !matches!(
+                        turn.speaker.as_str(),
+                        "speaker_0"
+                            | "speaker_1"
+                            | "speaker_2"
+                            | "speaker_3"
+                            | "speaker_4"
+                            | "speaker_5"
+                            | "speaker_6"
+                            | "speaker_7"
+                    )
+            })
+        {
+            return Err(ChildError::failed(
+                "invalid diarization observations",
+                false,
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,12 +171,6 @@ pub enum Request {
     DiarClose {
         handle: Handle,
     },
-    DiarizeFile {
-        path: PathBuf,
-    },
-    DiarizeWindow {
-        pcm: Vec<f32>,
-    },
     LanguageProbe {
         pcm: Vec<f32>,
     },
@@ -172,7 +206,6 @@ pub enum Response {
     Handle(Handle),
     Vad(VadFeedOut),
     Diar(DiarFeedOut),
-    Turns(Vec<Turn>),
     Probe(LanguageProbeOut),
     Text(AsrText),
     Ctc(CtcScoresOut),
@@ -194,8 +227,7 @@ pub enum EnvelopeBody {
     Response(Result<Response, ChildError>),
 }
 
-/// `None` means the supervisor scales the limit with audio duration (`DiarizeFile`).
-pub fn request_timeout(request: &Request) -> Option<Duration> {
+pub fn request_timeout(request: &Request) -> Duration {
     let seconds = match request {
         Request::Transcribe { .. } => 60,
         Request::LanguageProbe { .. } => 10,
@@ -203,18 +235,16 @@ pub fn request_timeout(request: &Request) -> Option<Duration> {
         Request::EmbedVoice { .. } => 10,
         Request::VadFeed { .. } | Request::DiarFeed { .. } => 10,
         Request::SetupCheck { .. } => 120,
-        Request::DiarizeFile { .. } => return None,
         Request::Hello { .. }
         | Request::VadOpen { .. }
         | Request::VadClose { .. }
         | Request::DiarOpen { .. }
         | Request::DiarClose { .. }
-        | Request::DiarizeWindow { .. }
         | Request::Metrics
         | Request::Cancel { .. }
         | Request::Shutdown => 10,
     };
-    Some(Duration::from_secs(seconds))
+    Duration::from_secs(seconds)
 }
 
 pub fn read_envelope<R: std::io::Read>(reader: &mut R) -> std::io::Result<Envelope> {

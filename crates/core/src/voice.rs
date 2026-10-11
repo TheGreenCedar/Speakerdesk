@@ -449,15 +449,19 @@ pub fn speaker_audio_ranges(segment: &AudioSegment, track_id: &str) -> Vec<(f64,
     let Some(activity) = segment.speaker_activity.as_ref() else {
         return Vec::new();
     };
-    if activity.audio_revision != revision || activity.observed_end_sample != end_sample {
+    if activity.audio_revision != revision
+        || activity.observed_end_sample <= start_sample
+        || activity.observed_end_sample > end_sample
+    {
         return Vec::new();
     }
+    let observed = activity.observed_end_sample;
     let mut ranges: Vec<(i64, i64)> = Vec::new();
     let mut cursor = start_sample;
     for region in &activity.regions {
         if region.start_sample != cursor
             || region.start_sample >= region.end_sample
-            || region.end_sample > end_sample
+            || region.end_sample > observed
         {
             return Vec::new();
         }
@@ -480,7 +484,7 @@ pub fn speaker_audio_ranges(segment: &AudioSegment, track_id: &str) -> Vec<(f64,
         }
         cursor = region.end_sample;
     }
-    if cursor != end_sample {
+    if cursor != observed {
         return Vec::new();
     }
     ranges

@@ -496,7 +496,11 @@ fn prepare_projection(row: &ReadingRow) -> Option<Projection<'_>> {
     if units.is_empty() || units.len() != evidence.words.len() {
         return None;
     }
-    let regions = merged_regions(&activity.regions, row.start_sample, row.end_sample)?;
+    let regions = merged_regions(
+        &activity.regions,
+        row.start_sample,
+        activity.observed_end_sample.unwrap_or(row.end_sample),
+    )?;
     Some(Projection {
         evidence,
         anchor,

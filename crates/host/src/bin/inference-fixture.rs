@@ -27,6 +27,7 @@ fn main() {
     let output = Arc::new(Mutex::new(std::io::stdout()));
     let mut active: Option<(u64, Arc<AtomicBool>)> = None;
     let mut sessions = HashSet::new();
+    let mut diar_progress = std::collections::HashMap::<u64, (u64, u64)>::new();
     let mut next_session = 1;
     let mut race: Option<PathBuf> = None;
     let mut race_error = false;
@@ -73,7 +74,7 @@ fn main() {
                 sessions.insert(handle.session);
                 Ok(Response::Handle(handle))
             }
-            Request::VadFeed { handle, .. } | Request::DiarFeed { handle, .. } => {
+            Request::VadFeed { handle, .. } => {
                 assert!(sessions.contains(&handle.session));
                 if race_error {
                     Err(ChildError::failed("fixture model error", false))
@@ -85,8 +86,43 @@ fn main() {
                     }))
                 }
             }
+            Request::DiarFeed { handle, pcm, last } => {
+                assert!(sessions.contains(&handle.session));
+                assert!(
+                    pcm.len() <= 16000 * 10,
+                    "whole-recording IPC was not removed"
+                );
+                if race_error || pcm.iter().any(|x| !x.is_finite()) {
+                    Err(ChildError::failed("fixture model error", false))
+                } else {
+                    let (received, observed) = diar_progress.entry(handle.session).or_default();
+                    *received += pcm.len() as u64;
+                    // Deliberately retain every observation until EOF.
+                    let end = if last {
+                        *received / 160 * 160
+                    } else {
+                        *observed
+                    };
+                    let turns = if end > *observed {
+                        vec![speakerdesk_core::ipc::DiarTurn {
+                            start: *observed,
+                            end,
+                            speaker: "speaker_0".into(),
+                        }]
+                    } else {
+                        Vec::new()
+                    };
+                    *observed = end;
+                    Ok(Response::Diar(speakerdesk_core::ipc::DiarFeedOut {
+                        turns,
+                        received: *received,
+                        observed: *observed,
+                    }))
+                }
+            }
             Request::VadClose { handle } | Request::DiarClose { handle } => {
                 assert!(sessions.remove(&handle.session), "session was not resident");
+                diar_progress.remove(&handle.session);
                 Ok(Response::Ack)
             }
             Request::Metrics => Ok(Response::Metrics(MetricsOut {
@@ -186,8 +222,10 @@ fn main() {
             }
             _ => Err(ChildError::Unimplemented),
         };
-        if matches!(result, Ok(Response::Handle(_) | Response::Vad(_)) | Err(_))
-            && let Some(marker) = race.take()
+        if matches!(
+            result,
+            Ok(Response::Handle(_) | Response::Vad(_) | Response::Diar(_)) | Err(_)
+        ) && let Some(marker) = race.take()
         {
             let flag = Arc::new(AtomicBool::new(false));
             active = Some((id, flag.clone()));

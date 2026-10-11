@@ -270,18 +270,14 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
                 chunk_speaker(chunk)
             };
             ensure_speaker(&mut speakers, &speaker);
-            let review = row.review
-                || speaker == "unassigned"
-                || chunk.speakers.len() != 1
-                || end - start < 0.5;
             let mut segment = segment_from_row(
                 format!("seg-{}", segments.len()),
                 start,
                 end,
                 speaker,
-                review,
                 chunk,
                 &row,
+                (pcm.len() / 160 * 160) as i64,
             );
             if let Some(alignment) = alignment
                 && row.audio_state.is_none()
@@ -914,16 +910,19 @@ fn segment_from_row(
     start: f64,
     end: f64,
     speaker: String,
-    review: bool,
     chunk: &DecodeRegion,
     row: &Decoded,
+    observed: i64,
 ) -> Segment {
+    let review =
+        row.review || speaker == "unassigned" || chunk.speakers.len() != 1 || end - start < 0.5;
     let mut rest = Map::new();
     rest.insert("speaker_candidates".into(), json!(chunk.speakers));
     rest.insert(
         "voice_eligible".into(),
         json!(
             chunk.speakers.len() == 1
+                && (end * 16000.).round() as i64 <= observed
                 && row.audio_state.is_none()
                 && chunk.activity_regions.is_none()
         ),
@@ -942,15 +941,19 @@ fn segment_from_row(
     if let Some(padding) = &row.padding {
         rest.insert("cohere_input_padding".into(), padding.clone());
     }
+    let activity_end = end.min(observed as f64 / 16000.);
     let activity = chunk.activity_regions.as_ref().map_or_else(
         || {
+            if activity_end <= start {
+                return Vec::new();
+            }
             vec![ActivitySlice {
                 start,
-                end,
+                end: activity_end,
                 speakers: chunk.speakers.clone(),
             }]
         },
-        |regions| activity_slice(regions, start, end),
+        |regions| activity_slice(regions, start, activity_end),
     );
     rest.insert(
         "activity_regions".into(),
@@ -988,7 +991,7 @@ fn segment_from_row(
         );
     }
     let speaker_activity = Some(json!({
-        "audio_revision":0, "observed_end_sample":(end * 16000.).round() as i64,
+        "audio_revision":0, "observed_end_sample":((end * 16000.).round() as i64).min(observed),
         "regions":activity.iter().map(|region| json!({
             "start_sample":(region.start * 16000.).round() as i64,
             "end_sample":(region.end * 16000.).round() as i64,
@@ -1431,12 +1434,6 @@ pub(crate) mod tests {
         fn diar_close(&self, handle: Handle) -> Result<(), crate::error::ChildError> {
             UnimplementedModels.diar_close(handle)
         }
-        fn diarize_file(
-            &self,
-            path: &std::path::Path,
-        ) -> Result<Vec<Turn>, crate::error::ChildError> {
-            UnimplementedModels.diarize_file(path)
-        }
         fn diarize_window(&self, _pcm: &[f32]) -> Result<Vec<Turn>, crate::error::ChildError> {
             self.events.lock().unwrap().push(Event::Diarize);
             Ok(self.turns.clone())
@@ -1677,7 +1674,7 @@ pub(crate) mod tests {
 
     #[test]
     fn manual_import_names_one_speaker_and_skips_language_id() {
-        let samples = 8_192;
+        let samples = 8_160;
         let models = Scripted::new(
             vec![Turn {
                 start: 0.0,
@@ -1730,6 +1727,32 @@ pub(crate) mod tests {
         let exported = export::export(&document, "txt").unwrap();
         assert_eq!(exported.body.matches("en:Hello").count(), 1);
         assert!(exported.body.contains("Speaker 1"));
+    }
+
+    #[test]
+    fn import_keeps_the_unobserved_sub_hop_tail_explicit() {
+        let models = Scripted::new(
+            vec![Turn {
+                start: 0.,
+                end: 1.,
+                speaker: "speaker_0".into(),
+            }],
+            vec![(0, 16_037)],
+        );
+        let document = import_recording(&models, &tone(16_037), "en", None).unwrap();
+        let last = document.segments.last().unwrap();
+        assert_eq!(last.end, 16_037. / 16_000.);
+        assert_eq!(
+            last.speaker_activity.as_ref().unwrap()["observed_end_sample"],
+            16_000
+        );
+        for region in last.speaker_activity.as_ref().unwrap()["regions"]
+            .as_array()
+            .unwrap()
+        {
+            assert!(region["end_sample"].as_i64().unwrap() <= 16_000);
+        }
+        assert_eq!(last.rest["voice_eligible"], false);
     }
 
     #[test]

@@ -72,10 +72,6 @@ impl ApplicationModels for ImportInference {
             .map_err(|e| e.to_string())
     }
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String> {
-        // shortcut: first Nemotron window only; remove when offline AOSC/FIFO is implemented.
-        if job.duration.is_none_or(|duration| duration > 27.2) {
-            return Err("This native preview supports imports up to 27.2 seconds. Longer diarization is not implemented yet.".into());
-        }
         let path = recording_path(&self.root, job).map_err(|e| e.to_string())?;
         let pcm = audio::read_pcm16(path).map_err(|e| e.to_string())?;
         speakerdesk_core::import::import_recording(
@@ -415,8 +411,8 @@ async fn setup(State(app): State<AppState>) -> Response {
     let models: Vec<_> = ["Speech detection", "Speaker diarization", "Transcription", "Automatic language", "Supplied-text timing"].iter().enumerate().map(|(index, name)| json!({"id":index,"name":name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":0,"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
     Json(
         json!({"supported":cfg!(all(target_os="macos",target_arch="aarch64")),"ready":issues.is_empty(),"core_ready":issues.is_empty(),"automatic_language":issues.is_empty() && app.automatic_language_ready(),"status":if issues.is_empty(){"ready"}else{"failed"},"error":issues.join(" "),"models":models,"total_bytes":0,"downloaded_bytes":0,"can_download":false,
-        "voice":{"status":if voice_available{"ready"}else{"unavailable"},"enabled":enabled,"available":voice_available,"released":false,"message":if voice_available{"Native voice enrollment and manual checking are available. Automatic checks are still pending."}else{"The native voice model did not initialize. Saved voices and names are kept."}},
-        "message":format!("Native preview: imports up to 27.2 seconds. Automatic language: {}. Supplied-text timing: {}. Live capture is not implemented yet.",if app.automatic_language_ready(){"available"}else{"unavailable"},if app.alignment_ready(){"available"}else{"unavailable"})}),
+        "voice":{"status":if voice_available{"ready"}else{"unavailable"},"enabled":enabled,"available":voice_available,"released":false,"message":if voice_available{"Native voice enrollment and manual and automatic checks are available."}else{"The native voice model did not initialize. Saved voices and names are kept."}},
+        "message":format!("Native preview. Automatic language: {}. Supplied-text timing: {}. Live capture is not implemented yet.",if app.automatic_language_ready(){"available"}else{"unavailable"},if app.alignment_ready(){"available"}else{"unavailable"})}),
     ).into_response()
     }).await
 }

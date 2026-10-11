@@ -10,8 +10,8 @@ use std::time::Duration;
 use speakerdesk_core::error::ChildError;
 use speakerdesk_core::ipc::{
     AsrText, CtcScoresOut, DiarFeedOut, DiarPreset, Envelope, EnvelopeBody, GainPolicy, Handle,
-    LanguageProbeOut, MAX_FRAME_BYTES, MetricsOut, Request, Response, SetupModelReport, Turn,
-    VadFeedOut, request_timeout,
+    LanguageProbeOut, MAX_FRAME_BYTES, MetricsOut, Request, Response, SetupModelReport, VadFeedOut,
+    request_timeout,
 };
 use speakerdesk_core::models::Models;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -20,7 +20,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
-const FILE_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 struct Call {
     request: Request,
@@ -181,22 +180,6 @@ impl Models for ChildModels {
 
     fn diar_close(&self, handle: Handle) -> Result<(), ChildError> {
         ack(self.exchange(Request::DiarClose { handle })?)
-    }
-
-    fn diarize_file(&self, path: &Path) -> Result<Vec<Turn>, ChildError> {
-        match self.exchange(Request::DiarizeFile {
-            path: path.to_path_buf(),
-        })? {
-            Response::Turns(turns) => Ok(turns),
-            other => Err(unexpected(&other)),
-        }
-    }
-
-    fn diarize_window(&self, pcm: &[f32]) -> Result<Vec<Turn>, ChildError> {
-        match self.exchange(Request::DiarizeWindow { pcm: pcm.to_vec() })? {
-            Response::Turns(turns) => Ok(turns),
-            other => Err(unexpected(&other)),
-        }
     }
 
     fn language_probe(&self, pcm: &[f32]) -> Result<LanguageProbeOut, ChildError> {
@@ -436,7 +419,7 @@ async fn run(
         }
         let id = next_id;
         next_id += 1;
-        let timeout = request_timeout(&request).unwrap_or(FILE_TIMEOUT);
+        let timeout = request_timeout(&request);
         let result = tokio::select! {
             _ = stop.cancelled() => Err(ChildError::Cancelled),
             result = execute(child, id, request, timeout, &call.cancellation, &mut next_id) => result,

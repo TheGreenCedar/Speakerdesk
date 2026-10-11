@@ -15,6 +15,7 @@ pub struct Runtime {
     ctc: Option<ctc::network::Network>,
     voice: Option<redimnet::coreml::Network>,
     vad_sessions: std::collections::HashMap<u64, crate::silero::session::Session>,
+    diar_sessions: std::collections::HashMap<u64, sortformer::session::Session>,
     next_session: u64,
 }
 
@@ -33,6 +34,7 @@ impl Runtime {
             ctc: None,
             voice: None,
             vad_sessions: Default::default(),
+            diar_sessions: Default::default(),
             next_session: 1,
         })
     }
@@ -183,18 +185,48 @@ impl Runtime {
                 self.vad_sessions.remove(&handle.session);
                 Ok(Response::Ack)
             }
-            Request::DiarizeWindow { pcm } => {
+            Request::DiarOpen { preset } => {
                 if self.nemotron.is_none() {
                     self.nemotron = Some(sortformer::network::Network::load(
                         &self.model_root.join("nemotron"),
                     )?);
                 }
-                let probabilities = self
-                    .nemotron
-                    .as_mut()
-                    .expect("loaded above")
-                    .probabilities(&pcm, cancel)?;
-                Ok(Response::Turns(sortformer::frames_to_turns(&probabilities)))
+                let session = sortformer::session::Session::new(preset)?;
+                let id = self.next_session;
+                self.next_session = id
+                    .checked_add(1)
+                    .ok_or_else(|| ChildError::failed("model session id exhausted", false))?;
+                self.diar_sessions.insert(id, session);
+                Ok(Response::Handle(Handle {
+                    generation: 0,
+                    session: id,
+                }))
+            }
+            Request::DiarFeed { handle, pcm, last } => {
+                if handle.generation != 0 {
+                    return Err(ChildError::failed("invalid child generation", false));
+                }
+                let session = self
+                    .diar_sessions
+                    .get_mut(&handle.session)
+                    .ok_or_else(|| ChildError::failed("unknown Nemotron session", false))?;
+                let result = session.feed(
+                    self.nemotron.as_mut().expect("loaded before open"),
+                    &pcm,
+                    last,
+                    cancel,
+                );
+                if result.is_err() {
+                    self.diar_sessions.remove(&handle.session);
+                }
+                result.map(Response::Diar)
+            }
+            Request::DiarClose { handle } => {
+                if handle.generation != 0 {
+                    return Err(ChildError::failed("invalid child generation", false));
+                }
+                self.diar_sessions.remove(&handle.session);
+                Ok(Response::Ack)
             }
             Request::Transcribe {
                 pcm,
@@ -282,8 +314,6 @@ pub fn dispatch(request: Request, cancel: &AtomicBool) -> Result<Response, Child
             sortformer::diar_feed(handle, &pcm, last).map(Response::Diar)
         }
         Request::DiarClose { handle } => sortformer::diar_close(handle).map(|()| Response::Ack),
-        Request::DiarizeFile { path } => sortformer::diarize_file(&path).map(Response::Turns),
-        Request::DiarizeWindow { pcm } => sortformer::diarize_window(&pcm).map(Response::Turns),
         Request::LanguageProbe { pcm } => whisper_lid::language_probe(&pcm).map(Response::Probe),
         Request::Transcribe {
             pcm,

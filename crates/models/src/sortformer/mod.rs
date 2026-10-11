@@ -1,12 +1,14 @@
 //! Nemotron-3 diarization. Upstream: `Blaizzy/mlx-audio@feb25a37`.
 //! Weights: `mlx-community/Nemotron-3-Diarization@59ed2db`.
-use std::path::Path;
-
 use speakerdesk_core::error::ChildError;
 use speakerdesk_core::ipc::{DiarFeedOut, DiarPreset, Handle, Turn};
 
 #[cfg(target_os = "macos")]
+mod cache;
+#[cfg(target_os = "macos")]
 pub mod network;
+#[cfg(target_os = "macos")]
+pub mod session;
 
 pub const WEIGHT_PIN: &str =
     "mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f";
@@ -20,14 +22,6 @@ pub fn diar_feed(_handle: Handle, _pcm: &[f32], _last: bool) -> Result<DiarFeedO
 }
 
 pub fn diar_close(_handle: Handle) -> Result<(), ChildError> {
-    Err(ChildError::Unimplemented)
-}
-
-pub fn diarize_file(_path: &Path) -> Result<Vec<Turn>, ChildError> {
-    Err(ChildError::Unimplemented)
-}
-
-pub fn diarize_window(_pcm: &[f32]) -> Result<Vec<Turn>, ChildError> {
     Err(ChildError::Unimplemented)
 }
 

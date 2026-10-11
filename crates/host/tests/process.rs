@@ -14,6 +14,43 @@ fn supervisor() -> std::sync::Arc<InferenceSupervisor> {
 }
 
 #[test]
+fn recording_larger_than_ipc_frame_uses_bounded_feeds_and_includes_eof() {
+    let host = supervisor();
+    let models = host.models(CancellationToken::new());
+    let mut pcm = vec![0.; speakerdesk_core::ipc::MAX_FRAME_BYTES / 4 + 159];
+    let turns = models.diarize_window(&pcm).unwrap();
+    assert_eq!(
+        turns,
+        vec![speakerdesk_core::ipc::Turn {
+            start: 0.,
+            end: (pcm.len() / 160 * 160) as f64 / 16000.,
+            speaker: "speaker_0".into()
+        }]
+    );
+    assert_eq!(
+        models.metrics().unwrap().peak_mlx_bytes,
+        0,
+        "session must close"
+    );
+    pcm[160_001] = f32::NAN;
+    assert!(
+        models
+            .diarize_window(&pcm)
+            .unwrap_err()
+            .to_string()
+            .contains("fixture model error")
+    );
+    assert_eq!(
+        models.metrics().unwrap().peak_mlx_bytes,
+        0,
+        "failed feed must close"
+    );
+    let pid = host.child_pid().unwrap();
+    host.shutdown();
+    reaped(pid);
+}
+
+#[test]
 #[ignore = "requires SPEAKERDESK_TEST_CHILD desktop binary and SPEAKERDESK_TEST_MODELS disposable model root"]
 fn actual_desktop_child_returns_native_voice_identity_and_reaps() {
     let host = InferenceSupervisor::new(
@@ -368,6 +405,73 @@ fn cancelled_operations_can_close_sessions_and_discarded_outputs_are_closed() {
         );
     }
     ready.vad_close(other).unwrap();
+    host.shutdown();
+    reaped(pid);
+}
+
+#[test]
+#[ignore = "requires built desktop child, pinned models, and independent long Nemotron reference"]
+fn actual_child_keeps_long_offline_and_live_diarization_sessions_separate() {
+    use speakerdesk_core::ipc::DiarPreset;
+    let host = InferenceSupervisor::new(
+        std::env::var_os("SPEAKERDESK_TEST_CHILD").unwrap(),
+        env!("CARGO_PKG_VERSION"),
+        std::env::var_os("SPEAKERDESK_TEST_MODELS").unwrap(),
+    )
+    .unwrap();
+    let models = host.models(CancellationToken::new());
+    let proof =
+        std::path::PathBuf::from(std::env::var_os("SPEAKERDESK_TEST_NEMOTRON_LONG").unwrap());
+    let reference: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(proof.join("reference.json")).unwrap()).unwrap();
+    let expected: Vec<[f32; 8]> =
+        serde_json::from_value(reference["probabilities"].clone()).unwrap();
+    let mut wav = hound::WavReader::open(proof.join("three-windows.wav")).unwrap();
+    let pcm: Vec<f32> = wav
+        .samples::<i16>()
+        .map(|s| s.unwrap() as f32 / 32768.)
+        .collect();
+    let live = models.diar_open(DiarPreset::Low).unwrap();
+    let buffered = models.diar_feed(live, &[0.; 512], false).unwrap();
+    assert_eq!((buffered.received, buffered.observed), (512, 0));
+    let turns = models.diarize_window(&pcm).unwrap();
+    assert_eq!(expected.len(), pcm.len() / 160);
+    let mut activity = vec![[false; 8]; expected.len()];
+    for turn in turns {
+        let speaker: usize = turn
+            .speaker
+            .strip_prefix("speaker_")
+            .unwrap()
+            .parse()
+            .unwrap();
+        for row in
+            &mut activity[(turn.start * 100.).round() as usize..(turn.end * 100.).round() as usize]
+        {
+            row[speaker] = true;
+        }
+    }
+    assert_eq!(
+        activity,
+        expected
+            .iter()
+            .map(|row| row.map(|p| p > 0.5))
+            .collect::<Vec<_>>()
+    );
+    let tail = models.diar_feed(live, &[], true).unwrap();
+    assert_eq!((tail.received, tail.observed), (512, 480));
+    assert!(tail.turns.is_empty());
+    models.diar_close(live).unwrap();
+    let bad = models.diar_open(DiarPreset::Low).unwrap();
+    assert!(models.diar_feed(bad, &[f32::NAN], false).is_err());
+    assert!(
+        models
+            .diar_feed(bad, &[], true)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown Nemotron session")
+    );
+    models.diar_close(bad).unwrap();
+    let pid = host.child_pid().unwrap();
     host.shutdown();
     reaped(pid);
 }

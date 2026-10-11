@@ -794,6 +794,9 @@ pub fn routed_short_revision(passages: &[Passage], start: i64, end: i64) -> Opti
 }
 
 pub fn activity_regions(turns: &[Turn], start: i64, end: i64) -> Vec<timing::ActivityRegion> {
+    if start >= end {
+        return Vec::new();
+    }
     let mut points = vec![start, end];
     for turn in turns {
         let turn_start = round_samples(turn.start).clamp(start, end);
@@ -1689,6 +1692,7 @@ pub struct Engine<M: Models> {
     pcm: Vec<f32>,
     received: i64,
     turns: Vec<Turn>,
+    diar_observed: i64,
     timeline: Vec<LanguageStamp>,
     document: Document,
     capture_finished: bool,
@@ -1736,6 +1740,7 @@ impl<M: Models + 'static> Engine<M> {
             pcm: Vec::new(),
             received: 0,
             turns: Vec::new(),
+            diar_observed: 0,
             timeline,
             document: empty_document(),
             capture_finished: false,
@@ -1858,16 +1863,26 @@ impl<M: Models + 'static> Engine<M> {
         self.admit_frames(end, feed)?;
         let diar = self.diar.expect("diar");
         let diarized = self.models.diar_feed(diar, &pcm, false)?;
-        let origin = start as f64 / RATE as f64;
-        for turn in diarized.turns {
+        self.admit_diarization(end, diarized)?;
+        self.received = end;
+        Ok(())
+    }
+
+    fn admit_diarization(
+        &mut self,
+        received: i64,
+        feed: crate::ipc::DiarFeedOut,
+    ) -> Result<(), LiveError> {
+        feed.validate(received as u64, self.diar_observed as u64)?;
+        self.diar_observed = feed.observed as i64;
+        for turn in feed.turns {
             let speaker = self.prefix_speaker(&turn.speaker)?;
             self.turns.push(Turn {
-                start: turn.start + origin,
-                end: turn.end + origin,
+                start: turn.start as f64 / RATE as f64,
+                end: turn.end as f64 / RATE as f64,
                 speaker,
             });
         }
-        self.received = end;
         Ok(())
     }
 
@@ -1931,7 +1946,7 @@ impl<M: Models + 'static> Engine<M> {
             self.events.push(EngineEvent::FlushAck {
                 request_id,
                 received_sample: self.received,
-                available_sample: self.received.min(observed),
+                available_sample: self.received.min(observed).min(self.diar_observed),
                 speech_observed_sample: self.received.min(observed),
                 fast_sequence: self.fast_sequence,
             });
@@ -1958,7 +1973,13 @@ impl<M: Models + 'static> Engine<M> {
             }
         }
         if let Some(diar) = self.diar {
-            let _ = self.models.diar_feed(diar, &[], true)?;
+            let feed = self.models.diar_feed(diar, &[], true)?;
+            self.admit_diarization(self.received, feed)?;
+            if self.diar_observed != self.received / 160 * 160 {
+                return Err(LiveError::Message(
+                    "Incomplete final diarization observations.",
+                ));
+            }
         }
         self.capture_finished = true;
         self.inbox.lock().expect("inbox").capture_finished = true;
@@ -2084,7 +2105,12 @@ impl<M: Models + 'static> Engine<M> {
     fn commit(&mut self, final_pass: bool, decode_open: bool) -> Result<(), LiveError> {
         let available = {
             let ledger = self.ledger.lock().expect("speech ledger");
-            self.received.min(ledger.end_sample())
+            let speech = self.received.min(ledger.end_sample());
+            if self.capture_finished {
+                speech
+            } else {
+                speech.min(self.diar_observed)
+            }
         };
         loop {
             let boundary = self
@@ -2159,10 +2185,14 @@ impl<M: Models + 'static> Engine<M> {
 
     fn attach(&mut self, identity: &str) -> Result<(), LiveError> {
         let row = self.book.rows.get(identity).expect("row").clone();
-        let regions = activity_regions(&self.turns, row.start_sample, row.end_sample);
+        let regions = activity_regions(
+            &self.turns,
+            row.start_sample,
+            row.end_sample.min(self.diar_observed),
+        );
         let activity = timing::SpeakerActivity {
             audio_revision: row.audio_revision,
-            observed_end_sample: Some(row.end_sample),
+            observed_end_sample: Some(row.end_sample.min(self.diar_observed)),
             regions: regions.clone(),
         };
         let mut owners = Vec::new();
@@ -2850,7 +2880,6 @@ mod tests {
         SetupModelReport, VadFrame,
     };
     use crate::language::{DetectionMode, DetectionReason, LanguageDetection};
-    use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn notice(start: i64, end: i64, epoch: i64) -> LiveCommand {
@@ -3242,6 +3271,8 @@ mod tests {
         fail_diar_open: AtomicBool,
         fail_vad_eof: AtomicBool,
         diar_sessions: AtomicUsize,
+        diar_progress: Mutex<BTreeMap<u64, (u64, u64)>>,
+        delayed_diar: AtomicBool,
     }
 
     impl FakeModels {
@@ -3254,6 +3285,8 @@ mod tests {
                 fail_diar_open: AtomicBool::new(false),
                 fail_vad_eof: AtomicBool::new(false),
                 diar_sessions: AtomicUsize::new(0),
+                diar_progress: Mutex::new(BTreeMap::new()),
+                delayed_diar: AtomicBool::new(false),
             }
         }
     }
@@ -3317,38 +3350,48 @@ mod tests {
                 return Err(ChildError::failed("replayed open failure", false));
             }
             self.diar_sessions.fetch_add(1, Ordering::Relaxed);
+            let session = self.next_session.fetch_add(1, Ordering::Relaxed) as u64;
+            self.diar_progress.lock().unwrap().insert(session, (0, 0));
             Ok(Handle {
                 generation: 1,
-                session: 2,
+                session,
             })
         }
         fn diar_feed(
             &self,
-            _handle: Handle,
+            handle: Handle,
             pcm: &[f32],
-            _last: bool,
+            last: bool,
         ) -> Result<DiarFeedOut, ChildError> {
-            if pcm.is_empty() {
-                return Ok(DiarFeedOut {
-                    turns: Vec::new(),
-                    frames_processed: 0,
-                });
-            }
+            let mut progress = self.diar_progress.lock().unwrap();
+            let (received, previous) = progress.get_mut(&handle.session).unwrap();
+            *received += pcm.len() as u64;
+            let received = *received;
+            let observed = if !last && self.delayed_diar.load(Ordering::Relaxed) {
+                0
+            } else {
+                received / 160 * 160
+            };
+            let start = *previous;
+            *previous = observed;
             Ok(DiarFeedOut {
-                turns: vec![Turn {
-                    start: 0.0,
-                    end: pcm.len() as f64 / RATE as f64,
-                    speaker: "speaker_0".into(),
-                }],
-                frames_processed: pcm.len() as u64,
+                turns: if observed > start {
+                    vec![crate::ipc::DiarTurn {
+                        start,
+                        end: observed,
+                        speaker: "speaker_0".into(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                received,
+                observed,
             })
         }
-        fn diar_close(&self, _handle: Handle) -> Result<(), ChildError> {
+        fn diar_close(&self, handle: Handle) -> Result<(), ChildError> {
+            self.diar_progress.lock().unwrap().remove(&handle.session);
             self.diar_sessions.fetch_sub(1, Ordering::Relaxed);
             Ok(())
-        }
-        fn diarize_file(&self, _path: &Path) -> Result<Vec<Turn>, ChildError> {
-            Err(ChildError::Unimplemented)
         }
         fn diarize_window(&self, _pcm: &[f32]) -> Result<Vec<Turn>, ChildError> {
             Err(ChildError::Unimplemented)
@@ -3430,6 +3473,70 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn language_boundary_inside_unobserved_final_hop_stays_unknown() {
+        let mut engine =
+            Engine::single(EngineConfig::new("partial", "en"), FakeModels::english()).unwrap();
+        engine.append_pcm(&loud(16_037));
+        engine.handle(notice(0, 16_037, 0)).unwrap();
+        engine
+            .handle(LiveCommand::Language {
+                language: "de".into(),
+                generation: 1,
+                start_sample: 16_037,
+            })
+            .unwrap();
+        engine.append_pcm(&loud(50));
+        engine.handle(notice(16_037, 16_087, 1)).unwrap();
+        engine.handle(LiveCommand::Stop).unwrap();
+        assert_eq!(engine.diar_observed, 16_000);
+        let tail = engine
+            .book
+            .rows
+            .values()
+            .find(|row| row.start_sample == 16_037)
+            .unwrap();
+        assert!(tail.speaker_candidates.is_empty());
+        assert!(tail.speaker_activity.as_ref().unwrap().regions.is_empty());
+        assert_eq!(engine.models.diar_sessions.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn delayed_diarization_and_final_only_turns_reach_sealed_passages() {
+        let mut engine =
+            Engine::single(EngineConfig::new("delayed", "en"), FakeModels::english()).unwrap();
+        engine.models.delayed_diar.store(true, Ordering::Relaxed);
+        let pcm = [loud(48_000), vec![0.; 16_000], loud(16_037)].concat();
+        engine.append_pcm(&pcm);
+        engine.handle(notice(0, pcm.len() as i64, 0)).unwrap();
+        assert_eq!(
+            engine.book.cursor(),
+            0,
+            "unobserved speaker evidence cannot seal passages"
+        );
+        assert!(engine.document.segments.is_empty());
+        let events = engine.handle(LiveCommand::Stop).unwrap();
+        assert_eq!(engine.diar_observed, 80_000);
+        assert_eq!(engine.book.cursor(), 80_037);
+        assert_eq!(
+            engine.turns,
+            vec![Turn {
+                start: 0.,
+                end: 5.,
+                speaker: "speaker_0".into()
+            }]
+        );
+        assert!(!revisions(&events).is_empty());
+        for row in engine.book.rows.values() {
+            assert_eq!(row.speaker_candidates, vec!["speaker_0"]);
+            assert_eq!(
+                row.speaker_activity.as_ref().unwrap().observed_end_sample,
+                Some(row.end_sample.min(80_000))
+            );
+        }
+        assert!(engine.book.closed());
     }
 
     #[test]

@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use crate::error::ChildError;
 use crate::ipc::{
     AsrText, CtcScoresOut, DiarFeedOut, DiarPreset, GainPolicy, Handle, LanguageProbeOut,
@@ -15,8 +13,34 @@ pub trait Models: Send + Sync {
     fn diar_feed(&self, handle: Handle, pcm: &[f32], last: bool)
     -> Result<DiarFeedOut, ChildError>;
     fn diar_close(&self, handle: Handle) -> Result<(), ChildError>;
-    fn diarize_file(&self, path: &Path) -> Result<Vec<Turn>, ChildError>;
-    fn diarize_window(&self, pcm: &[f32]) -> Result<Vec<Turn>, ChildError>;
+    fn diarize_window(&self, pcm: &[f32]) -> Result<Vec<Turn>, ChildError> {
+        let handle = self.diar_open(DiarPreset::Offline)?;
+        let result = (|| {
+            let mut turns = Vec::new();
+            let mut received = 0;
+            let mut observed = 0;
+            for chunk in pcm.chunks(16000 * 10).chain(std::iter::once(&[][..])) {
+                received += chunk.len() as u64;
+                let feed = self.diar_feed(handle, chunk, chunk.is_empty())?;
+                feed.validate(received, observed)?;
+                observed = feed.observed;
+                turns.extend(feed.turns.into_iter().map(|turn| Turn {
+                    start: turn.start as f64 / 16000.,
+                    end: turn.end as f64 / 16000.,
+                    speaker: turn.speaker,
+                }));
+            }
+            if observed != received / 160 * 160 {
+                return Err(ChildError::failed(
+                    "incomplete final diarization observations",
+                    false,
+                ));
+            }
+            Ok(turns)
+        })();
+        let cleanup = self.diar_close(handle);
+        result.and_then(|turns| cleanup.map(|()| turns))
+    }
     fn language_probe(&self, pcm: &[f32]) -> Result<LanguageProbeOut, ChildError>;
     fn transcribe(
         &self,
@@ -61,9 +85,6 @@ impl Models for UnimplementedModels {
         Err(ChildError::Unimplemented)
     }
     fn diar_close(&self, _handle: Handle) -> Result<(), ChildError> {
-        Err(ChildError::Unimplemented)
-    }
-    fn diarize_file(&self, _path: &Path) -> Result<Vec<Turn>, ChildError> {
         Err(ChildError::Unimplemented)
     }
     fn diarize_window(&self, _pcm: &[f32]) -> Result<Vec<Turn>, ChildError> {

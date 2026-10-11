@@ -772,3 +772,76 @@ The complete replacement remains unfinished. Next work is long-file diarization,
 model download/setup, live capture and saved-audio recovery, Python-free default
 packaging/updater, and the full cold/warm/live performance gates. The installed
 application, production data and existing model cache remain untouched.
+
+## Stateful long-recording diarization
+
+PR state was refreshed during this slice: head
+`db9da655b3eeeeef598ba21a21cb54505e6bce21`, base
+`59e7b0c860f72ca94c24e6eab18ac820b144ee24`. The fetched PR head matches the local
+starting commit. This slice has not been pushed or published by this run.
+
+Nemotron now retains per-recording AOSC/FIFO evidence and bounded waveform history
+across windows. Low and Offline presets are session-owned; weights remain resident
+in the serial child. Offline import uses bounded open/feed/final/close calls.
+Unused whole-recording and child-file diarization requests were removed. Absolute
+sample turns carry separate received/observed endpoints; failed feeds invalidate
+only their own session. The 27.2-second host guard is removed.
+
+The independent 82.0099375-second fixture matches all 8,200 native probability
+frames exactly and retains identical speaker decisions under irregular packet
+splits. It repeats the existing synthetic two-voice recording and ends with a
+159-sample partial frame (WAV SHA256
+`3297950fe04a7a7310436f2afaa2f6a0f49163c6c5a176871a3337a90d70f6a8`). This is window,
+cache and tail evidence, not returning-speaker acoustic quality: the upstream
+long-context model groups this particular repeated fixture into one track.
+
+The first comparison exposed two numerical differences. Apple's macOS 26 and
+macOS 15 MLX wheels both report 0.32.2 but contain different native kernels.
+The reference now records the actual loaded native-library and Metal-resource
+hashes. With the same pinned macOS 15 runtime, the first two windows matched.
+Replacing `square` with the pinned power operation removed the remaining
+rounding differences and later cache-selection drift. No probability tolerance
+was relaxed. Separate module globals in the reference loader also fix a latent
+Sortformer helper collision reached only by cache compression.
+
+A separate pinned Low reference passes with interleaved Low/Offline sessions and
+cancellation of one session, followed by a clean recording. The actual optimized
+desktop child passes the long fixture through the bounded pipe protocol while a
+Low session remains independent; invalid feeds remove their handles, close is
+idempotent, and shutdown reaps the child. The direct test runner is required here:
+Cargo replaces `DYLD_LIBRARY_PATH`, so the first attempt failed in dyld before
+handshake and ran no inference. The actual-child pass used the explicit pinned
+native-library directory. This is not packaged-runtime independence proof.
+
+Live replays exposed sealing ahead of delayed speaker observations and discarded
+EOF results. Both are corrected. A non-hop-aligned language boundary reproduced
+a panic (`16037 > 16000`) in an empty activity range; it now publishes unknown
+ownership and cleans up. Import and live metadata preserve the final unobserved
+suffix. Timing and voice validators retain usable evidence inside the observed
+prefix while rejecting gaps, competing owners, edited bounds and evidence past
+that endpoint; incomplete speaker observations no longer discard earlier valid
+word timing or enrollment crops.
+
+Validation: 148 core tests, 52 host tests, one native-host lifecycle replay and
+seven process replays pass, including a recording larger than the 64 MiB IPC frame,
+final-only output, cancellation races, failed-feed cleanup, crash/restart and
+malformed framing. Three ignored Metal/Nemotron qualification tests were run and
+pass. Strict core/host/models Clippy and locked release build pass, with the
+previous upstream mlx-sys malloc/realloc warnings. Release executable SHA256:
+`0e85c1db40f9c85cf52c73341f536121b0591ba71c5ecf3e88581cf178f46bc5`.
+Independent read-only review found no remaining source-slice blocker.
+
+Evidence: `/private/tmp/speakerdesk-nemotron-long/` contains reference/runtime
+identities, numerical diagnostics, partition/Low tests, actual-child evidence and
+before/after live regressions. Suite/lint/build logs are `/tmp/speakerdesk-diar-*`.
+The desktop UI check is pending Mac unlock; the existing preview still runs the
+previous retry build. Long-import memory/performance parity is unqualified: the
+parent still owns the complete imported PCM. No installed app, production store,
+recordings or existing model cache were changed.
+
+The accepted complete replacement remains unfinished. Continue with native model
+setup/downloads, finish this candidate's editor check, then live capture/drain and
+saved-audio recovery, Python-free default packaging/updater, security qualification
+and full cold/warm/live performance comparisons against 0.6.6. Windows and issue
+#25 remain follow-up scope. A source checkpoint or successful model slice does
+not replace those acceptance criteria.

@@ -18,8 +18,6 @@ const FFT: usize = 512;
 const DIM: i32 = 512;
 const HEADS: i32 = 8;
 const SPEAKERS: i32 = 8;
-/// The first offline window emits 340 * 8 native frames before cache updates.
-pub const OFFLINE_WINDOW_SAMPLES: usize = 340 * 8 * HOP;
 
 struct Block {
     norm1: LayerNorm,
@@ -73,6 +71,7 @@ pub struct Network {
     upsample: Conv1d,
     speaker_hidden: Linear,
     speaker_output: Linear,
+    silence: Array,
 }
 
 impl Network {
@@ -198,8 +197,14 @@ impl Network {
                 true,
                 DTYPE,
             )?,
+            silence: take(
+                &mut weights,
+                &format!("{prefix}.learnable_sil_emb"),
+                &[DIM],
+                DTYPE,
+            )?,
         };
-        // These training/stream-cache tensors are not used by the first offline window.
+        // Auxiliary training heads do not participate in diarization inference.
         for (name, shape) in [
             ("activity_head.layers.0.weight", vec![192]),
             ("activity_head.layers.0.bias", vec![192]),
@@ -207,7 +212,6 @@ impl Network {
             ("activity_head.layers.1.bias", vec![3]),
             ("hidden_to_spks.weight", vec![8, 384]),
             ("hidden_to_spks.bias", vec![8]),
-            ("learnable_sil_emb", vec![512]),
         ] {
             take(&mut weights, &format!("{prefix}.{name}"), &shape, DTYPE)?;
         }
@@ -217,100 +221,106 @@ impl Network {
         Ok(network)
     }
 
-    /// shortcut: one offline window; add AOSC/FIFO before accepting longer recordings.
     pub fn probabilities(
         &mut self,
         pcm: &[f32],
         cancel: &AtomicBool,
     ) -> Result<Vec<[f32; 8]>, ChildError> {
-        if pcm.len() > OFFLINE_WINDOW_SAMPLES {
-            return Err(error("Nemotron multi-window inference is not implemented"));
-        }
-        if pcm.iter().any(|s| !s.is_finite()) {
-            return Err(error("Nemotron requires finite mono PCM"));
-        }
-        if cancel.load(Ordering::Acquire) {
-            return Err(ChildError::Cancelled);
-        }
-        let valid = pcm.len() / HOP;
-        if valid == 0 {
-            return Ok(Vec::new());
-        }
-        let padded = (valid + 1).div_ceil(16) * 16;
-        let features = self.features(pcm, padded).map_err(error)?;
-        let probs =
-            mlx_rs::with_stream(&mlx_rs::Stream::gpu(), || -> Result<Array, ChildError> {
-                let stacked = features
-                    .as_dtype(DTYPE)
-                    .map_err(error)?
-                    .reshape(&[1, (padded / 8) as i32, 1024])
-                    .map_err(error)?;
-                let mut x = self
-                    .embed_norm
-                    .forward(&self.projection.forward(&stacked).map_err(error)?)
-                    .map_err(error)?;
-                let valid_encoded = valid.div_ceil(8);
-                let mask = Array::from_slice(
-                    &(0..padded / 8)
-                        .map(|i| i < valid_encoded)
-                        .collect::<Vec<_>>(),
-                    &[1, 1, 1, (padded / 8) as i32],
-                );
-                for layer in &mut self.layers {
-                    if cancel.load(Ordering::Acquire) {
-                        return Err(ChildError::Cancelled);
-                    }
-                    x = layer.forward(&x, &mask).map_err(error)?;
-                    debug_assert_eq!(x.dtype(), DTYPE);
-                }
-                x = self.final_norm.forward(&x).map_err(error)?;
-                x = self.speaker_projection.forward(&x).map_err(error)?;
-                x = self
-                    .upsample
-                    .forward(&x)
-                    .map_err(error)?
-                    .reshape(&[1, padded as i32, 192])
-                    .map_err(error)?;
-                x = self
-                    .speaker_hidden
-                    .forward(&mlx_rs::nn::relu(&x).map_err(error)?)
-                    .map_err(error)?;
-                x = self
-                    .speaker_output
-                    .forward(&mlx_rs::nn::relu(&x).map_err(error)?)
-                    .map_err(error)?;
-                let probs = mlx_rs::ops::sigmoid(x)
-                    .map_err(error)?
-                    .index((0, ..valid as i32, ..))
-                    .as_dtype(Dtype::Float32)
-                    .map_err(error)?;
-                if cancel.load(Ordering::Acquire) {
-                    return Err(ChildError::Cancelled);
-                }
-                probs.eval().map_err(error)?;
-                Ok(probs)
-            })?;
-        if cancel.load(Ordering::Acquire) {
-            return Err(ChildError::Cancelled);
-        }
-        let values = probs.as_slice::<f32>();
-        if values
-            .iter()
-            .any(|p| !p.is_finite() || !(0.0..=1.0).contains(p))
-        {
-            return Err(error("invalid Nemotron probabilities"));
-        }
-        Ok(values.as_chunks::<8>().0.to_vec())
+        let mut session = super::session::Session::new(speakerdesk_core::ipc::DiarPreset::Offline)?;
+        session.probabilities(self, pcm, true, cancel)
     }
 
-    fn features(&self, pcm: &[f32], count: usize) -> Result<Array, mlx_rs::error::Exception> {
-        let valid = pcm.len() / HOP;
+    pub(super) fn step(
+        &mut self,
+        features: &Array,
+        valid: usize,
+        central: usize,
+        state: &mut super::cache::State,
+        cancel: &AtomicBool,
+    ) -> Result<Array, ChildError> {
+        let frames = features.dim(0);
+        let stacked = features
+            .as_dtype(DTYPE)
+            .map_err(error)?
+            .reshape(&[1, frames / 8, 1024])
+            .map_err(error)?;
+        let chunk = self.projection.forward(&stacked).map_err(error)?;
+        let prefix = state.cache.dim(1) + state.fifo.dim(1);
+        let combined =
+            mlx_rs::ops::concatenate(&[&state.cache, &state.fifo, &chunk], 1).map_err(error)?;
+        let mut x = self.embed_norm.forward(&combined).map_err(error)?;
+        let valid_encoded = prefix + valid.div_ceil(8) as i32;
+        let mask = Array::from_slice(
+            &(0..x.dim(1)).map(|i| i < valid_encoded).collect::<Vec<_>>(),
+            &[1, 1, 1, x.dim(1)],
+        );
+        for layer in &mut self.layers {
+            if cancel.load(Ordering::Acquire) {
+                return Err(ChildError::Cancelled);
+            }
+            x = layer.forward(&x, &mask).map_err(error)?;
+        }
+        x = self.final_norm.forward(&x).map_err(error)?;
+        x = self.speaker_projection.forward(&x).map_err(error)?;
+        x = self
+            .upsample
+            .forward(&x)
+            .map_err(error)?
+            .reshape(&[1, -1, 192])
+            .map_err(error)?;
+        x = self
+            .speaker_hidden
+            .forward(&mlx_rs::nn::relu(&x).map_err(error)?)
+            .map_err(error)?;
+        x = self
+            .speaker_output
+            .forward(&mlx_rs::nn::relu(&x).map_err(error)?)
+            .map_err(error)?;
+        let high = mlx_rs::ops::sigmoid(x).map_err(error)?;
+        let mask = Array::from_slice(
+            &(0..high.dim(1))
+                .map(|i| i < valid_encoded * 8)
+                .collect::<Vec<_>>(),
+            &[1, high.dim(1), 1],
+        );
+        let high = high.multiply(mask).map_err(error)?;
+        let low = high
+            .as_dtype(Dtype::Float32)
+            .map_err(error)?
+            .reshape(&[1, -1, 8, 8])
+            .map_err(error)?
+            .mean_axis(2, false)
+            .map_err(error)?;
+        let result = high
+            .index((0, prefix * 8..prefix * 8 + central as i32, ..))
+            .as_dtype(Dtype::Float32)
+            .map_err(error)?;
+        if cancel.load(Ordering::Acquire) {
+            return Err(ChildError::Cancelled);
+        }
+        state
+            .update(&chunk, &low, central.div_ceil(8) as i32, &self.silence)
+            .map_err(error)?;
+        state.eval(&result).map_err(error)?;
+        Ok(result)
+    }
+
+    pub(super) fn features(
+        &self,
+        pcm: &[f32],
+        sample_offset: usize,
+        total_samples: usize,
+        start: usize,
+        count: usize,
+    ) -> Result<Array, mlx_rs::error::Exception> {
+        let valid = total_samples / HOP;
         let mut windows = vec![0.0f32; count * FFT];
         for (frame, window) in windows.as_chunks_mut::<FFT>().0.iter_mut().enumerate() {
             for (offset, sample) in window.iter_mut().enumerate() {
-                let position = (frame * HOP + offset) as isize - 256;
-                if let Some(current) = pcm.get(position as usize) {
-                    let previous = pcm.get((position - 1) as usize).copied().unwrap_or(0.0);
+                let position = ((start + frame) * HOP + offset) as isize - 256;
+                let local = position - sample_offset as isize;
+                if let Some(current) = pcm.get(local as usize) {
+                    let previous = pcm.get((local - 1) as usize).copied().unwrap_or(0.0);
                     *sample = *current - 0.97 * previous;
                 }
             }
@@ -321,13 +331,14 @@ impl Network {
             let framed = Array::from_slice(&windows, &[count as i32, FFT as i32]);
             let window = Array::from_slice(&window, &[FFT as i32]);
             let spectrum = mlx_rs::fft::rfft(framed.multiply(window)?, None, None)?;
-            let power = spectrum.abs()?.square()?;
+            // The pinned power operator rounds differently from square near BF16 boundaries.
+            let power = spectrum.abs()?.power(Array::from(2f32))?;
             let features = power
                 .matmul(self.filterbank.index(0).t())?
                 .add(Array::from(2.0f32.powi(-24)))?
                 .log()?;
             let valid = Array::from_slice(
-                &(0..count).map(|i| i < valid).collect::<Vec<_>>(),
+                &(0..count).map(|i| start + i < valid).collect::<Vec<_>>(),
                 &[count as i32, 1],
             );
             mlx_rs::ops::select(valid, features, Array::from(0.0f32))

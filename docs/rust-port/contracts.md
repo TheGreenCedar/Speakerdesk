@@ -16,13 +16,22 @@ Rust **1.99.0** (`rust-toolchain.toml`), edition 2024. This is the stable 1.99 r
 
 ## Models and IPC
 
-`speakerdesk_core::models::Models` is the sync trait. Payloads are `speakerdesk_core::ipc::Request` and `Response`. A frame is a big-endian `u32` length plus a postcard `Envelope` (`request_id` and `Result`). `DiarizeFile` has no fixed timeout; the supervisor scales it. Other timeouts are `request_timeout`.
+`speakerdesk_core::models::Models` is the sync trait. Payloads are `speakerdesk_core::ipc::Request` and `Response`. A frame is a big-endian `u32` length plus a postcard `Envelope` (`request_id` and `Result`). Timeouts are `request_timeout`. Offline diarization uses the same open/feed/close boundary as live sessions, with bounded parent feeds; there is no child file-access or whole-recording diarization request.
 
 The Mac child initializes MLX and Metal resources before reporting its device.
-Hello lists only loaded model identities. Silero, the first Nemotron window,
-Cohere, Whisper language scoring and supplied-text CTC run in Rust. Streaming
-diarization and ReDimNet are still unavailable. Other platforms report
+Hello lists only loaded model identities. Silero, multi-window Nemotron,
+Cohere, Whisper language scoring and supplied-text CTC run in Rust; ReDimNet uses
+native Core ML. Nemotron Low and Offline state belongs to each recording, with
+resident weights shared by the serial executor. Diarization turns use absolute
+sample coordinates and separate received and observed endpoints. Its final
+sub-160-sample suffix remains unobserved. Live capture integration remains
+unfinished. Other platforms report
 `"unavailable"` and explicit `ChildError::Unimplemented` results.
+
+Numerical comparisons identify the native runtime and Metal library hashes,
+not just the MLX package version. Apple's macOS 15 and macOS 26 wheels contain
+different kernels under the same 0.32.2 version. This build pins the macOS 15
+archive in `scripts/fetch_mlx_runtime.sh`.
 
 CTC scores carry the original audio length, valid frame count, frame hop/origin,
 explicit selected column IDs (including blank when requested), model identity
