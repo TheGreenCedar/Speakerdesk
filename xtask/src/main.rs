@@ -58,13 +58,10 @@ fn main() -> ExitCode {
         Command::Acceptance => commands::pending::run("acceptance"),
         Command::Bench => commands::pending::run("bench"),
         Command::Corpora => commands::pending::run("corpora"),
-        Command::VerifyBundle { path } => {
-            let _ = path;
-            commands::pending::run("verify-bundle")
-        }
-        Command::CheckPythonFree => commands::pending::run("check-python-free"),
+        Command::VerifyBundle { path } => commands::verify_bundle::run(path),
+        Command::CheckPythonFree => commands::python_free::run(),
         Command::Notices => commands::pending::run("notices"),
-        Command::CiChanges => commands::pending::run("ci-changes"),
+        Command::CiChanges => commands::ci_changes::run(),
         Command::VoiceCalibrate => commands::pending::run("voice-calibrate"),
         Command::E2e { kind } => {
             let _ = kind;
