@@ -14,6 +14,30 @@ fn supervisor() -> std::sync::Arc<InferenceSupervisor> {
 }
 
 #[test]
+fn cleanup_close_is_idempotent_and_keeps_unrelated_sessions_resident() {
+    let host = supervisor();
+    let models = host.models(CancellationToken::new());
+    let vad = models.vad_open(None).unwrap();
+    let diar = models
+        .diar_open(speakerdesk_core::ipc::DiarPreset::Low)
+        .unwrap();
+    let other = models.vad_open(None).unwrap();
+    let pid = host.child_pid().unwrap();
+    models.vad_close(vad).unwrap();
+    models.vad_close(vad).unwrap();
+    models.diar_close(diar).unwrap();
+    models.diar_close(diar).unwrap();
+    assert_eq!(
+        models.vad_feed(other, &[0.; 512], true).unwrap().observed,
+        512
+    );
+    assert_eq!(host.child_pid(), Some(pid));
+    models.vad_close(other).unwrap();
+    host.shutdown();
+    reaped(pid);
+}
+
+#[test]
 fn installation_restart_reaps_the_resident_child_and_invalidates_old_handles() {
     let host = supervisor();
     let cancel = CancellationToken::new();

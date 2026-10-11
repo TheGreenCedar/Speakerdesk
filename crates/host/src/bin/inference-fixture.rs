@@ -10,7 +10,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[path = "inference-fixture/capture.rs"]
+mod capture;
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--capture") {
+        capture::run();
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("--native-host") {
         let args: Vec<_> = std::env::args_os().skip(2).collect();
         if let Err(error) = speakerdesk_host::native::run(
@@ -28,6 +34,8 @@ fn main() {
     let mut active: Option<(u64, Arc<AtomicBool>)> = None;
     let mut sessions = HashSet::new();
     let mut diar_progress = std::collections::HashMap::<u64, (u64, u64)>::new();
+    let mut vad_progress = std::collections::HashMap::<u64, (u64, u64)>::new();
+    let mut live_diar = HashSet::new();
     let mut next_session = 1;
     let mut race: Option<PathBuf> = None;
     let mut race_error = false;
@@ -71,7 +79,10 @@ fn main() {
                         .collect(),
                 ))
             }
-            Request::VadOpen { .. } | Request::DiarOpen { .. } => {
+            Request::VadOpen { .. }
+            | Request::DiarOpen {
+                preset: speakerdesk_core::ipc::DiarPreset::Offline,
+            } => {
                 let handle = Handle {
                     generation: 0,
                     session: next_session,
@@ -80,15 +91,47 @@ fn main() {
                 sessions.insert(handle.session);
                 Ok(Response::Handle(handle))
             }
-            Request::VadFeed { handle, .. } => {
+            Request::DiarOpen {
+                preset: speakerdesk_core::ipc::DiarPreset::Low,
+            } => {
+                let handle = Handle {
+                    generation: 0,
+                    session: next_session,
+                };
+                next_session += 1;
+                sessions.insert(handle.session);
+                live_diar.insert(handle.session);
+                Ok(Response::Handle(handle))
+            }
+            Request::VadFeed { handle, pcm, last } => {
                 assert!(sessions.contains(&handle.session));
                 if race_error {
                     Err(ChildError::failed("fixture model error", false))
                 } else {
+                    let (received, observed) = vad_progress.entry(handle.session).or_default();
+                    *received += pcm.len() as u64;
+                    let end = if last {
+                        *received
+                    } else {
+                        *received / 512 * 512
+                    };
+                    let mut frames = Vec::new();
+                    while *observed < end {
+                        let next = (*observed + 512).min(end);
+                        frames.push(speakerdesk_core::ipc::VadFrame {
+                            start: *observed,
+                            end: next,
+                            raw_p: 0.99,
+                            norm_p: 0.99,
+                            gain: 1.,
+                            constant: false,
+                        });
+                        *observed = next;
+                    }
                     Ok(Response::Vad(speakerdesk_core::ipc::VadFeedOut {
-                        frames: Vec::new(),
-                        received: 0,
-                        observed: 0,
+                        frames,
+                        received: *received,
+                        observed: *observed,
                     }))
                 }
             }
@@ -104,7 +147,7 @@ fn main() {
                     let (received, observed) = diar_progress.entry(handle.session).or_default();
                     *received += pcm.len() as u64;
                     // Deliberately retain every observation until EOF.
-                    let end = if last {
+                    let end = if last || live_diar.contains(&handle.session) {
                         *received / 160 * 160
                     } else {
                         *observed
@@ -127,8 +170,12 @@ fn main() {
                 }
             }
             Request::VadClose { handle } | Request::DiarClose { handle } => {
-                assert!(sessions.remove(&handle.session), "session was not resident");
+                // Production Runtime closes idempotently. Cancellation can close a discarded
+                // successful feed before Engine::drop releases its retained handle.
+                sessions.remove(&handle.session);
                 diar_progress.remove(&handle.session);
+                vad_progress.remove(&handle.session);
+                live_diar.remove(&handle.session);
                 Ok(Response::Ack)
             }
             Request::Metrics => Ok(Response::Metrics(MetricsOut {

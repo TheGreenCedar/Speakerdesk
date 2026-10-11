@@ -23,6 +23,10 @@ const PACKETS: usize = 120;
 
 pub struct CaptureSupervisor;
 impl CaptureSupervisor {
+    /// Inspect the configured app-owned helper without launching it.
+    pub fn check_helper(path: &Path) -> Result<(), CaptureError> {
+        Helper::inspect(path).map(|_| ())
+    }
     /// Construction does filesystem work off the async reader. No model or store is involved.
     pub async fn spawn(
         helper: impl AsRef<Path>,

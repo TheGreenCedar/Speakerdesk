@@ -46,6 +46,12 @@ pub(crate) struct NativeModels {
 }
 
 impl ApplicationModels for NativeModels {
+    fn live_models(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Option<crate::inference::ChildModels> {
+        Some(self.supervisor.models(cancellation.clone()))
+    }
     fn retry_passage(
         &self,
         pcm: &[f32],
@@ -372,6 +378,11 @@ async fn serve(
         .expect("native setup configured once");
     app.updates.lock().expect("updates").connect();
     native.start(app.clone(), false)?;
+    crate::meeting::configure_capture(
+        &app,
+        std::env::var_os("SPEAKERDESK_CAPTURE_HELPER").map(PathBuf::from),
+    )
+    .await;
     let stop = CancellationToken::new();
     let server_stop = stop.clone();
     let router = crate::router(app.clone());
@@ -425,11 +436,19 @@ async fn serve(
     native.cancel();
     let close_app = app.clone();
     let close_supervisor = supervisor.clone();
-    let cleanup = tokio::task::spawn_blocking(move || {
-        let cancelled = close_app.cancel_all();
-        close_supervisor.shutdown();
-        close_app.drain();
-        cancelled
+    let cleanup = tokio::spawn(async move {
+        let invalidate = close_app.clone();
+        let cancelled = tokio::task::spawn_blocking(move || invalidate.cancel_all())
+            .await
+            .map_err(|e| speakerdesk_core::error::StoreError::message(e.to_string()))?;
+        let meeting_cleanup = crate::meeting::shutdown(&close_app).await;
+        tokio::task::spawn_blocking(move || {
+            close_supervisor.shutdown();
+            close_app.drain();
+        })
+        .await
+        .map_err(|e| speakerdesk_core::error::StoreError::message(e.to_string()))?;
+        cancelled.and(meeting_cleanup)
     });
     // Reaping is independent of clients finishing uploads or audio responses.
     let drained = tokio::time::timeout(crate::inference::CONTROL_TIMEOUT, &mut server).await;
@@ -570,7 +589,7 @@ async fn setup(State(app): State<AppState>) -> Response {
                 "message":"Supplied-text timing preserves authoritative transcript words. Use Download models below to finish setup for all local models.","phase":progress.phase,"downloaded_bytes":0},
             "voice":{"status":if voice {"ready"}else {"unavailable"},"enabled":enabled,"available":voice,"released":false,
                 "message":if voice {"Native voice enrollment and manual and automatic checks are available."}else {"The native voice model did not initialize. Saved voices and names are kept."}},
-            "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing: {}. Live capture is not implemented yet.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
+            "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing for imports: {}. Live accuracy refinement and word timing are not available yet.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
         })).into_response()
     }).await
 }

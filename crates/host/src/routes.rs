@@ -80,6 +80,13 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 ///
 /// The production implementation uses the resident inference supervisor.
 pub trait ApplicationModels: Send + Sync {
+    /// A real resident child connection for the serial live worker.
+    fn live_models(
+        &self,
+        _cancellation: &CancellationToken,
+    ) -> Option<crate::inference::ChildModels> {
+        None
+    }
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String>;
     fn retry_passage(
         &self,
@@ -162,7 +169,6 @@ struct Shared {
     models: Mutex<Arc<dyn ApplicationModels>>,
     operations: Mutex<HashMap<JobId, RunningOperation>>,
     prepare: Mutex<Arc<dyn AudioPrep>>,
-    meeting: Mutex<Option<JobId>>,
     issues: Mutex<Vec<String>>,
     reports: Mutex<Vec<speakerdesk_core::ipc::SetupModelReport>>,
     data_dir: PathBuf,
@@ -222,7 +228,6 @@ impl AppState {
                 models: Mutex::new(Arc::new(UnavailableModels)),
                 operations: Mutex::new(HashMap::new()),
                 prepare: Mutex::new(Arc::new(WavPrepare)),
-                meeting: Mutex::new(None),
                 issues: Mutex::new(default_issues()),
                 reports: Mutex::new(Vec::new()),
                 data_dir,
@@ -267,10 +272,6 @@ impl AppState {
             .expect("insert job");
     }
 
-    pub fn set_meeting(&self, id: Option<JobId>) {
-        *self.shared.meeting.lock().expect("meeting") = id;
-    }
-
     pub fn set_issues(&self, issues: Vec<String>) {
         *self.shared.issues.lock().expect("issues") = issues;
     }
@@ -288,6 +289,23 @@ impl AppState {
         store: &mut SqliteJobStore,
         job: &mut Job,
     ) -> Result<OperationGuard, ApiError> {
+        self.begin_operation(store, job, Activity::Refinement)
+    }
+
+    pub(crate) fn begin_recording_operation(
+        &self,
+        store: &mut SqliteJobStore,
+        job: &mut Job,
+    ) -> Result<OperationGuard, ApiError> {
+        self.begin_operation(store, job, Activity::recording())
+    }
+
+    fn begin_operation(
+        &self,
+        store: &mut SqliteJobStore,
+        job: &mut Job,
+        activity: Activity,
+    ) -> Result<OperationGuard, ApiError> {
         if self.admission.closed() {
             return Err(ApiError::new(409, messages::UPDATE_RESERVED));
         }
@@ -297,7 +315,12 @@ impl AppState {
                 .operations
                 .lock()
                 .expect("operations")
-                .contains_key(&job.id)
+                .iter()
+                .any(|(id, op)| {
+                    matches!(activity, Activity::Recording { .. })
+                        || matches!(op.activity, Activity::Recording { .. })
+                        || id == &job.id
+                })
         {
             return Err(ApiError::new(
                 409,
@@ -320,7 +343,7 @@ impl AppState {
             RunningOperation {
                 generation,
                 cancellation: cancellation.clone(),
-                activity: Activity::Refinement,
+                activity,
             },
         );
         Ok(OperationGuard {
@@ -367,49 +390,71 @@ impl AppState {
         self.admission.close();
         let mut store = self.store();
         let operations = self.shared.operations.lock().expect("operations").clone();
-        for (id, operation) in operations {
-            let generation = operation.generation;
-            let token = operation.cancellation;
-            let active = store.get(&id, false)?.is_some_and(|job| {
-                (operation.activity == Activity::Refinement
-                    || ["queued", "processing"].contains(&job.status.as_str()))
-                    && job
+        let tokens: Vec<_> = operations
+            .values()
+            .map(|op| op.cancellation.clone())
+            .collect();
+        let result = (|| {
+            for (id, operation) in operations {
+                let generation = operation.generation;
+                let token = operation.cancellation;
+                let active = store.get(&id, false)?.is_some_and(|job| {
+                    (matches!(
+                        operation.activity,
+                        Activity::Refinement | Activity::Recording { .. }
+                    ) || ["queued", "processing"].contains(&job.status.as_str()))
+                        && job
+                            .extra
+                            .get("operation_generation")
+                            .and_then(Value::as_u64)
+                            == Some(generation)
+                });
+                if !active {
+                    token.cancel();
+                    continue;
+                }
+                store.update_job(&id, |job| {
+                    if job
                         .extra
                         .get("operation_generation")
                         .and_then(Value::as_u64)
                         == Some(generation)
-            });
-            if !active {
-                token.cancel();
-                continue;
-            }
-            store.update_job(&id, |job| {
-                if job
-                    .extra
-                    .get("operation_generation")
-                    .and_then(Value::as_u64)
-                    == Some(generation)
-                {
-                    job.extra
-                        .insert("operation_generation".into(), json!(generation + 1));
-                    if job
-                        .extra
-                        .remove("passage_retry")
-                        .is_some_and(|value| !value.is_null())
                     {
-                        job.message =
-                            "Passage retry interrupted. Existing words are retained.".into();
+                        job.extra
+                            .insert("operation_generation".into(), json!(generation + 1));
+                        if job
+                            .extra
+                            .remove("passage_retry")
+                            .is_some_and(|value| !value.is_null())
+                        {
+                            job.message =
+                                "Passage retry interrupted. Existing words are retained.".into();
+                        }
+                        if ["queued", "processing"].contains(&job.status.as_str()) {
+                            job.status = "uploaded".into();
+                            job.message = "Transcription interrupted. Saved audio is kept.".into();
+                        }
+                        if matches!(operation.activity, Activity::Recording { .. }) {
+                            job.status = "failed".into();
+                            job.message =
+                                "Recording interrupted. Captured audio and edits are retained."
+                                    .into();
+                        }
                     }
-                    if ["queued", "processing"].contains(&job.status.as_str()) {
-                        job.status = "uploaded".into();
-                        job.message = "Transcription interrupted. Saved audio is kept.".into();
-                    }
-                }
-                Ok::<_, StoreError>(())
-            })?;
-            token.cancel();
+                    Ok::<_, StoreError>(())
+                })?;
+                token.cancel();
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            // A failed transaction cannot grant publication. Cancel under the same store lock
+            // before any worker can reload the unchanged generation, then report the failure.
+            for token in tokens {
+                token.cancel();
+            }
         }
-        Ok(())
+        result
     }
 }
 
@@ -607,13 +652,12 @@ async fn job_detail(
         } else {
             (job, None)
         };
-        let owned = meeting_id(&app.shared).as_ref() == Some(&id)
-            || app
-                .shared
-                .operations
-                .lock()
-                .expect("operations")
-                .contains_key(&id);
+        let owned = app
+            .shared
+            .operations
+            .lock()
+            .expect("operations")
+            .contains_key(&id);
         Json(detail_json(
             &job,
             known.is_some() && unchanged == Some(true),
@@ -771,7 +815,6 @@ async fn delete_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
                 .lock()
                 .expect("operations")
                 .contains_key(&id)
-            || meeting_id(&app.shared).as_ref() == Some(&id)
         {
             return error_response(StatusCode::CONFLICT, messages::DELETE_BUSY);
         }
@@ -1243,7 +1286,13 @@ fn require_job_id(jid: &str) -> Result<JobId, ApiError> {
 }
 
 fn meeting_id(shared: &Shared) -> Option<JobId> {
-    shared.meeting.lock().expect("meeting").clone()
+    shared
+        .operations
+        .lock()
+        .expect("operations")
+        .iter()
+        .find(|(_, op)| matches!(op.activity, Activity::Recording { .. }))
+        .map(|(id, _)| id.clone())
 }
 
 fn remove_staged(root: &Path, ids: &[JobId]) {
@@ -1496,7 +1545,7 @@ fn unix_now() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn new_job_id() -> Result<JobId, StoreError> {
+pub(crate) fn new_job_id() -> Result<JobId, StoreError> {
     JobId::parse(random_hex(16)).map_err(|error| StoreError::message(error.to_string()))
 }
 
@@ -2245,6 +2294,33 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_write_failure_cancels_recording_before_releasing_the_store() {
+        let state = AppState::new();
+        let mut recording = job(JOB_A, "ready", 1.0);
+        recording.kind = JobKind::Meeting;
+        // SQLite can store this revision, but the next mutation cannot increment it.
+        recording.revision = i64::MAX;
+        let operation = state
+            .begin_recording_operation(&mut state.store(), &mut recording)
+            .unwrap();
+        let before = state.store().get(&recording.id, false).unwrap().unwrap();
+        assert!(
+            state
+                .cancel_all()
+                .unwrap_err()
+                .to_string()
+                .contains("Revision overflow")
+        );
+        assert!(operation.cancellation.is_cancelled());
+        assert!(!operation.current(&before));
+        assert_eq!(
+            state.store().get(&recording.id, false).unwrap().unwrap(),
+            before
+        );
+        assert!(state.admission.closed());
+    }
+
+    #[test]
     fn shutdown_cancels_only_current_active_generations_and_preserves_terminal_results() {
         let state = AppState::new();
         let mut completed = job(JOB_A, "ready", 1.0);
@@ -2660,9 +2736,23 @@ mod tests {
             messages::DELETE_BUSY
         );
 
-        running
-            .state
-            .set_meeting(Some(JobId::parse(JOB_A).unwrap()));
+        let recording = {
+            let mut store = running.state.store();
+            let mut busy = store
+                .get(&JobId::parse(JOB_B).unwrap(), false)
+                .unwrap()
+                .unwrap();
+            busy.status = "ready".into();
+            store.put(&busy, None).unwrap();
+            let mut job = store
+                .get(&JobId::parse(JOB_A).unwrap(), false)
+                .unwrap()
+                .unwrap();
+            running
+                .state
+                .begin_recording_operation(&mut store, &mut job)
+                .unwrap()
+        };
         let owned = running
             .authed(
                 running
@@ -2673,7 +2763,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(owned.status(), 409);
-        running.state.set_meeting(None);
+        drop(recording);
         let deleted = running
             .authed(
                 running
@@ -2822,9 +2912,17 @@ mod tests {
             messages::RERUN_WOULD_OVERWRITE
         );
 
-        running
-            .state
-            .set_meeting(Some(JobId::parse(JOB_B).unwrap()));
+        let recording = {
+            let mut store = running.state.store();
+            let mut job = store
+                .get(&JobId::parse(JOB_B).unwrap(), false)
+                .unwrap()
+                .unwrap();
+            running
+                .state
+                .begin_recording_operation(&mut store, &mut job)
+                .unwrap()
+        };
         let mut third = job(&"c".repeat(32), "uploaded", 3.0);
         third.document = None;
         third.duration = Some(2.0);
@@ -2843,6 +2941,7 @@ mod tests {
             meeting.json::<Value>().await.unwrap()["error"],
             messages::FINISH_MEETING_BEFORE_IMPORT
         );
+        drop(recording);
         running.shutdown().await;
     }
 

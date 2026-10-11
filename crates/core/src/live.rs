@@ -1574,6 +1574,8 @@ pub struct EngineConfig {
     pub audio_batch_seconds: i64,
     pub fast_sequence: i64,
     pub source_id: Option<String>,
+    /// Validated host catalog identity for source-specific candidates.
+    pub capture_catalog_sha256: Option<String>,
     /// Set only after the host verifies the processed microphone's source-bound receipt.
     pub processed_microphone_contract: Option<String>,
 }
@@ -1587,6 +1589,7 @@ impl EngineConfig {
             audio_batch_seconds: 6,
             fast_sequence: 0,
             source_id: None,
+            capture_catalog_sha256: None,
             processed_microphone_contract: None,
         }
     }
@@ -2500,7 +2503,14 @@ impl<M: Models + 'static> Engine<M> {
     }
 
     fn publish(&mut self, row: Utterance) -> Result<(), LiveError> {
-        let candidate = project_segment(&row, &self.language_at(row.start_sample));
+        let mut candidate = project_segment(&row, &self.language_at(row.start_sample));
+        if let (Some(source), Some(catalog)) =
+            (&self.config.source_id, &self.config.capture_catalog_sha256)
+        {
+            candidate.capture_source = Some(
+                serde_json::json!({"catalog_sha256":catalog,"source_id":source,"source_revision":1}),
+            );
+        }
         if self.published.get(&row.id) == Some(&candidate) {
             return Ok(());
         }
@@ -2725,6 +2735,9 @@ pub struct SourceRuntime<M: Models> {
 }
 
 impl<M: Models + 'static> SourceRuntime<M> {
+    pub fn inbox(&self) -> Arc<Mutex<Inbox>> {
+        Arc::clone(&self.inbox)
+    }
     pub fn new(
         config: EngineConfig,
         models: M,

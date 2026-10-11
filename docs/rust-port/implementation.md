@@ -1017,3 +1017,55 @@ locked Mac after the user's unlock replies. The existing isolated preview and
 optimized desktop executable remain the earlier builds recorded above. No working
 app, production data, recordings or existing model cache were changed. Windows and
 issue #25 remain follow-up work.
+
+## Native capture, live models and persistent publication joined
+
+The mounted meeting routes now own the capture helper and one serial live model
+worker. The old simulated meeting manager and duplicate current-meeting flag are
+removed. Runtime state contains handles and progress; the operation map owns
+admission, SQLite owns jobs/documents, and the writer owns retained PCM. Inference
+receives coalesced committed sample endpoints and reads bounded saved crops.
+Qualified dual-source receipts/catalogs are persisted before inference starts, and
+published passages retain their source binding independently of editable speakers.
+
+Publication reloads the current document in the existing transaction and preserves
+protected passage edits and saved names. Language changes queue the old-language
+audio boundary before the new epoch; Stop consumes final VAD/diarization output
+before Ready and releases admission only after helper, writer and worker cleanup.
+Independent review closed start/terminal replacement and start/shutdown races with
+one owned Tokio start gate. A database invalidation failure now cancels every
+affected token under the store lock, returns the persistence error and still allows
+owned-process cleanup. Duplicate session closes match the real child's idempotent
+behavior. No placeholder live refinement capability is advertised.
+
+Validation on the M5 Mac: 154 core tests, 56 host tests, three mounted live-service
+replays, one native-service lifecycle test and nine process tests passed. The live
+replays cover concurrent starts, live passage/name/boundary edits, later candidates,
+language boundaries, raw Pause/Resume, EOF tails, source identities, helper/child
+failure, whole-host shutdown, export, restart and stale saves. Strict core/host
+Clippy passed; the three live tests passed again after style corrections. Existing
+network and separate real-model qualification tests were not repeated. Logs:
+`/tmp/speakerdesk-meeting-{full-tests,final-tests,clippy,release}.log`.
+
+The optimized desktop executable built successfully (known upstream mlx-sys
+malloc/realloc binding warnings remain), SHA-256
+`e3149fb98fa5365a987bd4da98672bb36d6736e7c09c47a88bd7fa6258052be9`.
+The real native host then processed the existing synthetic two-voice fixture through
+an owned shell capture-protocol replay and the real resident models. All 145,445
+PCM16 samples were retained exactly, both expected utterances reached SQLite, and
+the final observation covered the partial last frame. Text, speaker-name and
+boundary edits survived whole-host restart; TXT export and stale-save rejection
+passed. Evidence: `/private/tmp/speakerdesk-live-model-join.1u4zhv/`.
+The single warm, unpaced replay reached terminal state in 1.069 seconds; this is a
+diagnostic observation, not device, UI, sustained-live or 0.6.6 performance acceptance.
+The qualification hosts and their children exited; the older isolated Tauri preview
+remains unchanged. CUA still reports the Mac locked after the user's unlock replies.
+
+The complete replacement remains active and unfinished. Next implement recovery
+from retained audio after child loss, then live timing/refinement/identity and the
+remaining capture boundaries. Qualified Pause currently ends its epoch with saved
+audio; qualified Resume and raw dual-source echo still need work. Real device and
+Tauri live/setup/long-import checks, long-session memory/backlog, native default
+startup and packaging, updater/security qualification and equivalent 0.6.6
+measurements remain required. The installed app, production data and existing model
+cache remain untouched; Windows and issue #25 remain follow-ups.
