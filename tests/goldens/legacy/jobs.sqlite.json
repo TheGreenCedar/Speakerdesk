@@ -1,0 +1,190 @@
+{
+  "function": "speakerdesk.job_store.JobStore; speakerdesk.people.PeopleStore",
+  "sqlite_sha256": "7d34f5a2de6a4e3bdd5d953597832b03662cdebb645e4c36d0e43235d6df2a44",
+  "sqlite_bytes": 53248,
+  "schema": [
+    {
+      "type": "index",
+      "name": "job_metadata_created",
+      "tbl_name": "job_metadata",
+      "sql": "CREATE INDEX job_metadata_created ON job_metadata(created)"
+    },
+    {
+      "type": "index",
+      "name": "job_metadata_status",
+      "tbl_name": "job_metadata",
+      "sql": "CREATE INDEX job_metadata_status ON job_metadata(status)"
+    },
+    {
+      "type": "table",
+      "name": "job_metadata",
+      "tbl_name": "job_metadata",
+      "sql": "CREATE TABLE job_metadata (id TEXT PRIMARY KEY, payload TEXT NOT NULL, status TEXT, created REAL)"
+    },
+    {
+      "type": "table",
+      "name": "job_progress",
+      "tbl_name": "job_progress",
+      "sql": "CREATE TABLE job_progress (id TEXT PRIMARY KEY, duration REAL NOT NULL, updated REAL NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "jobs",
+      "tbl_name": "jobs",
+      "sql": "CREATE TABLE jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "people",
+      "tbl_name": "people",
+      "sql": "CREATE TABLE people (id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "voice_profiles",
+      "tbl_name": "voice_profiles",
+      "sql": "CREATE TABLE voice_profiles (person_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+    },
+    {
+      "type": "trigger",
+      "name": "jobs_metadata_delete",
+      "tbl_name": "jobs",
+      "sql": "CREATE TRIGGER jobs_metadata_delete AFTER DELETE ON jobs BEGIN\n                DELETE FROM job_metadata WHERE id=OLD.id;\n                DELETE FROM job_progress WHERE id=OLD.id;\n                END"
+    },
+    {
+      "type": "trigger",
+      "name": "jobs_metadata_insert",
+      "tbl_name": "jobs",
+      "sql": "CREATE TRIGGER jobs_metadata_insert\n                    AFTER INSERT ON jobs BEGIN\n                    INSERT OR REPLACE INTO job_metadata VALUES\n                    (NEW.id,json_remove(NEW.payload,'$.document','$.rolling_sources','$.refinement_history','$.fast_history','$.fast_previous_revision','$.boundary_candidate','$.boundary_candidates','$.rolling_inflight','$.fast_retained_candidate'),json_extract(NEW.payload,'$.status'),json_extract(NEW.payload,'$.created'));\n                    DELETE FROM job_progress WHERE id=NEW.id;\n                    END"
+    },
+    {
+      "type": "trigger",
+      "name": "jobs_metadata_update",
+      "tbl_name": "jobs",
+      "sql": "CREATE TRIGGER jobs_metadata_update\n                    AFTER UPDATE ON jobs BEGIN\n                    INSERT OR REPLACE INTO job_metadata VALUES\n                    (NEW.id,json_remove(NEW.payload,'$.document','$.rolling_sources','$.refinement_history','$.fast_history','$.fast_previous_revision','$.boundary_candidate','$.boundary_candidates','$.rolling_inflight','$.fast_retained_candidate'),json_extract(NEW.payload,'$.status'),json_extract(NEW.payload,'$.created'));\n                    DELETE FROM job_progress WHERE id=NEW.id;\n                    END"
+    }
+  ],
+  "tables": {
+    "job_metadata": [
+      {
+        "id": "job-import",
+        "payload": "{\"id\":\"job-import\",\"name\":\"Imported notes\",\"kind\":\"import\",\"source_file\":\"import-source\",\"created\":1700000000.0,\"status\":\"ready\",\"message\":\"Saved.\",\"language\":\"en\",\"duration\":12.0,\"revision\":1,\"updated\":1791731410.4688776}",
+        "status": "ready",
+        "created": 1700000000.0
+      },
+      {
+        "id": "job-meeting",
+        "payload": "{\"id\":\"job-meeting\",\"name\":\"Weekly sync\",\"kind\":\"meeting\",\"source_file\":\"meeting-source\",\"created\":1700000000.0,\"status\":\"ready\",\"message\":\"Saved.\",\"language\":\"en\",\"duration\":12.0,\"revision\":1,\"updated\":1791731410.4726737}",
+        "status": "ready",
+        "created": 1700000000.0
+      },
+      {
+        "id": "job-processing",
+        "payload": "{\"id\":\"job-processing\",\"name\":\"Live notes\",\"kind\":\"meeting\",\"source_file\":\"meeting-source\",\"created\":1700000000.0,\"status\":\"failed\",\"message\":\"The meeting was interrupted. Captured audio and transcript were preserved.\",\"language\":\"en\",\"duration\":12.0,\"revision\":1,\"updated\":1791731410.4814534}",
+        "status": "failed",
+        "created": 1700000000.0
+      }
+    ],
+    "job_progress": [],
+    "jobs": [
+      {
+        "id": "job-import",
+        "payload": "{\"id\": \"job-import\", \"name\": \"Imported notes\", \"kind\": \"import\", \"source_file\": \"import-source\", \"created\": 1700000000.0, \"status\": \"ready\", \"message\": \"Saved.\", \"language\": \"en\", \"duration\": 12.0, \"revision\": 1, \"document\": {\"schema_version\": 1, \"speakers\": {\"speaker_0\": \"Speaker 1\"}, \"segments\": [{\"id\": \"seg-1\", \"speaker\": \"speaker_0\", \"start\": 0.0, \"end\": 1.5, \"text\": \"Imported hello.\"}], \"provenance\": {\"kind\": \"local_inference\"}}, \"updated\": 1791731410.4688776}"
+      },
+      {
+        "id": "job-meeting",
+        "payload": "{\"id\": \"job-meeting\", \"name\": \"Weekly sync\", \"kind\": \"meeting\", \"source_file\": \"meeting-source\", \"created\": 1700000000.0, \"status\": \"ready\", \"message\": \"Saved.\", \"language\": \"en\", \"duration\": 12.0, \"revision\": 1, \"document\": {\"schema_version\": 1, \"speakers\": {\"speaker_0\": \"Speaker 1\"}, \"segments\": [{\"id\": \"seg-1\", \"speaker\": \"speaker_0\", \"start\": 0.0, \"end\": 1.5, \"text\": \"Meeting hello.\"}], \"provenance\": {\"kind\": \"local_inference\"}}, \"updated\": 1791731410.4726737}"
+      },
+      {
+        "id": "job-processing",
+        "payload": "{\"id\": \"job-processing\", \"name\": \"Live notes\", \"kind\": \"meeting\", \"source_file\": \"meeting-source\", \"created\": 1700000000.0, \"status\": \"failed\", \"message\": \"The meeting was interrupted. Captured audio and transcript were preserved.\", \"language\": \"en\", \"duration\": 12.0, \"revision\": 1, \"document\": {\"schema_version\": 1, \"speakers\": {\"speaker_0\": \"Speaker 1\"}, \"segments\": [{\"id\": \"seg-1\", \"speaker\": \"speaker_0\", \"start\": 0.0, \"end\": 1.5, \"text\": \"Still working.\"}], \"provenance\": {\"kind\": \"local_inference\"}}, \"updated\": 1791731410.4814534}"
+      }
+    ],
+    "people": [
+      {
+        "id": "2e01c2bd49104082b835c670b55e0f1d",
+        "payload": "{\"id\": \"2e01c2bd49104082b835c670b55e0f1d\", \"name\": \"Priya Natarajan\", \"created\": 1791731410.4744935}"
+      }
+    ],
+    "voice_profiles": []
+  },
+  "people_create": {
+    "id": "2e01c2bd49104082b835c670b55e0f1d",
+    "name": "Priya Natarajan",
+    "created": 1791731410.4744935
+  },
+  "recover": {
+    "active": [
+      "preparing",
+      "queued",
+      "processing",
+      "starting",
+      "recording",
+      "paused",
+      "finishing"
+    ],
+    "return_value": null,
+    "before": {
+      "id": "job-processing",
+      "name": "Live notes",
+      "kind": "meeting",
+      "source_file": "meeting-source",
+      "created": 1700000000.0,
+      "status": "processing",
+      "message": "Starting local inference.",
+      "language": "en",
+      "duration": 12.0,
+      "revision": 1,
+      "document": {
+        "schema_version": 1,
+        "speakers": {
+          "speaker_0": "Speaker 1"
+        },
+        "segments": [
+          {
+            "id": "seg-1",
+            "speaker": "speaker_0",
+            "start": 0.0,
+            "end": 1.5,
+            "text": "Still working."
+          }
+        ],
+        "provenance": {
+          "kind": "local_inference"
+        }
+      },
+      "updated": 1791731410.4790065
+    },
+    "after": {
+      "id": "job-processing",
+      "name": "Live notes",
+      "kind": "meeting",
+      "source_file": "meeting-source",
+      "created": 1700000000.0,
+      "status": "failed",
+      "message": "The meeting was interrupted. Captured audio and transcript were preserved.",
+      "language": "en",
+      "duration": 12.0,
+      "revision": 1,
+      "document": {
+        "schema_version": 1,
+        "speakers": {
+          "speaker_0": "Speaker 1"
+        },
+        "segments": [
+          {
+            "id": "seg-1",
+            "speaker": "speaker_0",
+            "start": 0.0,
+            "end": 1.5,
+            "text": "Still working."
+          }
+        ],
+        "provenance": {
+          "kind": "local_inference"
+        }
+      },
+      "updated": 1791731410.4814534
+    }
+  }
+}

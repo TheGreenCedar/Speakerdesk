@@ -1,0 +1,83 @@
+{
+  "function": "speakerdesk.transcript.validate; speakerdesk.transcript.export",
+  "duration": 10.0,
+  "document": {
+    "speakers": {
+      "speaker_0": " Ada Lovelace "
+    },
+    "segments": [
+      {
+        "id": "later",
+        "start": 4.0,
+        "end": 5.5,
+        "speaker": "speaker_0",
+        "text": "Second line."
+      },
+      {
+        "id": "earlier",
+        "start": 0.5,
+        "end": 2.25,
+        "speaker": "speaker_0",
+        "text": "Hello, oracle."
+      }
+    ]
+  },
+  "validated": {
+    "speakers": {
+      "speaker_0": "Ada Lovelace"
+    },
+    "segments": [
+      {
+        "id": "earlier",
+        "start": 0.5,
+        "end": 2.25,
+        "speaker": "speaker_0",
+        "text": "Hello, oracle."
+      },
+      {
+        "id": "later",
+        "start": 4.0,
+        "end": 5.5,
+        "speaker": "speaker_0",
+        "text": "Second line."
+      }
+    ],
+    "schema_version": 1
+  },
+  "exports": {
+    "txt": {
+      "body": "[00:00:00.500 – 00:00:02.250] Ada Lovelace: Hello, oracle.\n[00:00:04.000 – 00:00:05.500] Ada Lovelace: Second line.\n",
+      "media_type": "text/plain; charset=utf-8"
+    },
+    "srt": {
+      "body": "1\n00:00:00,500 --> 00:00:02,250\nAda Lovelace: Hello, oracle.\n\n2\n00:00:04,000 --> 00:00:05,500\nAda Lovelace: Second line.\n\n",
+      "media_type": "text/plain; charset=utf-8"
+    },
+    "vtt": {
+      "body": "WEBVTT\n\n1\n00:00:00.500 --> 00:00:02.250\nAda Lovelace: Hello, oracle.\n\n2\n00:00:04.000 --> 00:00:05.500\nAda Lovelace: Second line.\n\n",
+      "media_type": "text/vtt; charset=utf-8"
+    },
+    "json": {
+      "body": "{\n  \"speakers\": {\n    \"speaker_0\": \"Ada Lovelace\"\n  },\n  \"segments\": [\n    {\n      \"id\": \"earlier\",\n      \"start\": 0.5,\n      \"end\": 2.25,\n      \"speaker\": \"speaker_0\",\n      \"text\": \"Hello, oracle.\"\n    },\n    {\n      \"id\": \"later\",\n      \"start\": 4.0,\n      \"end\": 5.5,\n      \"speaker\": \"speaker_0\",\n      \"text\": \"Second line.\"\n    }\n  ],\n  \"schema_version\": 1\n}\n",
+      "media_type": "application/json"
+    }
+  },
+  "validate_error": {
+    "error": "Segment 1: times must fall within the recording and end after start.",
+    "document": {
+      "speakers": {
+        "speaker_0": "Ada Lovelace"
+      },
+      "segments": [
+        {
+          "id": "late",
+          "start": 0.0,
+          "end": 99.0,
+          "speaker": "speaker_0",
+          "text": "Too late."
+        }
+      ]
+    },
+    "duration": 10.0
+  }
+}

@@ -1,0 +1,223 @@
+{
+  "function": "speakerdesk.language_detection.LanguagePolicy.decide",
+  "detector": "LanguagePolicy.decide accepts a probability mapping directly. No detector object is required.",
+  "cases": [
+    {
+      "name": "supported_above_both_thresholds",
+      "speaker": "speaker_0",
+      "probabilities": {
+        "en": 0.95,
+        "de": 0.03,
+        "fr": 0.02
+      },
+      "decision": {
+        "language": "en",
+        "language_detection": {
+          "mode": "auto",
+          "probability": 0.95,
+          "margin": 0.9199999999999999,
+          "candidates": [
+            {
+              "language": "en",
+              "probability": 0.95
+            },
+            {
+              "language": "de",
+              "probability": 0.03
+            },
+            {
+              "language": "fr",
+              "probability": 0.02
+            }
+          ],
+          "reason": "detected"
+        },
+        "review": false
+      },
+      "current_after": {
+        "speaker_0": "en"
+      }
+    },
+    {
+      "name": "supported_probability_below_0_90",
+      "speaker": "speaker_0",
+      "probabilities": {
+        "en": 0.89,
+        "fr": 0.11
+      },
+      "decision": {
+        "language": "en",
+        "language_detection": {
+          "mode": "auto",
+          "probability": 0.89,
+          "margin": 0.78,
+          "candidates": [
+            {
+              "language": "en",
+              "probability": 0.89
+            },
+            {
+              "language": "fr",
+              "probability": 0.11
+            }
+          ],
+          "reason": "best_effort"
+        },
+        "review": true
+      },
+      "current_after": {}
+    },
+    {
+      "name": "supported_margin_below_0_20",
+      "speaker": "speaker_0",
+      "probabilities": {
+        "en": 0.52,
+        "fr": 0.48
+      },
+      "decision": {
+        "language": "en",
+        "language_detection": {
+          "mode": "auto",
+          "probability": 0.52,
+          "margin": 0.040000000000000036,
+          "candidates": [
+            {
+              "language": "en",
+              "probability": 0.52
+            },
+            {
+              "language": "fr",
+              "probability": 0.48
+            }
+          ],
+          "reason": "best_effort"
+        },
+        "review": true
+      },
+      "current_after": {}
+    },
+    {
+      "name": "supported_probability_at_0_90",
+      "speaker": "speaker_0",
+      "probabilities": {
+        "en": 0.9,
+        "fr": 0.1
+      },
+      "decision": {
+        "language": "en",
+        "language_detection": {
+          "mode": "auto",
+          "probability": 0.9,
+          "margin": 0.8,
+          "candidates": [
+            {
+              "language": "en",
+              "probability": 0.9
+            },
+            {
+              "language": "fr",
+              "probability": 0.1
+            }
+          ],
+          "reason": "detected"
+        },
+        "review": false
+      },
+      "current_after": {
+        "speaker_0": "en"
+      }
+    },
+    {
+      "name": "supported_margin_at_0_20_probability_below_0_90",
+      "speaker": "speaker_0",
+      "probabilities": {
+        "en": 0.55,
+        "fr": 0.35000000000000003,
+        "de": 0.09999999999999992
+      },
+      "decision": {
+        "language": "en",
+        "language_detection": {
+          "mode": "auto",
+          "probability": 0.55,
+          "margin": 0.2,
+          "candidates": [
+            {
+              "language": "en",
+              "probability": 0.55
+            },
+            {
+              "language": "fr",
+              "probability": 0.35000000000000003
+            },
+            {
+              "language": "de",
+              "probability": 0.09999999999999992
+            }
+          ],
+          "reason": "best_effort"
+        },
+        "review": true
+      },
+      "current_after": {}
+    },
+    {
+      "name": "unsupported_above_both_thresholds",
+      "speaker": "speaker_1",
+      "probabilities": {
+        "ru": 0.96,
+        "en": 0.04
+      },
+      "decision": {
+        "language": null,
+        "language_detection": {
+          "mode": "auto",
+          "probability": 0.96,
+          "margin": 0.9199999999999999,
+          "candidates": [
+            {
+              "language": "ru",
+              "probability": 0.96
+            },
+            {
+              "language": "en",
+              "probability": 0.04
+            }
+          ],
+          "reason": "unsupported"
+        },
+        "review": true
+      },
+      "current_after": {}
+    },
+    {
+      "name": "unsupported_below_thresholds",
+      "speaker": "speaker_1",
+      "probabilities": {
+        "ru": 0.55,
+        "en": 0.45
+      },
+      "decision": {
+        "language": null,
+        "language_detection": {
+          "mode": "auto",
+          "probability": 0.55,
+          "margin": 0.10000000000000003,
+          "candidates": [
+            {
+              "language": "ru",
+              "probability": 0.55
+            },
+            {
+              "language": "en",
+              "probability": 0.45
+            }
+          ],
+          "reason": "needs_language"
+        },
+        "review": true
+      },
+      "current_after": {}
+    }
+  ]
+}

@@ -1,0 +1,225 @@
+{
+  "function": "speakerdesk.pipeline.decode_regions",
+  "turn_gap_seconds": 0.65,
+  "default_max_seconds": 24.5,
+  "cases": [
+    {
+      "name": "overlap_gap",
+      "turns": [
+        {
+          "start": 0.0,
+          "end": 3.0,
+          "speaker": "speaker_0"
+        },
+        {
+          "start": 2.5,
+          "end": 6.0,
+          "speaker": "speaker_1"
+        },
+        {
+          "start": 6.0,
+          "end": 9.0,
+          "speaker": "speaker_2"
+        }
+      ],
+      "arguments": {},
+      "regions": [
+        {
+          "start": 0.0,
+          "end": 2.5,
+          "speakers": [
+            "speaker_0"
+          ]
+        },
+        {
+          "start": 2.5,
+          "end": 3.0,
+          "speakers": [
+            "speaker_0",
+            "speaker_1"
+          ]
+        },
+        {
+          "start": 3.0,
+          "end": 6.0,
+          "speakers": [
+            "speaker_1"
+          ]
+        },
+        {
+          "start": 6.0,
+          "end": 9.0,
+          "speakers": [
+            "speaker_2"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "same_speaker_brief_gap",
+      "turns": [
+        {
+          "start": 0.0,
+          "end": 1.0,
+          "speaker": "speaker_0"
+        },
+        {
+          "start": 1.25,
+          "end": 2.25,
+          "speaker": "speaker_0"
+        },
+        {
+          "start": 2.5,
+          "end": 3.5,
+          "speaker": "speaker_0"
+        }
+      ],
+      "arguments": {
+        "coverage": [
+          0.0,
+          3.5
+        ]
+      },
+      "regions": [
+        {
+          "start": 0.0,
+          "end": 3.5,
+          "speakers": [
+            "speaker_0"
+          ],
+          "activity_regions": [
+            {
+              "start": 0.0,
+              "end": 1.0,
+              "speakers": [
+                "speaker_0"
+              ]
+            },
+            {
+              "start": 1.0,
+              "end": 1.25,
+              "speakers": []
+            },
+            {
+              "start": 1.25,
+              "end": 2.25,
+              "speakers": [
+                "speaker_0"
+              ]
+            },
+            {
+              "start": 2.25,
+              "end": 2.5,
+              "speakers": []
+            },
+            {
+              "start": 2.5,
+              "end": 3.5,
+              "speakers": [
+                "speaker_0"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "same_speaker_long_pause",
+      "turns": [
+        {
+          "start": 0.0,
+          "end": 1.0,
+          "speaker": "speaker_0"
+        },
+        {
+          "start": 2.0,
+          "end": 3.0,
+          "speaker": "speaker_0"
+        }
+      ],
+      "arguments": {
+        "coverage": [
+          0.0,
+          3.0
+        ]
+      },
+      "regions": [
+        {
+          "start": 0.0,
+          "end": 1.0,
+          "speakers": [
+            "speaker_0"
+          ]
+        },
+        {
+          "start": 1.0,
+          "end": 2.0,
+          "speakers": []
+        },
+        {
+          "start": 2.0,
+          "end": 3.0,
+          "speakers": [
+            "speaker_0"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "region_longer_than_default_max_seconds",
+      "turns": [
+        {
+          "start": 0.0,
+          "end": 30.0,
+          "speaker": "speaker_0"
+        }
+      ],
+      "arguments": {},
+      "regions": [
+        {
+          "start": 0.0,
+          "end": 24.5,
+          "speakers": [
+            "speaker_0"
+          ]
+        },
+        {
+          "start": 24.5,
+          "end": 30.0,
+          "speakers": [
+            "speaker_0"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "region_longer_than_18_seconds",
+      "turns": [
+        {
+          "start": 0.0,
+          "end": 20.0,
+          "speaker": "speaker_0"
+        }
+      ],
+      "arguments": {
+        "max_seconds": 18
+      },
+      "regions": [
+        {
+          "start": 0.0,
+          "end": 18.0,
+          "speakers": [
+            "speaker_0"
+          ]
+        },
+        {
+          "start": 18.0,
+          "end": 20.0,
+          "speakers": [
+            "speaker_0"
+          ]
+        }
+      ]
+    }
+  ]
+}
