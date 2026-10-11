@@ -262,21 +262,28 @@ impl AudioReason {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct ActivityRegion {
     pub start_sample: i64,
     pub end_sample: i64,
     pub speakers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct SpeakerActivity {
     pub audio_revision: i64,
     pub observed_end_sample: i64,
     pub regions: Vec<ActivityRegion>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct ImportAudioAnchor {
+    pub start_sample: i64,
+    pub end_sample: i64,
+    pub policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct AudioSegment {
     pub id: String,
     pub speaker: String,
@@ -292,11 +299,13 @@ pub struct AudioSegment {
     pub canonical_state: Option<String>,
     pub canonical_utterance_id: Option<String>,
     pub source_speaker_candidates: Option<Vec<String>>,
+    #[serde(default)]
     pub protected_fields: Vec<String>,
     pub start_sample: Option<i64>,
     pub end_sample: Option<i64>,
     pub audio_revision: Option<i64>,
     pub speaker_activity: Option<SpeakerActivity>,
+    pub decode_context: Option<ImportAudioAnchor>,
 }
 
 impl AudioSegment {
@@ -321,6 +330,7 @@ impl AudioSegment {
             end_sample: None,
             audio_revision: None,
             speaker_activity: None,
+            decode_context: None,
         }
     }
 }
@@ -424,14 +434,7 @@ pub fn speaker_audio_ranges(segment: &AudioSegment, track_id: &str) -> Vec<(f64,
     if speaker_audio_reason(segment, track_id).is_none() {
         return vec![(segment.start, segment.end)];
     }
-    if !crop_anchor_ok(segment, track_id) {
-        return Vec::new();
-    }
-    let (Some(start_sample), Some(end_sample), Some(revision)) = (
-        segment.start_sample,
-        segment.end_sample,
-        segment.audio_revision,
-    ) else {
+    let Some((start_sample, end_sample, revision)) = crop_anchor(segment, track_id) else {
         return Vec::new();
     };
     if start_sample < 0 || start_sample >= end_sample || revision < 0 {
@@ -486,23 +489,51 @@ pub fn speaker_audio_ranges(segment: &AudioSegment, track_id: &str) -> Vec<(f64,
         .collect()
 }
 
-fn crop_anchor_ok(segment: &AudioSegment, track_id: &str) -> bool {
-    segment.speaker == track_id
-        && !truthy(&segment.audio_state)
-        && NUMBERED_TRACK.is_match(track_id)
-        && !truthy(&segment.canonical_unresolved)
-        && segment.finalized == Some(true)
-        && segment.canonical_state.as_deref() == Some("sealed")
-        && segment.canonical_utterance_id.as_deref() == Some(segment.id.as_str())
-        && sole_owner(&segment.speaker_candidates, track_id)
-        && sole_owner(&segment.source_speaker_candidates, track_id)
-        && !segment
+fn crop_anchor(segment: &AudioSegment, track_id: &str) -> Option<(i64, i64, i64)> {
+    if truthy(&segment.audio_state)
+        || !NUMBERED_TRACK.is_match(track_id)
+        || truthy(&segment.canonical_unresolved)
+        || segment.finalized == Some(false)
+        || segment.canonical_utterance_id.as_deref() != Some(segment.id.as_str())
+        || !sole_owner(&segment.speaker_candidates, track_id)
+        || segment.source_speaker_candidates.is_some()
+            && !sole_owner(&segment.source_speaker_candidates, track_id)
+        || segment
+            .canonical_state
+            .as_deref()
+            .is_some_and(|state| state != "sealed")
+        || segment
             .protected_fields
             .iter()
             .any(|field| field == "speaker" || field == "start" || field == "end")
+    {
+        return None;
+    }
+    let (start, end) = if let Some(anchor) = &segment.decode_context {
+        // Unassigned tail words do not erase separately observed solo speaker audio.
+        if anchor.policy != "speech_utterance_tail_context_v1"
+            || (segment.speaker != track_id && segment.speaker != "unassigned")
+        {
+            return None;
+        }
+        (anchor.start_sample, anchor.end_sample)
+    } else {
+        if segment.speaker != track_id
+            || segment.finalized != Some(true)
+            || segment.canonical_state.as_deref() != Some("sealed")
+            || !sole_owner(&segment.source_speaker_candidates, track_id)
+        {
+            return None;
+        }
+        (segment.start_sample?, segment.end_sample?)
+    };
+    Some((start, end, segment.audio_revision?))
 }
 
 pub fn voice_clip_choices(job: &RecognitionMeeting, track_id: &str) -> Vec<(String, VoiceClip)> {
+    if !job.is_local() {
+        return Vec::new();
+    }
     let mut choices = Vec::new();
     for segment in &job.segments {
         for (left, right) in speaker_audio_ranges(segment, track_id) {
@@ -1225,6 +1256,71 @@ mod tests {
         let mut second = AudioSegment::passage("second", 4.0, 7.0);
         second.text = "We can start now.".to_string();
         RecognitionMeeting::local("meeting", vec![first, second])
+    }
+
+    #[test]
+    fn imported_unassigned_text_can_offer_only_unchanged_verified_solo_audio() {
+        // The actual native import payload has uncertain text ownership in its VAD tail.
+        let segment: AudioSegment = serde_json::from_value(serde_json::json!({
+            "id":"seg-0","speaker":"unassigned","start":0.03,"end":4.424,
+            "text":"Words with a tail.","review":true,"voice_eligible":false,
+            "canonical_utterance_id":"seg-0","audio_revision":0,
+            "speaker_candidates":["speaker_0"],
+            "decode_context":{"start_sample":480,"end_sample":70784,"boundary_sample":64800,"policy":"speech_utterance_tail_context_v1"},
+            "speaker_activity":{"audio_revision":0,"observed_end_sample":70784,"regions":[
+                {"start_sample":480,"end_sample":64800,"speakers":["speaker_0"]},
+                {"start_sample":64800,"end_sample":70784,"speakers":[]}
+            ]}
+        })).unwrap();
+        assert_eq!(
+            speaker_audio_ranges(&segment, "speaker_0"),
+            vec![(0.03, 4.05)]
+        );
+        assert!(speaker_audio_ranges(&segment, "speaker_1").is_empty());
+        let mut edited = segment.clone();
+        edited.text = "Human text edit".into();
+        edited.protected_fields.push("text".into());
+        assert_eq!(
+            speaker_audio_ranges(&edited, "speaker_0"),
+            vec![(0.03, 4.05)]
+        );
+        for case in 0..12 {
+            let mut changed = segment.clone();
+            match case {
+                0 => changed.protected_fields.push("speaker".into()),
+                1 => changed.protected_fields.push("start".into()),
+                2 => changed.start = 0.1,
+                3 => changed.speaker_activity.as_mut().unwrap().audio_revision += 1,
+                4 => {
+                    changed
+                        .speaker_activity
+                        .as_mut()
+                        .unwrap()
+                        .observed_end_sample -= 1
+                }
+                5 => changed.speaker_activity.as_mut().unwrap().regions[0]
+                    .speakers
+                    .push("speaker_1".into()),
+                6 => changed.finalized = Some(false),
+                7 => changed.canonical_utterance_id = Some("different".into()),
+                8 => changed.decode_context.as_mut().unwrap().policy = "unknown".into(),
+                9 => changed.speaker_activity.as_mut().unwrap().regions[1].start_sample += 1,
+                10 => changed.source_speaker_candidates = Some(vec!["speaker_1".into()]),
+                11 => changed.canonical_state = Some("open".into()),
+                _ => unreachable!(),
+            }
+            assert!(
+                speaker_audio_ranges(&changed, "speaker_0").is_empty(),
+                "case {case}"
+            );
+        }
+        let mut meeting = RecognitionMeeting::local("meeting", vec![segment]);
+        assert_eq!(
+            voice_clip_choices(&meeting, "speaker_0")[0].0,
+            "seg-0@480:64800"
+        );
+        meeting.provenance_kind = Some("imported_transcript".into());
+        assert!(voice_clip_choices(&meeting, "speaker_0").is_empty());
     }
 
     fn confirmed(person_id: &str, name: &str) -> SpeakerAssignment {

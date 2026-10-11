@@ -40,6 +40,7 @@ const SERVER_REST_KEYS: &[&str] = &[
     "end_sample",
     "capture_audio",
     "text_audio_anchor",
+    "decode_context",
     "speech_regions",
     "assembly_provenance",
     "bounded_decode_provenance",
@@ -719,6 +720,60 @@ mod tests {
         .unwrap_err();
         assert_eq!(busy.status, 409);
         assert_eq!(busy.message, messages::WAIT_FOR_INFERENCE);
+    }
+
+    #[test]
+    fn saves_preserve_imported_voice_crop_ownership() {
+        use crate::voice::{AudioSegment, speaker_audio_ranges};
+        let segment = serde_json::from_value(json!({
+            "id":"seg-0","speaker":"unassigned","start":0.03,"end":4.424,
+            "text":"Words with a tail.","review":true,"voice_eligible":false,
+            "canonical_utterance_id":"seg-0","audio_revision":0,
+            "speaker_candidates":["speaker_0"],
+            "decode_context":{"start_sample":480,"end_sample":70784,"boundary_sample":64800,"policy":"speech_utterance_tail_context_v1"},
+            "speaker_activity":{"audio_revision":0,"observed_end_sample":70784,"regions":[
+                {"start_sample":480,"end_sample":64800,"speakers":["speaker_0"]},
+                {"start_sample":64800,"end_sample":70784,"speakers":[]}
+            ]}
+        })).unwrap();
+        let mut document = saved_document(segment);
+        document
+            .speakers
+            .insert("unassigned".into(), "Unassigned".into());
+        let anchor = document.segments[0].rest["decode_context"].clone();
+        let (assignments, checks) = empty_maps();
+        for forged in [false, true] {
+            let mut incoming = serde_json::to_value(&document).unwrap();
+            let row = incoming["segments"][0].as_object_mut().unwrap();
+            row.insert("text".into(), json!("Human text edit"));
+            row.remove("decode_context");
+            if forged {
+                row.insert(
+                    "decode_context".into(),
+                    json!({"start_sample":0,"end_sample":80000,"policy":"forged"}),
+                );
+            }
+            let outcome = save_transcript(SaveInput {
+                status: "ready",
+                duration: Some(10.),
+                revision: 7,
+                saved: Some(&document),
+                body: &json!({"revision":7,"document":incoming}),
+                now: 20.,
+                speaker_assignments: &assignments,
+                voice_checks: &checks,
+            })
+            .unwrap();
+            let saved = &outcome.document.segments[0];
+            assert_eq!(saved.rest.get("decode_context"), Some(&anchor));
+            assert_eq!(saved.text, "Human text edit");
+            let audio: AudioSegment =
+                serde_json::from_value(serde_json::to_value(saved).unwrap()).unwrap();
+            assert_eq!(
+                speaker_audio_ranges(&audio, "speaker_0"),
+                vec![(0.03, 4.05)]
+            );
+        }
     }
 
     #[test]

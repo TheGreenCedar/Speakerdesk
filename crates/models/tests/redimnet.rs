@@ -158,3 +158,120 @@ fn artifact_boundary_rejects_links_extras_and_corruption() {
     std::fs::write(&path, bytes).unwrap();
     verify_artifact(&root).unwrap();
 }
+
+#[test]
+#[ignore = "requires disposable SPEAKERDESK_VOICE_FIXTURES, SPEAKERDESK_TEST_VOICE and a fresh SPEAKERDESK_VOICE_RESULT"]
+fn frozen_recognition_policy_on_regenerated_synthetic_corpus() {
+    use speakerdesk_core::voice::{Calibration, VoiceProfile, normalized, propose_match};
+    use std::collections::BTreeMap;
+    let fixtures =
+        PathBuf::from(std::env::var_os("SPEAKERDESK_VOICE_FIXTURES").expect("fixture root"));
+    let root = PathBuf::from(std::env::var_os("SPEAKERDESK_TEST_VOICE").expect("model directory"));
+    let output = PathBuf::from(std::env::var_os("SPEAKERDESK_VOICE_RESULT").expect("result path"));
+    assert!(!output.exists());
+    let manifest_bytes = std::fs::read(fixtures.join("manifest.json")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest["dataset_id"], "macos-compact-tts-development-v1");
+    assert_eq!(manifest["fixture_source"], "synthetic");
+    let groups = manifest["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 36);
+    let frozen: serde_json::Value =
+        serde_json::from_str(include_str!("../../../speakerdesk/voice_calibration.json")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&manifest_bytes)),
+        frozen["fixture_manifest_sha256"]
+    );
+    let mut reports = vec![];
+    for policy in [ComputePolicy::CpuAndGpu, ComputePolicy::All] {
+        let network = Network::load(&root, policy).unwrap();
+        let model = network.identity();
+        let mut rows = vec![];
+        for group in groups {
+            let path = fixtures.join(group["file"].as_str().unwrap());
+            let bytes = std::fs::read(&path).unwrap();
+            let mut reader = hound::WavReader::new(std::io::Cursor::new(&bytes)).unwrap();
+            assert_eq!(reader.spec().sample_rate, 16000);
+            assert_eq!(reader.spec().channels, 1);
+            let pcm: Vec<_> = reader
+                .samples::<i16>()
+                .map(|s| f32::from(s.unwrap()) / 32768.)
+                .collect();
+            let mut vectors = vec![];
+            let mut seconds = vec![];
+            for clip in group["clips"].as_array().unwrap() {
+                let left = (clip["start"].as_f64().unwrap() * 16000.).round() as usize;
+                let right = (clip["end"].as_f64().unwrap() * 16000.).round() as usize;
+                let started = Instant::now();
+                let embedding = network
+                    .embed(&pcm[left..right], &AtomicBool::new(false))
+                    .unwrap();
+                seconds.push(started.elapsed().as_secs_f64());
+                assert!(embedding.clean);
+                vectors.push(embedding.vector);
+            }
+            assert_eq!(vectors.len(), 2);
+            rows.push(serde_json::json!({"id":group["id"],"speaker_id":group["speaker_id"],"split":group["split"],"audio_sha256":format!("{:x}",Sha256::digest(bytes)),"vectors":vectors,"seconds":seconds}));
+        }
+        let vectors = |row: &serde_json::Value| {
+            serde_json::from_value::<Vec<Vec<f64>>>(row["vectors"].clone()).unwrap()
+        };
+        let mut enrolled: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for row in rows.iter().filter(|row| row["split"] == "enrollment") {
+            let centroid = enrolled
+                .entry(row["speaker_id"].as_str().unwrap().to_owned())
+                .or_insert_with(|| vec![0.; 192]);
+            for vector in vectors(row) {
+                for (total, value) in centroid.iter_mut().zip(vector) {
+                    *total += value;
+                }
+            }
+        }
+        assert_eq!(enrolled.len(), 4);
+        let profiles: Vec<_> = enrolled
+            .into_iter()
+            .map(|(person_id, vector)| VoiceProfile {
+                person_id,
+                version: "synthetic-corpus".into(),
+                enrolled_at: 0.,
+                model: model.clone(),
+                centroid: normalized(&vector, 192).unwrap(),
+                clips: vec![],
+                consent: "explicit_remember_voice".into(),
+            })
+            .collect();
+        let cal = &frozen["calibration"];
+        let calibration = Calibration::new(
+            model.clone(),
+            cal["dataset_id"].as_str().unwrap(),
+            cal["threshold"].as_f64().unwrap(),
+            cal["margin"].as_f64().unwrap(),
+            cal["genuine_trials"].as_u64().unwrap(),
+            cal["impostor_trials"].as_u64().unwrap(),
+            cal["false_accept_rate"].as_f64().unwrap(),
+            cal["false_reject_rate"].as_f64().unwrap(),
+            cal["minimum_clips"].as_u64().unwrap() as usize,
+        )
+        .unwrap();
+        let mut trials = vec![];
+        for row in rows.iter().filter(|row| row["split"] != "enrollment") {
+            let found = propose_match(&model, &calibration, &vectors(row), &profiles).unwrap();
+            let person = found.as_ref().map(|found| found.person_id.as_str());
+            trials.push(serde_json::json!({"id":row["id"],"split":row["split"],"expected":row["speaker_id"],"matched":person,"correct":person==row["speaker_id"].as_str(),"score":found.as_ref().map(|f|f.score),"margin":found.as_ref().map(|f|f.margin)}));
+        }
+        reports.push(serde_json::json!({"policy":policy.name(),"model":model,"frozen_threshold":cal["threshold"],"frozen_margin":cal["margin"],"rows":rows,"trials":trials}));
+    }
+    let result = serde_json::json!({"manifest_sha256":format!("{:x}",Sha256::digest(manifest_bytes)),"limitation":"Regenerated synthetic corpus; frozen policy, no tuning; not human population recognition accuracy or legacy profile relabeling authority.","reports":reports});
+    std::fs::write(output, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+    for report in result["reports"].as_array().unwrap() {
+        assert_eq!(report["trials"].as_array().unwrap().len(), 28);
+        assert!(
+            report["trials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|trial| trial["correct"] == true),
+            "frozen policy failed: {}",
+            report["policy"]
+        );
+    }
+}

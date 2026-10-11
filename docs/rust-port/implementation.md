@@ -24,9 +24,12 @@ Local implementation branch: `codex/python-free-mac`.
    the actual native child and assembled import pipeline. An isolated Tauri
    preview now starts the Rust HTTP service and resident child. Actual HTTP
    import/edit/name/export/restart passes on synthetic audio (proof below).
-   Desktop interaction is blocked by the locked Mac; the UI workflow, public
-   audio and end-to-end performance qualification remain pending.
-4. Pending: automatic language, CTC, native Core ML ReDimNet, identity and setup.
+   The actual editor import/edit/name/boundary/save/reopen/export/stale-save path
+   passes, including Auto language and CTC. Short synthetic/public recordings have
+   equivalent warm application measurements; long imports and full performance
+   qualification remain pending.
+4. In progress: automatic language, supplied-text CTC and native Core ML ReDimNet
+   extraction work. Voice enrollment/recognition and model setup remain pending.
 5. Pending: native capture coordination, streaming tails/recovery and bounded work.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
@@ -572,3 +575,23 @@ cleanup matrix pass. The separate real-child voice and artifact-boundary tests
 pass. Clippy with warnings denied includes the desktop this time; upstream
 mlx-sys still emits its two previously documented allocator-signature warnings.
 Independent review found no remaining blocker in this bounded extraction slice.
+
+The original compact-voice synthetic corpus was regenerated in disposable storage:
+72 clips in 36 groups, manifest SHA256
+`4a6eb0102d420587fba74fa0047db89f0ec17dcaeb75da79eb1c6144562d44a7`.
+The independent test asserts that digest before model loading and uses the existing
+`voice_calibration.json` threshold (0.7264125328398843) and margin
+(0.10003429964182987) without fitting. Both policies pass all 28 recognition
+decisions across the calibration and held-out groups, including unseen synthetic
+voices. Median extraction is 30.4 ms for CPU_AND_GPU and 130.1 ms for ALL. Results:
+`/private/tmp/speakerdesk-model-qualification/native-frozen-voice-policy.json`.
+This is synthetic-policy evidence, not human population accuracy or permission to
+relabel legacy profile identities.
+
+Voice crop selection now understands native import activity and excludes its
+unassigned tail without discarding separately verified solo audio. Whole-document
+saves preserve the server-owned decode anchor; client omission/forgery cannot
+replace it. Text-only edits keep the crop while stale activity, competing owners,
+changed speaker/bounds or incomplete observations reject it. The save regression
+failed before the fix; all 142 core tests pass afterward. HTTP enrollment remains
+the next slice.

@@ -105,9 +105,17 @@ consistency, not human recognition accuracy or universal saved-profile compatibi
 ```sh
 SPEAKERDESK_TEST_VOICE=/path/to/models/redimnet2-b6 \
 SPEAKERDESK_VOICE_RESULT=/new/result.json \
-  cargo test --release --locked -p speakerdesk-models --test redimnet -- --ignored --nocapture
+  cargo test --release --locked -p speakerdesk-models --test redimnet native_coreml_policies_return_stable_normalized_embeddings -- --ignored --nocapture
 ```
 
 For process-scoped timing/memory comparison, run the policy test separately with
 `SPEAKERDESK_TEST_COMPUTE_POLICY=CPU_AND_GPU` and `ALL`, each with a fresh result
 path. Metal capture is a separate test and is excluded from timing measurements.
+
+`frozen_recognition_policy_on_regenerated_synthetic_corpus` additionally takes
+`SPEAKERDESK_VOICE_FIXTURES`, pointing to `scripts/generate_voice_fixtures.py` output.
+It verifies the manifest against `voice_calibration.json` before loading either
+compute policy, then uses that file's unchanged threshold and margin on 72 clips
+in 36 groups. Enrollment, calibration and held-out groups remain separate; all
+28 non-enrollment decisions must match. No threshold fitting occurs. The corpus
+uses macOS synthetic voices and does not establish human recognition accuracy.
