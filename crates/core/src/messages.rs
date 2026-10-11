@@ -171,6 +171,62 @@ pub const RECORDING_DISK_LOW: &str =
 pub const VOICE_FREE_SPACE: &str = "Free at least 0.6 GB of disk space, then retry voice setup.";
 pub const DOWNLOAD_PAUSED_DISK: &str =
     "Download paused because disk space is low. Free space, then resume.";
+pub const REMEMBER_PROFILE: &str = "Choose Remember voice to save a voice profile.";
+pub const RETRY_RETAINED: &str =
+    "This passage could not be transcribed. Its audio and existing words are retained.";
+pub const CAPTURE_FINITE_MONO: &str = "Capture requires finite mono audio.";
+pub const EXPECTED_PCM_WAV: &str = "Expected 16 kHz mono 16-bit PCM WAV.";
+pub const RECORDING_LENGTH: &str = "Recordings must be nonempty and no longer than two hours.";
+pub const PCM_TRUNCATED: &str = "The PCM recording is truncated.";
+pub const PCM_INCOMPLETE_SAMPLE: &str = "The PCM recording has an incomplete sample.";
+pub const PCM_DECODE_FAILED: &str = "The file could not be decoded as PCM audio.";
+pub const FFMPEG_REQUIRED: &str =
+    "Install FFmpeg to decode this format, or supply mono 16 kHz 16-bit PCM WAV.";
+pub const AUDIO_CONVERSION_TIMEOUT: &str = "Audio conversion exceeded three minutes.";
+pub const COULD_NOT_DECODE: &str =
+    "Could not decode this recording. Supply a supported audio file.";
+pub const TOO_MANY_TRANSITIONS: &str =
+    "Too many speaker transitions. Split the recording into smaller files.";
+pub const INCOMPLETE_COHERE: &str = "Cohere returned an incomplete transcript.";
+pub const CLOSING: &str = "Speakerdesk is closing.";
+pub const MEETING_STOPPED_BEFORE_CAPTURE: &str = "Meeting stopped before capture began.";
+pub const CAPTURE_TIMING_JUMPED: &str =
+    "Audio capture timing jumped. Recording stopped to preserve its timeline.";
+pub const ECHO_REJECTED_FRAME: &str = "Speaker echo cancellation rejected an audio frame.";
+pub const USE_FINALIZED_CLIPS: &str =
+    "Use finalized local transcription clips for voice recognition.";
+pub const CLEAN_PASSAGE_LENGTH: &str =
+    "Choose clean, finalized passages from one speaker, each 2–10 seconds long.";
+pub const NONOVERLAPPING_PASSAGES: &str = "Choose separate, nonoverlapping passages.";
+pub const PASSAGE_UNUSABLE: &str =
+    "A selected passage is unusable for voice recognition. Choose another clean passage.";
+pub const PROFILE_NEEDS_CLIPS: &str = "A voice profile requires multiple clean passages.";
+pub const VOICE_PASSAGE_LENGTH: &str = "Voice passages must be 2–10 seconds long.";
+pub const VOICE_FINITE_MONO: &str = "Supply 2–10 seconds of finite mono audio.";
+pub const VOICE_PCM: &str = "Voice recognition needs normalized mono 16 kHz PCM16 meeting audio.";
+pub const VOICE_PASSAGE_BEYOND_AUDIO: &str = "A voice passage extends beyond the saved audio.";
+pub const VOICE_PASSAGE_INCOMPLETE: &str = "A voice passage is incomplete.";
+pub const VOICE_READ_FAILED: &str = "Voice recognition could not read the meeting audio.";
+pub const MODEL_VERIFICATION_FAILED: &str = "Model verification failed. Retry the download.";
+pub const MODEL_METADATA_VERIFICATION_FAILED: &str =
+    "Model metadata verification failed. Retry the download.";
+pub const MISSING_CHECKPOINT: &str = "Missing local model checkpoint.";
+pub const TIMING_FAILED_TO_LOAD: &str =
+    "Required transcript timing failed to load. Retry local model setup.";
+pub const CAPTURE_CLOCK_STOPPED: &str = "Capture clock stopped updating. Audio has been saved.";
+pub const AUDIO_FORMAT_CHANGED: &str = "Audio format changed too frequently. Audio has been saved.";
+pub const MODELS_COULD_NOT_START: &str =
+    "Local models could not start. Audio capture did not begin.";
+pub const CAPTURE_STOPPED_UNEXPECTEDLY: &str =
+    "Audio capture stopped unexpectedly. Captured audio has been saved.";
+pub const TRANSCRIPTION_FINISH_TIMEOUT: &str =
+    "Transcription took too long to finish. Captured audio has been saved.";
+pub const REFINEMENT_PAUSED: &str =
+    "Refinement paused. Previous words and saved audio are retained.";
+
+pub fn clean_passage_count(minimum: usize) -> String {
+    format!("Choose {minimum}–12 separate clean passages.")
+}
 
 pub fn segment_times(index: usize) -> String {
     format!("Segment {index}: supply numeric start and end times.")
@@ -198,5 +254,14 @@ mod tests {
             PASSAGE_STALE,
             "This passage changed. Review its latest words before saving."
         );
+        assert_eq!(
+            super::RETRY_RETAINED,
+            "This passage could not be transcribed. Its audio and existing words are retained."
+        );
+        assert_eq!(
+            super::clean_passage_count(2),
+            "Choose 2–12 separate clean passages."
+        );
+        assert_ne!(super::REMEMBER_CONSENT, super::REMEMBER_PROFILE);
     }
 }
