@@ -272,7 +272,10 @@ rust = []
 path = "tests/test_export_bounds.py"
 disposition = "port"
 status = "pending"
-rust = []
+rust = [
+    "crates/core/tests/ported.rs",
+]
+reason = "Pure export-boundary cases ported; the GET/HEAD 413 attachment half is route-level (M1.3)."
 
 [[row]]
 path = "tests/test_final_asr_reuse.py"
@@ -327,13 +330,20 @@ rust = []
 path = "tests/test_imports.py"
 disposition = "port"
 status = "pending"
-rust = []
+rust = [
+    "crates/core/tests/ported.rs",
+]
+reason = "PUT imported-provenance semantics ported; upload/audio/executor/preparation route cases land with M1.3."
 
 [[row]]
 path = "tests/test_job_polling.py"
 disposition = "port"
 status = "pending"
-rust = []
+rust = [
+    "crates/core/tests/ported.rs",
+    "crates/core/tests/migration.rs",
+]
+reason = "JobStore-level cases ported (list projection, duration ticks, checkpoint fold, restart recovery); ?known_revision= parsing and manager.patch overlays are host-level."
 
 [[row]]
 path = "tests/test_language_detection.py"
@@ -412,7 +422,10 @@ rust = []
 path = "tests/test_passage_review.py"
 disposition = "port"
 status = "pending"
-rust = []
+rust = [
+    "crates/core/tests/ported.rs",
+]
+reason = "review_reason/retain_unassigned_audio and retry-candidate PUT/PATCH semantics ported; pipeline retry_passage and /retry route cases land with inference + M1.3."
 
 [[row]]
 path = "tests/test_people.py"
@@ -436,7 +449,11 @@ rust = []
 path = "tests/test_reading_turns.py"
 disposition = "port"
 status = "pending"
-rust = []
+rust = [
+    "crates/core/tests/ported.rs",
+    "crates/core/tests/golden_transcript.rs",
+]
+reason = "validated_turns binding + export/edit gate semantics ported; project_turns/bind_words/alignment_words and canonical-runtime cases land with inference (M2+)."
 
 [[row]]
 path = "tests/test_refinement_tail_context.py"
@@ -667,7 +684,12 @@ rust = []
 path = "speakerdesk/app.py"
 disposition = "port"
 status = "pending"
-rust = []
+rust = [
+    "crates/core/src/edit.rs",
+    "crates/core/tests/golden_edit.rs",
+    "crates/core/tests/ported.rs",
+]
+reason = "Pure PUT/PATCH transcript semantics ported to core::edit; all other routes land with the axum host (M1.3)."
 
 [[row]]
 path = "speakerdesk/asr_reuse_profile.py"
@@ -759,8 +781,13 @@ rust = []
 [[row]]
 path = "speakerdesk/job_store.py"
 disposition = "port"
-status = "pending"
-rust = []
+status = "done"
+rust = [
+    "crates/core/src/store/mod.rs",
+    "crates/core/src/store/legacy.rs",
+    "crates/core/tests/ported.rs",
+    "crates/core/tests/migration.rs",
+]
 
 [[row]]
 path = "speakerdesk/language_detection.py"
@@ -771,8 +798,10 @@ rust = []
 [[row]]
 path = "speakerdesk/language_preferences.py"
 disposition = "port"
-status = "pending"
-rust = []
+status = "done"
+rust = [
+    "crates/core/src/store/mod.rs",
+]
 
 [[row]]
 path = "speakerdesk/language_probe_cache.py"
@@ -887,7 +916,11 @@ rust = []
 path = "speakerdesk/reading_turns.py"
 disposition = "port"
 status = "pending"
-rust = []
+rust = [
+    "crates/core/src/transcript.rs",
+    "crates/core/src/store/legacy.rs",
+]
+reason = "validated_turns gate ported (used by export + legacy migration); project_turns/bind_words/alignment_words land with inference (M2+)."
 
 [[row]]
 path = "speakerdesk/render_innovation.py"
@@ -906,8 +939,11 @@ reason = "D11: dev capture innovation is dropped."
 [[row]]
 path = "speakerdesk/review.py"
 disposition = "port"
-status = "pending"
-rust = []
+status = "done"
+rust = [
+    "crates/core/src/review.rs",
+    "crates/core/tests/ported.rs",
+]
 
 [[row]]
 path = "speakerdesk/rolling_refinement.py"
@@ -949,8 +985,12 @@ reason = "D3: the thread-bound worker backend is replaced by the resident infere
 [[row]]
 path = "speakerdesk/transcript.py"
 disposition = "port"
-status = "pending"
-rust = []
+status = "done"
+rust = [
+    "crates/core/src/transcript.rs",
+    "crates/core/tests/golden_transcript.rs",
+    "crates/core/tests/ported.rs",
+]
 
 [[row]]
 path = "speakerdesk/update_runtime.py"

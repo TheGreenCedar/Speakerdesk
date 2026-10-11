@@ -34,3 +34,4 @@ __pycache__/
 *.zip
 
 desktop/capture/echo/libspeakerdesk_echo.dylib
+.agent/

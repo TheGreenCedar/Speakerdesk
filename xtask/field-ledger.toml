@@ -1,0 +1,2206 @@
+# M1.2 product-field ledger — one row per distinct key path the v0.6.6 Python
+# code writes into persisted payloads (jobs/job_metadata/job_progress payloads,
+# people, voice_profiles, preferences).
+#
+# `class` is the ruled classification.
+#   product = read by frontend JS, exports, edit/merge rules, refinement
+#             reconciliation, voice eligibility, or recovery.
+#   private = engine-only recovery/refinement state the user never sees
+#             (mirrors job_store.PRIVATE_FIELDS plus row-internal state).
+#   drop    = receipts/qualification (D6), no-reader fields, and D11
+#             dropped-path fields. Not migrated; not in Rust types.
+#
+# Writers/readers cite file:line in the v0.6.6 tree (speakerdesk/ == working tree).
+# Line numbers are from the v0.6.6 worktree (.cache/v066).
+# `in_fixtures` = key path observed in tests/goldens/legacy-db/*.sqlite.
+# `{}` = dynamic map key (utterance id, track id, hex id); `[]` = array element.
+
+# ============================ scope: job ============================
+
+[[field]]
+path = "job.id"
+scope = "job"
+writers = ["app.py:226", "live_meeting.py:335"]
+readers = ["static/app.js:8", "static/live_editor.js:22", "static/people.js:11", "job_store.py:64"]
+in_fixtures = true
+class = "product"
+note = "jobs PK; every API response and export ties to it"
+
+[[field]]
+path = "job.name"
+scope = "job"
+writers = ["app.py:225", "live_meeting.py:335"]
+readers = ["static/app.js:92", "static/live_editor.js:195", "transcript.py:exports"]
+in_fixtures = true
+class = "product"
+note = "display name; PUT renames, exports title"
+
+[[field]]
+path = "job.kind"
+scope = "job"
+writers = ["app.py:225", "live_meeting.py:335"]
+readers = ["static/app.js:103", "static/live_editor.js:36", "static/people.js:199"]
+in_fixtures = true
+class = "product"
+note = "'import'|'meeting'; JS gates capture/people behaviors on it"
+
+[[field]]
+path = "job.language"
+scope = "job"
+writers = ["app.py:225", "live_meeting.py:335", "live_meeting.py:495"]
+readers = ["static/app.js:195", "static/app.js:590", "transcript.py:exports"]
+in_fixtures = true
+class = "product"
+note = "job-level language (may be 'auto'); shown and exported"
+
+[[field]]
+path = "job.source_file"
+scope = "job"
+writers = ["app.py:226", "live_meeting.py:335"]
+readers = ["app.py:99", "job_store.py:64"]
+in_fixtures = true
+class = "product"
+note = "basename of source audio; recovery re-normalizes it into audio.wav"
+
+[[field]]
+path = "job.sources[]"
+scope = "job"
+writers = ["live_meeting.py:335", "live_meeting.py:921"]
+readers = ["static/app.js:1248", "live_meeting.py:247"]
+in_fixtures = true
+class = "product"
+note = "array of capture-source id strings chosen at meeting start; status endpoint echoes them"
+
+[[field]]
+path = "job.status"
+scope = "job"
+writers = ["app.py:226", "live_meeting.py:335", "app.py:282", "live_meeting.py:830", "inference_worker.py:status-updates"]
+readers = ["static/app.js:18", "static/live_editor.js:33", "static/people.js:97", "job_store.py:130"]
+in_fixtures = true
+class = "product"
+note = "starting|preparing|processing|ready|failed|cancelled; drives all UI state"
+
+[[field]]
+path = "job.message"
+scope = "job"
+writers = ["app.py:226", "live_meeting.py:335", "live_meeting.py:830", "app.py:283"]
+readers = ["static/app.js:131", "static/live_editor.js:43", "static/people.js:39"]
+in_fixtures = true
+class = "product"
+note = "user-visible progress/failure string; exact messages are product behavior"
+
+[[field]]
+path = "job.duration"
+scope = "job"
+writers = ["job_store.py:55", "job_store.py:86", "live_meeting.py:790", "meeting_refinement.py:213"]
+readers = ["static/app.js:153", "static/live_editor.js:38", "meeting_refinement.py:248"]
+in_fixtures = true
+class = "product"
+note = "seconds; merged with job_progress checkpoint overlay on read (job_store._decode)"
+
+[[field]]
+path = "job.created"
+scope = "job"
+writers = ["app.py:226", "live_meeting.py:335"]
+readers = ["static/app.js:164", "static/app.js:189", "job_store.py:71"]
+in_fixtures = true
+class = "product"
+note = "epoch seconds; sort key and display date"
+
+[[field]]
+path = "job.updated"
+scope = "job"
+writers = ["job_store.py:86", "job_store.py:107"]
+readers = ["job_store.py:84", "static/app.js:job-list"]
+in_fixtures = true
+class = "product"
+note = "last-write epoch; merged with job_progress.updated on read"
+
+[[field]]
+path = "job.revision"
+scope = "job"
+writers = ["app.py:282", "people.py:283", "voice_recognition.py:111", "live_meeting.py:897"]
+readers = ["static/app.js:565", "static/live_editor.js:74", "static/people.js:70", "app.py:264"]
+in_fixtures = true
+class = "product"
+note = "optimistic-concurrency counter; every mutating route 409s on stale revision"
+
+[[field]]
+path = "job.document"
+scope = "job"
+writers = ["live_meeting.py:335", "pipeline.py:318", "app.py:282", "meeting_refinement.py:214"]
+readers = ["static/app.js:228", "static/live_editor.js:10", "transcript.py:exports", "app.py:341"]
+in_fixtures = true
+class = "product"
+note = "the whole transcript document; stripped from job_metadata projection (job_store.py:24)"
+
+[[field]]
+path = "job.speaker_assignments"
+scope = "job"
+writers = ["people.py:117", "people.py:304", "voice_recognition.py:105"]
+readers = ["static/app.js:454", "static/app.js:471", "static/people.js:71", "people.py:116"]
+in_fixtures = true
+class = "product"
+note = "map track->assignment; frontend reads name/source/confirmed for identity UI"
+
+[[field]]
+path = "job.speaker_assignments.{}.person_id"
+scope = "speaker_assignments"
+writers = ["people.py:304", "voice_recognition.py:105"]
+readers = ["static/people.js:72", "people.py:300"]
+in_fixtures = true
+class = "product"
+note = "people FK; people.js renders assignment chips from it"
+
+[[field]]
+path = "job.speaker_assignments.{}.meeting_id"
+scope = "speaker_assignments"
+writers = ["people.py:304", "voice_recognition.py:105"]
+readers = ["people.py:suggestions"]
+in_fixtures = true
+class = "product"
+note = "owning meeting; mirrors job.id"
+
+[[field]]
+path = "job.speaker_assignments.{}.track_id"
+scope = "speaker_assignments"
+writers = ["people.py:304", "voice_recognition.py:105"]
+readers = ["static/people.js:205"]
+in_fixtures = true
+class = "product"
+note = "map key duplicated in value"
+
+[[field]]
+path = "job.speaker_assignments.{}.name"
+scope = "speaker_assignments"
+writers = ["people.py:304", "voice_recognition.py:105"]
+readers = ["static/app.js:471", "static/people.js:73", "people.py:117"]
+in_fixtures = true
+class = "product"
+note = "display name; reconcile_assignments drops entries whose name no longer matches speakers map"
+
+[[field]]
+path = "job.speaker_assignments.{}.confirmed"
+scope = "speaker_assignments"
+writers = ["people.py:304", "voice_recognition.py:105"]
+readers = ["static/people.js:88"]
+in_fixtures = true
+class = "product"
+note = "manual vs unconfirmed-automatic flag"
+
+[[field]]
+path = "job.speaker_assignments.{}.confirmed_at"
+scope = "speaker_assignments"
+writers = ["people.py:305"]
+readers = []
+in_fixtures = true
+class = "product"
+note = "ruled product: user-action record (manual confirm)"
+
+[[field]]
+path = "job.speaker_assignments.{}.assigned_at"
+scope = "speaker_assignments"
+writers = ["voice_recognition.py:106"]
+readers = []
+in_fixtures = false
+class = "product"
+note = "ruled product: user-action record (auto-match apply)"
+
+[[field]]
+path = "job.speaker_assignments.{}.source"
+scope = "speaker_assignments"
+writers = ["people.py:305", "voice_recognition.py:106"]
+readers = ["static/app.js:471", "static/people.js:103"]
+in_fixtures = true
+class = "product"
+note = "'automatic_voice'|'manual'|suggestion-kind; JS shows 'Recognized' tag"
+
+[[field]]
+path = "job.speaker_assignments.{}.evidence"
+scope = "speaker_assignments"
+writers = ["people.py:306", "voice_recognition.py:107"]
+readers = ["static/people.js:200"]
+in_fixtures = true
+class = "product"
+note = "{match:{...}, clips:[...]} or null; served to people UI"
+
+[[field]]
+path = "job.speaker_assignments.{}.evidence.match"
+scope = "speaker_assignments"
+writers = ["voice_recognition.py:107"]
+readers = ["static/people.js:200"]
+in_fixtures = false
+class = "product"
+note = "propose_match output {person_id,profile_version,score,margin,model,calibration{dataset_id,threshold,margin,minimum_clips}}"
+
+[[field]]
+path = "job.speaker_assignments.{}.evidence.clips[]"
+scope = "speaker_assignments"
+writers = ["voice_recognition.py:107"]
+readers = ["static/people.js:201"]
+in_fixtures = false
+class = "product"
+note = "clip payload list {meeting_id,track_id,segment_id,start,end}; people UI evidence"
+
+[[field]]
+path = "job.voice_checks"
+scope = "job"
+writers = ["people.py:309", "voice_recognition.py:65"]
+readers = ["people.py:117", "voice_recognition.py:89"]
+in_fixtures = true
+class = "product"
+note = "map track->{id,status}; status drives people.js check states"
+
+[[field]]
+path = "job.voice_checks.{}.id"
+scope = "job"
+writers = ["people.py:309", "voice_recognition.py:65"]
+readers = ["voice_recognition.py:71"]
+in_fixtures = true
+class = "product"
+note = "check op id; stale checks cancelled on supersede"
+
+[[field]]
+path = "job.voice_checks.{}.status"
+scope = "job"
+writers = ["people.py:309", "voice_recognition.py:96"]
+readers = ["static/people.js:151", "voice_recognition.py:96"]
+in_fixtures = true
+class = "product"
+note = "queued|running|matched|unmatched|unavailable|cancelled|manual"
+
+[[field]]
+path = "job.voice_suggestions[]"
+scope = "job"
+writers = ["people.py:308", "people.py:356"]
+readers = ["people.py:304", "static/people.js:suggestions", "people.py:reconcile_assignments"]
+in_fixtures = true
+class = "product"
+note = "pending identity suggestions served to people UI; cleared by edits/confirmations"
+
+[[field]]
+path = "job.voice_suggestions[].id"
+scope = "job"
+writers = ["people.py:356"]
+readers = ["people.py:283"]
+in_fixtures = true
+class = "product"
+note = "uuid; dismissal list references it"
+
+[[field]]
+path = "job.voice_suggestions[].kind"
+scope = "job"
+writers = ["people.py:356"]
+readers = ["static/people.js:199", "people.py:305"]
+in_fixtures = true
+class = "product"
+note = "'voice_match'|'explicit_introduction'; becomes assignment.source on confirm"
+
+[[field]]
+path = "job.voice_suggestions[].track_id"
+scope = "job"
+writers = ["people.py:356"]
+readers = ["static/people.js:205", "people.py:356"]
+in_fixtures = true
+class = "product"
+note = "speaker track the suggestion applies to"
+
+[[field]]
+path = "job.voice_suggestions[].person_id"
+scope = "job"
+writers = ["people.py:356"]
+readers = ["people.py:300", "static/people.js:206"]
+in_fixtures = true
+class = "product"
+note = "suggested person (voice_match only)"
+
+[[field]]
+path = "job.voice_suggestions[].name"
+scope = "job"
+writers = ["people.py:356", "people.py:introduction_suggestions"]
+readers = ["static/people.js:intro-ui", "people.py:300"]
+in_fixtures = false
+class = "product"
+note = "suggested display name"
+
+[[field]]
+path = "job.voice_suggestions[].match"
+scope = "job"
+writers = ["people.py:357"]
+readers = ["people.py:suggestions-filter"]
+in_fixtures = false
+class = "product"
+note = "propose_match payload; suggestion filtering re-validates model/calibration/profile_version before showing"
+
+[[field]]
+path = "job.voice_suggestions[].evidence"
+scope = "job"
+writers = ["people.py:358", "people.py:introduction_suggestions"]
+readers = ["static/people.js:200", "people.py:305"]
+in_fixtures = false
+class = "product"
+note = "{clips:[...]} for voice_match; {segment_id,quote,start,end} for explicit_introduction"
+
+[[field]]
+path = "job.dismissed_identity_suggestions[]"
+scope = "job"
+writers = ["people.py:283"]
+readers = ["people.py:suggestions", "people.py:introduction_suggestions"]
+in_fixtures = false
+class = "product"
+note = "list of dismissed suggestion ids (uuid or intro digest); filters future suggestions; capped at 256"
+
+[[field]]
+path = "job.passage_retry"
+scope = "job"
+writers = ["app.py:383", "app.py:139"]
+readers = ["static/app.js:592", "app.py:131"]
+in_fixtures = false
+class = "product"
+note = "{id,segment_id,language}; transient in-flight marker, cleared to null on completion; JS reads it"
+
+[[field]]
+path = "job.refinement_status"
+scope = "job"
+writers = ["job_store.py:130", "meeting_refinement.py:133", "meeting_refinement.py:139", "live_meeting.py:830"]
+readers = ["static/live_editor.js:31", "static/app.js:505", "meeting_refinement.py:417"]
+in_fixtures = true
+class = "product"
+note = "waiting|refining|paused|complete|unresolved; live editor renders accuracy-pass state"
+
+[[field]]
+path = "job.refinement_error"
+scope = "job"
+writers = ["meeting_refinement.py:308", "meeting_refinement.py:359"]
+readers = ["meeting_refinement.py:341"]
+in_fixtures = false
+class = "drop"
+note = "ruled drop: no reader in kept code"
+
+[[field]]
+path = "job.refinement_unresolved[]"
+scope = "job"
+writers = ["meeting_refinement.py:310", "meeting_refinement.py:432"]
+readers = ["meeting_refinement.py:139", "meeting_refinement.py:417", "meeting_refinement.py:440"]
+in_fixtures = true
+class = "private"
+note = "window entries {id,start_sample,end_sample,reason}; engine resume state, not frontend-read"
+
+[[field]]
+path = "job.refinement_unresolved[].id"
+scope = "job"
+writers = ["meeting_refinement.py:432"]
+readers = ["meeting_refinement.py:resolve_unresolved"]
+in_fixtures = false
+class = "private"
+note = "anchor_id(start,stop,'refine')"
+
+[[field]]
+path = "job.refinement_unresolved[].start_sample"
+scope = "job"
+writers = ["meeting_refinement.py:432"]
+readers = ["meeting_refinement.py:418", "meeting_refinement.py:435"]
+in_fixtures = false
+class = "private"
+note = "window start; drives completed_sample rewind"
+
+[[field]]
+path = "job.refinement_unresolved[].end_sample"
+scope = "job"
+writers = ["meeting_refinement.py:432"]
+readers = ["meeting_refinement.py:435"]
+in_fixtures = false
+class = "private"
+note = "window end"
+
+[[field]]
+path = "job.refinement_unresolved[].reason"
+scope = "job"
+writers = ["meeting_refinement.py:433"]
+readers = []
+in_fixtures = false
+class = "private"
+note = "why the window was retained"
+
+[[field]]
+path = "job.rolling_refinement"
+scope = "job"
+writers = ["job_store.py:129", "meeting_refinement.py:72", "rolling_refinement.py:100"]
+readers = ["static/live_editor.js:34", "meeting_refinement.py:417"]
+in_fixtures = true
+class = "product"
+note = "checkpoint state; live editor shows refinement controls iff present"
+
+[[field]]
+path = "job.rolling_refinement.cancelled"
+scope = "job"
+writers = ["rolling_refinement.py", "meeting_refinement.py:pause"]
+readers = ["rolling_refinement.py:104", "rolling_refinement.py:110"]
+in_fixtures = true
+class = "private"
+note = "stop flag; engine-only"
+
+[[field]]
+path = "job.rolling_refinement.completed_sample"
+scope = "job"
+writers = ["rolling_refinement.py", "meeting_refinement.py:418"]
+readers = ["rolling_refinement.py:62", "rolling_refinement.py:104"]
+in_fixtures = true
+class = "private"
+note = "contiguous checkpoint watermark; validated on recover"
+
+[[field]]
+path = "job.rolling_refinement.last_scheduled_at"
+scope = "job"
+writers = ["rolling_refinement.py:100"]
+readers = ["rolling_refinement.py:enough"]
+in_fixtures = true
+class = "private"
+note = "schedule throttle timestamp"
+
+[[field]]
+path = "job.rolling_refinement.pending[]"
+scope = "job"
+writers = ["rolling_refinement.py:100"]
+readers = ["rolling_refinement.py:62", "rolling_refinement.py:104", "rolling_refinement.py:110"]
+in_fixtures = true
+class = "private"
+note = "queued refinement windows {id,start_sample,end_sample,context_start_sample,context_end_sample,status,attempts,operation_id}"
+
+[[field]]
+path = "job.rolling_refinement.pending[].id"
+scope = "job"
+writers = ["rolling_refinement.py:96"]
+readers = ["meeting_refinement.py:result-matching"]
+in_fixtures = true
+class = "private"
+note = "anchor_id(start,end,'refine')"
+
+[[field]]
+path = "job.rolling_refinement.pending[].start_sample"
+scope = "job"
+writers = ["rolling_refinement.py:96"]
+readers = ["rolling_refinement.py:62", "meeting_refinement.py:100"]
+in_fixtures = true
+class = "private"
+note = "core window start"
+
+[[field]]
+path = "job.rolling_refinement.pending[].end_sample"
+scope = "job"
+writers = ["rolling_refinement.py:96"]
+readers = ["rolling_refinement.py:62"]
+in_fixtures = true
+class = "private"
+note = "core window end; contiguity validated"
+
+[[field]]
+path = "job.rolling_refinement.pending[].context_start_sample"
+scope = "job"
+writers = ["rolling_refinement.py:97"]
+readers = ["rolling_refinement.py:65"]
+in_fixtures = true
+class = "private"
+note = "leading context bound; oversized-context check on recover"
+
+[[field]]
+path = "job.rolling_refinement.pending[].context_end_sample"
+scope = "job"
+writers = ["rolling_refinement.py:97"]
+readers = ["rolling_refinement.py:65"]
+in_fixtures = true
+class = "private"
+note = "trailing context bound"
+
+[[field]]
+path = "job.rolling_refinement.pending[].status"
+scope = "job"
+writers = ["rolling_refinement.py:99", "rolling_refinement.py:112"]
+readers = ["rolling_refinement.py:69", "rolling_refinement.py:110"]
+in_fixtures = true
+class = "private"
+note = "queued|in_flight; in_flight requeues on recover"
+
+[[field]]
+path = "job.rolling_refinement.pending[].attempts"
+scope = "job"
+writers = ["rolling_refinement.py:99", "rolling_refinement.py:112"]
+readers = ["rolling_refinement.py:112"]
+in_fixtures = true
+class = "private"
+note = "dispatch counter"
+
+[[field]]
+path = "job.rolling_refinement.pending[].operation_id"
+scope = "job"
+writers = ["rolling_refinement.py:112"]
+readers = ["meeting_refinement.py:result-matching"]
+in_fixtures = false
+class = "private"
+note = "uuid binding dispatch->result; receipt-adjacent but engine-internal"
+
+[[field]]
+path = "job.rolling_refinement.version"
+scope = "job"
+writers = ["meeting_refinement.py:72", "rolling_refinement.py:init"]
+readers = ["rolling_refinement.py:recover"]
+in_fixtures = true
+class = "private"
+note = "state schema version; recover validates it"
+
+[[field]]
+path = "job.rolling_inflight"
+scope = "job"
+writers = ["meeting_refinement.py:132", "meeting_refinement.py:245"]
+readers = ["meeting_refinement.py:221", "meeting_refinement.py:298", "meeting_refinement.py:346"]
+in_fixtures = false
+class = "private"
+note = "in-flight rolling window request copy (PRIVATE_FIELDS member)"
+
+[[field]]
+path = "job.rolling_sources"
+scope = "job"
+writers = ["meeting_refinement.py:68", "live_meeting.py:586"]
+readers = ["rolling_refinement.py:dispatch", "meeting_refinement.py:297", "job_store.py:12"]
+in_fixtures = true
+class = "private"
+note = "PRIVATE_FIELDS member; map uid->sealed segment-shaped rows used as rolling-refinement source"
+
+[[field]]
+path = "job.rolling_sources.{}"
+scope = "job"
+writers = ["meeting_refinement.py:68", "live_meeting.py:586", "canonical_runtime.py:486"]
+readers = ["rolling_refinement.py", "meeting_refinement.py:297"]
+in_fixtures = true
+class = "private"
+note = "entry object; same key union as document.segments[] minus private row keys — see segment scope; never leaves the process"
+
+[[field]]
+path = "job.refinement_history"
+scope = "job"
+writers = ["meeting_refinement.py:74", "meeting_refinement.py:193", "meeting_refinement.py:312", "meeting_refinement.py:335"]
+readers = []
+in_fixtures = false
+class = "private"
+note = "PRIVATE_FIELDS member; map window_id->history dict (window_id,segments,candidates,language_epoch,created)"
+
+[[field]]
+path = "job.fast_history"
+scope = "job"
+writers = ["meeting_refinement.py:74", "meeting_refinement.py:287"]
+readers = []
+in_fixtures = false
+class = "private"
+note = "PRIVATE_FIELDS member; map start_sample->history; only written by D11 pre-canonical fast path"
+
+[[field]]
+path = "job.fast_previous_revision"
+scope = "job"
+writers = ["meeting_refinement.py:286"]
+readers = []
+in_fixtures = false
+class = "private"
+note = "PRIVATE_FIELDS member; fast-path merge bookkeeping (dropped path)"
+
+[[field]]
+path = "job.last_fast_sequence"
+scope = "job"
+writers = ["meeting_refinement.py:168", "meeting_refinement.py:289"]
+readers = ["meeting_refinement.py:148", "meeting_refinement.py:260"]
+in_fixtures = true
+class = "private"
+note = "monotonic fast-result sequence guard; only produced/consumed by dropped fast path"
+
+[[field]]
+path = "job.fast_retained_candidate"
+scope = "job"
+writers = ["meeting_refinement.py:291"]
+readers = []
+in_fixtures = false
+class = "private"
+note = "PRIVATE_FIELDS member; retained fast result for later merge (dropped path)"
+
+[[field]]
+path = "job.boundary_candidate"
+scope = "job"
+writers = ["live_meeting.py:522"]
+readers = []
+in_fixtures = false
+class = "private"
+note = "PRIVATE_FIELDS member; pending boundary decision (dropped fast path)"
+
+[[field]]
+path = "job.boundary_candidates"
+scope = "job"
+writers = ["meeting_refinement.py", "live_meeting.py"]
+readers = []
+in_fixtures = false
+class = "private"
+note = "PRIVATE_FIELDS member; plural form of boundary state (dropped fast path)"
+
+[[field]]
+path = "job.language_epoch"
+scope = "job"
+writers = ["meeting_refinement.py:69", "live_meeting.py:495"]
+readers = ["meeting_refinement.py:158", "meeting_refinement.py:261", "canonical_runtime.py:35"]
+in_fixtures = true
+class = "product"
+note = "current language epoch counter; drives per-segment epoch stamps and reconciliation"
+
+[[field]]
+path = "job.language_revision"
+scope = "job"
+writers = ["live_meeting.py:495", "meeting_refinement.py:69"]
+readers = ["static/app.js:1208", "live_meeting.py:change_language"]
+in_fixtures = true
+class = "product"
+note = "language-change revision; JS sends it back on PATCH for stale-change detection"
+
+[[field]]
+path = "job.language_acknowledged_revision"
+scope = "job"
+writers = ["live_meeting.py:495"]
+readers = ["static/app.js:1208", "static/app.js:1221"]
+in_fixtures = true
+class = "product"
+note = "revision at which UI acknowledged language switch; JS polls it"
+
+[[field]]
+path = "job.language_history[]"
+scope = "job"
+writers = ["meeting_refinement.py:69", "live_meeting.py:495"]
+readers = ["static/app.js:1222", "meeting_refinement.py:100", "meeting_refinement.py:110"]
+in_fixtures = true
+class = "product"
+note = "epoch timeline entries; JS replays them for language-change display"
+
+[[field]]
+path = "job.language_history[].epoch"
+scope = "job"
+writers = ["meeting_refinement.py:69"]
+readers = ["meeting_refinement.py:261", "static/app.js:1222"]
+in_fixtures = true
+class = "product"
+note = "epoch number"
+
+[[field]]
+path = "job.language_history[].generation"
+scope = "job"
+writers = ["meeting_refinement.py:69"]
+readers = ["meeting_refinement.py:validate_language_segment"]
+in_fixtures = true
+class = "product"
+note = "detector generation; stamped onto segments as language_generation"
+
+[[field]]
+path = "job.language_history[].language"
+scope = "job"
+writers = ["meeting_refinement.py:69"]
+readers = ["meeting_refinement.py:110", "canonical_runtime.py:35"]
+in_fixtures = true
+class = "product"
+note = "language or 'auto' for the epoch"
+
+[[field]]
+path = "job.language_history[].start_sample"
+scope = "job"
+writers = ["meeting_refinement.py:69"]
+readers = ["meeting_refinement.py:100", "static/app.js:1222"]
+in_fixtures = true
+class = "product"
+note = "sample where epoch begins"
+
+[[field]]
+path = "job.pause_flush"
+scope = "job"
+writers = ["live_meeting.py:387"]
+readers = ["live_meeting.py:383", "live_meeting.py:398"]
+in_fixtures = false
+class = "private"
+note = "{request_id,state:'awaiting_capture'} pause coordination marker"
+
+[[field]]
+path = "job.canonical_utterances"
+scope = "job"
+writers = ["live_meeting.py:556"]
+readers = ["meeting_refinement.py:90", "meeting_refinement.py:412", "source_runtime.py:36", "live_refinement.py:353"]
+in_fixtures = true
+class = "private"
+note = "bool flag selecting the canonical two-pass pipeline; engine-internal"
+
+[[field]]
+path = "job.canonical_observed_sample"
+scope = "job"
+writers = ["meeting_refinement.py:400", "source_runtime.py:142"]
+readers = ["meeting_refinement.py:248", "live_meeting.py:527"]
+in_fixtures = true
+class = "private"
+note = "canonical book cursor at capture end; completeness check on seal"
+
+[[field]]
+path = "job.canonical_uncertain_samples"
+scope = "job"
+writers = ["meeting_refinement.py:399", "source_runtime.py:143"]
+readers = ["meeting_refinement.py:249", "live_meeting.py:527"]
+in_fixtures = true
+class = "private"
+note = "count of uncertain samples; blocks clean seal"
+
+[[field]]
+path = "job.canonical_refined.{}"
+scope = "job"
+writers = ["meeting_refinement.py:226", "meeting_refinement.py:355", "meeting_refinement.py:416"]
+readers = ["meeting_refinement.py:237", "meeting_refinement.py:412"]
+in_fixtures = true
+class = "private"
+note = "map utterance_id->audio_revision already refined; dedupe map for rolling pass"
+
+[[field]]
+path = "job.canonical_force_fresh_asr"
+scope = "job"
+writers = ["meeting_refinement.py:413"]
+readers = ["meeting_refinement.py:237"]
+in_fixtures = false
+class = "private"
+note = "bool flag forcing fresh ASR instead of reuse on next rolling window"
+
+[[field]]
+path = "job.admission_execution.*"
+scope = "job"
+writers = ["live_meeting.py:595"]
+readers = ["admission_receipt.py:validators"]
+in_fixtures = true
+class = "drop"
+note = "single-source admission receipt {component,execution_id,input_policy,job_id,model_revision,model_sha256,schema_version}; read only by receipt validators (D6/D11) Ruled drop (D6)."
+
+[[field]]
+path = "job.source_admission_executions.{}"
+scope = "job"
+writers = ["live_meeting.py:520", "live_meeting.py:592"]
+readers = ["admission_receipt.py:validators", "live_meeting.py:593"]
+in_fixtures = false
+class = "drop"
+note = "map source_id->admission execution receipt; multi-source catalog path Ruled drop (D6)."
+
+[[field]]
+path = "job.capture_admission.*"
+scope = "job"
+writers = ["meeting_refinement.py:390"]
+readers = ["admission_receipt.py:validators"]
+in_fixtures = true
+class = "drop"
+note = "22-key capture admission receipt (execution_id, model/pcm sha256, sample counters, inspection_state, request_id); qualification journal (D6) Ruled drop (D6)."
+
+[[field]]
+path = "job.source_capture_admissions.{}"
+scope = "job"
+writers = ["meeting_refinement.py:381"]
+readers = ["admission_receipt.py:validators"]
+in_fixtures = false
+class = "drop"
+note = "map source_id->capture_admission receipt Ruled drop (D6)."
+
+[[field]]
+path = "job.capture_inspection_request.*"
+scope = "job"
+writers = ["live_meeting.py:725"]
+readers = ["live_meeting.py:stop-correlation"]
+in_fixtures = true
+class = "drop"
+note = "ruled drop: stop-time inspection correlation"
+
+[[field]]
+path = "job.capture_processing"
+scope = "job"
+writers = ["capture_processing.py:172"]
+readers = ["capture_processing.py:qualification-check"]
+in_fixtures = false
+class = "drop"
+note = "helper qualification reference; producer-registry hash binding is explicitly dropped (plan Capture row) Ruled drop (D6)."
+
+[[field]]
+path = "job.capture_source_catalog"
+scope = "job"
+writers = ["live_meeting.py:348"]
+readers = ["live_meeting.py:354", "capture_processing.py:152", "capture_sources.py:binding"]
+in_fixtures = false
+class = "drop"
+note = "no catalog key is frontend/status-read (checked app.js/live_editor.js and MeetingManager.status); schema_version only selects the dropped v2/v3 dev-capture sinks; the product source list is job.sources[]. Ruled drop."
+
+[[field]]
+path = "job.capture_audio"
+scope = "job"
+writers = ["live_meeting.py:790", "live_meeting.py:49"]
+readers = ["static/live_editor.js:33", "static/live_editor.js:37", "static/app.js:emptyFailedCapture"]
+in_fixtures = true
+class = "product"
+note = "{state:'retained'|'empty'|'unverified',frames,sample_rate}; UI shows 'No audio was recorded'/'could not be verified'"
+
+[[field]]
+path = "job.capture_audio.state"
+scope = "job"
+writers = ["live_meeting.py:61"]
+readers = ["static/live_editor.js:33"]
+in_fixtures = true
+class = "product"
+note = "retained|empty|unverified"
+
+[[field]]
+path = "job.capture_audio.frames"
+scope = "job"
+writers = ["live_meeting.py:62"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "ruled drop: no reader"
+
+[[field]]
+path = "job.capture_audio.sample_rate"
+scope = "job"
+writers = ["live_meeting.py:62"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "ruled drop: no reader"
+
+# ============================ scope: document ============================
+
+[[field]]
+path = "job.document.schema_version"
+scope = "document"
+writers = ["app.py:350", "app.py:357", "pipeline.py:318", "live_meeting.py:doc-init"]
+readers = ["static/app.js:812", "app.py:PUT-validation"]
+in_fixtures = true
+class = "product"
+note = "document schema version (=1); PUT validates it"
+
+[[field]]
+path = "job.document.speakers.{}"
+scope = "document"
+writers = ["pipeline.py:318", "app.py:352", "people.py:303", "voice_recognition.py:104"]
+readers = ["static/app.js:254", "static/app.js:454", "static/live_editor.js:50", "people.py:117"]
+in_fixtures = true
+class = "product"
+note = "map track_id->display name; drives all speaker labels in UI/exports"
+
+[[field]]
+path = "job.document.segments[]"
+scope = "document"
+writers = ["pipeline.py:318", "app.py:352", "live_meeting.py:publish", "canonical_runtime.py:486"]
+readers = ["static/app.js:71", "static/live_editor.js:10", "transcript.py:exports", "people.py:reconcile"]
+in_fixtures = true
+class = "product"
+note = "transcript passages; see segment scope for key union"
+
+[[field]]
+path = "job.document.diarization[]"
+scope = "document"
+writers = ["pipeline.py:318"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "ruled drop: raw Nemotron turns, no reader in kept code"
+
+[[field]]
+path = "job.document.diarization[].start"
+scope = "document"
+writers = ["pipeline.py:318"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "ruled drop with parent"
+
+[[field]]
+path = "job.document.diarization[].end"
+scope = "document"
+writers = ["pipeline.py:318"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "ruled drop with parent"
+
+[[field]]
+path = "job.document.diarization[].speaker"
+scope = "document"
+writers = ["pipeline.py:318"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "ruled drop with parent"
+
+[[field]]
+path = "job.document.warnings[]"
+scope = "document"
+writers = ["app.py:351", "app.py:358"]
+readers = ["static/app.js:313"]
+in_fixtures = true
+class = "product"
+note = "user-visible warning strings (imported/manual provenance caveats)"
+
+[[field]]
+path = "job.document.edited_at"
+scope = "document"
+writers = ["app.py:281", "app.py:359"]
+readers = []
+in_fixtures = true
+class = "product"
+note = "ruled product: user-action record (last edit epoch)"
+
+# ============================ scope: document.provenance ============================
+
+[[field]]
+path = "job.document.provenance.kind"
+scope = "document.provenance"
+writers = ["app.py:350", "app.py:357", "pipeline.py:319", "live_meeting.py:doc-init"]
+readers = ["static/app.js:637", "people.py:introduction_suggestions", "people.py:source_verified", "app.py:351"]
+in_fixtures = true
+class = "product"
+note = "imported|manual|local_inference|meeting; gates introductions, voice-clip eligibility, UI copy"
+
+[[field]]
+path = "job.document.provenance.timing"
+scope = "document.provenance"
+writers = ["app.py:350", "app.py:357", "pipeline.py:321"]
+readers = ["static/app.js:637", "app.py:PUT-validation"]
+in_fixtures = true
+class = "product"
+note = "human-readable timing policy string; shown in evidence panel"
+
+[[field]]
+path = "job.document.provenance.mode"
+scope = "document.provenance"
+writers = ["live_meeting.py:doc-init"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "meeting pipeline mode label; whole-object JS evidence dump"
+
+[[field]]
+path = "job.document.provenance.models[]"
+scope = "document.provenance"
+writers = ["live_meeting.py:339"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "model id list used by the meeting; evidence panel"
+
+[[field]]
+path = "job.document.provenance.language"
+scope = "document.provenance"
+writers = ["pipeline.py:320", "live_meeting.py:doc-init"]
+readers = ["static/app.js:637", "transcript.py:exports"]
+in_fixtures = true
+class = "product"
+note = "recording language or 'auto'"
+
+[[field]]
+path = "job.document.provenance.asr_model"
+scope = "document.provenance"
+writers = ["pipeline.py:319"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "ASR model id (evidence panel shows whole provenance object)"
+
+[[field]]
+path = "job.document.provenance.diarization_model"
+scope = "document.provenance"
+writers = ["pipeline.py:320"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "diarization model id"
+
+[[field]]
+path = "job.document.provenance.device"
+scope = "document.provenance"
+writers = ["pipeline.py:320"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "execution device string"
+
+[[field]]
+path = "job.document.provenance.language_detector"
+scope = "document.provenance"
+writers = ["pipeline.py:321"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "LID checkpoint id or null"
+
+[[field]]
+path = "job.document.provenance.speech_detector"
+scope = "document.provenance"
+writers = ["pipeline.py:322"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "Silero repo@revision"
+
+[[field]]
+path = "job.document.provenance.speaker_limit"
+scope = "document.provenance"
+writers = ["pipeline.py:323"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "diarization speaker cap used"
+
+[[field]]
+path = "job.document.provenance.asr_checkpoint"
+scope = "document.provenance"
+writers = ["pipeline.py:provenance-tail"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "Cohere checkpoint pin; provenance detail (hash-adjacent but surfaced to UI)"
+
+[[field]]
+path = "job.document.provenance.diarization_checkpoint"
+scope = "document.provenance"
+writers = ["pipeline.py:323"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "Nemotron checkpoint pin"
+
+[[field]]
+path = "job.document.provenance.metrics"
+scope = "document.provenance"
+writers = ["pipeline.py:provenance-tail"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "{asr,diarization} x {inference_seconds,load_seconds,peak_mlx_bytes,peak_process_rss_bytes,worker_seconds}; surfaced via evidence dump"
+
+[[field]]
+path = "job.document.provenance.metrics.asr.*"
+scope = "document.provenance"
+writers = ["pipeline.py:provenance-tail"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "5 children: inference_seconds,load_seconds,peak_mlx_bytes,peak_process_rss_bytes,worker_seconds; evidence dump"
+
+[[field]]
+path = "job.document.provenance.metrics.diarization.*"
+scope = "document.provenance"
+writers = ["pipeline.py:provenance-tail"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "same 5 timing/memory counters for diarization"
+
+[[field]]
+path = "job.document.provenance.libraries"
+scope = "document.provenance"
+writers = ["pipeline.py:provenance-tail"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "{asr:{mlx,mlx-speech},diarization:{mlx,mlx-audio}} versions; evidence dump"
+
+[[field]]
+path = "job.document.provenance.libraries.asr.*"
+scope = "document.provenance"
+writers = ["pipeline.py:provenance-tail"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "2 children: mlx, mlx-speech version strings"
+
+[[field]]
+path = "job.document.provenance.libraries.diarization.*"
+scope = "document.provenance"
+writers = ["pipeline.py:provenance-tail"]
+readers = ["static/app.js:637"]
+in_fixtures = true
+class = "product"
+note = "2 children: mlx, mlx-audio version strings"
+
+# ============================ scope: segment ============================
+# Key union over import segments (pipeline/inference_worker), manual/imported
+# segments (app.py PUT), live provisional rows (live_refinement — dropped path),
+# and sealed canonical segments (canonical_runtime decorate).
+
+[[field]]
+path = "job.document.segments[].id"
+scope = "segment"
+writers = ["inference_worker.py:seg-build", "pipeline.py:307", "utterances.py:163", "review.py:retain_unassigned"]
+readers = ["static/app.js:all", "transcript.py:exports", "app.py:PUT/PATCH", "people.py:evidence"]
+in_fixtures = true
+class = "product"
+note = "passage id; anchors edits, retries, evidence, exports"
+
+[[field]]
+path = "job.document.segments[].start"
+scope = "segment"
+writers = ["inference_worker.py:seg-build", "review.py:70", "canonical_runtime.py:489"]
+readers = ["static/app.js:330", "static/live_editor.js:47", "transcript.py:exports", "app.py:PATCH"]
+in_fixtures = true
+class = "product"
+note = "seconds; editable field"
+
+[[field]]
+path = "job.document.segments[].end"
+scope = "segment"
+writers = ["inference_worker.py:seg-build", "review.py:70", "canonical_runtime.py:489"]
+readers = ["static/app.js:331", "static/live_editor.js:47", "transcript.py:exports", "app.py:PATCH"]
+in_fixtures = true
+class = "product"
+note = "seconds; editable field"
+
+[[field]]
+path = "job.document.segments[].speaker"
+scope = "segment"
+writers = ["inference_worker.py:seg-build", "utterances.py:163", "canonical_runtime.py:490", "review.py:70"]
+readers = ["static/app.js:206", "static/live_editor.js:48", "transcript.py:exports", "app.py:PATCH", "voice_profiles.py:137"]
+in_fixtures = true
+class = "product"
+note = "track id (speaker_N|overlap_N|unassigned|multiple_speakers); editable"
+
+[[field]]
+path = "job.document.segments[].text"
+scope = "segment"
+writers = ["inference_worker.py:seg-build", "utterances.py:update_text", "canonical_runtime.py:seal", "app.py:PUT"]
+readers = ["static/app.js:284", "static/live_editor.js:58", "transcript.py:exports", "app.py:merge-rules"]
+in_fixtures = true
+class = "product"
+note = "passage words; protected-field edit tracking"
+
+[[field]]
+path = "job.document.segments[].speaker_candidates[]"
+scope = "segment"
+writers = ["utterances.py:468", "inference_worker.py:seg-build", "app.py:278", "review.py:70"]
+readers = ["static/app.js:359", "static/app.js:634", "people.py:introduction_suggestions", "app.py:PATCH"]
+in_fixtures = true
+class = "product"
+note = "candidate track ids; evidence panel + introduction gating"
+
+[[field]]
+path = "job.document.segments[].source_speaker_candidates[]"
+scope = "segment"
+writers = ["canonical_runtime.py:489"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "ruled drop: no reader in kept code"
+
+[[field]]
+path = "job.document.segments[].voice_eligible"
+scope = "segment"
+writers = ["inference_worker.py:seg-build", "utterances.py:469", "app.py:278", "live_refinement.py:508"]
+readers = ["static/app.js:634", "voice_profiles.py:137", "source_voice.py:52", "app.py:335"]
+in_fixtures = true
+class = "product"
+note = "gate for voice-clip sourcing; UI evidence + voice eligibility readers"
+
+[[field]]
+path = "job.document.segments[].review"
+scope = "segment"
+writers = ["language_detection.py:145", "live_refinement.py:409", "pipeline.py:315", "app.py:280"]
+readers = ["static/app.js:469", "static/live_editor.js:needs-review", "transcript.py:exports", "people.py:introduction_suggestions"]
+in_fixtures = true
+class = "product"
+note = "needs-review flag; drives UI badges and export annotations"
+
+[[field]]
+path = "job.document.segments[].review_resolution"
+scope = "segment"
+writers = ["app.py:280", "static/app.js:577"]
+readers = ["static/app.js:575", "static/app.js:634", "static/live_editor.js:58"]
+in_fixtures = false
+class = "product"
+note = "'words_reviewed' user acknowledgment; JS reads and writes it"
+
+[[field]]
+path = "job.document.segments[].protected_fields[]"
+scope = "segment"
+writers = ["utterances.py:206", "app.py:PUT-protected"]
+readers = ["static/app.js:642", "app.py:324", "meeting_refinement.py:237", "canonical_runtime.py:486"]
+in_fixtures = true
+class = "product"
+note = "human-edited field names shielded from machine overwrite; merge-rule input"
+
+[[field]]
+path = "job.document.segments[].machine_revision"
+scope = "segment"
+writers = ["utterances.py:207", "app.py:269", "app.py:326", "pipeline.py:208"]
+readers = ["static/app.js:634", "static/live_editor.js:74", "app.py:264"]
+in_fixtures = true
+class = "product"
+note = "per-segment revision; PATCH 409s on stale segment_revision"
+
+[[field]]
+path = "job.document.segments[].refinement_state"
+scope = "segment"
+writers = ["live_refinement.py:409", "app.py:269", "app.py:327", "rolling_refinement.py:242", "meeting_refinement.py:316"]
+readers = ["static/app.js:505", "static/app.js:634", "static/live_editor.js:57", "meeting_refinement.py:325"]
+in_fixtures = true
+class = "product"
+note = "provisional|edited|unresolved|refined; UI state and reconciliation input"
+
+[[field]]
+path = "job.document.segments[].refinement_window"
+scope = "segment"
+writers = ["rolling_refinement.py:242", "meeting_refinement.py:316"]
+readers = ["static/app.js:635", "meeting_refinement.py:325"]
+in_fixtures = false
+class = "product"
+note = "window id that last touched the row; unresolved-tracking + evidence panel"
+
+[[field]]
+path = "job.document.segments[].language"
+scope = "segment"
+writers = ["language_detection.py:250", "canonical_runtime.py:111", "app.py:retry-accept", "review.py:70"]
+readers = ["static/app.js:589", "transcript.py:exports", "app.py:PATCH"]
+in_fixtures = true
+class = "product"
+note = "per-passage language override; exported and editable via retry"
+
+[[field]]
+path = "job.document.segments[].language_detection.*"
+scope = "segment"
+writers = ["language_detection.py:145", "language_detection.py:250", "canonical_runtime.py:136"]
+readers = ["static/app.js:589", "static/app.js:592", "static/app.js:621", "language_detection.py:293"]
+in_fixtures = true
+class = "product"
+note = "{mode,reason,probability?}; JS reads mode+reason for review badges and retry eligibility"
+
+[[field]]
+path = "job.document.segments[].language_review"
+scope = "segment"
+writers = ["language_detection.py:390", "canonical_runtime.py:111", "canonical_runtime.py:142", "canonical_runtime.py:373"]
+readers = ["canonical_runtime.py:142", "canonical_runtime.py:287", "canonical_runtime.py:370"]
+in_fixtures = true
+class = "product"
+note = "bool flag 'language uncertain'; folded into review by canonical paths"
+
+[[field]]
+path = "job.document.segments[].language_epoch"
+scope = "segment"
+writers = ["live_refinement.py:406", "utterances.py:165", "pipeline.py:208"]
+readers = ["meeting_refinement.py:158", "core_plan.py:45", "word_alignment.py:90"]
+in_fixtures = true
+class = "product"
+note = "epoch stamp binding row to job.language_history; reconciliation + plan validation"
+
+[[field]]
+path = "job.document.segments[].language_generation"
+scope = "segment"
+writers = ["live_refinement.py:406", "canonical_runtime.py:489"]
+readers = ["meeting_refinement.py:validate"]
+in_fixtures = true
+class = "product"
+note = "detector generation that produced the language stamp"
+
+[[field]]
+path = "job.document.segments[].language_mode"
+scope = "segment"
+writers = ["live_refinement.py:406", "canonical_runtime.py:490"]
+readers = ["canonical_runtime.py:490"]
+in_fixtures = true
+class = "product"
+note = "language stamp source label ('auto'|fixed); sealed decoration reads it"
+
+[[field]]
+path = "job.document.segments[].cohere_raw_text"
+scope = "segment"
+writers = ["language_detection.py:393"]
+readers = ["canonical_runtime.py:34", "canonical_runtime.py:126", "canonical_runtime.py:339"]
+in_fixtures = true
+class = "product"
+note = "unmodified ASR text kept alongside cleaned text; canonical seal prefers it"
+
+[[field]]
+path = "job.document.segments[].transcription_review.*"
+scope = "segment"
+writers = ["language_detection.py:335", "language_detection.py:372", "live_refinement.py:481", "canonical_runtime.py:145", "review.py:72"]
+readers = ["static/app.js:584", "static/app.js:610", "static/app.js:617", "canonical_runtime.py:39", "live_refinement.py:383"]
+in_fixtures = true
+class = "product"
+note = "{reason,partial_text,candidate_text?}; UI renders reason badges; engine skips re-decode on it"
+
+[[field]]
+path = "job.document.segments[].transcription_review.candidate_text"
+scope = "segment"
+writers = []
+readers = ["static/app.js:647"]
+in_fixtures = false
+class = "drop"
+note = "ruled: dead frontend read (app.js:647), no writer in v0.6.6 — never stored; JS left alone"
+
+[[field]]
+path = "job.document.segments[].confidence"
+scope = "segment"
+writers = ["pipeline.py:316", "live_refinement.py:406", "review.py:71"]
+readers = ["static/app.js:634"]
+in_fixtures = true
+class = "product"
+note = "ASR confidence or null; evidence panel only"
+
+[[field]]
+path = "job.document.segments[].timing"
+scope = "segment"
+writers = ["pipeline.py:316", "review.py:71", "canonical_runtime.py:491", "live_refinement.py:406"]
+readers = ["static/app.js:312", "static/app.js:634", "transcript.py:62"]
+in_fixtures = true
+class = "product"
+note = "timing provenance label (audio_crop|contextual_audio_regions|audio_coverage|canonical_vad_audio_anchor)"
+
+[[field]]
+path = "job.document.segments[].audio_state"
+scope = "segment"
+writers = ["language_detection.py:252", "language_detection.py:284", "canonical_runtime.py:110"]
+readers = ["static/app.js:634", "static/app.js:651", "voice_profiles.py:115", "utterances.py:107"]
+in_fixtures = true
+class = "product"
+note = "digital_silence|constant_signal|model_non_speech|insufficient_acoustic_context|...; gates voice eligibility and empty-passage UI"
+
+[[field]]
+path = "job.document.segments[].audio_anchor.*"
+scope = "segment"
+writers = ["core_plan.py:45", "canonical_runtime.py:53", "word_alignment.py:219", "meeting_refinement.py:130"]
+readers = ["static/app.js:634", "core_plan.py:55", "word_alignment.py:319", "reading_turns.py:51"]
+in_fixtures = false
+class = "product"
+note = "{start_sample,end_sample} binding rows/requests to audio; JS evidence + plan/word validators"
+
+[[field]]
+path = "job.document.segments[].text_audio_anchor.*"
+scope = "segment"
+writers = ["canonical_assembly.py:24", "pipeline.py:214"]
+readers = ["word_alignment.py:90", "reading_turns.py:83", "reading_turns.py:226", "app.py:331"]
+in_fixtures = true
+class = "product"
+note = "{start_sample,end_sample} binding text to audio range; alignment/turn validators key on it"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.*"
+scope = "segment"
+writers = ["language_detection.py:284", "canonical_runtime.py:105", "utterances.py:95"]
+readers = ["static/app.js:650", "voice_profiles.py:eligibility", "language_detection.py:chronology", "utterances.py:39"]
+in_fixtures = true
+class = "product"
+note = "15-key evidence object; JS reads .decision for empty-passage logic; engine reads regions for eligibility/reconciliation — mixed evidence/product, see subkeys"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.decision"
+scope = "segment"
+writers = ["language_detection.py:284", "canonical_runtime.py:105"]
+readers = ["static/app.js:650", "utterances.py:39"]
+in_fixtures = true
+class = "product"
+note = "speech|no_speech|uncertain|pending; UI + seal logic"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.complete"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py:105"]
+readers = ["canonical_runtime.py:bounded"]
+in_fixtures = true
+class = "product"
+note = "ruled product: read by utterances.py:125/38 + language_detection.py:205 + canonical_runtime.py:42"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.speech_regions[]"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = ["utterances.py:39", "voice_profiles.py"]
+in_fixtures = true
+class = "product"
+note = "[{start_sample,end_sample}] speech evidence; eligibility/no-speech checks"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.model_negative_regions[]"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = ["voice_profiles.py", "utterances.py"]
+in_fixtures = true
+class = "drop"
+note = "ruled drop: no reader in kept code"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.uncertain_regions[]"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = ["voice_profiles.py", "utterances.py"]
+in_fixtures = true
+class = "product"
+note = "ruled product: read by utterances.py:40/137 + canonical_runtime.py:44"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.maximum_probability"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = []
+in_fixtures = true
+class = "product"
+note = "ruled product: read by utterances.py:36/41 + language_detection.py:208 (threshold check)"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.maximum_model_probability"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "ruled drop: no reader in kept code"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.observed_until_sample"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = ["reading_turns.py:project_turns"]
+in_fixtures = true
+class = "drop"
+note = "ruled drop: no reader in kept code"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.source"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = []
+in_fixtures = true
+class = "product"
+note = "ruled product: read by utterances.py:37 + language_detection.py:203 (=='silero_v6')"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.input_policy"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "policy identity string; receipt-style binding, validator-only Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.model_revision"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "model revision identity; receipt-style binding Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.classification_scope"
+scope = "segment"
+writers = ["language_detection.py"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "qualified-scope string for the decision; receipt-style Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.negative_signal_state"
+scope = "segment"
+writers = ["language_detection.py"]
+readers = []
+in_fixtures = true
+class = "drop"
+note = "signal-state qualification detail Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.start_sample"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = ["utterances.py", "voice_profiles.py"]
+in_fixtures = true
+class = "product"
+note = "evidence window start"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.end_sample"
+scope = "segment"
+writers = ["language_detection.py", "canonical_runtime.py"]
+readers = ["utterances.py", "voice_profiles.py"]
+in_fixtures = true
+class = "product"
+note = "evidence window end"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.audio_revision"
+scope = "segment"
+writers = ["utterances.py:95"]
+readers = ["utterances.py:95", "reading_turns.py:127"]
+in_fixtures = false
+class = "product"
+note = "audio epoch the evidence was measured against; read for binding checks"
+
+[[field]]
+path = "job.document.segments[].acoustic_evidence.retained_audio_revision"
+scope = "segment"
+writers = ["utterances.py:99"]
+readers = ["utterances.py:95", "reading_turns.py:127"]
+in_fixtures = false
+class = "product"
+note = "audio revision retained across a roll-forward; binding check"
+
+[[field]]
+path = "job.document.segments[].activity_regions[]"
+scope = "segment"
+writers = ["inference_worker.py:region-merge", "pipeline.py:314", "live_refinement.py"]
+readers = ["voice_profiles.py:speaker_audio_ranges", "pipeline.py:307", "app.py:319"]
+in_fixtures = true
+class = "product"
+note = "[{start,end,speakers[]}] diarization regions; voice clip sourcing + unassigned-split logic"
+
+[[field]]
+path = "job.document.segments[].activity_regions[].start"
+scope = "segment"
+writers = ["inference_worker.py:region-merge", "pipeline.py:314"]
+readers = ["voice_profiles.py"]
+in_fixtures = true
+class = "product"
+note = "region start seconds"
+
+[[field]]
+path = "job.document.segments[].activity_regions[].end"
+scope = "segment"
+writers = ["inference_worker.py:region-merge", "pipeline.py:314"]
+readers = ["voice_profiles.py"]
+in_fixtures = true
+class = "product"
+note = "region end seconds"
+
+[[field]]
+path = "job.document.segments[].activity_regions[].speakers[]"
+scope = "segment"
+writers = ["inference_worker.py:region-merge", "pipeline.py:314"]
+readers = ["voice_profiles.py", "pipeline.py:307"]
+in_fixtures = true
+class = "product"
+note = "track ids active in the region; single-speaker regions gate voice eligibility"
+
+[[field]]
+path = "job.document.segments[].decode_context.*"
+scope = "segment"
+writers = ["inference_worker.py:43"]
+readers = ["pipeline.py:193", "inference_worker.py:142", "pipeline.py:314"]
+in_fixtures = true
+class = "product"
+note = "{policy:'speech_utterance_tail_context_v1',start_sample,end_sample,boundary_sample}; gates alignment attach and retry re-decode"
+
+[[field]]
+path = "job.document.segments[].pcm_evidence.*"
+scope = "segment"
+writers = ["language_detection.py:253", "language_detection.py:284"]
+readers = ["language_detection.py:396"]
+in_fixtures = true
+class = "drop"
+note = "ruled drop: no reader in kept code"
+
+[[field]]
+path = "job.document.segments[].finalized"
+scope = "segment"
+writers = ["utterances.py:114", "live_refinement.py:508", "canonical_runtime.py:491", "rolling_refinement.py:242"]
+readers = ["people.py:introduction_suggestions", "static/app.js:implicit"]
+in_fixtures = true
+class = "product"
+note = "sealed/immutable flag; introduction gating reads it"
+
+[[field]]
+path = "job.document.segments[].boundary_unresolved"
+scope = "segment"
+writers = ["live_refinement.py:550"]
+readers = ["app.py:319"]
+in_fixtures = false
+class = "drop"
+note = "ruled drop: D11 pre-canonical fast path"
+
+[[field]]
+path = "job.document.segments[].source_start"
+scope = "segment"
+writers = ["live_refinement.py:417"]
+readers = ["app.py:319"]
+in_fixtures = false
+class = "drop"
+note = "ruled drop: D11 pre-canonical fast path"
+
+[[field]]
+path = "job.document.segments[].source_end"
+scope = "segment"
+writers = ["live_refinement.py:417"]
+readers = ["app.py:319"]
+in_fixtures = false
+class = "drop"
+note = "ruled drop: D11 pre-canonical fast path"
+
+[[field]]
+path = "job.document.segments[].fast_origin_sample"
+scope = "segment"
+writers = ["live_refinement.py:417"]
+readers = ["app.py:319"]
+in_fixtures = false
+class = "drop"
+note = "ruled drop: D11 pre-canonical fast path"
+
+[[field]]
+path = "job.document.segments[].canonical_utterance_id"
+scope = "segment"
+writers = ["canonical_runtime.py:487", "pipeline.py:213"]
+readers = ["static/app.js:339", "canonical_runtime.py:seal", "app.py:319"]
+in_fixtures = true
+class = "product"
+note = "links doc segment to canonical utterance; JS uses it for overlap logic"
+
+[[field]]
+path = "job.document.segments[].canonical_machine_revision"
+scope = "segment"
+writers = ["canonical_runtime.py:488", "pipeline.py:213"]
+readers = ["meeting_refinement.py:reconciliation"]
+in_fixtures = true
+class = "product"
+note = "machine revision of the canonical row at seal time"
+
+[[field]]
+path = "job.document.segments[].canonical_state"
+scope = "segment"
+writers = ["canonical_runtime.py:488", "pipeline.py:214"]
+readers = ["meeting_refinement.py"]
+in_fixtures = true
+class = "product"
+note = "'open'|'sealed' of source utterance at decoration time"
+
+[[field]]
+path = "job.document.segments[].canonical_unresolved"
+scope = "segment"
+writers = ["canonical_runtime.py:145"]
+readers = ["canonical_runtime.py:114", "canonical_runtime.py:488", "voice_profiles.py:139"]
+in_fixtures = false
+class = "product"
+note = "'incomplete_cohere_revision' etc.; mapped to refinement_state+transcription_review on seal; voice eligibility reads it"
+
+[[field]]
+path = "job.document.segments[].audio_revision"
+scope = "segment"
+writers = ["utterances.py:88", "canonical_runtime.py:seal", "pipeline.py:214"]
+readers = ["static/app.js:343", "utterances.py:95", "meeting_refinement.py:355", "reading_turns.py"]
+in_fixtures = true
+class = "product"
+note = "audio epoch of the row; JS validates speaker_activity binding against it"
+
+[[field]]
+path = "job.document.segments[].start_sample"
+scope = "segment"
+writers = ["utterances.py:163", "pipeline.py:208", "canonical_runtime.py:seal"]
+readers = ["static/app.js:344", "utterances.py:everywhere", "rolling_refinement.py"]
+in_fixtures = true
+class = "product"
+note = "sample-precise start; engine + JS overlap walk"
+
+[[field]]
+path = "job.document.segments[].end_sample"
+scope = "segment"
+writers = ["utterances.py:113", "pipeline.py:208", "canonical_runtime.py:seal"]
+readers = ["static/app.js:348", "utterances.py:everywhere"]
+in_fixtures = true
+class = "product"
+note = "sample-precise end"
+
+[[field]]
+path = "job.document.segments[].speech_regions[]"
+scope = "segment"
+writers = ["utterances.py:174", "pipeline.py:208"]
+readers = ["utterances.py:86", "voice_profiles.py", "rolling_refinement.py"]
+in_fixtures = true
+class = "product"
+note = "[{start_sample,end_sample}] speech bounds inside the utterance; seal/eligibility logic"
+
+[[field]]
+path = "job.document.segments[].speech_regions[].start_sample"
+scope = "segment"
+writers = ["utterances.py:176"]
+readers = ["utterances.py:173", "voice_profiles.py"]
+in_fixtures = true
+class = "product"
+note = "region start sample"
+
+[[field]]
+path = "job.document.segments[].speech_regions[].end_sample"
+scope = "segment"
+writers = ["utterances.py:174"]
+readers = ["utterances.py:173", "voice_profiles.py"]
+in_fixtures = true
+class = "product"
+note = "region end sample"
+
+[[field]]
+path = "job.document.segments[].speaker_activity.*"
+scope = "segment"
+writers = ["utterances.py:466"]
+readers = ["static/app.js:342", "reading_turns.py:project_turns", "voice_profiles.py"]
+in_fixtures = true
+class = "product"
+note = "{audio_revision,observed_end_sample,regions[]}; JS validates binding then walks regions for overlap"
+
+[[field]]
+path = "job.document.segments[].speaker_activity.audio_revision"
+scope = "segment"
+writers = ["utterances.py:466"]
+readers = ["static/app.js:343", "reading_turns.py"]
+in_fixtures = true
+class = "product"
+note = "audio epoch the activity was measured against"
+
+[[field]]
+path = "job.document.segments[].speaker_activity.observed_end_sample"
+scope = "segment"
+writers = ["utterances.py:467"]
+readers = ["reading_turns.py:project_turns", "utterances.py:469"]
+in_fixtures = true
+class = "product"
+note = "activity observation horizon; required for turn projection and eligibility"
+
+[[field]]
+path = "job.document.segments[].speaker_activity.regions[]"
+scope = "segment"
+writers = ["utterances.py:467", "canonical_runtime.py:454"]
+readers = ["static/app.js:342", "reading_turns.py:144", "voice_profiles.py"]
+in_fixtures = true
+class = "product"
+note = "[{start_sample,end_sample,speakers[]}] contiguous per-sample activity; JS checks full coverage"
+
+[[field]]
+path = "job.document.segments[].speaker_track_mapping.*"
+scope = "segment"
+writers = ["canonical_runtime.py:459"]
+readers = ["static/app.js:634"]
+in_fixtures = true
+class = "product"
+note = "9-key batch-mapping object {source,audio_anchor,audio_revision,local_activity[],mapping{},raw_batch_turns[],scores[],operation_id,utterance_id}; evidence panel dumps it whole — opaque candidate"
+
+[[field]]
+path = "job.document.segments[].capture_source"
+scope = "segment"
+writers = ["utterances.py:170", "canonical_runtime.py:518", "live_meeting.py:515"]
+readers = ["transcript.py:62", "source_voice.py:52", "capture_sources.py:utterance_id"]
+in_fixtures = false
+class = "product"
+note = "ruled product: read by transcript.py:62 export + source_voice clip scoping"
+
+[[field]]
+path = "job.document.segments[].capture_audio.*"
+scope = "segment"
+writers = ["canonical_runtime.py:518"]
+readers = []
+in_fixtures = false
+class = "drop"
+note = "{capture_source,audio_revision,start_sample,end_sample,encoding,sample_rate,pcm_sha256}; per-segment PCM identity binding; no product reader Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].reading_turns[]"
+scope = "segment"
+writers = ["reading_turns.py:project_turns", "canonical_runtime.py:496", "inference_worker.py:attach"]
+readers = ["static/app.js:321", "static/app.js:validReadingTurns", "transcript.py:exports"]
+in_fixtures = true
+class = "product"
+note = "[{text,speaker,attribution,start,end,start_offset,end_offset}] reading slices; rendered + exported (VTT cues)"
+
+[[field]]
+path = "job.document.segments[].reading_turns[].text"
+scope = "segment"
+writers = ["reading_turns.py:project_turns"]
+readers = ["static/app.js:validReadingTurns", "transcript.py:exports"]
+in_fixtures = true
+class = "product"
+note = "slice text; JS validates code-point contiguity"
+
+[[field]]
+path = "job.document.segments[].reading_turns[].speaker"
+scope = "segment"
+writers = ["reading_turns.py:project_turns"]
+readers = ["static/app.js:readingTurnLabel", "transcript.py:exports"]
+in_fixtures = true
+class = "product"
+note = "attributed track id"
+
+[[field]]
+path = "job.document.segments[].reading_turns[].attribution"
+scope = "segment"
+writers = ["reading_turns.py:project_turns"]
+readers = ["static/app.js:326", "transcript.py:exports", "canonical_runtime.py:480"]
+in_fixtures = true
+class = "product"
+note = "single|overlap|unknown; drives labels and overlap detection"
+
+[[field]]
+path = "job.document.segments[].reading_turns[].start"
+scope = "segment"
+writers = ["reading_turns.py:project_turns"]
+readers = ["static/app.js:validReadingTurns", "transcript.py:exports"]
+in_fixtures = true
+class = "product"
+note = "slice start seconds (null when timing unknown)"
+
+[[field]]
+path = "job.document.segments[].reading_turns[].end"
+scope = "segment"
+writers = ["reading_turns.py:project_turns"]
+readers = ["static/app.js:validReadingTurns", "transcript.py:exports"]
+in_fixtures = true
+class = "product"
+note = "slice end seconds (null when timing unknown)"
+
+[[field]]
+path = "job.document.segments[].reading_turns[].start_offset"
+scope = "segment"
+writers = ["reading_turns.py:project_turns"]
+readers = ["static/app.js:validReadingTurns"]
+in_fixtures = true
+class = "product"
+note = "code-point offset into segment.text; JS enforces cursor==start_offset"
+
+[[field]]
+path = "job.document.segments[].reading_turns[].end_offset"
+scope = "segment"
+writers = ["reading_turns.py:project_turns"]
+readers = ["static/app.js:validReadingTurns"]
+in_fixtures = true
+class = "product"
+note = "code-point end offset; must equal text length"
+
+[[field]]
+path = "job.document.segments[].reading_turn_provenance.*"
+scope = "segment"
+writers = ["canonical_runtime.py:497", "pipeline.py:215"]
+readers = ["transcript.py:export-qualification", "reading_turns.py:226"]
+in_fixtures = true
+class = "drop"
+note = "ruled drop (D6): product rule = reading_turns present implies valid; edits that change text/start/end remove reading_turns; legacy importer keeps turns only if the v0.6.6 export gate would accept them (gate ported into core::store::legacy only)"
+
+[[field]]
+path = "job.document.segments[].reading_alignment.*"
+scope = "segment"
+writers = ["inference_worker.py:196"]
+readers = ["pipeline.py:194", "reading_turns.py:attachment", "app.py:331"]
+in_fixtures = true
+class = "drop"
+note = "34-key CTC/coarse alignment result (sha256s, provider ids, manifests, frame calibrations); read only to validate binding before reuse — pure receipt Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].audio_float32_sha256"
+scope = "segment"
+writers = ["inference_worker.py:196"]
+readers = ["pipeline.py:195", "pipeline.py:198", "authoritative_tail.py:128", "alignment_cache.py:97"]
+in_fixtures = true
+class = "drop"
+note = "sha of the f32 crop aligned against; read only for binding validation Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].reading_word_evidence.*"
+scope = "segment"
+writers = ["reading_turns.py:112"]
+readers = ["reading_turns.py:121", "canonical_runtime.py:497"]
+in_fixtures = false
+class = "drop"
+note = "{audio_anchor,words,calibration_id,model_sha256,timing_unit_policy_id,...} word-level evidence feeding reading_turn_provenance; stripped from sealed doc Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].alignment"
+scope = "segment"
+writers = ["utterances.py:433", "canonical_runtime.py:308"]
+readers = ["canonical_assembly.py:101", "app.py:331"]
+in_fixtures = false
+class = "drop"
+note = "coarse-alignment result retained on the utterance row for assembly; stripped/never reaches sealed doc; app.js 'alignment' hits are setup-page state, unrelated Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].assembly_provenance.*"
+scope = "segment"
+writers = ["utterances.py:352", "utterances.py:406"]
+readers = ["canonical_runtime.py:177", "canonical_runtime.py:218"]
+in_fixtures = false
+class = "drop"
+note = "{words,complete,reason,text,text_sha256,machine_revision,audio_revision,context_policy?,rollover_receipts[]} text-assembly receipt on utterance rows Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].bounded_decode_provenance.*"
+scope = "segment"
+writers = ["canonical_runtime.py:144"]
+readers = ["app.py:331"]
+in_fixtures = false
+class = "drop"
+note = "bounded-decode routing provenance on rows; PUT-stripped server field Ruled drop (D6)."
+
+[[field]]
+path = "job.document.segments[].decode_core_plan.*"
+scope = "segment"
+writers = ["canonical_runtime.py:196"]
+readers = ["canonical_runtime.py:197", "core_plan.py:validate"]
+in_fixtures = false
+class = "private"
+note = "validated decode plan cached on the row for replay; engine-internal"
+
+[[field]]
+path = "job.document.segments[].provenance"
+scope = "segment"
+writers = ["client-PUT", "app.py:352"]
+readers = ["static/app.js:635"]
+in_fixtures = false
+class = "product"
+note = "ruled product: stored as opaque bounded JSON object"
+
+[[field]]
+path = "job.document.segments[].retry_candidate.*"
+scope = "segment"
+writers = ["app.py:120", "app.py:136", "app.py:343"]
+readers = ["static/app.js:578", "app.py:278", "app.py:341"]
+in_fixtures = false
+class = "product"
+note = "{id,language,original_text,text,start,end,speaker,created,review,transcription_review?,error?,replaced_text?,accepted_at?,prior_language_detection?} retry proposal; JS 'Use this text' flow"
+
+[[field]]
+path = "job.document.segments[].machine_versions[]"
+scope = "segment"
+writers = ["utterances.py:235", "utterances.py:342", "utterances.py:397"]
+readers = ["utterances.py:merge", "meeting_refinement.py:history"]
+in_fixtures = false
+class = "private"
+note = "[{text,stage,complete,audio_anchor,base_revision,audio_revision,non_speech_evidence?,previous_text?}] machine-edit history on the row; reconciliation input; stripped from sealed doc"
+
+[[field]]
+path = "job.document.segments[].state"
+scope = "segment"
+writers = ["utterances.py:114", "utterances.py:165"]
+readers = ["utterances.py:seal-checks", "rolling_refinement.py"]
+in_fixtures = false
+class = "private"
+note = "'open'|'sealed' on the live utterance row; not persisted to doc segments"
+
+[[field]]
+path = "job.document.segments[].last_speech_sample"
+scope = "segment"
+writers = ["utterances.py:165", "utterances.py:177"]
+readers = ["utterances.py:113", "utterances.py:157"]
+in_fixtures = false
+class = "private"
+note = "trailing-speech watermark on the live row"
+
+# ============================ scope: person ============================
+
+[[field]]
+path = "person.id"
+scope = "person"
+writers = ["people.py:PeopleStore.create"]
+readers = ["static/people.js:11", "people.py:everywhere"]
+in_fixtures = true
+class = "product"
+note = "people PK; voice_profiles.person_id FK"
+
+[[field]]
+path = "person.name"
+scope = "person"
+writers = ["people.py:PeopleStore.create/update"]
+readers = ["static/people.js:27", "people.py:suggestions"]
+in_fixtures = true
+class = "product"
+note = "display name; suggestion/assignment name resolution"
+
+[[field]]
+path = "person.created"
+scope = "person"
+writers = ["people.py:PeopleStore.create"]
+readers = ["static/people.js:list"]
+in_fixtures = true
+class = "product"
+note = "creation epoch"
+
+[[field]]
+path = "person.updated"
+scope = "person"
+writers = ["people.py:51"]
+readers = []
+in_fixtures = false
+class = "product"
+note = "ruled product: user-action record (rename timestamp)"
+
+# ============================ scope: voice_profile ============================
+
+[[field]]
+path = "voice_profile.person_id"
+scope = "voice_profile"
+writers = ["voice_profiles.py:save", "people.py:remember_voice"]
+readers = ["voice_recognition.py:89", "static/people.js:72"]
+in_fixtures = true
+class = "product"
+note = "PK + FK to people"
+
+[[field]]
+path = "voice_profile.version"
+scope = "voice_profile"
+writers = ["voice_profiles.py:save"]
+readers = ["voice_recognition.py:89", "people.py:suggestions", "voice_profiles.py:278"]
+in_fixtures = true
+class = "product"
+note = "profile version; match validation re-checks it against live profiles"
+
+[[field]]
+path = "voice_profile.consent"
+scope = "voice_profile"
+writers = ["people.py:remember_voice"]
+readers = ["people.py:voice-routes"]
+in_fixtures = true
+class = "product"
+note = "enrollment consent flag; API requires it"
+
+[[field]]
+path = "voice_profile.enrolled_at"
+scope = "voice_profile"
+writers = ["people.py:remember_voice"]
+readers = ["static/people.js:profile-display"]
+in_fixtures = true
+class = "product"
+note = "enrollment timestamp"
+
+[[field]]
+path = "voice_profile.model.*"
+scope = "voice_profile"
+writers = ["voice_profiles.py:save"]
+readers = ["voice_recognition.py:44", "people.py:suggestions"]
+in_fixtures = true
+class = "product"
+note = "{model_id,revision,artifact_sha256,dimension,sample_rate} model identity; match filtering keys on it"
+
+[[field]]
+path = "voice_profile.centroid[]"
+scope = "voice_profile"
+writers = ["voice_profiles.py:save"]
+readers = ["voice_profiles.py:rank_matches"]
+in_fixtures = true
+class = "product"
+note = "192-dim L2-normalized embedding; matching input"
+
+[[field]]
+path = "voice_profile.clips[]"
+scope = "voice_profile"
+writers = ["voice_profiles.py:save", "people.py:remember_voice"]
+readers = ["static/people.js:93", "voice_profiles.py:audit", "people.js:201"]
+in_fixtures = true
+class = "product"
+note = "[{meeting_id,track_id,segment_id,start,end}] enrollment clip references; shown in people UI"
+
+[[field]]
+path = "voice_profile.clips[].meeting_id"
+scope = "voice_profile"
+writers = ["voice_profiles.py:clip-payload"]
+readers = ["static/people.js:clip-audio"]
+in_fixtures = true
+class = "product"
+note = "source meeting for playback"
+
+[[field]]
+path = "voice_profile.clips[].track_id"
+scope = "voice_profile"
+writers = ["voice_profiles.py:clip-payload"]
+readers = ["static/people.js:205"]
+in_fixtures = true
+class = "product"
+note = "source track"
+
+[[field]]
+path = "voice_profile.clips[].segment_id"
+scope = "voice_profile"
+writers = ["voice_profiles.py:clip-payload"]
+readers = ["source_voice.py:53"]
+in_fixtures = true
+class = "product"
+note = "clip's source segment"
+
+[[field]]
+path = "voice_profile.clips[].start"
+scope = "voice_profile"
+writers = ["voice_profiles.py:clip-payload"]
+readers = ["static/people.js:93", "voice_waveform.py:crop"]
+in_fixtures = true
+class = "product"
+note = "clip start seconds; playback/audio crop"
+
+[[field]]
+path = "voice_profile.clips[].end"
+scope = "voice_profile"
+writers = ["voice_profiles.py:clip-payload"]
+readers = ["static/people.js:96", "voice_waveform.py:crop"]
+in_fixtures = true
+class = "product"
+note = "clip end seconds"
+
+# ============================ scope: preference ============================
+
+[[field]]
+path = "preference.default_language"
+scope = "preference"
+writers = ["language_preferences.py", "app.py:preferences-route"]
+readers = ["static/app.js:803", "static/app.js:1175", "live_meeting.py:default_language"]
+in_fixtures = true
+class = "product"
+note = "preferences table key; language default for new jobs"
+
+[[field]]
+path = "preference.voice_recognition"
+scope = "preference"
+writers = ["voice_recognition.py:23"]
+readers = ["voice_recognition.py:20", "static/app.js:recognition-toggle", "people.py:323"]
+in_fixtures = false
+class = "product"
+note = "bool enabling automatic voice checks; GET/PUT /api/recognition"
+
+# ============================ scope: job_progress ============================
+
+[[field]]
+path = "job_progress.duration"
+scope = "job_progress"
+writers = ["job_store.py:96", "job_store.py:107"]
+readers = ["job_store.py:64", "job_store.py:84"]
+in_fixtures = false
+class = "product"
+note = "checkpoint duration column overlaying job.duration on read; recovery keeps max()"
+
+[[field]]
+path = "job_progress.updated"
+scope = "job_progress"
+writers = ["job_store.py:107"]
+readers = ["job_store.py:84"]
+in_fixtures = false
+class = "product"
+note = "checkpoint epoch column overlaying job.updated on read"
+
+# ============================ scope: job_metadata ============================
+
+[[field]]
+path = "job_metadata.id"
+scope = "job_metadata"
+writers = ["job_store.py:35"]
+readers = ["job_store.py:71", "app.py:list"]
+in_fixtures = true
+class = "product"
+note = "FK to jobs.id; list-view table row"
+
+[[field]]
+path = "job_metadata.payload"
+scope = "job_metadata"
+writers = ["job_store.py:35"]
+readers = ["job_store.py:64", "app.py:list"]
+in_fixtures = true
+class = "product"
+note = "json_remove(job.payload, $.document + $.{PRIVATE_FIELDS}); list responses serve this projection — every non-private, non-document job key above lands here"
+
+[[field]]
+path = "job_metadata.status"
+scope = "job_metadata"
+writers = ["job_store.py:36"]
+readers = ["job_store.py:71", "app.py:list"]
+in_fixtures = true
+class = "product"
+note = "extracted status column for indexed filtering"
+
+[[field]]
+path = "job_metadata.created"
+scope = "job_metadata"
+writers = ["job_store.py:36"]
+readers = ["job_store.py:71"]
+in_fixtures = true
+class = "product"
+note = "extracted created column for ordering"
