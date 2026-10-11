@@ -1,0 +1,394 @@
+{
+  "function": "speakerdesk.word_alignment.prepare_text",
+  "vocabulary_source": "in-memory string passed to parse_vocabulary; no vocabulary file and no model file",
+  "vocabulary": [
+    "<s>",
+    "<pad>",
+    "</s>",
+    "<unk>",
+    " ",
+    "h",
+    "e",
+    "l",
+    "o",
+    "w",
+    "r",
+    "d",
+    "م",
+    "ر",
+    "ح",
+    "ب",
+    "ا",
+    "ع",
+    "コ",
+    "ヒ"
+  ],
+  "cases": [
+    {
+      "name": "english_default_language",
+      "text": "Hello, world.",
+      "language": null,
+      "prepared": {
+        "raw_text": "Hello, world.",
+        "targets": [
+          {
+            "token_id": 5,
+            "text": "h",
+            "start_char": 0,
+            "end_char": 1
+          },
+          {
+            "token_id": 6,
+            "text": "e",
+            "start_char": 1,
+            "end_char": 2
+          },
+          {
+            "token_id": 7,
+            "text": "l",
+            "start_char": 2,
+            "end_char": 3
+          },
+          {
+            "token_id": 7,
+            "text": "l",
+            "start_char": 3,
+            "end_char": 4
+          },
+          {
+            "token_id": 8,
+            "text": "o",
+            "start_char": 4,
+            "end_char": 5
+          },
+          {
+            "token_id": 4,
+            "text": " ",
+            "start_char": 6,
+            "end_char": 7
+          },
+          {
+            "token_id": 9,
+            "text": "w",
+            "start_char": 7,
+            "end_char": 8
+          },
+          {
+            "token_id": 8,
+            "text": "o",
+            "start_char": 8,
+            "end_char": 9
+          },
+          {
+            "token_id": 10,
+            "text": "r",
+            "start_char": 9,
+            "end_char": 10
+          },
+          {
+            "token_id": 7,
+            "text": "l",
+            "start_char": 10,
+            "end_char": 11
+          },
+          {
+            "token_id": 11,
+            "text": "d",
+            "start_char": 11,
+            "end_char": 12
+          }
+        ],
+        "unsupported": [],
+        "text_sha256": "f8c3bf62a9aa3e6fc1619c250e48abe7519373d3edf41be62eb5dc45199af2ef",
+        "acoustic_aliases": [
+          {
+            "start_char": 0,
+            "end_char": 1,
+            "raw_text": "H",
+            "acoustic_token": "h",
+            "kind": "supported_single_character_lowercase_alias"
+          }
+        ],
+        "language": null
+      }
+    },
+    {
+      "name": "english",
+      "text": "Hello, world.",
+      "language": "en",
+      "prepared": {
+        "raw_text": "Hello, world.",
+        "targets": [
+          {
+            "token_id": 5,
+            "text": "h",
+            "start_char": 0,
+            "end_char": 1
+          },
+          {
+            "token_id": 6,
+            "text": "e",
+            "start_char": 1,
+            "end_char": 2
+          },
+          {
+            "token_id": 7,
+            "text": "l",
+            "start_char": 2,
+            "end_char": 3
+          },
+          {
+            "token_id": 7,
+            "text": "l",
+            "start_char": 3,
+            "end_char": 4
+          },
+          {
+            "token_id": 8,
+            "text": "o",
+            "start_char": 4,
+            "end_char": 5
+          },
+          {
+            "token_id": 4,
+            "text": " ",
+            "start_char": 6,
+            "end_char": 7
+          },
+          {
+            "token_id": 9,
+            "text": "w",
+            "start_char": 7,
+            "end_char": 8
+          },
+          {
+            "token_id": 8,
+            "text": "o",
+            "start_char": 8,
+            "end_char": 9
+          },
+          {
+            "token_id": 10,
+            "text": "r",
+            "start_char": 9,
+            "end_char": 10
+          },
+          {
+            "token_id": 7,
+            "text": "l",
+            "start_char": 10,
+            "end_char": 11
+          },
+          {
+            "token_id": 11,
+            "text": "d",
+            "start_char": 11,
+            "end_char": 12
+          }
+        ],
+        "unsupported": [],
+        "text_sha256": "f8c3bf62a9aa3e6fc1619c250e48abe7519373d3edf41be62eb5dc45199af2ef",
+        "acoustic_aliases": [
+          {
+            "start_char": 0,
+            "end_char": 1,
+            "raw_text": "H",
+            "acoustic_token": "h",
+            "kind": "supported_single_character_lowercase_alias"
+          }
+        ],
+        "language": "en"
+      }
+    },
+    {
+      "name": "japanese_long_vowel",
+      "text": "コーヒー",
+      "language": "ja",
+      "prepared": {
+        "raw_text": "コーヒー",
+        "targets": [
+          {
+            "token_id": 18,
+            "text": "コ",
+            "start_char": 0,
+            "end_char": 1
+          },
+          {
+            "token_id": 4,
+            "text": " ",
+            "start_char": 1,
+            "end_char": 2
+          },
+          {
+            "token_id": 19,
+            "text": "ヒ",
+            "start_char": 2,
+            "end_char": 3
+          }
+        ],
+        "unsupported": [],
+        "text_sha256": "bb782cf87667ea09544c7c1326097a648d9ba469aeaeefdb2cfb71e2e0ea76c8",
+        "acoustic_aliases": [
+          {
+            "start_char": 1,
+            "end_char": 2,
+            "raw_text": "ー",
+            "acoustic_token": " ",
+            "kind": "upstream_japanese_separator_alias",
+            "independent_acoustic_timestamp": false,
+            "profile_id": "omni_ctc_attached_ar_marks_ja_separator_v1"
+          },
+          {
+            "start_char": 3,
+            "end_char": 4,
+            "raw_text": "ー",
+            "acoustic_token": " ",
+            "kind": "upstream_japanese_separator_alias",
+            "independent_acoustic_timestamp": false,
+            "profile_id": "omni_ctc_attached_ar_marks_ja_separator_v1"
+          }
+        ],
+        "language": "ja"
+      }
+    },
+    {
+      "name": "arabic_marks",
+      "text": "مَرْحَبًا",
+      "language": "ar",
+      "prepared": {
+        "raw_text": "مَرْحَبًا",
+        "targets": [
+          {
+            "token_id": 12,
+            "text": "م",
+            "start_char": 0,
+            "end_char": 1
+          },
+          {
+            "token_id": 13,
+            "text": "ر",
+            "start_char": 2,
+            "end_char": 3
+          },
+          {
+            "token_id": 14,
+            "text": "ح",
+            "start_char": 4,
+            "end_char": 5
+          },
+          {
+            "token_id": 15,
+            "text": "ب",
+            "start_char": 6,
+            "end_char": 7
+          },
+          {
+            "token_id": 16,
+            "text": "ا",
+            "start_char": 8,
+            "end_char": 9
+          }
+        ],
+        "unsupported": [],
+        "text_sha256": "c23f7983b1f9f2592e5b6f98aece3a41111f6378da2b820071dabb128dc2bbfe",
+        "acoustic_aliases": [
+          {
+            "start_char": 1,
+            "end_char": 2,
+            "raw_text": "َ",
+            "acoustic_token": null,
+            "kind": "upstream_deleted_arabic_mark",
+            "independent_acoustic_timestamp": false,
+            "profile_id": "omni_ctc_attached_ar_marks_ja_separator_v1"
+          },
+          {
+            "start_char": 3,
+            "end_char": 4,
+            "raw_text": "ْ",
+            "acoustic_token": null,
+            "kind": "upstream_deleted_arabic_mark",
+            "independent_acoustic_timestamp": false,
+            "profile_id": "omni_ctc_attached_ar_marks_ja_separator_v1"
+          },
+          {
+            "start_char": 5,
+            "end_char": 6,
+            "raw_text": "َ",
+            "acoustic_token": null,
+            "kind": "upstream_deleted_arabic_mark",
+            "independent_acoustic_timestamp": false,
+            "profile_id": "omni_ctc_attached_ar_marks_ja_separator_v1"
+          },
+          {
+            "start_char": 7,
+            "end_char": 8,
+            "raw_text": "ً",
+            "acoustic_token": null,
+            "kind": "upstream_deleted_arabic_mark",
+            "independent_acoustic_timestamp": false,
+            "profile_id": "omni_ctc_attached_ar_marks_ja_separator_v1"
+          }
+        ],
+        "language": "ar"
+      }
+    },
+    {
+      "name": "unsupported_scalar",
+      "text": "Hello Ω",
+      "language": "en",
+      "prepared": {
+        "raw_text": "Hello Ω",
+        "targets": [
+          {
+            "token_id": 5,
+            "text": "h",
+            "start_char": 0,
+            "end_char": 1
+          },
+          {
+            "token_id": 6,
+            "text": "e",
+            "start_char": 1,
+            "end_char": 2
+          },
+          {
+            "token_id": 7,
+            "text": "l",
+            "start_char": 2,
+            "end_char": 3
+          },
+          {
+            "token_id": 7,
+            "text": "l",
+            "start_char": 3,
+            "end_char": 4
+          },
+          {
+            "token_id": 8,
+            "text": "o",
+            "start_char": 4,
+            "end_char": 5
+          }
+        ],
+        "unsupported": [
+          {
+            "start_char": 6,
+            "end_char": 7,
+            "text": "Ω"
+          }
+        ],
+        "text_sha256": "0cd726619fe6ac2c623213fc45d5213471d2a4da05a2607e676170b3e2d2124b",
+        "acoustic_aliases": [
+          {
+            "start_char": 0,
+            "end_char": 1,
+            "raw_text": "H",
+            "acoustic_token": "h",
+            "kind": "supported_single_character_lowercase_alias"
+          }
+        ],
+        "language": "en"
+      }
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "description": "Committed goldens produced by tools/oracle/emit.py from the v0.6.6 Python modules. The harness imports no Rust.",
+  "files": [
+    {
+      "file": "tests/goldens/decode_regions.json",
+      "function": "speakerdesk.pipeline.decode_regions",
+      "byte_size": 4210
+    },
+    {
+      "file": "tests/goldens/crop_context.json",
+      "function": "speakerdesk.pipeline.crop_context",
+      "byte_size": 2074
+    },
+    {
+      "file": "tests/goldens/raw_units.json",
+      "function": "speakerdesk.alignment_text.raw_units",
+      "byte_size": 13892
+    },
+    {
+      "file": "tests/goldens/prepare_text.json",
+      "function": "speakerdesk.word_alignment.prepare_text",
+      "byte_size": 9655
+    },
+    {
+      "file": "tests/goldens/exports.json",
+      "function": "speakerdesk.transcript.validate; speakerdesk.transcript.export",
+      "byte_size": 2508
+    },
+    {
+      "file": "tests/goldens/reading_turns.json",
+      "function": "speakerdesk.reading_turns.project_turns; speakerdesk.reading_turns.validated_turns",
+      "byte_size": 3050
+    },
+    {
+      "file": "tests/goldens/language_policy.json",
+      "function": "speakerdesk.language_detection.LanguagePolicy.decide",
+      "byte_size": 5217
+    },
+    {
+      "file": "tests/goldens/introductions.json",
+      "function": "speakerdesk.people.introduction_suggestions",
+      "byte_size": 2543
+    },
+    {
+      "file": "tests/goldens/legacy/jobs.sqlite.json",
+      "function": "speakerdesk.job_store.JobStore; speakerdesk.people.PeopleStore",
+      "byte_size": 8561
+    },
+    {
+      "file": "tests/goldens/manifest.json",
+      "function": "tools/oracle/emit.py",
+      "byte_size": 1698
+    }
+  ]
+}

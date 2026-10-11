@@ -1,0 +1,111 @@
+{
+  "function": "speakerdesk.pipeline.crop_context",
+  "cases": [
+    {
+      "padding": 0.22,
+      "duration": 12.0,
+      "turns": [
+        {
+          "start": 0.1,
+          "end": 1.0,
+          "speaker": "speaker_0"
+        },
+        {
+          "start": 4.0,
+          "end": 5.0,
+          "speaker": "speaker_1"
+        }
+      ],
+      "chunks_before": [
+        {
+          "start": 0.1,
+          "end": 1.0,
+          "speakers": [
+            "speaker_0"
+          ]
+        },
+        {
+          "start": 4.0,
+          "end": 5.0,
+          "speakers": [
+            "speaker_1"
+          ]
+        }
+      ],
+      "return_value": null,
+      "chunks_after": [
+        {
+          "start": 0.1,
+          "end": 1.0,
+          "speakers": [
+            "speaker_0"
+          ],
+          "audio_start": 0.05,
+          "audio_end": 1.22
+        },
+        {
+          "start": 4.0,
+          "end": 5.0,
+          "speakers": [
+            "speaker_1"
+          ],
+          "audio_start": 3.78,
+          "audio_end": 5.22
+        }
+      ]
+    },
+    {
+      "padding": 0,
+      "duration": 12.0,
+      "turns": [
+        {
+          "start": 0.1,
+          "end": 1.0,
+          "speaker": "speaker_0"
+        },
+        {
+          "start": 4.0,
+          "end": 5.0,
+          "speaker": "speaker_1"
+        }
+      ],
+      "chunks_before": [
+        {
+          "start": 0.1,
+          "end": 1.0,
+          "speakers": [
+            "speaker_0"
+          ]
+        },
+        {
+          "start": 4.0,
+          "end": 5.0,
+          "speakers": [
+            "speaker_1"
+          ]
+        }
+      ],
+      "return_value": null,
+      "chunks_after": [
+        {
+          "start": 0.1,
+          "end": 1.0,
+          "speakers": [
+            "speaker_0"
+          ],
+          "audio_start": 0.1,
+          "audio_end": 1.0
+        },
+        {
+          "start": 4.0,
+          "end": 5.0,
+          "speakers": [
+            "speaker_1"
+          ],
+          "audio_start": 4.0,
+          "audio_end": 5.0
+        }
+      ]
+    }
+  ]
+}

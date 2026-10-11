@@ -1,0 +1,105 @@
+{
+  "function": "speakerdesk.people.introduction_suggestions",
+  "cases": [
+    {
+      "name": "clear_introduction",
+      "job": {
+        "document": {
+          "schema_version": 1,
+          "speakers": {
+            "speaker_0": "Speaker 1"
+          },
+          "segments": [
+            {
+              "id": "intro",
+              "speaker": "speaker_0",
+              "start": 0.0,
+              "end": 3.0,
+              "text": "I'm Priya. Welcome to the meeting.",
+              "review": false,
+              "finalized": true,
+              "speaker_candidates": [
+                "speaker_0"
+              ]
+            }
+          ],
+          "provenance": {
+            "kind": "local_inference"
+          }
+        }
+      },
+      "suggestions": [
+        {
+          "id": "21457a0232d90b11cb8ca9ef23034afa",
+          "track_id": "speaker_0",
+          "name": "Priya",
+          "kind": "explicit_introduction",
+          "evidence": {
+            "segment_id": "intro",
+            "quote": "I'm Priya. Welcome to the meeting.",
+            "start": 0.0,
+            "end": 3.0
+          }
+        }
+      ]
+    },
+    {
+      "name": "addressed_name_not_an_introduction",
+      "job": {
+        "document": {
+          "schema_version": 1,
+          "speakers": {
+            "speaker_0": "Speaker 1"
+          },
+          "segments": [
+            {
+              "id": "intro",
+              "speaker": "speaker_0",
+              "start": 0.0,
+              "end": 3.0,
+              "text": "Priya, what do you think?",
+              "review": false,
+              "finalized": true,
+              "speaker_candidates": [
+                "speaker_0"
+              ]
+            }
+          ],
+          "provenance": {
+            "kind": "local_inference"
+          }
+        }
+      },
+      "suggestions": []
+    },
+    {
+      "name": "lowercase_name_not_suggested",
+      "job": {
+        "document": {
+          "schema_version": 1,
+          "speakers": {
+            "speaker_0": "Speaker 1"
+          },
+          "segments": [
+            {
+              "id": "intro",
+              "speaker": "speaker_0",
+              "start": 0.0,
+              "end": 3.0,
+              "text": "I'm priya.",
+              "review": false,
+              "finalized": true,
+              "speaker_candidates": [
+                "speaker_0"
+              ]
+            }
+          ],
+          "provenance": {
+            "kind": "local_inference"
+          }
+        }
+      },
+      "suggestions": []
+    }
+  ]
+}
