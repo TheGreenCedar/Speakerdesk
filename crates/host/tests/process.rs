@@ -66,7 +66,7 @@ fn actual_desktop_child_runs_speech_models_and_reaps() {
         "I checked the recording this morning. The transcript needs a speaker name. I can review it after lunch. Please save the final version."
     );
     assert_eq!(text.token_count, 31);
-    let document = speakerdesk_core::import::import_recording(&models, &pcm, "en").unwrap();
+    let document = speakerdesk_core::import::import_recording(&models, &pcm, "en", None).unwrap();
     let exported = speakerdesk_core::export::export(&document, "txt").unwrap();
     eprintln!("Actual child import transcript: {}", exported.body);
     assert!(

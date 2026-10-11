@@ -73,6 +73,8 @@ pub struct Parameter {
     pub shape: Vec<usize>,
     pub sources: Vec<String>,
     pub transform: Transform,
+    #[serde(default)]
+    pub converted_tensor_sha256: Option<String>,
 }
 
 /// File span for an initializer that lives in the source model bytes.

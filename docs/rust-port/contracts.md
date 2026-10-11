@@ -18,11 +18,24 @@ Rust **1.99.0** (`rust-toolchain.toml`), edition 2024. This is the stable 1.99 r
 
 `speakerdesk_core::models::Models` is the sync trait. Payloads are `speakerdesk_core::ipc::Request` and `Response`. A frame is a big-endian `u32` length plus a postcard `Envelope` (`request_id` and `Result`). `DiarizeFile` has no fixed timeout; the supervisor scales it. Other timeouts are `request_timeout`.
 
-Hello currently reports `"unavailable"` on every platform; OS identity is not initialized model capability. Other model arms return `ChildError::Unimplemented` until the owning model agent fills them.
+The Mac child initializes MLX and Metal resources before reporting its device.
+Hello lists only loaded model identities. Silero, the first Nemotron window,
+Cohere, Whisper language scoring and supplied-text CTC run in Rust. Streaming
+diarization and ReDimNet are still unavailable. Other platforms report
+`"unavailable"` and explicit `ChildError::Unimplemented` results.
+
+CTC scores carry the original audio length, valid frame count, frame hop/origin,
+explicit selected column IDs (including blank when requested), model identity
+and vocabulary digest. There is no implicit blank column or padded-frame count.
+Scores are normalized across all 9,812 tokens before selection. Core owns the
+supplied-text adapter and the existing reading projection; model output cannot
+replace transcript text. Vocabulary parsing and artifact checks occur once per
+load, outside inference loops. The native provider has a distinct versioned
+identity; saved documents cannot nominate their own trusted provider.
 
 ## Jobs
 
-`Job` and `Document` round-trip the product fields named in `document.rs`. A missing `kind` deserializes as `import`. Job ids are 32 lowercase hex characters. `store::SCHEMA_V1` is the new database. `import_legacy` is the one-way importer; hot-journal recovery and production startup integration remain unfinished.
+`Job` and `Document` round-trip the product fields named in `document.rs`. A missing `kind` deserializes as `import`. Job ids are 32 lowercase hex characters. `store::SCHEMA_V1` is the new database. `AppState::open` owns one file-backed store at an explicit root. Migration uses a consistent snapshot, private hot-journal recovery, and no-clobber publication; existing native state wins. Migrated audio remains legacy-owned and read-only. Native writes use copy-on-write media storage. Qualification has used disposable stores only.
 
 ## Messages and security
 

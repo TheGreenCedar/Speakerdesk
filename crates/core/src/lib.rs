@@ -1,5 +1,6 @@
 //! Speakerdesk domain crate. Contract modules are frozen by the coordinator.
 //! Feature modules start as stubs and are filled by the owning port agent.
+pub mod alignment;
 pub mod audio;
 pub mod document;
 pub mod edit;

@@ -442,3 +442,71 @@ allocator-signature warnings. Independent review found no further defect in
 this slice. This extends the editable import milestone; alignment, voice,
 language repair/retry integration, live capture, packaged independence and
 equivalent full-application performance remain unfinished.
+
+## Supplied-text alignment through native publication
+
+The pinned Omnilingual CTC graph now runs in the resident MLX child. Rust converts
+the pinned ONNX tensors once into safetensors and loads them through maintained
+loaders. The fixed graph retains weights; input crops, activations and cancellation
+checks belong to each call. Full-vocabulary log-softmax precedes column selection.
+The result carries actual valid frame count, source sample count, frame hop/origin,
+token IDs and model/vocabulary identities. Padding never becomes observed audio.
+
+The parent owns character-to-token mapping, conservative Unicode spans, supplied-text
+alignment and publication. It preserves authoritative text and its source crop.
+Weak or unsupported characters remain unresolved. Projected reading turns pass the
+existing freshness validator, including trusted native provider identity at export.
+The unwired live scaffold no longer invents word-ordinal token IDs or calls CTC and
+discards its result. Live timing is explicitly unavailable until the live join lands.
+
+Independent reference generation executes the unchanged Python CTC graph from the
+original NPZ weights with the same MLX 0.32.2 backend. Two calls on six inputs cover
+the full two-voice fixture, minimum context, partial final frames and silence;
+permuted vocabulary columns match at F32 precision. Separately, ctc-segmentation
+1.7.4 and the unchanged Python text adapter generate hostile supplied-text replays.
+Review caught excessive selected probability mass and reordered combining-mark span
+drift; both now have boundary tests. Fixtures are numerical/replay evidence, not a
+multilingual acoustic benchmark.
+
+The optimized native Tauri preview loaded all five models and published two aligned
+passages from Auto import through its real HTTP/store path. TXT/SRT/VTT/JSON exports
+passed; JSON segments equal the persisted document. The specific CTC editor
+edit/restart check remains pending because the Mac locked during this work. Earlier
+explicit-language and Auto editor/restart proof remains valid for unchanged behavior.
+
+For a closer comparison, an APFS copy of installed 0.6.6 runs under its own bundle
+identifier and disposable storage. Both previews use the same pinned artifacts,
+Auto selection and alignment. This is ready-app upload to persisted HTTP result;
+it includes polling latency and excludes cold startup and editor rendering.
+
+| Observation | Two synthetic voices, 9.09 s | Public speech, 7.06 s |
+|---|---:|---:|
+| Native import to persisted result | 1.25 s | 1.07 s |
+| Copied 0.6.6 import to persisted result | 3.42 s | 3.05 s |
+| Native sampled aggregate physical footprint | 3.44 GB | 3.33 GB |
+| Copied 0.6.6 sampled aggregate physical footprint | 3.94 GB | 3.94 GB |
+
+Both clips have identical words, source PCM hashes/anchors, activity and reading
+turns across implementations. Sampling includes the Tauri root, descendants and
+positive WebKit service PIDs from that exact app's launchd domain, refreshed and
+deduplicated each sample. Maximum intervals were 0.11 s native and 0.22 s baseline;
+these are simultaneous sampled sums, not sums of process lifetime peaks. Startup
+and between-sample peaks remain unmeasured. The public run's sampled CPU lower
+bounds are 0.77 s native and 2.57 s baseline; exited workers can lose their final
+interval. Mach ticks use the observed 125/3 ns timebase, cross-checked against
+getrusage. The earlier two-voice raw CPU fields predate this conversion correction
+and must not be read as seconds. Retained scripts/results:
+`/private/tmp/speakerdesk-baseline-ctc-wc5si6wc/`.
+
+A separate ignored test captured a complete 720-sample CTC forward pass to a real Metal
+GPU trace using the already-pinned MLX C capture bindings. The system capture
+metadata records one frame; traced/untraced scores match. No Metal compiler was
+required. Trace: `/private/tmp/speakerdesk-ctc-metal-20261011.gputrace` (1.47 GB).
+It has not been opened/replayed in Xcode, and trace overhead is excluded above.
+
+Core 140, host 46, tooling 14 and five CTC unit tests pass. Six child lifecycle
+replays and the four-case native-host cleanup matrix pass; the separate Metal
+capture test passes. Application Clippy passes with warnings denied, apart from
+the previously recorded upstream mlx-sys allocator signatures. This slice does
+not complete voice, model setup, retry/language repair, long imports, live capture,
+packaging or full cold/warm/live performance acceptance.

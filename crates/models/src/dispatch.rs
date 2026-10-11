@@ -12,6 +12,7 @@ pub struct Runtime {
     nemotron: Option<sortformer::network::Network>,
     cohere: Option<cohere::network::Network>,
     whisper: Option<whisper_lid::network::Network>,
+    ctc: Option<ctc::network::Network>,
     vad_sessions: std::collections::HashMap<u64, crate::silero::session::Session>,
     next_session: u64,
 }
@@ -28,6 +29,7 @@ impl Runtime {
             nemotron: None,
             cohere: None,
             whisper: None,
+            ctc: None,
             vad_sessions: Default::default(),
             next_session: 1,
         })
@@ -79,6 +81,13 @@ impl Runtime {
                         }
                         whisper_lid::WEIGHT_PIN
                     }
+                    "coarse-alignment" => {
+                        if self.ctc.is_none() {
+                            self.ctc =
+                                Some(ctc::network::Network::load(&self.model_root.join(model))?);
+                        }
+                        speakerdesk_core::alignment::CHECKPOINT
+                    }
                     _ => return Err(ChildError::Unimplemented),
                 };
                 if cancel.load(Ordering::Acquire) {
@@ -107,6 +116,9 @@ impl Runtime {
                     self.whisper
                         .as_ref()
                         .map(|_| whisper_lid::WEIGHT_PIN.into()),
+                    self.ctc
+                        .as_ref()
+                        .map(|_| speakerdesk_core::alignment::CHECKPOINT.into()),
                 ]
                 .into_iter()
                 .flatten()
@@ -193,6 +205,18 @@ impl Runtime {
                     .expect("loaded above")
                     .probe(&pcm, cancel)
                     .map(Response::Probe)
+            }
+            Request::CtcScores { pcm, token_ids } => {
+                if self.ctc.is_none() {
+                    self.ctc = Some(ctc::network::Network::load(
+                        &self.model_root.join("coarse-alignment"),
+                    )?);
+                }
+                self.ctc
+                    .as_mut()
+                    .expect("loaded above")
+                    .scores(&pcm, &token_ids, cancel)
+                    .map(Response::Ctc)
             }
             other => dispatch(other, cancel),
         }

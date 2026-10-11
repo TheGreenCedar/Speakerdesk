@@ -273,6 +273,15 @@ impl AppState {
             .any(|report| report.ok && report.model == languages::LID_CHECKPOINT)
     }
 
+    pub(crate) fn alignment_ready(&self) -> bool {
+        self.shared
+            .reports
+            .lock()
+            .expect("reports")
+            .iter()
+            .any(|report| report.ok && report.model == speakerdesk_core::alignment::CHECKPOINT)
+    }
+
     pub(crate) fn cancel_all(&self) -> Result<(), StoreError> {
         self.admission.close();
         let mut store = self.store();
@@ -382,7 +391,7 @@ async fn config(State(app): State<AppState>) -> Response {
         Json(json!({
             "languages": language_choices(),
             "default_language": default_language,
-            "readiness": readiness_json(&issues, app.automatic_language_ready()),
+            "readiness": readiness_json(&issues, app.automatic_language_ready(), app.alignment_ready()),
             "decoder": "Symphonia",
         }))
         .into_response()
@@ -1176,12 +1185,12 @@ fn language_choices() -> Value {
     Value::Object(choices)
 }
 
-fn readiness_json(issues: &[String], automatic: bool) -> Value {
+fn readiness_json(issues: &[String], automatic: bool, alignment: bool) -> Value {
     json!({
         "configured": issues.is_empty(),
         "issues": issues,
         "automatic_language": issues.is_empty() && automatic,
-        "word_alignment": false,
+        "word_alignment": issues.is_empty() && alignment,
         "live_capture": false,
         "model": MODEL_NAME,
         "speaker_limit": MODEL_SPEAKER_LIMIT,

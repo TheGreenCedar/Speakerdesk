@@ -19,7 +19,7 @@ use speakerdesk_core::{
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -38,6 +38,7 @@ struct Assets;
 struct ImportInference {
     supervisor: Arc<InferenceSupervisor>,
     root: PathBuf,
+    alignment: Arc<OnceLock<speakerdesk_core::alignment::Vocabulary>>,
 }
 
 impl ImportModels for ImportInference {
@@ -52,6 +53,7 @@ impl ImportModels for ImportInference {
             &self.supervisor.models(cancellation.clone()),
             &pcm,
             &job.language,
+            self.alignment.get(),
         )
         .map_err(|e| e.to_string())
     }
@@ -100,10 +102,13 @@ async fn serve(
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
+    let alignment_directory = model_root.join("coarse-alignment");
+    let alignment = Arc::new(OnceLock::new());
     let supervisor = InferenceSupervisor::new(executable, env!("CARGO_PKG_VERSION"), model_root)?;
     app.set_models(Arc::new(ImportInference {
         supervisor: supervisor.clone(),
         root: app.data_dir().to_path_buf(),
+        alignment: alignment.clone(),
     }));
     app.set_issues(vec!["Initializing native speech models…".into()]);
     app.updates.lock().expect("updates").connect();
@@ -126,6 +131,33 @@ async fn serve(
                         tracing::warn!(%error, "automatic language model did not initialize");
                         reports.push(speakerdesk_core::ipc::SetupModelReport {
                             model: languages::LID_CHECKPOINT.into(),
+                            ok: false,
+                            timing_ms: 0,
+                        });
+                    }
+                }
+                let timing = std::fs::read_to_string(alignment_directory.join("tokens.txt"))
+                    .map_err(|e| e.to_string())
+                    .and_then(|tokens| speakerdesk_core::alignment::Vocabulary::parse(&tokens))
+                    .and_then(|vocabulary| {
+                        let report = load_models
+                            .setup_check(&["coarse-alignment".into()])
+                            .map_err(|e| e.to_string())?;
+                        if report.len() != 1
+                            || !report[0].ok
+                            || report[0].model != speakerdesk_core::alignment::CHECKPOINT
+                        {
+                            return Err("Native alignment did not initialize".into());
+                        }
+                        let _ = alignment.set(vocabulary);
+                        Ok(report)
+                    });
+                match timing {
+                    Ok(timing) => reports.extend(timing),
+                    Err(error) => {
+                        tracing::warn!(%error,"supplied-text timing did not initialize");
+                        reports.push(speakerdesk_core::ipc::SetupModelReport {
+                            model: speakerdesk_core::alignment::CHECKPOINT.into(),
                             ok: false,
                             timing_ms: 0,
                         });
@@ -307,11 +339,11 @@ async fn language(State(app): State<AppState>, body: Bytes) -> Response {
 
 async fn setup(State(app): State<AppState>) -> Json<Value> {
     let (issues, reports) = app.model_status();
-    let models: Vec<_> = ["Speech detection", "Speaker diarization", "Transcription", "Automatic language"].iter().enumerate().map(|(index, name)| json!({"id":index,"name":name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":0,"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
+    let models: Vec<_> = ["Speech detection", "Speaker diarization", "Transcription", "Automatic language", "Supplied-text timing"].iter().enumerate().map(|(index, name)| json!({"id":index,"name":name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":0,"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
     Json(
         json!({"supported":cfg!(all(target_os="macos",target_arch="aarch64")),"ready":issues.is_empty(),"core_ready":issues.is_empty(),"automatic_language":issues.is_empty() && app.automatic_language_ready(),"status":if issues.is_empty(){"ready"}else{"failed"},"error":issues.join(" "),"models":models,"total_bytes":0,"downloaded_bytes":0,"can_download":false,
         "voice":{"status":"unavailable","enabled":false,"available":false,"released":false,"message":"Native voice recognition is not implemented yet."},
-        "message":if app.automatic_language_ready() { "Native preview: automatic and explicit-language imports up to 27.2 seconds. Word alignment and live capture are not implemented yet." } else { "Native preview: explicit-language imports up to 27.2 seconds. Automatic language is unavailable; check the local Whisper artifact. Word alignment and live capture are not implemented yet." }}),
+        "message":format!("Native preview: imports up to 27.2 seconds. Automatic language: {}. Supplied-text timing: {}. Live capture is not implemented yet.",if app.automatic_language_ready(){"available"}else{"unavailable"},if app.alignment_ready(){"available"}else{"unavailable"})}),
     )
 }
 

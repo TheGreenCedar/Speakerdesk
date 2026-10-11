@@ -1,8 +1,7 @@
 //! Import pipeline. Owned by the import agent.
 //!
 //! Diarization, speech admission, and transcription go through [`Models`].
-//! Word-level CTC timing is not attached: [`Models::ctc_scores`] does not carry
-//! a vocabulary, and [`timing::ctc_segmentation`] needs a token score matrix.
+//! Optional supplied-text CTC timing uses the pinned vocabulary and original crop.
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
@@ -218,6 +217,7 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
     models: &M,
     pcm: &[f32],
     language: &str,
+    alignment: Option<&crate::alignment::Vocabulary>,
 ) -> Result<Document, ImportError> {
     let choice = LanguageChoice::parse(language).map_err(language_err)?;
     let duration = require_pcm(pcm)?;
@@ -274,7 +274,7 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
                 || speaker == "unassigned"
                 || chunk.speakers.len() != 1
                 || end - start < 0.5;
-            segments.push(segment_from_row(
+            let mut segment = segment_from_row(
                 format!("seg-{}", segments.len()),
                 start,
                 end,
@@ -282,7 +282,21 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
                 review,
                 chunk,
                 &row,
-            ));
+            );
+            if let Some(alignment) = alignment
+                && segment.rest.contains_key("decode_context")
+                && !segment.text.trim().is_empty()
+                && let Some(language) = &segment.language
+                && languages::is_supported(language)
+            {
+                let a = seconds_to_sample(row.start, pcm.len() as i64) as usize;
+                let b = seconds_to_sample(row.end, pcm.len() as i64) as usize;
+                let result = alignment
+                    .align(models, &pcm[a..b], &segment.text, a as i64, language)
+                    .map_err(child_err)?;
+                crate::alignment::attach_import(&mut segment, result);
+            }
+            segments.push(segment);
         }
     }
     let mut document = Document {
@@ -1595,7 +1609,7 @@ mod tests {
             }],
             vec![(0, samples as usize)],
         );
-        let document = import_recording(&models, &tone(samples as usize), "en").unwrap();
+        let document = import_recording(&models, &tone(samples as usize), "en", None).unwrap();
         assert_eq!(
             document.speakers.get("speaker_0").map(String::as_str),
             Some("Speaker 1")
@@ -1652,7 +1666,7 @@ mod tests {
             }],
             vec![(0, 49_152)],
         );
-        let document = import_recording(&models, &tone(64_000), "en").unwrap();
+        let document = import_recording(&models, &tone(64_000), "en", None).unwrap();
         assert_eq!(
             models.calls().len(),
             1,
@@ -1700,7 +1714,7 @@ mod tests {
             }],
             vec![(0, 16_384), (23_552, 39_936)],
         );
-        import_recording(&models, &pcm, "en").unwrap();
+        import_recording(&models, &pcm, "en", None).unwrap();
         assert_eq!(
             models.calls().len(),
             1,
@@ -1803,7 +1817,7 @@ mod tests {
             vec![(0, 16000)],
         );
         models.token_count = 448;
-        let document = import_recording(&models, &tone(16000), "en").unwrap();
+        let document = import_recording(&models, &tone(16000), "en", None).unwrap();
         let spoken = document
             .segments
             .iter()
@@ -1830,7 +1844,7 @@ mod tests {
             }],
             vec![(0, speech)],
         );
-        let document = import_recording(&models, &tone(samples as usize), "en").unwrap();
+        let document = import_recording(&models, &tone(samples as usize), "en", None).unwrap();
         let calls = models.calls();
         assert_eq!(calls.len(), 1);
         let context = speech + language::CANONICAL_PAD_SAMPLES as usize;
@@ -1861,7 +1875,7 @@ mod tests {
             }],
             Vec::new(),
         );
-        let document = import_recording(&models, &tone(samples), "en").unwrap();
+        let document = import_recording(&models, &tone(samples), "en", None).unwrap();
         assert!(models.calls().is_empty());
         assert!(
             document
@@ -1893,7 +1907,7 @@ mod tests {
             ],
             vec![(0, samples)],
         );
-        let document = import_recording(&models, &tone(samples), "en").unwrap();
+        let document = import_recording(&models, &tone(samples), "en", None).unwrap();
         assert_eq!(
             document.speakers.get("speaker_0").map(String::as_str),
             Some("Speaker 1")
@@ -1933,7 +1947,7 @@ mod tests {
             }],
             vec![(0, speech as usize)],
         );
-        let document = import_recording(&models, &tone(samples), "en").unwrap();
+        let document = import_recording(&models, &tone(samples), "en", None).unwrap();
         assert_eq!(
             document.speakers.get("unassigned").map(String::as_str),
             Some("Unassigned audio")
@@ -1981,7 +1995,8 @@ mod tests {
             }],
             vec![(0, samples)],
         );
-        let document = import_recording(&models, &tone(samples), languages::AUTOMATIC).unwrap();
+        let document =
+            import_recording(&models, &tone(samples), languages::AUTOMATIC, None).unwrap();
         assert!(models.events().iter().any(|event| event == "probe"));
         let calls = models.calls();
         assert_eq!(calls.len(), 1);
@@ -2022,7 +2037,8 @@ mod tests {
             .lock()
             .unwrap()
             .extend([vec![0.99, 0.01], vec![0.6, 0.4]]);
-        let document = import_recording(&models, &tone(samples), languages::AUTOMATIC).unwrap();
+        let document =
+            import_recording(&models, &tone(samples), languages::AUTOMATIC, None).unwrap();
         assert_eq!(
             models
                 .events()
@@ -2109,7 +2125,7 @@ mod tests {
             }],
             vec![(0, samples)],
         );
-        let document = import_recording(&models, &pcm, "en").unwrap();
+        let document = import_recording(&models, &pcm, "en", None).unwrap();
         let before = document.clone();
         let candidate =
             retry_passage(&models, &pcm, 0.0, limits::PASSAGE_RETRY_MAX_SECONDS, "de").unwrap();
@@ -2160,14 +2176,14 @@ mod tests {
     #[test]
     fn empty_and_non_finite_audio_fail_before_diarization() {
         let models = Scripted::new(Vec::new(), Vec::new());
-        let empty = import_recording(&models, &[], "en").unwrap_err();
+        let empty = import_recording(&models, &[], "en", None).unwrap_err();
         assert_eq!(empty.message, messages::RECORDING_LENGTH);
         let mut pcm = tone(512);
         pcm[0] = f32::NAN;
-        let non_finite = import_recording(&models, &pcm, "en").unwrap_err();
+        let non_finite = import_recording(&models, &pcm, "en", None).unwrap_err();
         assert_eq!(non_finite.message, messages::CAPTURE_FINITE_MONO);
         assert!(models.events().is_empty());
-        let unsupported = import_recording(&models, &tone(512), "xx").unwrap_err();
+        let unsupported = import_recording(&models, &tone(512), "xx", None).unwrap_err();
         assert_eq!(unsupported.message, messages::CHOOSE_LANGUAGE_MODE);
     }
 }

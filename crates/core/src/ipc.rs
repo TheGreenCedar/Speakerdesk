@@ -74,7 +74,14 @@ pub struct AsrText {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CtcScoresOut {
-    pub frames: u32,
+    pub valid_frames: u32,
+    pub audio_num_samples: u32,
+    pub frame_hop_samples: u32,
+    pub frame_origin_samples: u32,
+    /// Every returned column, including blank when requested; no implicit columns.
+    pub token_ids: Vec<i32>,
+    pub model: String,
+    pub vocabulary_sha256: String,
     pub gathered: Vec<f32>,
 }
 

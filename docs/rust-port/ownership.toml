@@ -69,7 +69,7 @@ paths = [
 
 [[agent]]
 id = "core-timing"
-paths = ["crates/core/src/timing.rs"]
+paths = ["crates/core/src/timing.rs", "crates/core/src/alignment.rs"]
 
 [[agent]]
 id = "core-audio"

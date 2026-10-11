@@ -867,7 +867,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn activity_json(activity: Option<&SpeakerActivity>) -> String {
+pub(crate) fn activity_json(activity: Option<&SpeakerActivity>) -> String {
     let Some(activity) = activity else {
         return "null".to_string();
     };
@@ -896,7 +896,7 @@ fn activity_json(activity: Option<&SpeakerActivity>) -> String {
     out
 }
 
-fn turns_json(turns: &[ReadingTurn]) -> String {
+pub(crate) fn turns_json(turns: &[ReadingTurn]) -> String {
     let mut out = String::from("[");
     for (index, turn) in turns.iter().enumerate() {
         if index > 0 {

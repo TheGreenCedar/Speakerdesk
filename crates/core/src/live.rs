@@ -24,8 +24,7 @@ use crate::languages;
 use crate::limits;
 use crate::models::Models;
 use crate::speech::{self, Admission, SampleSpan, SpeechDecision, SpeechError, SpeechLedger};
-use crate::timing::{self, CtcSegmentationParameters, ReadingRow, ReadingTurn, TimedWord};
-use crate::timing_policy::TIMING_UNIT_POLICY_ID;
+use crate::timing::{self, ReadingRow, ReadingTurn, TimedWord};
 
 /// 16 kHz recording clock. Alias of [`limits::SAMPLE_RATE`].
 pub const RATE: i64 = limits::SAMPLE_RATE as i64;
@@ -1721,7 +1720,8 @@ impl<M: Models + 'static> Engine<M> {
         models: Arc<M>,
         inbox: Arc<Mutex<Inbox>>,
     ) -> Result<Self, LiveError> {
-        let timing_apis = !matches!(models.ctc_scores(&[], &[]), Err(ChildError::Unimplemented));
+        // shortcut: enable after live publication is wired to the supplied-text adapter.
+        let timing_apis = false;
         let book = UtteranceBook::new(config.job_id.clone())?;
         let timeline = vec![LanguageStamp {
             start_sample: 0,
@@ -2282,10 +2282,6 @@ impl<M: Models + 'static> Engine<M> {
                 (left, right),
             )?;
             let part = tail_part(request, &passages, true);
-            if part.complete {
-                let pcm = self.read_pcm(request.start_sample, request.end_sample)?;
-                self.note_timing(&pcm, &part.text);
-            }
             parts.push(part);
         }
         let assembled = assemble_authoritative(&anchor, &requests, &parts)?;
@@ -2378,44 +2374,6 @@ impl<M: Models + 'static> Engine<M> {
         }
         let _ = plan;
         Ok(())
-    }
-
-    fn note_timing(&self, pcm: &[f32], text: &str) {
-        if !self.timing_apis || text.trim().is_empty() {
-            return;
-        }
-        let Ok(units) = timing::raw_units(text, TIMING_UNIT_POLICY_ID) else {
-            return;
-        };
-        let tokens: Vec<i32> = units
-            .iter()
-            .enumerate()
-            .map(|(index, _)| i32::try_from(index + 1).unwrap_or(i32::MAX))
-            .collect();
-        if tokens.is_empty() {
-            return;
-        }
-        let Ok(scores) = self.models.ctc_scores(pcm, &tokens) else {
-            return;
-        };
-        let width = tokens.len() + 1;
-        if scores.frames == 0 || scores.gathered.len() != scores.frames as usize * width {
-            return;
-        }
-        let matrix: Vec<Vec<f32>> = (0..scores.frames as usize)
-            .map(|frame| {
-                let start = frame * width;
-                scores.gathered[start..start + width].to_vec()
-            })
-            .collect();
-        let mut ground = vec![vec![-1_i64]];
-        for token in &tokens {
-            ground.push(vec![i64::from(*token)]);
-        }
-        let mut vocabulary = vec!["<blank>".to_string()];
-        vocabulary.extend(units.iter().map(|unit| unit.text.clone()));
-        let parameters = CtcSegmentationParameters::for_vocabulary(vocabulary);
-        let _ = timing::ctc_segmentation(&parameters, &matrix, &ground);
     }
 
     fn transcribe_span(
@@ -3277,7 +3235,6 @@ mod tests {
     }
 
     struct FakeModels {
-        timing: bool,
         ctc_calls: AtomicUsize,
         transcribe_calls: AtomicUsize,
         vad_sessions: Mutex<BTreeMap<u64, (u64, Vec<f32>)>>,
@@ -3288,9 +3245,8 @@ mod tests {
     }
 
     impl FakeModels {
-        fn english(timing: bool) -> Self {
+        fn english() -> Self {
             Self {
-                timing,
                 ctc_calls: AtomicUsize::new(0),
                 transcribe_calls: AtomicUsize::new(0),
                 vad_sessions: Mutex::new(BTreeMap::new()),
@@ -3417,19 +3373,9 @@ mod tests {
                 token_count: 1,
             })
         }
-        fn ctc_scores(&self, pcm: &[f32], token_ids: &[i32]) -> Result<CtcScoresOut, ChildError> {
-            if !self.timing {
-                return Err(ChildError::Unimplemented);
-            }
-            if !token_ids.is_empty() {
-                self.ctc_calls.fetch_add(1, Ordering::SeqCst);
-            }
-            let width = token_ids.len() + 1;
-            let frames = (pcm.len() / 320).max(1) as u32;
-            Ok(CtcScoresOut {
-                frames,
-                gathered: vec![-20.0; frames as usize * width],
-            })
+        fn ctc_scores(&self, _pcm: &[f32], _token_ids: &[i32]) -> Result<CtcScoresOut, ChildError> {
+            self.ctc_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ChildError::Unimplemented)
         }
         fn embed_voice(&self, _pcm: &[f32]) -> Result<Vec<f32>, ChildError> {
             Ok(vec![0.0])
@@ -3488,11 +3434,8 @@ mod tests {
 
     #[test]
     fn buffered_vad_tail_and_language_boundary_reach_publication() {
-        let mut engine = Engine::single(
-            EngineConfig::new("buffered", "en"),
-            FakeModels::english(false),
-        )
-        .unwrap();
+        let mut engine =
+            Engine::single(EngineConfig::new("buffered", "en"), FakeModels::english()).unwrap();
         engine.append_pcm(&loud(16_037));
         let events = engine.handle(notice(0, 16_037, 0)).unwrap();
         assert_eq!(engine.ledger.lock().unwrap().end_sample(), 15_872);
@@ -3522,11 +3465,8 @@ mod tests {
     #[test]
     fn model_streams_close_on_partial_open_failed_stop_and_drop() {
         for failure in 0..3 {
-            let mut engine = Engine::single(
-                EngineConfig::new("cleanup", "en"),
-                FakeModels::english(false),
-            )
-            .unwrap();
+            let mut engine =
+                Engine::single(EngineConfig::new("cleanup", "en"), FakeModels::english()).unwrap();
             let models = engine.models.clone();
             if failure == 0 {
                 models.fail_diar_open.store(true, Ordering::Relaxed);
@@ -3555,7 +3495,7 @@ mod tests {
     #[test]
     fn canonical_engine_publishes_a_provisional_revision_then_flush_language_and_stop() {
         let mut engine =
-            Engine::single(EngineConfig::new("job-1", "en"), FakeModels::english(false)).unwrap();
+            Engine::single(EngineConfig::new("job-1", "en"), FakeModels::english()).unwrap();
         assert!(!engine.timing_apis());
         drive(&mut engine, &loud(RATE as usize), "en");
         let mut seen = Vec::new();
@@ -3631,10 +3571,10 @@ mod tests {
     }
 
     #[test]
-    fn english_tail_calls_timing_and_non_english_uses_the_core_plan() {
+    fn unwired_live_timing_never_probes_or_calls_the_acoustic_model() {
         let mut english =
-            Engine::single(EngineConfig::new("job-en", "en"), FakeModels::english(true)).unwrap();
-        assert!(english.timing_apis());
+            Engine::single(EngineConfig::new("job-en", "en"), FakeModels::english()).unwrap();
+        assert!(!english.timing_apis());
         drive(&mut english, &loud((21 * RATE) as usize), "en");
         let mut events = Vec::new();
         while let Some(batch) = english.poll().unwrap() {
@@ -3643,14 +3583,11 @@ mod tests {
         let published = revisions(&events);
         let last = published.last().unwrap();
         assert_eq!(last.text, "hello");
-        assert_eq!(last.refinement_state.as_deref(), Some("unresolved"));
-        assert!(english.models.ctc_calls.load(Ordering::SeqCst) >= 1);
+        assert_eq!(last.refinement_state.as_deref(), Some("provisional"));
+        assert_eq!(english.models.ctc_calls.load(Ordering::SeqCst), 0);
 
-        let mut german = Engine::single(
-            EngineConfig::new("job-de", "de"),
-            FakeModels::english(false),
-        )
-        .unwrap();
+        let mut german =
+            Engine::single(EngineConfig::new("job-de", "de"), FakeModels::english()).unwrap();
         drive(&mut german, &loud((25 * RATE) as usize), "de");
         let mut events = Vec::new();
         while let Some(batch) = german.poll().unwrap() {
@@ -3666,11 +3603,8 @@ mod tests {
 
     #[test]
     fn two_sources_prefix_speaker_ids_on_one_clock() {
-        let mut runtime = SourceRuntime::new(
-            EngineConfig::new("job-src", "en"),
-            FakeModels::english(false),
-        )
-        .unwrap();
+        let mut runtime =
+            SourceRuntime::new(EngineConfig::new("job-src", "en"), FakeModels::english()).unwrap();
         let speech = loud(RATE as usize);
         let silence = quiet((RATE / 2) as usize);
         for source in SOURCE_IDS {
