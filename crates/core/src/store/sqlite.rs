@@ -18,6 +18,8 @@ use crate::languages;
 use crate::messages;
 
 const PRIVATE_FIELDS: &[&str] = &[
+    "legacy_media_root",
+    "operation_generation",
     "rolling_sources",
     "refinement_history",
     "fast_history",
@@ -59,6 +61,160 @@ impl SqliteJobStore {
         prepare_connection(&mut connection)?;
         Ok(Self { connection })
     }
+
+    pub fn insert_uploads(
+        &mut self,
+        jobs: &[Job],
+        active: &[&str],
+        limit: u64,
+    ) -> Result<bool, StoreError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let statuses =
+            serde_json::to_string(active).map_err(|e| StoreError::message(e.to_string()))?;
+        let count: i64 = tx.query_row(
+            "SELECT count(*) FROM jobs WHERE status IN (SELECT value FROM json_each(?1))",
+            [statuses],
+            |row| row.get(0),
+        )?;
+        if (count as u64).saturating_add(jobs.len() as u64) > limit {
+            return Ok(false);
+        }
+        for job in jobs {
+            insert_job(&tx, job, None)?;
+        }
+        if let Some(job) = jobs.last() {
+            save_default_language(&tx, &job.language)?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn delete(&mut self, id: &JobId) -> Result<bool, StoreError> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM jobs WHERE id = ?1", [id.as_str()])?
+            != 0)
+    }
+
+    /// The callback only transforms this document; no I/O or model work may run here.
+    pub fn update_job<R, E: From<StoreError>>(
+        &mut self,
+        id: &JobId,
+        update: impl FnOnce(&mut Job) -> Result<R, E>,
+    ) -> Result<Option<(Job, R)>, E> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let Some(stored) = fetch_job(&tx, id.as_str())? else {
+            return Ok(None);
+        };
+        let checkpoint = stored.checkpoint;
+        let mut job = for_view(stored, false);
+        let revision = job.revision;
+        let result = update(&mut job)?;
+        job.revision = revision
+            .checked_add(1)
+            .ok_or_else(|| StoreError::message("Revision overflow"))?;
+        job.updated = unix_time();
+        insert_job(&tx, &job, checkpoint)?;
+        tx.commit().map_err(StoreError::from)?;
+        Ok(Some((job, result)))
+    }
+
+    pub fn people(&self) -> Result<crate::people::People, StoreError> {
+        load_people(&self.connection)
+    }
+
+    pub fn edit_person<R, E: From<StoreError>>(
+        &mut self,
+        edit: impl FnOnce(&mut crate::people::People) -> Result<(crate::people::Person, R), E>,
+    ) -> Result<R, E> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let (person, result) = edit(&mut load_people(&tx)?)?;
+        tx.execute("INSERT INTO people(id,name,created,updated) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET name=excluded.name,updated=excluded.updated",
+            params![person.id,person.name,person.created,person.updated.unwrap_or(person.created)])
+            .map_err(StoreError::from)?;
+        tx.commit().map_err(StoreError::from)?;
+        Ok(result)
+    }
+
+    pub fn voice_versions(&self) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        self.connection
+            .prepare("SELECT person_id, CAST(profile_version AS TEXT) FROM voice_profiles")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn forget_voice(&mut self, person_id: &str) -> Result<(), StoreError> {
+        self.connection
+            .execute("DELETE FROM voice_profiles WHERE person_id=?1", [person_id])?;
+        Ok(())
+    }
+
+    pub fn preference(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row("SELECT value FROM preferences WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn set_recognition(&mut self, enabled: bool) -> Result<(), StoreError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("INSERT INTO preferences(key,value) VALUES('voice_recognition',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [enabled.to_string()])?;
+        if !enabled {
+            // Only jobs with an outstanding check need to be deserialized.
+            let ids: Vec<String> = tx.prepare("SELECT id FROM jobs WHERE EXISTS (SELECT 1 FROM json_each(json_extract(meeting, '$.voice_checks')) WHERE json_extract(value, '$.status')='checking')")?
+                .query_map([], |row| row.get(0))?.collect::<Result<_,_>>()?;
+            for id in ids {
+                let Some(mut stored) = fetch_job(&tx, &id)? else {
+                    continue;
+                };
+                if let Some(checks) = stored
+                    .job
+                    .extra
+                    .get_mut("voice_checks")
+                    .and_then(Value::as_object_mut)
+                {
+                    for check in checks.values_mut() {
+                        if check.get("status").and_then(Value::as_str) == Some("checking") {
+                            check["status"] = Value::String("cancelled".into());
+                        }
+                    }
+                }
+                stored.job.revision += 1;
+                stored.job.updated = unix_time();
+                insert_job(&tx, &stored.job, stored.checkpoint)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+fn load_people(connection: &Connection) -> Result<crate::people::People, StoreError> {
+    let entries = connection
+        .prepare("SELECT id,name,created,updated FROM people")?
+        .query_map([], |row| {
+            Ok(crate::people::Person {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created: row.get(2)?,
+                updated: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(crate::people::People::from_stored(entries))
 }
 
 pub(crate) fn prepare_connection(connection: &mut Connection) -> Result<(), StoreError> {

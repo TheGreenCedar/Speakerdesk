@@ -4,11 +4,11 @@
 //! [`speakerdesk_core::live::Inbox`]. They do not spawn the Swift capture
 //! helper or an MLX process. The parent router checks the session token.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
@@ -846,17 +846,8 @@ pub fn routes() -> axum::Router<crate::routes::AppState> {
         )
 }
 
-fn managers() -> &'static Mutex<HashMap<String, Arc<Mutex<MeetingManager>>>> {
-    static MANAGERS: OnceLock<Mutex<HashMap<String, Arc<Mutex<MeetingManager>>>>> = OnceLock::new();
-    MANAGERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 fn manager_for(app: &AppState) -> Arc<Mutex<MeetingManager>> {
-    let mut managers = managers().lock().expect("meeting registry");
-    managers
-        .entry(app.token().to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(MeetingManager::new())))
-        .clone()
+    app.meeting_manager()
 }
 
 fn with_manager<T>(app: &AppState, body: impl FnOnce(&mut MeetingManager) -> T) -> T {

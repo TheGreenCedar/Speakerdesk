@@ -4,8 +4,8 @@ use speakerdesk_core::security::{
     CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, TOKEN_HEADER, X_CONTENT_TYPE_OPTIONS,
 };
 
-pub fn router() -> Router {
-    crate::routes::router(crate::routes::AppState::new())
+pub fn router(state: crate::routes::AppState) -> Router {
+    crate::routes::router(state)
 }
 
 /// Headers every response keeps. The route agent applies these and must not change the values.

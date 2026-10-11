@@ -69,3 +69,9 @@ pub enum IdError {
     #[error("job id must be 32 lowercase hex characters")]
     JobId,
 }
+
+impl From<StoreError> for ApiError {
+    fn from(_error: StoreError) -> Self {
+        Self::new(500, crate::messages::LOCAL_OPERATION_FAILED)
+    }
+}

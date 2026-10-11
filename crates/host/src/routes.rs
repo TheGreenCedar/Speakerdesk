@@ -3,7 +3,7 @@
 //! Handlers speak the v0.6.6 job API. Mutating requests compare
 //! `X-Speakerdesk-Token` with [`speakerdesk_core::security::tokens_match`].
 //! Transcript writes go through [`speakerdesk_core::edit`]. Import runs are
-//! queued on [`crate::worker::JobWorker`]. Tests supply a directory and
+//! queued on [`crate::worker::JobWorker`]. Tests use temporary SQLite stores and
 //! [`ImportModels`] so nothing here downloads weights or spawns MLX.
 
 use std::fs;
@@ -26,11 +26,12 @@ use axum::routing::{get, patch, post, put};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use speakerdesk_core::audio::{self, AudioError};
-use speakerdesk_core::document::{Document, Job, JobKind, JobSummary};
+use speakerdesk_core::document::{Document, Job, JobKind};
 use speakerdesk_core::edit::{self, PassageEditInput, SaveInput};
 use speakerdesk_core::error::{ApiError, StoreError};
 use speakerdesk_core::ids::JobId;
 use speakerdesk_core::security::{self, MAX_UPLOAD_BYTES};
+use speakerdesk_core::store::{JobStore, SqliteJobStore};
 use speakerdesk_core::{export, languages, limits, messages, transcript};
 
 use crate::http::{security_headers, token_header};
@@ -54,6 +55,8 @@ const ACTIVE: &[&str] = &[
     "finishing",
 ];
 const PRIVATE_FIELDS: &[&str] = &[
+    "legacy_media_root",
+    "operation_generation",
     "rolling_sources",
     "refinement_history",
     "fast_history",
@@ -68,15 +71,6 @@ const AUDIO_EXTENSIONS: &[&str] = &[
     ".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aiff", ".aif", ".mp4", ".aac", ".webm",
 ];
 
-/// In-memory jobs. Route tests use this, or another [`JobDirectory`], instead of SQLite.
-pub trait JobDirectory: Send {
-    fn get(&mut self, id: &JobId, metadata: bool) -> Result<Option<Job>, StoreError>;
-    fn summaries(&mut self) -> Result<Vec<JobSummary>, StoreError>;
-    fn count_status(&mut self, statuses: &[&str]) -> Result<u64, StoreError>;
-    fn put(&mut self, job: &Job) -> Result<(), StoreError>;
-    fn delete(&mut self, id: &JobId) -> Result<bool, StoreError>;
-}
-
 /// Import inference behind `POST /api/jobs/:jid/run`.
 ///
 /// Implementations must not download models or spawn MLX. The default reports
@@ -88,63 +82,6 @@ pub trait ImportModels: Send + Sync {
 /// Turns an uploaded file into a duration in seconds.
 pub trait AudioPrep: Send + Sync {
     fn prepare(&self, directory: &Path, job: &Job) -> Result<f64, String>;
-}
-
-/// Local stand-in for the job table.
-#[derive(Debug, Default)]
-pub struct MemoryJobs {
-    jobs: Vec<Job>,
-}
-
-impl JobDirectory for MemoryJobs {
-    fn get(&mut self, id: &JobId, metadata: bool) -> Result<Option<Job>, StoreError> {
-        let Some(job) = self.jobs.iter().find(|job| &job.id == id) else {
-            return Ok(None);
-        };
-        let mut job = job.clone();
-        if metadata {
-            job.document = None;
-            for key in PRIVATE_FIELDS {
-                job.extra.remove(*key);
-            }
-        }
-        Ok(Some(job))
-    }
-
-    fn summaries(&mut self) -> Result<Vec<JobSummary>, StoreError> {
-        let mut jobs = self.jobs.clone();
-        jobs.sort_by(|left, right| {
-            right
-                .created
-                .total_cmp(&left.created)
-                .then_with(|| right.id.as_str().cmp(left.id.as_str()))
-        });
-        Ok(jobs.into_iter().map(summary_of).collect())
-    }
-
-    fn count_status(&mut self, statuses: &[&str]) -> Result<u64, StoreError> {
-        let count = self
-            .jobs
-            .iter()
-            .filter(|job| statuses.contains(&job.status.as_str()))
-            .count();
-        Ok(u64::try_from(count).unwrap_or(u64::MAX))
-    }
-
-    fn put(&mut self, job: &Job) -> Result<(), StoreError> {
-        if let Some(existing) = self.jobs.iter_mut().find(|stored| stored.id == job.id) {
-            *existing = job.clone();
-        } else {
-            self.jobs.push(job.clone());
-        }
-        Ok(())
-    }
-
-    fn delete(&mut self, id: &JobId) -> Result<bool, StoreError> {
-        let before = self.jobs.len();
-        self.jobs.retain(|job| &job.id != id);
-        Ok(self.jobs.len() != before)
-    }
 }
 
 /// Infer returns the setup message and does not touch a model runtime.
@@ -166,8 +103,16 @@ impl AudioPrep for WavPrepare {
         let Some(source_name) = job.source_file.as_deref() else {
             return Err(messages::AUDIO_PREP_FAILED.to_string());
         };
-        let folder = directory.join(job.id.as_str());
-        let source = folder.join(source_name);
+        let folder = media_write_directory(directory, job);
+        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let source_root = job
+            .extra
+            .get("legacy_media_root")
+            .and_then(Value::as_str)
+            .map(Path::new)
+            .unwrap_or(directory)
+            .join(job.id.as_str());
+        let source = confined_file(&source_root, source_name).map_err(|e| e.to_string())?;
         let destination = folder.join("audio.wav");
         match audio::normalize(&source, &destination) {
             Ok(duration) => Ok(duration),
@@ -178,12 +123,13 @@ impl AudioPrep for WavPrepare {
 }
 
 struct Shared {
-    directory: Mutex<Box<dyn JobDirectory + Send>>,
+    store: Mutex<SqliteJobStore>,
+    _owner: fs::File,
+    pub(crate) meeting_manager: Arc<Mutex<crate::meeting::MeetingManager>>,
     models: Mutex<Arc<dyn ImportModels>>,
     prepare: Mutex<Arc<dyn AudioPrep>>,
     meeting: Mutex<Option<JobId>>,
     issues: Mutex<Vec<String>>,
-    default_language: Mutex<String>,
     data_dir: PathBuf,
 }
 
@@ -196,26 +142,65 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        Self::with_directory(Box::new(MemoryJobs::default()))
+    pub fn open(root: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_legacy(root, None)
     }
 
-    pub fn with_directory(directory: Box<dyn JobDirectory + Send>) -> Self {
-        let data_dir = std::env::temp_dir().join(format!("speakerdesk-{}", random_hex(8)));
-        let _ = fs::create_dir_all(&data_dir);
-        Self {
+    pub fn open_with_legacy(
+        root: impl AsRef<Path>,
+        legacy_db: Option<&Path>,
+    ) -> Result<Self, StoreError> {
+        fs::create_dir_all(root.as_ref()).map_err(|e| StoreError::message(e.to_string()))?;
+        let data_dir = fs::canonicalize(root).map_err(|e| StoreError::message(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))
+                .map_err(|e| StoreError::message(e.to_string()))?;
+        }
+        let owner = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(data_dir.join("native.lock"))
+            .map_err(|e| StoreError::message(e.to_string()))?;
+        owner
+            .try_lock()
+            .map_err(|e| StoreError::message(format!("Cannot own native storage: {e}")))?;
+        let database = data_dir.join("speakerdesk.sqlite");
+        if let Some(legacy_db) = legacy_db {
+            speakerdesk_core::store::import_legacy(legacy_db, &database)?;
+        }
+        let mut store = SqliteJobStore::open(database)?;
+        store.recover(ACTIVE)?;
+        Ok(Self {
             token: Arc::from(random_hex(32)),
             shared: Arc::new(Shared {
-                directory: Mutex::new(directory),
+                store: Mutex::new(store),
+                _owner: owner,
+                meeting_manager: Arc::new(Mutex::new(crate::meeting::MeetingManager::new())),
                 models: Mutex::new(Arc::new(UnavailableModels)),
                 prepare: Mutex::new(Arc::new(WavPrepare)),
                 meeting: Mutex::new(None),
                 issues: Mutex::new(default_issues()),
-                default_language: Mutex::new(languages::AUTOMATIC.to_string()),
                 data_dir,
             }),
             worker: Arc::new(JobWorker::new()),
-        }
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new() -> Self {
+        Self::open(std::env::temp_dir().join(format!("speakerdesk-{}", random_hex(8)))).unwrap()
+    }
+
+    pub(crate) fn store(&self) -> std::sync::MutexGuard<'_, SqliteJobStore> {
+        self.shared.store.lock().expect("store")
+    }
+
+    pub(crate) fn meeting_manager(&self) -> Arc<Mutex<crate::meeting::MeetingManager>> {
+        Arc::clone(&self.shared.meeting_manager)
     }
 
     pub fn token(&self) -> &str {
@@ -232,10 +217,10 @@ impl AppState {
 
     pub fn insert_job(&self, job: Job) {
         self.shared
-            .directory
+            .store
             .lock()
             .expect("jobs")
-            .put(&job)
+            .put(&job, None)
             .expect("insert job");
     }
 
@@ -249,22 +234,6 @@ impl AppState {
 
     pub fn set_models(&self, models: Arc<dyn ImportModels>) {
         *self.shared.models.lock().expect("models") = models;
-    }
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Placeholder kept for the people and meeting route agents.
-#[derive(Debug, Default)]
-pub struct Routes;
-
-impl Routes {
-    pub fn new() -> Self {
-        Self
     }
 }
 
@@ -309,28 +278,32 @@ async fn guard(State(app): State<AppState>, request: Request, next: Next) -> Res
 }
 
 async fn config(State(app): State<AppState>) -> Response {
-    let issues = app.shared.issues.lock().expect("issues").clone();
-    let default_language = app
-        .shared
-        .default_language
-        .lock()
-        .expect("language")
-        .clone();
-    Json(json!({
-        "languages": language_choices(),
-        "default_language": default_language,
-        "readiness": readiness_json(&issues),
-        "decoder": decoder_name(),
-    }))
-    .into_response()
+    blocking(move || {
+        let issues = app.shared.issues.lock().expect("issues").clone();
+        let default_language = match app.store().preference("default_language") {
+            Ok(value) => value.unwrap_or_else(|| languages::AUTOMATIC.to_string()),
+            Err(error) => return store_failure(&error),
+        };
+        Json(json!({
+            "languages": language_choices(),
+            "default_language": default_language,
+            "readiness": readiness_json(&issues),
+            "decoder": decoder_name(),
+        }))
+        .into_response()
+    })
+    .await
 }
 
 async fn list_jobs(State(app): State<AppState>) -> Response {
-    let mut directory = app.shared.directory.lock().expect("jobs");
-    match directory.summaries() {
-        Ok(summaries) => Json(summaries).into_response(),
-        Err(error) => store_failure(&error),
-    }
+    blocking(move || {
+        let directory = app.shared.store.lock().expect("jobs");
+        match directory.summaries() {
+            Ok(summaries) => Json(summaries).into_response(),
+            Err(error) => store_failure(&error),
+        }
+    })
+    .await
 }
 
 async fn create_jobs(State(app): State<AppState>, request: Request) -> Response {
@@ -365,7 +338,7 @@ async fn create_jobs(State(app): State<AppState>, request: Request) -> Response 
             _ => {}
         }
     }
-    match accept_uploads(&app, &language, files) {
+    blocking(move || match accept_uploads(&app, &language, files) {
         Ok(created) => {
             for job in &created {
                 let shared = Arc::clone(&app.shared);
@@ -379,7 +352,8 @@ async fn create_jobs(State(app): State<AppState>, request: Request) -> Response 
                 .into_response()
         }
         Err(error) => from_api(error),
-    }
+    })
+    .await
 }
 
 async fn job_detail(
@@ -387,46 +361,49 @@ async fn job_detail(
     AxumPath(jid): AxumPath<String>,
     Query(query): Query<DetailQuery>,
 ) -> Response {
-    let known = match query.known_revision.as_deref() {
-        Some(raw) => match parse_known_revision(raw) {
-            Ok(value) => Some(value),
-            Err(()) => {
-                return error_response(StatusCode::BAD_REQUEST, messages::KNOWN_REVISION);
+    blocking(move || {
+        let known = match query.known_revision.as_deref() {
+            Some(raw) => match parse_known_revision(raw) {
+                Ok(value) => Some(value),
+                Err(()) => {
+                    return error_response(StatusCode::BAD_REQUEST, messages::KNOWN_REVISION);
+                }
+            },
+            None => None,
+        };
+        let id = match require_job_id(&jid) {
+            Ok(id) => id,
+            Err(error) => return from_api(error),
+        };
+        let directory = app.shared.store.lock().expect("jobs");
+        let metadata = known.is_some();
+        let job = match load_job(&directory, &id, metadata) {
+            Ok(job) => job,
+            Err(error) => return from_api(error),
+        };
+        let (job, unchanged) = if let Some(known) = known {
+            let unchanged = known == i128::from(job.revision);
+            if unchanged {
+                (job, Some(true))
+            } else {
+                match load_job(&directory, &id, false) {
+                    Ok(full) => (full, Some(false)),
+                    Err(error) => return from_api(error),
+                }
             }
-        },
-        None => None,
-    };
-    let id = match require_job_id(&jid) {
-        Ok(id) => id,
-        Err(error) => return from_api(error),
-    };
-    let mut directory = app.shared.directory.lock().expect("jobs");
-    let metadata = known.is_some();
-    let job = match load_job(&mut **directory, &id, metadata) {
-        Ok(job) => job,
-        Err(error) => return from_api(error),
-    };
-    let (job, unchanged) = if let Some(known) = known {
-        let unchanged = known == i128::from(job.revision);
-        if unchanged {
-            (job, Some(true))
         } else {
-            match load_job(&mut **directory, &id, false) {
-                Ok(full) => (full, Some(false)),
-                Err(error) => return from_api(error),
-            }
-        }
-    } else {
-        (job, None)
-    };
-    let owned = meeting_id(&app.shared).as_ref() == Some(&id);
-    Json(detail_json(
-        &job,
-        known.is_some() && unchanged == Some(true),
-        unchanged,
-        owned,
-    ))
-    .into_response()
+            (job, None)
+        };
+        let owned = meeting_id(&app.shared).as_ref() == Some(&id);
+        Json(detail_json(
+            &job,
+            known.is_some() && unchanged == Some(true),
+            unchanged,
+            owned,
+        ))
+        .into_response()
+    })
+    .await
 }
 
 async fn save_transcript(
@@ -434,54 +411,52 @@ async fn save_transcript(
     AxumPath(jid): AxumPath<String>,
     body: Bytes,
 ) -> Response {
-    let id = match require_job_id(&jid) {
-        Ok(id) => id,
-        Err(error) => return from_api(error),
-    };
-    let body = match json_body(&body) {
-        Ok(body) => body,
-        Err(error) => return from_api(error),
-    };
-    let mut directory = app.shared.directory.lock().expect("jobs");
-    let mut job = match load_job(&mut **directory, &id, false) {
-        Ok(job) => job,
-        Err(error) => return from_api(error),
-    };
-    let assignments = map_field(&job.extra, "speaker_assignments");
-    let checks = map_field(&job.extra, "voice_checks");
-    let outcome = match edit::save_transcript(SaveInput {
-        status: &job.status,
-        duration: job.duration,
-        revision: job.revision,
-        saved: job.document.as_ref(),
-        body: &body,
-        now: unix_now(),
-        speaker_assignments: &assignments,
-        voice_checks: &checks,
-    }) {
-        Ok(outcome) => outcome,
-        Err(error) => return from_api(error),
-    };
-    job.document = Some(outcome.document);
-    job.revision = outcome.revision;
-    job.status = outcome.status.to_string();
-    job.message = outcome.message.to_string();
-    job.extra.insert(
-        "speaker_assignments".to_string(),
-        Value::Object(outcome.speaker_assignments),
-    );
-    job.extra.insert(
-        "voice_checks".to_string(),
-        Value::Object(outcome.voice_checks),
-    );
-    if outcome.clear_voice_suggestions {
-        job.extra.remove("voice_suggestions");
-    }
-    job.updated = unix_now();
-    if let Err(error) = directory.put(&job) {
-        return store_failure(&error);
-    }
-    Json(stored_job_json(&job)).into_response()
+    blocking(move || {
+        let id = match require_job_id(&jid) {
+            Ok(id) => id,
+            Err(error) => return from_api(error),
+        };
+        let body = match json_body(&body) {
+            Ok(body) => body,
+            Err(error) => return from_api(error),
+        };
+        let result = app.store().update_job(&id, |job| {
+            let assignments = map_field(&job.extra, "speaker_assignments");
+            let checks = map_field(&job.extra, "voice_checks");
+            let outcome = edit::save_transcript(SaveInput {
+                status: &job.status,
+                duration: job.duration,
+                revision: job.revision,
+                saved: job.document.as_ref(),
+                body: &body,
+                now: unix_now(),
+                speaker_assignments: &assignments,
+                voice_checks: &checks,
+            })?;
+            job.document = Some(outcome.document);
+            job.revision = outcome.revision;
+            job.status = outcome.status.to_string();
+            job.message = outcome.message.to_string();
+            job.extra.insert(
+                "speaker_assignments".to_string(),
+                Value::Object(outcome.speaker_assignments),
+            );
+            job.extra.insert(
+                "voice_checks".to_string(),
+                Value::Object(outcome.voice_checks),
+            );
+            if outcome.clear_voice_suggestions {
+                job.extra.remove("voice_suggestions");
+            }
+            Ok::<_, ApiError>(())
+        });
+        match result {
+            Ok(Some((job, ()))) => Json(stored_job_json(&job)).into_response(),
+            Ok(None) => error_response(StatusCode::NOT_FOUND, NOT_FOUND),
+            Err(error) => from_api(error),
+        }
+    })
+    .await
 }
 
 async fn edit_passage(
@@ -489,133 +464,152 @@ async fn edit_passage(
     AxumPath((jid, sid)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Response {
-    let id = match require_job_id(&jid) {
-        Ok(id) => id,
-        Err(error) => return from_api(error),
-    };
-    let body = match json_body(&body) {
-        Ok(body) => body,
-        Err(error) => return from_api(error),
-    };
-    let mut directory = app.shared.directory.lock().expect("jobs");
-    let mut job = match load_job(&mut **directory, &id, false) {
-        Ok(job) => job,
-        Err(error) => return from_api(error),
-    };
-    let outcome = match edit::edit_passage(PassageEditInput {
-        status: &job.status,
-        duration: job.duration.unwrap_or(0.0),
-        revision: job.revision,
-        document: job.document.as_ref(),
-        segment_id: &sid,
-        body: &body,
-        now: unix_now(),
-    }) {
-        Ok(outcome) => outcome,
-        Err(error) => return from_api(error),
-    };
-    job.document = Some(outcome.document);
-    job.revision = outcome.revision;
-    job.updated = unix_now();
-    let segment = outcome.segment;
-    if let Err(error) = directory.put(&job) {
-        return store_failure(&error);
-    }
-    Json(json!({
-        "segment": segment,
-        "revision": outcome.revision,
-    }))
-    .into_response()
+    blocking(move || {
+        let id = match require_job_id(&jid) {
+            Ok(id) => id,
+            Err(error) => return from_api(error),
+        };
+        let body = match json_body(&body) {
+            Ok(body) => body,
+            Err(error) => return from_api(error),
+        };
+        let result = app.store().update_job(&id, |job| {
+            let outcome = edit::edit_passage(PassageEditInput {
+                status: &job.status,
+                duration: job.duration.unwrap_or(0.0),
+                revision: job.revision,
+                document: job.document.as_ref(),
+                segment_id: &sid,
+                body: &body,
+                now: unix_now(),
+            })?;
+            job.document = Some(outcome.document);
+            job.revision = outcome.revision;
+            Ok::<_, ApiError>(outcome.segment)
+        });
+        match result {
+            Ok(Some((job, segment))) => {
+                Json(json!({"segment": segment, "revision": job.revision})).into_response()
+            }
+            Ok(None) => error_response(StatusCode::NOT_FOUND, NOT_FOUND),
+            Err(error) => from_api(error),
+        }
+    })
+    .await
 }
 
 async fn export_job(
     State(app): State<AppState>,
     AxumPath((jid, kind)): AxumPath<(String, String)>,
 ) -> Response {
-    if !EXPORT_KINDS.contains(&kind.as_str()) {
-        return error_response(StatusCode::NOT_FOUND, NOT_FOUND);
-    }
-    let id = match require_job_id(&jid) {
-        Ok(id) => id,
-        Err(error) => return from_api(error),
-    };
-    let mut directory = app.shared.directory.lock().expect("jobs");
-    let job = match load_job(&mut **directory, &id, false) {
-        Ok(job) => job,
-        Err(error) => return from_api(error),
-    };
-    let Some(mut document) = job.document.clone() else {
-        return error_response(StatusCode::CONFLICT, messages::EXPORT_NEEDS_TRANSCRIPT);
-    };
-    if kind == "json"
-        && let Some(assignments) = job.extra.get("speaker_assignments")
-    {
-        document
-            .rest
-            .insert("speaker_assignments".to_string(), assignments.clone());
-    }
-    match export::export(&document, &kind) {
-        Ok(rendered) => export_response(rendered, download_name(&job.name, &kind)),
-        Err(_) => error_response(StatusCode::PAYLOAD_TOO_LARGE, messages::EXPORT_TOO_LARGE),
-    }
+    blocking(move || {
+        if !EXPORT_KINDS.contains(&kind.as_str()) {
+            return error_response(StatusCode::NOT_FOUND, NOT_FOUND);
+        }
+        let id = match require_job_id(&jid) {
+            Ok(id) => id,
+            Err(error) => return from_api(error),
+        };
+        let directory = app.shared.store.lock().expect("jobs");
+        let job = match load_job(&directory, &id, false) {
+            Ok(job) => job,
+            Err(error) => return from_api(error),
+        };
+        drop(directory);
+        let Some(mut document) = job.document.clone() else {
+            return error_response(StatusCode::CONFLICT, messages::EXPORT_NEEDS_TRANSCRIPT);
+        };
+        if kind == "json"
+            && let Some(assignments) = job.extra.get("speaker_assignments")
+        {
+            document
+                .rest
+                .insert("speaker_assignments".to_string(), assignments.clone());
+        }
+        match export::export(&document, &kind) {
+            Ok(rendered) => export_response(rendered, download_name(&job.name, &kind)),
+            Err(_) => error_response(StatusCode::PAYLOAD_TOO_LARGE, messages::EXPORT_TOO_LARGE),
+        }
+    })
+    .await
 }
 
 async fn delete_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -> Response {
-    let id = match require_job_id(&jid) {
-        Ok(id) => id,
-        Err(error) => return from_api(error),
-    };
-    let mut directory = app.shared.directory.lock().expect("jobs");
-    let job = match load_job(&mut **directory, &id, false) {
-        Ok(job) => job,
-        Err(error) => return from_api(error),
-    };
-    if ACTIVE.contains(&job.status.as_str()) || meeting_id(&app.shared).as_ref() == Some(&id) {
-        return error_response(StatusCode::CONFLICT, messages::DELETE_BUSY);
-    }
-    if let Err(error) = directory.delete(&id) {
-        return store_failure(&error);
-    }
-    drop(directory);
-    remove_job_dir(&app.shared.data_dir, &id);
-    Json(json!({ "deleted": true })).into_response()
+    blocking(move || {
+        let id = match require_job_id(&jid) {
+            Ok(id) => id,
+            Err(error) => return from_api(error),
+        };
+        let mut directory = app.shared.store.lock().expect("jobs");
+        let job = match load_job(&directory, &id, false) {
+            Ok(job) => job,
+            Err(error) => return from_api(error),
+        };
+        if ACTIVE.contains(&job.status.as_str()) || meeting_id(&app.shared).as_ref() == Some(&id) {
+            return error_response(StatusCode::CONFLICT, messages::DELETE_BUSY);
+        }
+        if let Err(error) = directory.delete(&id) {
+            return store_failure(&error);
+        }
+        drop(directory);
+        let folder = media_write_directory(&app.shared.data_dir, &job);
+        if let Err(error) = fs::remove_dir_all(&folder)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "deleted job left native media for cleanup");
+        }
+        Json(json!({ "deleted": true })).into_response()
+    })
+    .await
 }
 
 async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -> Response {
-    let id = match require_job_id(&jid) {
-        Ok(id) => id,
-        Err(error) => return from_api(error),
-    };
-    let mut directory = app.shared.directory.lock().expect("jobs");
-    let mut job = match load_job(&mut **directory, &id, false) {
-        Ok(job) => job,
-        Err(error) => return from_api(error),
-    };
-    if ACTIVE.contains(&job.status.as_str()) {
-        return error_response(StatusCode::CONFLICT, messages::JOB_ALREADY_RUNNING);
-    }
-    if has_segments(&job) {
-        return error_response(StatusCode::CONFLICT, messages::RERUN_WOULD_OVERWRITE);
-    }
-    if meeting_id(&app.shared).is_some() {
-        return error_response(StatusCode::CONFLICT, messages::FINISH_MEETING_BEFORE_IMPORT);
-    }
-    let issues = app.shared.issues.lock().expect("issues").clone();
-    if !issues.is_empty() {
-        return error_response(StatusCode::CONFLICT, &issues.join(" "));
-    }
-    job.status = "queued".to_string();
-    job.message = WAITING_FOR_INFERENCE.to_string();
-    job.updated = unix_now();
-    if let Err(error) = directory.put(&job) {
-        return store_failure(&error);
-    }
-    drop(directory);
-    let body = stored_job_json(&job);
-    let shared = Arc::clone(&app.shared);
-    let queued = id.clone();
-    app.worker.enqueue(move || execute_import(&shared, &queued));
-    (StatusCode::ACCEPTED, Json(body)).into_response()
+    blocking(move || {
+        let id = match require_job_id(&jid) {
+            Ok(id) => id,
+            Err(error) => return from_api(error),
+        };
+        let mut directory = app.shared.store.lock().expect("jobs");
+        let mut job = match load_job(&directory, &id, false) {
+            Ok(job) => job,
+            Err(error) => return from_api(error),
+        };
+        if ACTIVE.contains(&job.status.as_str()) {
+            return error_response(StatusCode::CONFLICT, messages::JOB_ALREADY_RUNNING);
+        }
+        if has_segments(&job) {
+            return error_response(StatusCode::CONFLICT, messages::RERUN_WOULD_OVERWRITE);
+        }
+        if meeting_id(&app.shared).is_some() {
+            return error_response(StatusCode::CONFLICT, messages::FINISH_MEETING_BEFORE_IMPORT);
+        }
+        let issues = app.shared.issues.lock().expect("issues").clone();
+        if !issues.is_empty() {
+            return error_response(StatusCode::CONFLICT, &issues.join(" "));
+        }
+        let generation = job
+            .extra
+            .get("operation_generation")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            + 1;
+        job.extra
+            .insert("operation_generation".into(), json!(generation));
+        job.status = "queued".to_string();
+        job.message = WAITING_FOR_INFERENCE.to_string();
+        job.updated = unix_now();
+        if let Err(error) = directory.put(&job, None) {
+            return store_failure(&error);
+        }
+        drop(directory);
+        let body = stored_job_json(&job);
+        let shared = Arc::clone(&app.shared);
+        let queued = id.clone();
+        app.worker
+            .enqueue(move || execute_import(&shared, &queued, generation));
+        (StatusCode::ACCEPTED, Json(body)).into_response()
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -647,14 +641,6 @@ fn accept_uploads(
         }
         uploads.push(Upload { filename, bytes });
     }
-    let mut directory = app.shared.directory.lock().expect("jobs");
-    let active = match directory.count_status(ACTIVE) {
-        Ok(active) => active,
-        Err(error) => return Err(store_error(&error)),
-    };
-    if active.saturating_add(uploads.len() as u64) > limits::MAX_BATCH_FILES as u64 {
-        return Err(ApiError::new(429, messages::QUEUE_FULL));
-    }
     let created_at = unix_now();
     let mut created = Vec::with_capacity(uploads.len());
     let mut staged = Vec::new();
@@ -662,17 +648,17 @@ fn accept_uploads(
         let id = match new_job_id() {
             Ok(id) => id,
             Err(error) => {
-                rollback(&mut **directory, &app.shared.data_dir, &staged);
+                remove_staged(&app.shared.data_dir, &staged);
                 return Err(store_error(&error));
             }
         };
         let suffix = path_suffix(&upload.filename);
+        staged.push(id.clone());
         if let Err(error) = write_source(&app.shared.data_dir, &id, &suffix, &upload.bytes) {
-            rollback(&mut **directory, &app.shared.data_dir, &staged);
+            remove_staged(&app.shared.data_dir, &staged);
             tracing::error!(%error, "could not store an upload");
             return Err(ApiError::new(500, messages::LOCAL_OPERATION_FAILED));
         }
-        staged.push(id.clone());
         let name = secure_filename(&upload.filename);
         let job = Job {
             id,
@@ -693,18 +679,27 @@ fn accept_uploads(
             document: None,
             extra: Map::new(),
         };
-        if let Err(error) = directory.put(&job) {
-            rollback(&mut **directory, &app.shared.data_dir, &staged);
-            return Err(store_error(&error));
-        }
         created.push(job);
     }
-    Ok(created)
+    let result = app
+        .store()
+        .insert_uploads(&created, ACTIVE, limits::MAX_BATCH_FILES as u64);
+    match result {
+        Ok(true) => Ok(created),
+        Ok(false) => {
+            remove_staged(&app.shared.data_dir, &staged);
+            Err(ApiError::new(429, messages::QUEUE_FULL))
+        }
+        Err(error) => {
+            remove_staged(&app.shared.data_dir, &staged);
+            Err(store_error(&error))
+        }
+    }
 }
 
 fn prepare_job(shared: &Shared, id: &JobId) {
     let job = {
-        let mut directory = shared.directory.lock().expect("jobs");
+        let directory = shared.store.lock().expect("jobs");
         match directory.get(id, false) {
             Ok(Some(job)) => job,
             _ => return,
@@ -712,7 +707,7 @@ fn prepare_job(shared: &Shared, id: &JobId) {
     };
     let prepare = Arc::clone(&*shared.prepare.lock().expect("prepare"));
     let result = prepare.prepare(&shared.data_dir, &job);
-    let mut directory = shared.directory.lock().expect("jobs");
+    let mut directory = shared.store.lock().expect("jobs");
     let Ok(Some(mut job)) = directory.get(id, false) else {
         return;
     };
@@ -728,15 +723,20 @@ fn prepare_job(shared: &Shared, id: &JobId) {
         }
     }
     job.updated = unix_now();
-    let _ = directory.put(&job);
+    let _ = directory.put(&job, None);
 }
 
-fn execute_import(shared: &Shared, id: &JobId) {
+fn execute_import(shared: &Shared, id: &JobId, generation: u64) {
+    let current = shared.store.lock().expect("store").get(id, false);
+    if !matches!(current, Ok(Some(ref job)) if job.status == "queued" && job.extra.get("operation_generation").and_then(Value::as_u64) == Some(generation))
+    {
+        return;
+    }
     if !audio_ready(shared, id) {
         return;
     }
     {
-        let mut directory = shared.directory.lock().expect("jobs");
+        let mut directory = shared.store.lock().expect("jobs");
         let Ok(Some(mut job)) = directory.get(id, false) else {
             return;
         };
@@ -746,52 +746,64 @@ fn execute_import(shared: &Shared, id: &JobId) {
         job.status = "processing".to_string();
         job.message = STARTING_INFERENCE.to_string();
         job.updated = unix_now();
-        if directory.put(&job).is_err() {
+        if directory.put(&job, None).is_err() {
             return;
         }
     }
     let job = {
-        let mut directory = shared.directory.lock().expect("jobs");
+        let directory = shared.store.lock().expect("jobs");
         match directory.get(id, false) {
             Ok(Some(job)) => job,
             _ => return,
         }
     };
     let models = Arc::clone(&*shared.models.lock().expect("models"));
-    let inferred = models.infer(&job);
-    let mut directory = shared.directory.lock().expect("jobs");
-    let Ok(Some(mut job)) = directory.get(id, false) else {
-        return;
-    };
-    match inferred {
-        Ok(document) => match checked_document(document, job.duration.unwrap_or(0.0)) {
-            Ok(document) => {
-                job.document = Some(document);
-                job.revision += 1;
-                job.status = "ready".to_string();
-                job.message = messages::TRANSCRIPT_READY.to_string();
+    let inferred = models
+        .infer(&job)
+        .and_then(|document| checked_document(document, job.duration.unwrap_or(0.0)));
+    let result = shared
+        .store
+        .lock()
+        .expect("store")
+        .update_job(id, |current| {
+            if current.status != "processing"
+                || current.revision != job.revision
+                || current
+                    .extra
+                    .get("operation_generation")
+                    .and_then(Value::as_u64)
+                    != Some(generation)
+            {
+                return Err(ApiError::new(
+                    409,
+                    "The inference operation is no longer current.",
+                ));
             }
-            Err(message) => {
-                job.status = "failed".to_string();
-                job.message = message;
+            match inferred {
+                Ok(document) => {
+                    current.document = Some(document);
+                    current.status = "ready".into();
+                    current.message = messages::TRANSCRIPT_READY.into();
+                }
+                Err(message) => {
+                    current.status = "failed".into();
+                    current.message = if message.is_empty() {
+                        messages::PROCESSING_FAILED.into()
+                    } else {
+                        message
+                    };
+                }
             }
-        },
-        Err(message) => {
-            job.status = "failed".to_string();
-            job.message = if message.is_empty() {
-                messages::PROCESSING_FAILED.to_string()
-            } else {
-                message
-            };
-        }
+            Ok::<_, ApiError>(())
+        });
+    if let Err(error) = result {
+        tracing::warn!(message = %error.message, "import result was not published");
     }
-    job.updated = unix_now();
-    let _ = directory.put(&job);
 }
 
 fn audio_ready(shared: &Shared, id: &JobId) -> bool {
     let missing = {
-        let mut directory = shared.directory.lock().expect("jobs");
+        let directory = shared.store.lock().expect("jobs");
         match directory.get(id, false) {
             Ok(Some(job)) => duration_missing(job.duration),
             _ => return false,
@@ -800,7 +812,7 @@ fn audio_ready(shared: &Shared, id: &JobId) -> bool {
     if missing {
         prepare_job(shared, id);
     }
-    let mut directory = shared.directory.lock().expect("jobs");
+    let directory = shared.store.lock().expect("jobs");
     match directory.get(id, false) {
         Ok(Some(job)) => job.status != "failed" && !duration_missing(job.duration),
         _ => false,
@@ -822,7 +834,7 @@ fn has_segments(job: &Job) -> bool {
         .is_some_and(|document| !document.segments.is_empty())
 }
 
-fn load_job(directory: &mut dyn JobDirectory, id: &JobId, metadata: bool) -> Result<Job, ApiError> {
+fn load_job(directory: &SqliteJobStore, id: &JobId, metadata: bool) -> Result<Job, ApiError> {
     match directory.get(id, metadata) {
         Ok(Some(job)) => Ok(job),
         Ok(None) => Err(ApiError::new(404, NOT_FOUND)),
@@ -838,11 +850,30 @@ fn meeting_id(shared: &Shared) -> Option<JobId> {
     shared.meeting.lock().expect("meeting").clone()
 }
 
-fn rollback(directory: &mut dyn JobDirectory, root: &Path, ids: &[JobId]) {
+fn remove_staged(root: &Path, ids: &[JobId]) {
     for id in ids {
-        let _ = directory.delete(id);
         remove_job_dir(root, id);
     }
+}
+
+fn media_write_directory(root: &Path, job: &Job) -> PathBuf {
+    if job.extra.contains_key("legacy_media_root") {
+        root.join("derived").join(job.id.as_str())
+    } else {
+        root.join(job.id.as_str())
+    }
+}
+
+fn confined_file(root: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let root = root.canonicalize()?;
+    let path = root.join(name).canonicalize()?;
+    if !path.starts_with(&root) || !path.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Audio path escapes its recording directory",
+        ));
+    }
+    Ok(path)
 }
 
 fn write_source(root: &Path, id: &JobId, suffix: &str, bytes: &[u8]) -> std::io::Result<()> {
@@ -863,7 +894,7 @@ fn remove_job_dir(root: &Path, id: &JobId) {
     }
 }
 
-fn stored_job_json(job: &Job) -> Value {
+pub(crate) fn stored_job_json(job: &Job) -> Value {
     let mut view = job.clone();
     for key in PRIVATE_FIELDS {
         view.extra.remove(*key);
@@ -886,22 +917,6 @@ fn detail_json(job: &Job, metadata: bool, unchanged: Option<bool>, owned: bool) 
     }
     value["inference_owned"] = Value::Bool(owned);
     value
-}
-
-fn summary_of(job: Job) -> JobSummary {
-    JobSummary {
-        id: job.id,
-        name: job.name,
-        kind: Some(job.kind),
-        source_file: job.source_file,
-        created: job.created,
-        updated: job.updated,
-        status: job.status,
-        message: Some(job.message),
-        language: Some(job.language),
-        duration: job.duration,
-        revision: Some(job.revision),
-    }
 }
 
 fn map_field(extra: &Map<String, Value>, key: &str) -> Map<String, Value> {
@@ -1128,8 +1143,21 @@ fn random_hex(bytes: usize) -> String {
     hex
 }
 
+pub(crate) async fn blocking(work: impl FnOnce() -> Response + Send + 'static) -> Response {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "host operation failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                messages::LOCAL_OPERATION_FAILED,
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
+    use speakerdesk_core::store::JobStore;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
@@ -1348,9 +1376,103 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fresh_native_storage_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let state = AppState::new();
+        assert_eq!(
+            std::fs::metadata(state.data_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[tokio::test]
+    async fn migrated_audio_is_read_only_and_delete_keeps_rollback_media() {
+        let state = AppState::new();
+        let root = state.data_dir().to_path_buf();
+        let id = JobId::parse(JOB_A).unwrap();
+        let folder = root.join(JOB_A);
+        std::fs::create_dir_all(&folder).unwrap();
+        let audio = tiny_wav();
+        std::fs::write(folder.join("source.wav"), &audio).unwrap();
+        std::fs::write(folder.join("audio.wav"), &audio).unwrap();
+        let mut stored = job(JOB_A, "ready", 1.0);
+        stored.extra.insert("legacy_media_root".into(), json!(root));
+        super::AudioPrep::prepare(&super::WavPrepare, &root, &stored).unwrap();
+        assert!(root.join("derived").join(JOB_A).join("audio.wav").is_file());
+        assert_eq!(std::fs::read(folder.join("audio.wav")).unwrap(), audio);
+        state.insert_job(stored);
+        let running = Running::spawn(state.clone()).await;
+        let deleted = running
+            .authed(
+                running
+                    .client
+                    .delete(running.url(&format!("/api/jobs/{id}"))),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), 200);
+        assert_eq!(std::fs::read(folder.join("audio.wav")).unwrap(), audio);
+        assert_eq!(std::fs::read(folder.join("source.wav")).unwrap(), audio);
+        assert!(!root.join("derived").join(JOB_A).exists());
+        running.shutdown().await;
+    }
+
+    #[test]
+    fn late_import_results_cannot_replace_edits_or_new_operations() {
+        for invalidate in [false, true] {
+            let state = AppState::new();
+            let mut stored = job(JOB_A, "queued", 1.0);
+            stored.document = None;
+            stored.extra.insert("operation_generation".into(), json!(1));
+            let id = stored.id.clone();
+            state.insert_job(stored);
+            let entered = Arc::new(AtomicUsize::new(0));
+            let release = Arc::new((Mutex::new(false), Condvar::new()));
+            state.set_models(Arc::new(GateModels {
+                entered: entered.clone(),
+                release: release.clone(),
+                document: document("Late model words", 0),
+            }));
+            let shared = state.shared.clone();
+            let thread = std::thread::spawn(move || super::execute_import(&shared, &id, 1));
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while entered.load(Ordering::SeqCst) == 0 {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let id = JobId::parse(JOB_A).unwrap();
+            state
+                .store()
+                .update_job(&id, |job| {
+                    job.document = Some(document("Protected correction", 1));
+                    if invalidate {
+                        job.extra.insert("operation_generation".into(), json!(2));
+                    }
+                    Ok::<_, speakerdesk_core::error::StoreError>(())
+                })
+                .unwrap();
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            thread.join().unwrap();
+            let saved = state.store().get(&id, false).unwrap().unwrap();
+            assert_eq!(
+                saved.document.unwrap().segments[0].text,
+                "Protected correction"
+            );
+            assert_eq!(saved.revision, 8);
+        }
+    }
+
     #[tokio::test]
     async fn http_router_serves_config_with_security_headers() {
-        let app = crate::http::router();
+        let app = crate::http::router(AppState::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (shutdown, signal) = tokio::sync::oneshot::channel();

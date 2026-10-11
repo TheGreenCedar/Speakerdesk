@@ -92,6 +92,10 @@ pub struct People {
 }
 
 impl People {
+    pub(crate) fn from_stored(entries: Vec<Person>) -> Self {
+        Self { entries }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

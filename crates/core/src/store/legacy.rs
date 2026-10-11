@@ -9,25 +9,113 @@ use super::sqlite::{insert_job, prepare_connection, unix_time};
 use crate::document::Job;
 use crate::error::StoreError;
 
-/// One-way import into a new database. The legacy file is opened read-only.
-/// A failed import deletes only the `*.partial` file and its sidecars.
+/// Import a consistent legacy snapshot; never recover or write the original.
 pub fn import_legacy(legacy_db: &Path, destination: &Path) -> Result<(), StoreError> {
     if destination.exists() {
-        return Err(StoreError::message(format!(
-            "Destination already exists: {}",
-            destination.display()
-        )));
+        return validate_native(destination);
     }
-    let dump = read_legacy(legacy_db)?;
     let partial = partial_path(destination)?;
+    let snapshot = sidecar(&partial, ".snapshot");
+    let result = (|| {
+        snapshot_legacy(legacy_db, &snapshot)?;
+        let mut dump =
+            read_legacy(&snapshot).map_err(|e| schema_error(legacy_db, &e.to_string()))?;
+        let legacy_root = std::fs::canonicalize(legacy_db).map_err(io_error)?;
+        let legacy_root = legacy_root
+            .parent()
+            .ok_or_else(|| StoreError::message("Legacy storage has no parent"))?;
+        for job in &mut dump.jobs {
+            job.extra.insert(
+                "legacy_media_root".into(),
+                Value::String(legacy_root.to_string_lossy().into_owned()),
+            );
+        }
+        write_dump(&partial, legacy_db, &dump)?;
+        publish(&partial, destination)
+    })();
+    remove_sqlite_family(&snapshot);
     remove_sqlite_family(&partial);
-    if let Err(err) =
-        write_dump(&partial, legacy_db, &dump).and_then(|()| publish(&partial, destination))
-    {
-        remove_sqlite_family(&partial);
-        return Err(err);
+    result
+}
+
+fn validate_native(path: &Path) -> Result<(), StoreError> {
+    let conn = open_readonly(path)?;
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let integrity: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    conn.prepare("SELECT id,document,revision FROM jobs LIMIT 0")?;
+    if version < 1 || integrity != "ok" {
+        return Err(StoreError::message(
+            "Existing native database is invalid; it was not replaced.",
+        ));
     }
     Ok(())
+}
+
+fn snapshot_legacy(source: &Path, snapshot: &Path) -> Result<(), StoreError> {
+    let copied = {
+        let connection = open_readonly(source)?;
+        connection.backup(rusqlite::MAIN_DB, snapshot, None)
+    };
+    match copied {
+        Ok(()) => Ok(()),
+        Err(error) if sidecar(source, "-journal").exists() => {
+            remove_sqlite_family(snapshot);
+            recover_rollback_copy(source, snapshot).map_err(|e| {
+                StoreError::message(format!(
+                    "Stop the legacy app before migrating: {error}; {e}"
+                ))
+            })
+        }
+        Err(error) => Err(schema_error(source, &error.to_string())),
+    }
+}
+
+#[cfg(unix)]
+fn recover_rollback_copy(source: &Path, snapshot: &Path) -> Result<(), StoreError> {
+    use std::os::fd::AsRawFd;
+    let mut source_file = std::fs::File::open(source).map_err(io_error)?;
+    // SQLite's pending/reserved/shared byte range excludes rollback writers.
+    let lock = libc::flock {
+        l_start: 0x40000000,
+        l_len: 512,
+        l_pid: 0,
+        l_type: libc::F_RDLCK as _,
+        l_whence: libc::SEEK_SET as _,
+    };
+    if unsafe { libc::fcntl(source_file.as_raw_fd(), libc::F_SETLK, &lock) } == -1 {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    // WAL writers use different locks. A normal WAL snapshot uses SQLite Backup above.
+    if sidecar(source, "-wal").exists() {
+        return Err(StoreError::message(
+            "Legacy WAL is still present; close its writer before recovery.",
+        ));
+    }
+    let mut copy = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(snapshot)
+        .map_err(io_error)?;
+    std::io::copy(&mut source_file, &mut copy).map_err(io_error)?;
+    std::fs::copy(sidecar(source, "-journal"), sidecar(snapshot, "-journal")).map_err(io_error)?;
+    drop(copy);
+    drop(source_file);
+    // Opening only this owned copy read/write lets SQLite roll back the journal.
+    let recovered = Connection::open(snapshot)?;
+    recovered.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    recovered
+        .close()
+        .map_err(|(_, error)| StoreError::from(error))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn recover_rollback_copy(_source: &Path, _snapshot: &Path) -> Result<(), StoreError> {
+    Err(StoreError::message(
+        "Stopped-writer journal recovery is currently supported on macOS only.",
+    ))
 }
 
 struct LegacyDump {
@@ -60,7 +148,7 @@ struct VoiceRow {
     artifact_sha256: String,
     dimension: i64,
     centroid: Vec<u8>,
-    profile_version: i64,
+    profile_version: String,
     consented_at: Option<f64>,
     enrollment: String,
 }
@@ -418,7 +506,11 @@ fn parse_voice(path: &Path, person_id: &str, payload: &str) -> Result<VoiceRow, 
         artifact_sha256,
         dimension,
         centroid,
-        profile_version: object.get("version").and_then(Value::as_i64).unwrap_or(1),
+        profile_version: match object.get("version") {
+            Some(Value::String(value)) if !value.is_empty() => value.clone(),
+            Some(Value::Number(value)) => value.to_string(),
+            _ => return Err(schema_error(path, "voice profile version")),
+        },
         consented_at: object.get("enrolled_at").and_then(Value::as_f64),
         enrollment: payload.to_string(),
     })
@@ -536,7 +628,7 @@ impl LegacyDump {
 fn publish(partial: &Path, destination: &Path) -> Result<(), StoreError> {
     fsync_file(partial)?;
     remove_sidecars(partial);
-    std::fs::rename(partial, destination).map_err(|err| {
+    std::fs::hard_link(partial, destination).map_err(|err| {
         StoreError::message(format!(
             "Could not publish imported database {}: {err}",
             destination.display()
@@ -546,7 +638,7 @@ fn publish(partial: &Path, destination: &Path) -> Result<(), StoreError> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        let _ = fsync_dir(parent);
+        fsync_dir(parent)?;
     }
     Ok(())
 }
@@ -564,7 +656,7 @@ fn partial_path(destination: &Path) -> Result<PathBuf, StoreError> {
         )));
     };
     let mut partial_name = name.to_os_string();
-    partial_name.push(".partial");
+    partial_name.push(format!(".{}.partial", uuid::Uuid::new_v4()));
     Ok(destination.with_file_name(partial_name))
 }
 
@@ -582,6 +674,7 @@ fn remove_sidecars(path: &Path) {
 fn remove_sqlite_family(path: &Path) {
     let _ = std::fs::remove_file(path);
     remove_sidecars(path);
+    let _ = std::fs::remove_file(sidecar(path, "-journal"));
 }
 
 fn fsync_file(path: &Path) -> Result<(), StoreError> {
@@ -613,7 +706,6 @@ mod tests {
 
     use rusqlite::params;
     use serde_json::json;
-    use sha2::{Digest, Sha256};
 
     use super::import_legacy;
     use crate::document::JobKind;
@@ -651,6 +743,114 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
         names
+    }
+
+    #[test]
+    fn legacy_writer_crash_fixture() {
+        let Some(path) = std::env::var_os("SPEAKERDESK_TEST_CRASH_DB") else {
+            return;
+        };
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("PRAGMA cache_size=5; CREATE TABLE jobs(id TEXT PRIMARY KEY, payload TEXT); CREATE TABLE padding(content BLOB);").unwrap();
+        conn.execute(
+            "INSERT INTO jobs VALUES(?1,?2)",
+            params![
+                JOB_ID,
+                json!({"id":JOB_ID,"name":"Kept","status":"ready","created":1.0,"updated":1.0})
+                    .to_string()
+            ],
+        )
+        .unwrap();
+        for _ in 0..64 {
+            conn.execute("INSERT INTO padding VALUES(randomblob(4096))", [])
+                .unwrap();
+        }
+        conn.execute_batch("BEGIN IMMEDIATE; UPDATE jobs SET payload='{}'; UPDATE padding SET content=randomblob(4096);").unwrap();
+        // Leave SQLite's rollback journal hot, without running Connection::drop.
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn recovers_a_hot_journal_on_a_private_copy() {
+        let dir = TempDir::new("hot-journal");
+        let legacy = dir.0.join("jobs.sqlite");
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "store::legacy::tests::legacy_writer_crash_fixture",
+                    "--nocapture"
+                ])
+                .env("SPEAKERDESK_TEST_CRASH_DB", &legacy)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let journal = super::sidecar(&legacy, "-journal");
+        let before = std::fs::read(&legacy).unwrap();
+        let before_journal = std::fs::read(&journal).unwrap();
+        assert!(!before_journal.is_empty());
+        let destination = dir.0.join("native.sqlite");
+        import_legacy(&legacy, &destination).unwrap();
+        assert_eq!(std::fs::read(&legacy).unwrap(), before);
+        assert_eq!(std::fs::read(&journal).unwrap(), before_journal);
+        let store = SqliteJobStore::open(&destination).unwrap();
+        assert_eq!(
+            store
+                .get(&JobId::parse(JOB_ID).unwrap(), false)
+                .unwrap()
+                .unwrap()
+                .name,
+            "Kept"
+        );
+    }
+
+    #[test]
+    fn existing_native_data_wins_and_publication_never_replaces() {
+        let dir = TempDir::new("publication");
+        let destination = dir.0.join("native.sqlite");
+        drop(SqliteJobStore::open(&destination).unwrap());
+        let before = std::fs::read(&destination).unwrap();
+        import_legacy(&dir.0.join("missing-legacy.sqlite"), &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), before);
+        let partial = dir.0.join("candidate.partial");
+        std::fs::write(&partial, b"unpublished").unwrap();
+        assert!(super::publish(&partial, &destination).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), before);
+        assert_eq!(std::fs::read(&partial).unwrap(), b"unpublished");
+    }
+
+    #[test]
+    fn snapshots_uncheckpointed_wal_without_changing_legacy_bytes() {
+        let dir = TempDir::new("wal");
+        let legacy = dir.0.join("jobs.sqlite");
+        let conn = rusqlite::Connection::open(&legacy).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE jobs(id TEXT PRIMARY KEY, payload TEXT);").unwrap();
+        conn.execute(
+            "INSERT INTO jobs VALUES(?1,?2)",
+            params![
+                JOB_ID,
+                json!({"id":JOB_ID,"name":"In WAL","status":"ready","created":1.0,"updated":1.0})
+                    .to_string()
+            ],
+        )
+        .unwrap();
+        let before = std::fs::read(&legacy).unwrap();
+        let wal = super::sidecar(&legacy, "-wal");
+        let before_wal = std::fs::read(&wal).unwrap();
+        let destination = dir.0.join("native.sqlite");
+        import_legacy(&legacy, &destination).unwrap();
+        assert_eq!(std::fs::read(&legacy).unwrap(), before);
+        assert_eq!(std::fs::read(&wal).unwrap(), before_wal);
+        let store = SqliteJobStore::open(&destination).unwrap();
+        assert_eq!(
+            store
+                .get(&JobId::parse(JOB_ID).unwrap(), false)
+                .unwrap()
+                .unwrap()
+                .name,
+            "In WAL"
+        );
     }
 
     #[test]
@@ -893,7 +1093,7 @@ mod tests {
             String,
             i64,
             Vec<u8>,
-            i64,
+            String,
             f64,
             String,
         ) = connection
@@ -915,7 +1115,7 @@ mod tests {
             .unwrap();
         assert_eq!(model_id, "redimnet");
         assert_eq!(dimension, 2);
-        assert_eq!(version, 1);
+        assert_eq!(version, "cccccccccccccccccccccccccccccccc");
         assert_eq!(consented_at, 10.5);
         assert!(enrollment.contains("explicit_remember_voice"));
         let mut expected = Vec::new();
@@ -931,7 +1131,7 @@ mod tests {
             )
             .unwrap();
         assert!(stored_path.contains("jobs.sqlite"));
-        assert_eq!(digest, hex::encode(Sha256::digest(&before)));
+        assert_eq!(digest.len(), 64); // Digest identifies the consistent SQLite snapshot.
         let counts: serde_json::Value = serde_json::from_str(&counts).unwrap();
         assert_eq!(counts["jobs"], 1);
         assert_eq!(counts["people"], 1);

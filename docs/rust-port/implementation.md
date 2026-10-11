@@ -15,8 +15,11 @@ Local implementation branch: `codex/python-free-mac`.
 1. Source repairs verified: updater/export/bundle/parser/readiness and truthful
    tests. Mac CI added; local full build remains blocked by missing Metal.
    Independent verifier architecture_capture found three issues, all corrected.
-2. Pending: one persistent application state, transactional publication, safe
-   migration and recording ownership; real child cancellation/reaping.
+2. In progress: data slice implemented and independently reviewed. Explicit-root
+   AppState uses SQLite for jobs, identities and preferences, immediate edit
+   transactions, guarded import publication, consistent migration snapshots,
+   private journal recovery and legacy audio copy-on-write. Process lifecycle,
+   operation cancellation and active meeting state integration remain pending.
 3. Pending: Silero, offline Nemotron and Cohere through the real desktop;
    edit/save/quit/reopen/export with a short public fixture and measured Metal.
 4. Pending: automatic language, CTC, native Core ML ReDimNet, identity and setup.
@@ -55,3 +58,23 @@ toolchain is available. Continue independent work; do not claim GPU acceptance.
 - New synthetic FLAC fixture independently round-trips through afconvert. Saved
   reading-turn receipts originate from the baseline Python validator. Neither
   fixture contains user recordings.
+
+## Data slice proof
+
+Core 128 and host 51 tests pass; Clippy denies warnings. Identity through the
+real router reaches ordinary GET/export, survives releasing and reopening the
+store, and stale saves conflict. Tests cover protected late publication, private
+response fields, exclusive native ownership and 0700 storage permissions.
+Migration tests retain original database/journal/WAL bytes, preserve profile
+version strings, recover a subprocess-created hot journal on a private copy,
+and prove existing native data wins and publication cannot replace a destination.
+Migrated audio normalization writes under native `derived/`; deleting its job
+keeps legacy audio. All these fixtures are synthetic/replays, not inference proof.
+The profile-version and hot-journal tests failed before their production fixes.
+Independent verifier architecture_capture found private response leakage and
+root permissions; both corrections are covered and verified in source.
+
+fs4 1.1 no longer provides file locks; storage ownership uses its standard-library
+successor, File::try_lock, available in the pinned Rust toolchain. Core ML, capture,
+process lifecycle, actual editor/model integration and the release gates remain
+open; data slice completion does not satisfy batch 2 or the replacement outcome.

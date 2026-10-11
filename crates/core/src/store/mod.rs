@@ -69,7 +69,18 @@ CREATE TABLE migrations (
 ";
 
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(SCHEMA_V1)])
+    Migrations::new(vec![M::up(SCHEMA_V1), M::up("
+ALTER TABLE voice_profiles RENAME TO old_voice_profiles;
+CREATE TABLE voice_profiles (
+ person_id TEXT PRIMARY KEY REFERENCES people(id) ON DELETE CASCADE,
+ model_id TEXT NOT NULL, revision TEXT NOT NULL, artifact_sha256 TEXT NOT NULL,
+ dimension INTEGER NOT NULL, centroid BLOB NOT NULL, profile_version TEXT NOT NULL,
+ consented_at REAL, enrollment TEXT NOT NULL
+);
+INSERT INTO voice_profiles SELECT person_id,model_id,revision,artifact_sha256,dimension,centroid,
+ COALESCE(json_extract(enrollment, '$.version'), CAST(profile_version AS TEXT)),consented_at,enrollment FROM old_voice_profiles;
+DROP TABLE old_voice_profiles;
+")])
 }
 
 pub fn apply_pragmas(connection: &Connection) -> Result<(), StoreError> {
@@ -110,7 +121,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         let tables: Vec<String> = connection
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()

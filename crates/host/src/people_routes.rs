@@ -1,16 +1,8 @@
-//! People, recognition, and meeting-identity routes for v0.6.6.
-//!
-//! [`AppState`](crate::routes::AppState) has no people table. Names, voice
-//! profiles, and the recognition preference stay in this module, keyed by the
-//! state's data directory. Identity routes load job documents from
-//! `identity-jobs/{id}.json` under that directory, then keep edits in memory.
-//! Suggestion text comes from [`speakerdesk_core::people`].
+//! People and identity routes share the application SQLite store.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
@@ -21,7 +13,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use serde_json::{Map, Value, json};
+use speakerdesk_core::error::StoreError;
 use speakerdesk_core::ids::JobId;
+use speakerdesk_core::store::{JobStore, SqliteJobStore};
 use speakerdesk_core::{messages, people, voice};
 
 use crate::routes::AppState;
@@ -56,54 +50,50 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-#[derive(Debug)]
 struct Catalog {
     people: people::People,
-    voices: voice::VoiceBook,
-    recognition_enabled: bool,
-    jobs: BTreeMap<String, Value>,
+    versions: BTreeMap<String, String>,
 }
 
-impl Default for Catalog {
-    fn default() -> Self {
-        Self {
-            people: people::People::default(),
-            voices: voice::VoiceBook::default(),
-            recognition_enabled: true,
-            jobs: BTreeMap::new(),
-        }
+impl Catalog {
+    fn load(store: &SqliteJobStore) -> Result<Self, HttpError> {
+        Ok(Self {
+            people: store.people()?,
+            versions: store.voice_versions()?,
+        })
     }
 }
 
-fn catalogs() -> &'static Mutex<BTreeMap<PathBuf, Catalog>> {
-    static CATALOGS: OnceLock<Mutex<BTreeMap<PathBuf, Catalog>>> = OnceLock::new();
-    CATALOGS.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-fn with_catalog<T>(app: &AppState, mutate: impl FnOnce(&mut Catalog, &Path) -> T) -> T {
-    let dir = app.data_dir().to_path_buf();
-    let mut guard = catalogs().lock().expect("people");
-    let catalog = guard.entry(dir.clone()).or_default();
-    mutate(catalog, &dir)
-}
-
-fn job_file(dir: &Path, jid: &str) -> PathBuf {
-    dir.join("identity-jobs").join(format!("{jid}.json"))
+async fn database(
+    app: AppState,
+    status: StatusCode,
+    work: impl FnOnce(&mut SqliteJobStore) -> Result<Value, HttpError> + Send + 'static,
+) -> Response {
+    crate::routes::blocking(move || match work(&mut app.store()) {
+        Ok(value) => (status, Json(value)).into_response(),
+        Err(error) => error.response(),
+    })
+    .await
 }
 
 async fn list_people(State(app): State<AppState>) -> Response {
-    Json(with_catalog(&app, |catalog, _dir| people_view(catalog))).into_response()
+    database(app, StatusCode::OK, |store| {
+        Ok(people_view(&Catalog::load(store)?))
+    })
+    .await
 }
 
 async fn create_person(State(app): State<AppState>, body: Bytes) -> Response {
-    let body = match json_object(&body) {
-        Ok(body) => body,
-        Err(error) => return error.response(),
-    };
-    match with_catalog(&app, |catalog, _dir| add_person(catalog, &body)) {
-        Ok(person) => (StatusCode::CREATED, Json(person)).into_response(),
-        Err(error) => error.response(),
-    }
+    database(app, StatusCode::CREATED, move |store| {
+        let body = json_object(&body)?;
+        let name = name_text(&body)?;
+        store.edit_person(|people| {
+            let person = people.create(name, unix_now()).map_err(from_people)?;
+            let value = person_json(&person);
+            Ok((person, value))
+        })
+    })
+    .await
 }
 
 async fn rename_person(
@@ -111,47 +101,55 @@ async fn rename_person(
     AxumPath(pid): AxumPath<String>,
     body: Bytes,
 ) -> Response {
-    let body = match json_object(&body) {
-        Ok(body) => body,
-        Err(error) => return error.response(),
-    };
-    match with_catalog(&app, |catalog, _dir| rename_in(catalog, &pid, &body)) {
-        Ok(person) => Json(person).into_response(),
-        Err(error) => error.response(),
-    }
+    database(app, StatusCode::OK, move |store| {
+        let body = json_object(&body)?;
+        let name = name_text(&body)?;
+        store.edit_person(|people| {
+            let person = people.rename(&pid, name, unix_now()).map_err(from_people)?;
+            let value = person_json(&person);
+            Ok((person, value))
+        })
+    })
+    .await
 }
 
 async fn forget_voice(State(app): State<AppState>, AxumPath(pid): AxumPath<String>) -> Response {
-    match with_catalog(&app, |catalog, _dir| forget_in(catalog, &pid)) {
-        Ok(body) => Json(body).into_response(),
-        Err(error) => error.response(),
-    }
+    database(app, StatusCode::OK, move |store| {
+        store.people()?.get(&pid).map_err(from_people)?;
+        store.forget_voice(&pid)?;
+        Ok(json!({"forgotten": true}))
+    })
+    .await
 }
 
 async fn recognition_status(State(app): State<AppState>) -> Response {
-    let enabled = with_catalog(&app, |catalog, _dir| catalog.recognition_enabled);
-    Json(json!({ "enabled": enabled })).into_response()
+    database(app, StatusCode::OK, |store| {
+        Ok(json!({"enabled": store.preference("voice_recognition")?.as_deref() != Some("false")}))
+    })
+    .await
 }
 
 async fn update_recognition(State(app): State<AppState>, body: Bytes) -> Response {
-    let body = match json_object(&body) {
-        Ok(body) => body,
-        Err(error) => return error.response(),
-    };
-    match with_catalog(&app, |catalog, dir| set_recognition(catalog, dir, &body)) {
-        Ok(enabled) => Json(json!({ "enabled": enabled })).into_response(),
-        Err(error) => error.response(),
-    }
+    database(app, StatusCode::OK, move |store| {
+        let body = json_object(&body)?;
+        let enabled = body
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| HttpError::new(StatusCode::BAD_REQUEST, messages::RECOGNITION_CHOICE))?;
+        store.set_recognition(enabled)?;
+        Ok(json!({"enabled": enabled}))
+    })
+    .await
 }
 
 async fn identity_suggestions(
     State(app): State<AppState>,
     AxumPath(jid): AxumPath<String>,
 ) -> Response {
-    match with_catalog(&app, |catalog, dir| suggestions_for(catalog, dir, &jid)) {
-        Ok(body) => Json(body).into_response(),
-        Err(error) => error.response(),
-    }
+    database(app, StatusCode::OK, move |store| {
+        let job = load_job(store, &jid)?;
+        Ok(json!({"revision": job_revision(&job)?, "suggestions": listed_suggestions(&Catalog::load(store)?, &job)}))
+    }).await
 }
 
 async fn dismiss_suggestion(
@@ -159,16 +157,13 @@ async fn dismiss_suggestion(
     AxumPath((jid, sid)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Response {
-    let body = match json_object(&body) {
-        Ok(body) => body,
-        Err(error) => return error.response(),
-    };
-    match with_catalog(&app, |catalog, dir| {
-        dismiss_in(catalog, dir, &jid, &sid, &body)
-    }) {
-        Ok(job) => Json(job).into_response(),
-        Err(error) => error.response(),
-    }
+    database(app, StatusCode::OK, move |store| {
+        let body = json_object(&body)?;
+        update_identity(store, &jid, |catalog, job| {
+            dismiss_in(catalog, job, &sid, &body)
+        })
+    })
+    .await
 }
 
 async fn confirm_identity(
@@ -176,26 +171,42 @@ async fn confirm_identity(
     AxumPath((jid, track)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Response {
-    let body = match json_object(&body) {
-        Ok(body) => body,
-        Err(error) => return error.response(),
-    };
-    match with_catalog(&app, |catalog, dir| {
-        confirm_in(catalog, dir, &jid, &track, &body)
-    }) {
-        Ok(job) => Json(job).into_response(),
-        Err(error) => error.response(),
-    }
+    database(app, StatusCode::OK, move |store| {
+        let body = json_object(&body)?;
+        update_identity(store, &jid, |catalog, job| {
+            confirm_in(catalog, job, &jid, &track, &body)
+        })
+    })
+    .await
+}
+
+fn update_identity(
+    store: &mut SqliteJobStore,
+    jid: &str,
+    update: impl FnOnce(&Catalog, Value) -> Result<Value, HttpError>,
+) -> Result<Value, HttpError> {
+    let id = JobId::parse(jid).map_err(|_| not_found())?;
+    let catalog = Catalog::load(store)?;
+    let (job, ()) = store
+        .update_job(&id, |job| {
+            let value = update(&catalog, serde_json::to_value(&*job).map_err(invalid_job)?)?;
+            *job = serde_json::from_value(value).map_err(invalid_job)?;
+            Ok::<_, HttpError>(())
+        })?
+        .ok_or_else(not_found)?;
+    Ok(crate::routes::stored_job_json(&job))
+}
+
+fn invalid_job(error: serde_json::Error) -> HttpError {
+    tracing::error!(%error, "stored document could not be decoded");
+    HttpError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        messages::LOCAL_OPERATION_FAILED,
+    )
 }
 
 fn people_view(catalog: &Catalog) -> Value {
     let available = voice::runtime_available(None, None, false);
-    let saved: BTreeSet<&str> = catalog
-        .voices
-        .profiles()
-        .iter()
-        .map(|profile| profile.person_id.as_str())
-        .collect();
     let mut rows: Vec<people::Person> = catalog.people.iter().cloned().collect();
     rows.sort_by(|left, right| {
         left.name
@@ -205,7 +216,7 @@ fn people_view(catalog: &Catalog) -> Value {
     });
     let people = rows
         .iter()
-        .map(|person| listed_person(person, saved.contains(person.id.as_str())))
+        .map(|person| listed_person(person, catalog.versions.contains_key(&person.id)))
         .collect::<Vec<_>>();
     let mut body = readiness_fields(available);
     body["people"] = json!(people);
@@ -262,34 +273,6 @@ fn person_json(person: &people::Person) -> Value {
     value
 }
 
-fn add_person(catalog: &mut Catalog, body: &Map<String, Value>) -> Result<Value, HttpError> {
-    let name = name_text(body)?;
-    match catalog.people.create(name, unix_now()) {
-        Ok(person) => Ok(person_json(&person)),
-        Err(error) => Err(from_people(error)),
-    }
-}
-
-fn rename_in(
-    catalog: &mut Catalog,
-    pid: &str,
-    body: &Map<String, Value>,
-) -> Result<Value, HttpError> {
-    let name = name_text(body)?;
-    match catalog.people.rename(pid, name, unix_now()) {
-        Ok(person) => Ok(person_json(&person)),
-        Err(error) => Err(from_people(error)),
-    }
-}
-
-fn forget_in(catalog: &mut Catalog, pid: &str) -> Result<Value, HttpError> {
-    match catalog.voices.forget(&catalog.people, pid) {
-        Ok(()) => Ok(json!({ "forgotten": true })),
-        Err(voice::VoiceError::People(error)) => Err(from_people(error)),
-        Err(error) => Err(HttpError::new(StatusCode::BAD_REQUEST, error.to_string())),
-    }
-}
-
 fn name_text(body: &Map<String, Value>) -> Result<&str, HttpError> {
     match body.get("name") {
         Some(Value::String(name)) => Ok(name.as_str()),
@@ -300,61 +283,12 @@ fn name_text(body: &Map<String, Value>) -> Result<&str, HttpError> {
     }
 }
 
-fn set_recognition(
-    catalog: &mut Catalog,
-    dir: &Path,
-    body: &Map<String, Value>,
-) -> Result<bool, HttpError> {
-    let enabled = match body.get("enabled") {
-        Some(Value::Bool(enabled)) => *enabled,
-        _ => {
-            return Err(HttpError::new(
-                StatusCode::BAD_REQUEST,
-                messages::RECOGNITION_CHOICE,
-            ));
-        }
-    };
-    catalog.recognition_enabled = enabled;
-    if !enabled {
-        import_disk_jobs(catalog, dir);
-        for job in catalog.jobs.values_mut() {
-            cancel_open_checks(job);
-        }
-    }
-    Ok(enabled)
-}
-
-fn cancel_open_checks(job: &mut Value) {
-    let Some(checks) = job
-        .get_mut("voice_checks")
-        .and_then(|value| value.as_object_mut())
-    else {
-        return;
-    };
-    for check in checks.values_mut() {
-        if check.get("status").and_then(|status| status.as_str()) == Some(voice::CHECK_CHECKING)
-            && let Some(object) = check.as_object_mut()
-        {
-            object.insert("status".to_string(), json!(voice::CHECK_CANCELLED));
-        }
-    }
-}
-
-fn suggestions_for(catalog: &mut Catalog, dir: &Path, jid: &str) -> Result<Value, HttpError> {
-    let job = load_job(catalog, dir, jid)?;
-    let revision = job_revision(&job)?;
-    let suggestions = listed_suggestions(catalog, &job);
-    Ok(json!({ "revision": revision, "suggestions": suggestions }))
-}
-
 fn dismiss_in(
-    catalog: &mut Catalog,
-    dir: &Path,
-    jid: &str,
+    catalog: &Catalog,
+    mut job: Value,
     sid: &str,
     body: &Map<String, Value>,
 ) -> Result<Value, HttpError> {
-    let mut job = load_job(catalog, dir, jid)?;
     editing_job(&job, body, None)?;
     let current = listed_suggestions(catalog, &job);
     let known = current
@@ -375,18 +309,16 @@ fn dismiss_in(
     job["dismissed_identity_suggestions"] = json!(dismissed);
     let revision = job_revision(&job)?;
     job["revision"] = json!(revision + 1);
-    catalog.jobs.insert(jid.to_string(), job.clone());
     Ok(job)
 }
 
 fn confirm_in(
-    catalog: &mut Catalog,
-    dir: &Path,
+    catalog: &Catalog,
+    mut job: Value,
     jid: &str,
     track: &str,
     body: &Map<String, Value>,
 ) -> Result<Value, HttpError> {
-    let mut job = load_job(catalog, dir, jid)?;
     editing_job(&job, body, Some(track))?;
     let suggestion = selected_suggestion(catalog, &job, body, track)?;
     let (person_id, name) = resolve_name(&catalog.people, body, suggestion.as_ref())?;
@@ -429,7 +361,6 @@ fn confirm_in(
     }
     let revision = job_revision(&job)?;
     job["revision"] = json!(revision + 1);
-    catalog.jobs.insert(jid.to_string(), job.clone());
     Ok(job)
 }
 
@@ -614,10 +545,9 @@ fn voice_suggestions(
             continue;
         };
         let profile_ok = catalog
-            .voices
-            .profiles()
-            .iter()
-            .any(|profile| profile.person_id == person_id && profile.version == version);
+            .versions
+            .get(person_id)
+            .is_some_and(|stored| stored == version);
         if !profile_ok {
             continue;
         }
@@ -666,60 +596,10 @@ fn editing_job(
     Ok(())
 }
 
-fn load_job(catalog: &mut Catalog, dir: &Path, jid: &str) -> Result<Value, HttpError> {
-    if JobId::parse(jid).is_err() {
-        return Err(not_found());
-    }
-    if let Some(job) = catalog.jobs.get(jid) {
-        return Ok(job.clone());
-    }
-    match std::fs::read(job_file(dir, jid)) {
-        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-            Ok(value) if value.is_object() => {
-                catalog.jobs.insert(jid.to_string(), value.clone());
-                Ok(value)
-            }
-            Ok(_) => Err(HttpError::new(
-                StatusCode::BAD_REQUEST,
-                messages::INVALID_REQUEST,
-            )),
-            Err(_) => Err(HttpError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                messages::LOCAL_OPERATION_FAILED,
-            )),
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(not_found()),
-        Err(_) => Err(HttpError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            messages::LOCAL_OPERATION_FAILED,
-        )),
-    }
-}
-
-fn import_disk_jobs(catalog: &mut Catalog, dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir.join("identity-jobs")) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        if JobId::parse(name).is_err() || catalog.jobs.contains_key(name) {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
-            && value.is_object()
-        {
-            catalog.jobs.insert(name.to_string(), value);
-        }
-    }
+fn load_job(store: &SqliteJobStore, jid: &str) -> Result<Value, HttpError> {
+    let id = JobId::parse(jid).map_err(|_| not_found())?;
+    let job = store.get(&id, false)?.ok_or_else(not_found)?;
+    serde_json::to_value(job).map_err(invalid_job)
 }
 
 fn ensure_object<'a>(
@@ -801,6 +681,16 @@ struct HttpError {
     message: String,
 }
 
+impl From<StoreError> for HttpError {
+    fn from(error: StoreError) -> Self {
+        tracing::error!(%error, "identity store operation failed");
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            messages::LOCAL_OPERATION_FAILED,
+        )
+    }
+}
+
 impl HttpError {
     fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
@@ -863,6 +753,7 @@ fn random_hex(bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use speakerdesk_core::store::JobStore;
     use std::time::Duration;
 
     use serde_json::{Value, json};
@@ -922,10 +813,8 @@ mod tests {
         }
     }
 
-    fn write_job(state: &AppState, id: &str, job: Value) {
-        let path = super::job_file(state.data_dir(), id);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, serde_json::to_vec(&job).unwrap()).unwrap();
+    fn write_job(state: &AppState, _id: &str, job: Value) {
+        state.insert_job(serde_json::from_value(job).unwrap());
     }
 
     fn intro_job(id: &str) -> Value {
@@ -960,9 +849,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identity_changes_reach_the_job_and_export_authority() {
+        let state = AppState::new();
+        let root = state.data_dir().to_path_buf();
+        assert!(
+            AppState::open(&root).is_err(),
+            "one process owns the storage root"
+        );
+        let id = "9".repeat(32);
+        let mut seeded = intro_job(&id);
+        seeded["fast_history"] = json!({"private": "retained"});
+        seeded["operation_generation"] = json!(4);
+        state.insert_job(serde_json::from_value(seeded).unwrap());
+        let running = serve(crate::routes::router(state.clone())).await;
+        let response = running
+            .client
+            .post(running.url(&format!("/api/jobs/{id}/speakers/speaker_0/identity")))
+            .header(crate::http::token_header(), state.token())
+            .json(&json!({"revision": 0, "name": "Ada"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let named: Value = response.json().await.unwrap();
+        assert!(named.get("fast_history").is_none());
+        assert!(named.get("operation_generation").is_none());
+        let saved: Value = running
+            .client
+            .get(running.url(&format!("/api/jobs/{id}")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(saved["document"]["speakers"]["speaker_0"], "Ada");
+        assert_eq!(saved["revision"], 1);
+        let exported = running
+            .client
+            .get(running.url(&format!("/api/jobs/{id}/export/txt")))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(exported.contains("Ada:"));
+        let edited = running
+            .client
+            .patch(running.url(&format!("/api/jobs/{id}/segments/intro")))
+            .header(crate::http::token_header(), state.token())
+            .json(&json!({"segment_revision": 0, "changes": {"text": "Edited words", "end": 2.5}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(edited.status(), 200);
+        assert_eq!(edited.json::<Value>().await.unwrap()["revision"], 2);
+        let created = running
+            .client
+            .post(running.url("/api/people"))
+            .header(crate::http::token_header(), state.token())
+            .json(&json!({"name": "Ada"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), 201);
+        running.shutdown().await;
+        drop(state);
+        let reopened = AppState::open(&root).unwrap();
+        let internal = reopened
+            .store()
+            .get(&speakerdesk_core::ids::JobId::parse(&id).unwrap(), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(internal.extra["fast_history"]["private"], "retained");
+        let running = serve(crate::routes::router(reopened.clone())).await;
+        let saved: Value = running
+            .client
+            .get(running.url(&format!("/api/jobs/{id}")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(saved["revision"], 2);
+        assert_eq!(saved["document"]["speakers"]["speaker_0"], "Ada");
+        assert_eq!(saved["document"]["segments"][0]["text"], "Edited words");
+        assert_eq!(saved["document"]["segments"][0]["end"], 2.5);
+        let listed: Value = running
+            .client
+            .get(running.url("/api/people"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed["people"][0]["name"], "Ada");
+        for kind in ["txt", "srt", "vtt", "json"] {
+            let text = running
+                .client
+                .get(running.url(&format!("/api/jobs/{id}/export/{kind}")))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(text.contains("Edited words") && text.contains("Ada"));
+        }
+        let stale = running
+            .client
+            .put(running.url(&format!("/api/jobs/{id}/transcript")))
+            .header(crate::http::token_header(), reopened.token())
+            .json(&json!({"revision": 1, "document": saved["document"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), 409);
+        running.shutdown().await;
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn route_table_accepts_people_methods_and_parent_rejects_bad_tokens() {
         // `crate::router` is `speakerdesk_host::router`: the parent applies the token guard.
-        let running = serve(crate::router()).await;
+        let running = serve(crate::router(AppState::new())).await;
         let job = "a".repeat(32);
         let person = "b".repeat(32);
         let suggestion = "c".repeat(32);
@@ -1175,7 +1189,7 @@ mod tests {
             .json::<Value>()
             .await
             .unwrap();
-        assert_eq!(suggestions["revision"], 0);
+        assert_eq!(suggestions["revision"], 1);
         assert_eq!(suggestions["suggestions"][0]["name"], "Priya");
         assert_eq!(
             suggestions["suggestions"][0]["kind"],
@@ -1205,7 +1219,7 @@ mod tests {
         let confirmed = running
             .client
             .post(running.url(&format!("/api/jobs/{meeting}/speakers/speaker_0/identity")))
-            .json(&json!({ "revision": 0, "suggestion_id": sid }))
+            .json(&json!({ "revision": 1, "suggestion_id": sid }))
             .send()
             .await
             .unwrap();
@@ -1226,7 +1240,7 @@ mod tests {
             "cancelled"
         );
         assert_eq!(confirmed["voice_checks"]["speaker_0"]["status"], "manual");
-        assert_eq!(confirmed["revision"], 1);
+        assert_eq!(confirmed["revision"], 2);
         let people = running
             .client
             .get(running.url("/api/people"))
@@ -1241,7 +1255,7 @@ mod tests {
         let stale_suggestion = running
             .client
             .post(running.url(&format!("/api/jobs/{meeting}/speakers/speaker_0/identity")))
-            .json(&json!({ "revision": 1, "suggestion_id": sid }))
+            .json(&json!({ "revision": 2, "suggestion_id": sid }))
             .send()
             .await
             .unwrap();
