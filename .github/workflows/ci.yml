@@ -90,11 +90,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.99.0
-      - name: Verify Apple Silicon and Metal compiler
+      - name: Prepare pinned native MLX runtime
         run: |
           test "$(uname -m)" = arm64
-          xcodebuild -downloadComponent MetalToolchain
-          xcrun -sdk macosx metal --version
+          bash scripts/fetch_mlx_runtime.sh
       - name: Test native crates with locked dependencies
         run: cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p speakerdesk-models -p speakerdesk-echo -p xtask
       - name: Compile desktop boundary without packaging resources

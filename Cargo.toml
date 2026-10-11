@@ -8,6 +8,10 @@ members = [
     "xtask",
     "desktop/src-tauri",
 ]
+exclude = ["vendor/mlx-sys"]
+
+[patch.crates-io]
+mlx-sys = { path = "vendor/mlx-sys" }
 
 [workspace.package]
 version = "0.6.6"

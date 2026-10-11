@@ -113,4 +113,20 @@ MLX_C_USE_SYSTEM_MLX option to compile unchanged upstream bindings with Command
 Line Tools and link the prebuilt runtime. An optimized standalone Rust executable
 evaluated GPU matmul with exact result [7,10,15,22]; no Python or Metal compiler ran.
 This is linkage/initialization proof, not speech-model or performance acceptance.
-Integration will pin the macOS 15 distribution to match Speakerdesk's minimum OS.
+Integration now pins the macOS 15 distribution (SHA256
+`55a369250d220b2cf10213a87a2ac1b1a420608c5b35b1df4e7147ac8e32f121`) to match
+Speakerdesk's minimum OS. The official mlx-sys source is vendored with only a
+build.rs change; the C/C++ binding remains upstream code. The bootstrap downloads
+and verifies the archive, then publishes under target/native. CI uses that path.
+
+The actual models crate now builds and passes 34 tests (six acoustic placeholders
+remain ignored). Its optimized metal_smoke example initializes Metal and evaluates
+GPU math. A copy relocated to a disposable Contents/MacOS + Contents/Frameworks
+layout runs with an empty environment; its loader trace resolves libmlx from that
+copy and loads neither Python nor checkout libraries. Invalid Metal resources
+fail initialization. This is a runtime probe, not the Speakerdesk app workflow.
+The locked release desktop binary also builds with Command Line Tools; bundle
+resources were disabled for this compile check, so it is not a qualified package.
+The installed app was read only to establish version 0.6.6. PR/base remain the
+starting SHAs above. Independent source review verified the ABI, artifact minimum
+OS, unchanged bindings, and fetch boundary; its ignore-rule finding was fixed.

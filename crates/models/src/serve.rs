@@ -276,7 +276,7 @@ mod tests {
             },
         )
         .unwrap();
-        let mut replies = vec![
+        let mut replies = [
             read_envelope(&mut parent).unwrap(),
             read_envelope(&mut parent).unwrap(),
         ];

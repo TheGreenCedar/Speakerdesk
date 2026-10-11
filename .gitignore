@@ -2,7 +2,8 @@
 .cache/
 .worktrees/
 /models/
-/vendor/
+/vendor/*
+!/vendor/mlx-sys/
 speakerdesk/data/
 fixtures/
 speakerdesk/fixtures/
