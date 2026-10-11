@@ -271,6 +271,8 @@ impl Routes {
 /// Job routes, including token checks and the v0.6.6 security headers.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .merge(crate::people_routes::routes())
+        .merge(crate::meeting::routes())
         .route("/api/config", get(config))
         .route("/api/jobs", get(list_jobs).post(create_jobs))
         .route("/api/jobs/{jid}", get(job_detail).delete(delete_job))

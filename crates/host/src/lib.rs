@@ -4,6 +4,7 @@ pub mod capture;
 pub mod http;
 pub mod inference;
 pub mod meeting;
+pub mod people_routes;
 pub mod routes;
 pub mod setup;
 pub mod worker;
