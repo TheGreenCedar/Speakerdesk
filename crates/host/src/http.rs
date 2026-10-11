@@ -5,7 +5,7 @@ use speakerdesk_core::security::{
 };
 
 pub fn router() -> Router {
-    Router::new()
+    crate::routes::router(crate::routes::AppState::new())
 }
 
 /// Headers every response keeps. The route agent applies these and must not change the values.
