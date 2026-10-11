@@ -114,6 +114,38 @@ pub fn read_pcm16(path: impl AsRef<Path>) -> Result<Vec<f32>, AudioError> {
         .collect()
 }
 
+/// Read only the requested saved-audio range, rejecting incomplete or noncanonical PCM.
+pub fn read_pcm16_range(
+    path: impl AsRef<Path>,
+    start: f64,
+    end: f64,
+) -> Result<Vec<f32>, AudioError> {
+    let mut reader = WavReader::open(path).map_err(map_open)?;
+    let spec = reader.spec();
+    if spec.channels != 1
+        || spec.bits_per_sample != 16
+        || spec.sample_rate != SAMPLE_RATE
+        || spec.sample_format != SampleFormat::Int
+    {
+        return Err(AudioError::message(EXPECTED_PCM));
+    }
+    let start = round_frames(start, SAMPLE_RATE)?;
+    let end = round_frames(end, SAMPLE_RATE)?;
+    if start >= end || end > reader.duration() {
+        return Err(AudioError::message(TRUNCATED));
+    }
+    reader.seek(start)?;
+    let pcm = reader
+        .samples::<i16>()
+        .take((end - start) as usize)
+        .map(|sample| sample.map(|s| f32::from(s) / 32768.).map_err(map_sample))
+        .collect::<Result<Vec<_>, _>>()?;
+    if pcm.len() != (end - start) as usize {
+        return Err(AudioError::message(TRUNCATED));
+    }
+    Ok(pcm)
+}
+
 /// Copy a canonical WAV, or decode and resample anything else to 16 kHz mono PCM16.
 pub fn normalize(
     source: impl AsRef<Path>,
@@ -526,9 +558,29 @@ mod tests {
         let duration = normalize(&source, &destination).unwrap();
         assert_eq!(duration, samples.len() as f64 / f64::from(SAMPLE_RATE));
         assert_eq!(fs::read(&source).unwrap(), fs::read(&destination).unwrap());
+        assert_eq!(
+            super::read_pcm16_range(&source, 1. / 16000., 4. / 16000.).unwrap(),
+            vec![-1. / 32768., 0., 1. / 32768.]
+        );
+        for (start, end) in [
+            (-1., 1.),
+            (0., f64::NAN),
+            (4. / 16000., 6. / 16000.),
+            (1., 0.),
+        ] {
+            assert!(super::read_pcm16_range(&source, start, end).is_err());
+        }
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&destination)
+            .unwrap()
+            .set_len(48)
+            .unwrap();
+        assert!(super::read_pcm16_range(&destination, 0., 5. / 16000.).is_err());
 
         let stereo = dir.join("stereo.wav");
         write_i16(&stereo, 2, SAMPLE_RATE, &[1000, -1000]);
+        assert!(super::read_pcm16_range(&stereo, 0., 1. / 16000.).is_err());
         assert_eq!(message(wav_duration(&stereo).unwrap_err()), EXPECTED_PCM);
 
         let empty = dir.join("empty.wav");

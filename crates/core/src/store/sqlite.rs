@@ -153,9 +153,85 @@ impl SqliteJobStore {
     }
 
     pub fn forget_voice(&mut self, person_id: &str) -> Result<(), StoreError> {
-        self.connection
-            .execute("DELETE FROM voice_profiles WHERE person_id=?1", [person_id])?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        advance_voice_generation(&tx, person_id)?;
+        tx.execute("DELETE FROM voice_profiles WHERE person_id=?1", [person_id])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn voice_generation(&self, person_id: &str) -> Result<Option<i64>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT voice_generation FROM people WHERE id=?1",
+                [person_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Preserve legacy payloads, including identities this runtime cannot execute.
+    pub fn voice_profiles(&self) -> Result<std::collections::BTreeMap<String, Value>, StoreError> {
+        self.connection
+            .prepare("SELECT person_id,enrollment FROM voice_profiles")?
+            .query_map([], |row| {
+                let payload: String = row.get(1)?;
+                Ok((
+                    row.get(0)?,
+                    serde_json::from_str(&payload).map_err(|e| sql_conversion(e.to_string()))?,
+                ))
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Model work finishes before this transaction; validation only inspects current data.
+    pub fn publish_voice<E: From<StoreError>>(
+        &mut self,
+        job_id: &JobId,
+        expected_generation: i64,
+        profile: &crate::voice::VoiceProfile,
+        validate: impl FnOnce(&Job) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let generation: Option<i64> = tx
+            .query_row(
+                "SELECT voice_generation FROM people WHERE id=?1",
+                [&profile.person_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)?;
+        if generation != Some(expected_generation) {
+            return Ok(false);
+        }
+        let Some(stored) = fetch_job(&tx, job_id.as_str())? else {
+            return Ok(false);
+        };
+        if !validate(&for_view(stored, false))? {
+            return Ok(false);
+        }
+        let payload =
+            serde_json::to_string(profile).map_err(|e| StoreError::message(e.to_string()))?;
+        let centroid: Vec<u8> = profile
+            .centroid
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        tx.execute("INSERT INTO voice_profiles(person_id,model_id,revision,artifact_sha256,dimension,centroid,profile_version,consented_at,enrollment)
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(person_id) DO UPDATE SET
+            model_id=excluded.model_id,revision=excluded.revision,artifact_sha256=excluded.artifact_sha256,dimension=excluded.dimension,centroid=excluded.centroid,
+            profile_version=excluded.profile_version,consented_at=excluded.consented_at,enrollment=excluded.enrollment",
+            params![profile.person_id,profile.model.model_id,profile.model.revision,profile.model.artifact_sha256,profile.model.dimension as i64,centroid,profile.version,profile.enrolled_at,payload]).map_err(StoreError::from)?;
+        advance_voice_generation(&tx, &profile.person_id)?;
+        tx.commit().map_err(StoreError::from)?;
+        Ok(true)
     }
 
     pub fn preference(&self, key: &str) -> Result<Option<String>, StoreError> {
@@ -179,7 +255,7 @@ impl SqliteJobStore {
         tx.execute("INSERT INTO preferences(key,value) VALUES('voice_recognition',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [enabled.to_string()])?;
         if !enabled {
             // Only jobs with an outstanding check need to be deserialized.
-            let ids: Vec<String> = tx.prepare("SELECT id FROM jobs WHERE EXISTS (SELECT 1 FROM json_each(json_extract(meeting, '$.voice_checks')) WHERE json_extract(value, '$.status')='checking')")?
+            let ids: Vec<String> = tx.prepare("SELECT id FROM jobs WHERE EXISTS (SELECT 1 FROM json_each(json_extract(meeting, '$.voice_checks')) WHERE json_extract(value, '$.status')='checking' AND COALESCE(json_extract(value, '$.manual'),0)!=1)")?
                 .query_map([], |row| row.get(0))?.collect::<Result<_,_>>()?;
             for id in ids {
                 let Some(mut stored) = fetch_job(&tx, &id)? else {
@@ -192,7 +268,9 @@ impl SqliteJobStore {
                     .and_then(Value::as_object_mut)
                 {
                     for check in checks.values_mut() {
-                        if check.get("status").and_then(Value::as_str) == Some("checking") {
+                        if check.get("status").and_then(Value::as_str) == Some("checking")
+                            && check.get("manual").and_then(Value::as_bool) != Some(true)
+                        {
                             check["status"] = Value::String("cancelled".into());
                         }
                     }
@@ -205,6 +283,14 @@ impl SqliteJobStore {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn advance_voice_generation(connection: &Connection, person_id: &str) -> Result<(), StoreError> {
+    let changed = connection.execute("UPDATE people SET voice_generation=voice_generation+1 WHERE id=?1 AND voice_generation<9223372036854775807", [person_id])?;
+    if changed != 1 {
+        return Err(StoreError::message("Voice generation is unavailable"));
+    }
+    Ok(())
 }
 
 fn load_people(connection: &Connection) -> Result<crate::people::People, StoreError> {
@@ -490,6 +576,24 @@ fn overlay_duration(duration: Option<f64>, checkpoint: Option<f64>) -> Option<f6
 fn recover_one(stored: StoredJob, active: &[&str]) -> Option<Job> {
     let mut changed = stored.checkpoint.is_some();
     let mut job = overlay_checkpoint(stored);
+    if let Some(checks) = job
+        .extra
+        .get_mut("voice_checks")
+        .and_then(Value::as_object_mut)
+    {
+        let mut cancelled = false;
+        for check in checks
+            .values_mut()
+            .filter(|check| check["status"] == "checking")
+        {
+            check["status"] = Value::String("cancelled".into());
+            cancelled = true;
+        }
+        if cancelled {
+            job.revision += 1;
+            changed = true;
+        }
+    }
     if active.contains(&job.status.as_str()) {
         job.status = "failed".to_string();
         job.message = match job.kind {
@@ -666,6 +770,103 @@ mod tests {
         let mut store = SqliteJobStore::open_in_memory().unwrap();
         store.initialize().unwrap();
         store
+    }
+
+    #[test]
+    fn voice_publication_preserves_edits_and_rejects_forget_replace_and_missing_job() {
+        use crate::{
+            error::StoreError,
+            voice::{VoiceModel, VoiceProfile},
+        };
+        let root = std::env::temp_dir().join(format!(
+            "speakerdesk-voice-store-{}-{}",
+            std::process::id(),
+            super::unix_time()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("native.sqlite");
+        let mut store = SqliteJobStore::open(&path).unwrap();
+        let job = job(IMPORT_ID, JobKind::Import, "ready", 1.);
+        store.put(&job, None).unwrap();
+        let person = store
+            .edit_person(|people| {
+                let person = people.create("Ada", 1.).unwrap();
+                Ok::<_, StoreError>((person.clone(), person))
+            })
+            .unwrap();
+        let mut profile = VoiceProfile {
+            person_id: person.id.clone(),
+            version: "native-version-one".into(),
+            enrolled_at: 2.,
+            model: VoiceModel::new("fixture", "one", "a".repeat(64), 2, 16000).unwrap(),
+            centroid: vec![1., 0.],
+            clips: vec![],
+            consent: "explicit_remember_voice".into(),
+        };
+        let pending = store.voice_generation(&person.id).unwrap().unwrap();
+        store.forget_voice(&person.id).unwrap(); // Also invalidates enrollment when no profile existed.
+        assert!(
+            !store
+                .publish_voice(&job.id, pending, &profile, |_| Ok::<_, StoreError>(true))
+                .unwrap()
+        );
+        assert!(store.voice_profiles().unwrap().is_empty());
+        let pending = store.voice_generation(&person.id).unwrap().unwrap();
+        store
+            .update_job(&job.id, |job| {
+                job.name = "Edited while extracting".into();
+                Ok::<_, StoreError>(())
+            })
+            .unwrap();
+        assert!(
+            store
+                .publish_voice(&job.id, pending, &profile, |current| {
+                    assert_eq!(current.name, "Edited while extracting");
+                    Ok::<_, StoreError>(true)
+                })
+                .unwrap()
+        );
+        profile.version = "losing-replacement".into();
+        assert!(
+            !store
+                .publish_voice(&job.id, pending, &profile, |_| Ok::<_, StoreError>(true))
+                .unwrap()
+        );
+        let pending = store.voice_generation(&person.id).unwrap().unwrap();
+        assert!(
+            !store
+                .publish_voice(&job.id, pending, &profile, |_| Ok::<_, StoreError>(false))
+                .unwrap()
+        );
+        assert!(
+            store
+                .publish_voice(&job.id, pending, &profile, |_| Err::<bool, _>(
+                    StoreError::message("stale crop")
+                ))
+                .is_err()
+        );
+        assert_eq!(store.voice_generation(&person.id).unwrap(), Some(pending));
+        drop(store);
+        let mut store = SqliteJobStore::open(&path).unwrap();
+        assert_eq!(
+            store.voice_profiles().unwrap()[&person.id]["version"],
+            "native-version-one"
+        );
+        assert_eq!(
+            store.get(&job.id, false).unwrap().unwrap().revision,
+            job.revision + 1
+        );
+        store.delete(&job.id).unwrap();
+        assert!(
+            !store
+                .publish_voice(&job.id, pending, &profile, |_| Ok::<_, StoreError>(true))
+                .unwrap()
+        );
+        store.forget_voice(&person.id).unwrap();
+        assert!(store.voice_profiles().unwrap().is_empty());
+        assert_eq!(store.people().unwrap().get(&person.id).unwrap().name, "Ada");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

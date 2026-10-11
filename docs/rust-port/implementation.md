@@ -29,7 +29,8 @@ Local implementation branch: `codex/python-free-mac`.
    equivalent warm application measurements; long imports and full performance
    qualification remain pending.
 4. In progress: automatic language, supplied-text CTC and native Core ML ReDimNet
-   extraction work. Voice enrollment/recognition and model setup remain pending.
+   extraction work. Manual voice enrollment/checking now passes the actual editor
+   and full restart (below). Automatic recognition and model setup remain pending.
 5. Pending: native capture coordination, streaming tails/recovery and bounded work.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
@@ -595,3 +596,49 @@ replace it. Text-only edits keep the crop while stale activity, competing owners
 changed speaker/bounds or incomplete observations reject it. The save regression
 failed before the fix; all 142 core tests pass afterward. HTTP enrollment remains
 the next slice.
+
+## Voice editor integration
+
+The production router uses bounded saved-audio crops and the resident native child
+for consented enrollment and manual voice suggestions. SQLite owns profiles and
+monotonic person generations: forget/replacement invalidates in-flight enrollment,
+including the no-existing-profile case. Publication reloads the job and checks its
+operation, assignment and selected audio; unrelated text edits survive. Inference
+and crop I/O hold no database lock. Cancellation/shutdown retain admission until
+the worker terminates. Restart cancels orphaned checking states once.
+
+The first actual UI attempt caught a gap missed by component tests: imported solo
+speech bridged across a short pause retained activity but could not enroll unless
+word alignment had produced reading turns. Import now publishes speaker observations
+independently of optional alignment. The import-to-voice regression failed before
+the correction; Auto/English replay plus actual passage-edit handlers prove crop
+preservation for text edits and invalidation for speaker/boundary edits.
+
+On M5/macOS 27, the optimized isolated Tauri app imported and transcribed the frozen
+synthetic Daniel enrollment file, saved a new person, previewed the second crop at
+5.14 seconds, and enrolled its two solo crops. Whole-app quit reaped the three owned
+processes (34418/34453/34454). After restart, People showed the same saved compatible
+voice. Importing different held-out words produced a manual "Possible Daniel fixture"
+suggestion (score 0.9643743364); confirming it updated the editor and its actual text
+export. No person was assigned before confirmation. This proves synthetic product
+integration, not human-population recognition accuracy or automatic checks.
+
+Core 144 and host 48 tests pass; strict all-target core/host Clippy and locked release
+desktop build pass. The blocked-inference HTTP matrix covers text/boundary edits,
+forget/replacement, cancellation/shutdown, failures and preference changes. Tests use
+explicit model doubles; the desktop path above used real MLX/Core ML inference.
+Independent read-only verification found no remaining voice-slice source blocker.
+Release executable SHA256: `d93e2474069c47889ee70fb5dbd2a5b1f9096d0d4f67bb9eae667cb1f54903f4`.
+The ad-hoc signed preview executable hash is
+`4e77503943ee84dfad8dd19377a81956eb5c6b860f0ca355852b7da485ed104c`.
+Evidence under `/private/tmp/speakerdesk-native-desktop.WJKAde/`:
+`voice-people-{before-restart,reopened}.json`, `voice-enrolled-job.json`,
+`voice-heldout-{suggested,confirmed}.json`, and `voice-ui-recognized.txt`.
+
+The same recordings exposed another assembled-path defect: 21–26 ms final tails
+after a passage with an internal pause were decoded separately and hallucinated
+short text. The earlier tail correction only handled unbridged diarization regions.
+This remains a blocking import-correctness task for the next slice. Ordinary
+non-tail passages also still lack supplied-text alignment. Live capture, long
+imports, automatic voice checks, packaged independence and the full performance
+gate remain unfinished; this slice does not complete the replacement.

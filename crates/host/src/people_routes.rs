@@ -22,16 +22,20 @@ use crate::routes::AppState;
 
 const NOT_FOUND: &str = "The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.";
 const NAMING_BUSY: &[&str] = &["preparing", "queued", "processing", "finishing"];
-const VOICE_READY: &str =
-    "Saved voices are recognized once when a new speaker appears. You can correct any name.";
+const VOICE_READY: &str = "Save voices with explicit consent, then check another speaker's passages for a possible match.";
 const VOICE_UNQUALIFIED: &str = "Voice recognition needs a qualified GPU/ANE runtime. Saved names and voices are kept. Install a Speakerdesk update with qualified voice recognition.";
+mod voice_http;
+
 const PROFILE_KEPT: &str = "Your saved voice is kept. Voice recognition is currently unavailable.";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/people", get(list_people).post(create_person))
         .route("/api/people/{pid}", patch(rename_person))
-        .route("/api/people/{pid}/voice", delete(forget_voice))
+        .route(
+            "/api/people/{pid}/voice",
+            delete(forget_voice).post(voice_http::remember_voice),
+        )
         .route(
             "/api/recognition",
             get(recognition_status).patch(update_recognition),
@@ -50,37 +54,32 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/jobs/{jid}/speakers/{track}/voice-clips",
-            get(voice_clips),
+            get(voice_http::voice_clips),
         )
-}
-
-async fn voice_clips(
-    State(app): State<AppState>,
-    AxumPath((jid, track)): AxumPath<(String, String)>,
-) -> Response {
-    database(app, StatusCode::OK, move |store| {
-        let job = load_job(store, &jid)?;
-        if job["document"]["speakers"].get(&track).is_none() {
-            return Err(not_found());
-        }
-        // shortcut: availability only until native ReDimNet enrollment is implemented.
-        Ok(json!({"revision":job_revision(&job)?,"track_id":track,
-            "status":"unavailable","message":"Native voice recognition is not implemented yet. You can save the speaker name now.",
-            "minimum_clips":2,"audio_available":false,"readiness_code":"unavailable",
-            "next_action":"updates","clips":[],"recommended_ids":[],"excluded":[]}))
-    }).await
+        .route(
+            "/api/jobs/{jid}/speakers/{track}/voice-preview",
+            get(voice_http::voice_preview),
+        )
+        .route(
+            "/api/jobs/{jid}/speakers/{track}/voice-suggestion",
+            post(voice_http::voice_suggestion),
+        )
 }
 
 struct Catalog {
     people: people::People,
     versions: BTreeMap<String, String>,
+    profiles: BTreeMap<String, Value>,
+    policy: Option<voice::Calibration>,
 }
 
 impl Catalog {
-    fn load(store: &SqliteJobStore) -> Result<Self, HttpError> {
+    fn load(store: &SqliteJobStore, policy: Option<voice::Calibration>) -> Result<Self, HttpError> {
         Ok(Self {
             people: store.people()?,
             versions: store.voice_versions()?,
+            profiles: store.voice_profiles()?,
+            policy,
         })
     }
 }
@@ -98,8 +97,9 @@ async fn database(
 }
 
 async fn list_people(State(app): State<AppState>) -> Response {
-    database(app, StatusCode::OK, |store| {
-        Ok(people_view(&Catalog::load(store)?))
+    let policy = app.models().voice_policy();
+    database(app, StatusCode::OK, move |store| {
+        Ok(people_view(&Catalog::load(store, policy)?))
     })
     .await
 }
@@ -167,9 +167,10 @@ async fn identity_suggestions(
     State(app): State<AppState>,
     AxumPath(jid): AxumPath<String>,
 ) -> Response {
+    let policy = app.models().voice_policy();
     database(app, StatusCode::OK, move |store| {
         let job = load_job(store, &jid)?;
-        Ok(json!({"revision": job_revision(&job)?, "suggestions": listed_suggestions(&Catalog::load(store)?, &job)}))
+        Ok(json!({"revision": job_revision(&job)?, "suggestions": listed_suggestions(&Catalog::load(store, policy)?, &job)}))
     }).await
 }
 
@@ -178,9 +179,10 @@ async fn dismiss_suggestion(
     AxumPath((jid, sid)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Response {
+    let policy = app.models().voice_policy();
     database(app, StatusCode::OK, move |store| {
         let body = json_object(&body)?;
-        update_identity(store, &jid, |catalog, job| {
+        update_identity(store, &jid, policy, |catalog, job| {
             dismiss_in(catalog, job, &sid, &body)
         })
     })
@@ -192,9 +194,10 @@ async fn confirm_identity(
     AxumPath((jid, track)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Response {
+    let policy = app.models().voice_policy();
     database(app, StatusCode::OK, move |store| {
         let body = json_object(&body)?;
-        update_identity(store, &jid, |catalog, job| {
+        update_identity(store, &jid, policy, |catalog, job| {
             confirm_in(catalog, job, &jid, &track, &body)
         })
     })
@@ -204,10 +207,11 @@ async fn confirm_identity(
 fn update_identity(
     store: &mut SqliteJobStore,
     jid: &str,
+    policy: Option<voice::Calibration>,
     update: impl FnOnce(&Catalog, Value) -> Result<Value, HttpError>,
 ) -> Result<Value, HttpError> {
     let id = JobId::parse(jid).map_err(|_| not_found())?;
-    let catalog = Catalog::load(store)?;
+    let catalog = Catalog::load(store, policy)?;
     let (job, ()) = store
         .update_job(&id, |job| {
             let value = update(&catalog, serde_json::to_value(&*job).map_err(invalid_job)?)?;
@@ -227,7 +231,7 @@ fn invalid_job(error: serde_json::Error) -> HttpError {
 }
 
 fn people_view(catalog: &Catalog) -> Value {
-    let available = voice::runtime_available(None, None, false);
+    let available = catalog.policy.is_some();
     let mut rows: Vec<people::Person> = catalog.people.iter().cloned().collect();
     rows.sort_by(|left, right| {
         left.name
@@ -237,7 +241,13 @@ fn people_view(catalog: &Catalog) -> Value {
     });
     let people = rows
         .iter()
-        .map(|person| listed_person(person, catalog.versions.contains_key(&person.id)))
+        .map(|person| {
+            listed_person(
+                person,
+                catalog.profiles.get(&person.id),
+                catalog.policy.as_ref(),
+            )
+        })
         .collect::<Vec<_>>();
     let mut body = readiness_fields(available);
     body["people"] = json!(people);
@@ -262,23 +272,37 @@ fn readiness_fields(available: bool) -> Value {
     }
 }
 
-fn listed_person(person: &people::Person, saved: bool) -> Value {
+fn listed_person(
+    person: &people::Person,
+    profile: Option<&Value>,
+    policy: Option<&voice::Calibration>,
+) -> Value {
+    let saved = profile.is_some();
     let mut value = person_json(person);
     let object = value.as_object_mut().expect("person object");
     object.insert("voice_saved".to_string(), json!(saved));
-    object.insert("voice_compatible".to_string(), json!(false));
-    if saved {
-        object.insert(
-            "voice_profile_state".to_string(),
-            json!("stored_unavailable"),
-        );
-        object.insert("voice_profile_message".to_string(), json!(PROFILE_KEPT));
-        object.insert("voice_profile_next_action".to_string(), Value::Null);
+    let compatible = profile
+        .zip(policy)
+        .is_some_and(|(profile, policy)| profile.get("model") == Some(&json!(policy.model)));
+    object.insert("voice_compatible".into(), json!(compatible));
+    let (state, message, action) = if !saved {
+        ("none", None, None)
+    } else if policy.is_none() {
+        ("stored_unavailable", Some(PROFILE_KEPT), None)
+    } else if compatible {
+        ("compatible", None, None)
     } else {
-        object.insert("voice_profile_state".to_string(), json!("none"));
-        object.insert("voice_profile_message".to_string(), Value::Null);
-        object.insert("voice_profile_next_action".to_string(), Value::Null);
-    }
+        (
+            "incompatible_runtime",
+            Some(
+                "Remember this voice again before it can recognize this person. Your saved voice and name are kept until you choose to replace the voice.",
+            ),
+            Some("remember_voice"),
+        )
+    };
+    object.insert("voice_profile_state".into(), json!(state));
+    object.insert("voice_profile_message".into(), json!(message));
+    object.insert("voice_profile_next_action".into(), json!(action));
     value
 }
 
@@ -494,7 +518,7 @@ fn set_speaker(job: &mut Value, track: &str, name: &str) -> Result<(), HttpError
 }
 
 fn listed_suggestions(catalog: &Catalog, job: &Value) -> Vec<Value> {
-    let available = voice::runtime_available(None, None, false);
+    let available = catalog.policy.is_some();
     let intros = people::introduction_suggestions(&suggestion_job(job));
     let intro_tracks: BTreeSet<String> = intros.iter().map(|item| item.track_id.clone()).collect();
     let mut listed: Vec<Value> = intros.iter().map(suggestion_json).collect();
@@ -569,7 +593,13 @@ fn voice_suggestions(
             .versions
             .get(person_id)
             .is_some_and(|stored| stored == version);
-        if !profile_ok {
+        if !profile_ok
+            || catalog.policy.as_ref().is_none_or(|policy| {
+                suggestion.pointer("/match/model") != Some(&json!(policy.model))
+                    || suggestion.pointer("/match/calibration")
+                        != Some(&voice_http::policy_json(policy))
+            })
+        {
             continue;
         }
         let mut copy = suggestion.clone();
@@ -870,6 +900,554 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn voice_editor_routes_publish_check_and_reopen_one_store() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::open(root.path()).unwrap();
+        let replay = std::sync::Arc::new(VoiceReplay::default());
+        state.set_models(replay.clone());
+        let jid = "7".repeat(32);
+        voice_job(&state, &jid);
+        let running = voice_server(&state).await;
+        let pid = enroll_person(&running, &jid).await;
+        let body = json!({"revision":1,"meeting_id":jid,"track_id":"speaker_0","segment_ids":["a","b"],"consent":true});
+        let endpoint = running.url(&format!("/api/people/{pid}/voice"));
+        let mut denied = body.clone();
+        denied["consent"] = json!(false);
+        assert_eq!(
+            running
+                .client
+                .post(&endpoint)
+                .json(&denied)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            400
+        );
+        denied = body.clone();
+        denied["revision"] = json!(0);
+        assert_eq!(
+            running
+                .client
+                .post(&endpoint)
+                .json(&denied)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        assert_eq!(replay.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let choices: Value = running
+            .client
+            .get(running.url(&format!("/api/jobs/{jid}/speakers/speaker_0/voice-clips")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(choices["status"], "ready");
+        assert_eq!(choices["recommended_ids"], json!(["a", "b"]));
+        let preview = running
+            .client
+            .get(running.url(&format!(
+                "/api/jobs/{jid}/speakers/speaker_0/voice-preview?revision=1&clip=b"
+            )))
+            .header("Range", "bytes=0-43")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(preview.status(), 206);
+        let header = preview.bytes().await.unwrap();
+        assert_eq!(&header[..4], b"RIFF");
+        assert_eq!(
+            u32::from_le_bytes(header[40..44].try_into().unwrap()),
+            9 * 16000 * 2
+        );
+        assert_eq!(
+            running
+                .client
+                .get(running.url(&format!(
+                    "/api/jobs/{jid}/speakers/speaker_0/voice-preview?revision=0&clip=b"
+                )))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        let saved = running
+            .client
+            .post(&endpoint)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+        assert_eq!(replay.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            *replay.starts.lock().unwrap(),
+            vec![3276. / 32768., 6553. / 32768.]
+        );
+        let original = state.store().voice_profiles().unwrap()[&pid].clone();
+        assert_eq!(
+            original["model"],
+            json!(crate::native::native_voice_policy().model)
+        );
+        assert_eq!(original["clips"].as_array().unwrap().len(), 2);
+        assert_eq!(original["consent"], "explicit_remember_voice");
+        assert_eq!(
+            running
+                .client
+                .patch(running.url("/api/recognition"))
+                .json(&json!({"enabled":false}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        let second = "8".repeat(32);
+        voice_job(&state, &second);
+        let checked = running
+            .client
+            .post(running.url(&format!(
+                "/api/jobs/{second}/speakers/speaker_0/voice-suggestion"
+            )))
+            .json(&json!({"revision":0,"segment_ids":["a","b"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(checked.status(), 200);
+        let checked: Value = checked.json().await.unwrap();
+        assert_eq!(checked["matched"], true);
+        assert_eq!(
+            checked["job"]["document"]["speakers"]["speaker_0"],
+            "Speaker 1"
+        );
+        let suggestions: Value = running
+            .client
+            .get(running.url(&format!("/api/jobs/{second}/identity-suggestions")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(suggestions["suggestions"].as_array().unwrap().len(), 1);
+        assert_eq!(suggestions["suggestions"][0]["person_id"], pid);
+        let applied = running.client.post(running.url(&format!("/api/jobs/{second}/speakers/speaker_0/identity"))).json(&json!({"revision":2,"person_id":pid,"suggestion_id":suggestions["suggestions"][0]["id"]})).send().await.unwrap();
+        assert_eq!(applied.status(), 200);
+        assert_eq!(
+            applied.json::<Value>().await.unwrap()["document"]["speakers"]["speaker_0"],
+            "Ada"
+        );
+        running.shutdown().await;
+        drop(state);
+        let state = AppState::open(root.path()).unwrap();
+        state.set_models(replay);
+        let running = voice_server(&state).await;
+        let setup: Value = running
+            .client
+            .get(running.url("/api/setup"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(setup["voice"]["enabled"], false);
+        assert_eq!(setup["voice"]["available"], true);
+        let people: Value = running
+            .client
+            .get(running.url("/api/people"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(people["people"][0]["voice_compatible"], true);
+        assert_eq!(state.store().voice_profiles().unwrap()[&pid], original);
+        state.set_models(std::sync::Arc::new(crate::routes::UnavailableModels));
+        let kept: Value = running
+            .client
+            .get(running.url("/api/people"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            kept["people"][0]["voice_profile_state"],
+            "stored_unavailable"
+        );
+        assert_eq!(state.store().voice_profiles().unwrap()[&pid], original);
+        assert_eq!(
+            running
+                .client
+                .delete(running.url(&format!("/api/people/{pid}/voice")))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert!(state.store().voice_profiles().unwrap().is_empty());
+        assert_eq!(
+            state.store().people().unwrap().get(&pid).unwrap().name,
+            "Ada"
+        );
+        running.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn blocked_voice_work_respects_edits_forget_replacement_cancel_and_shutdown() {
+        use std::sync::{Arc, Condvar, Mutex, mpsc};
+        for case in [
+            "words",
+            "bounds",
+            "forget",
+            "replace",
+            "cancel",
+            "shutdown",
+            "check_save",
+            "check_cancel",
+            "check_shutdown",
+            "check_audio_failure",
+            "check_model_failure",
+            "manual_off_on",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let state = AppState::open(root.path()).unwrap();
+            let (entered, receive) = mpsc::sync_channel(1);
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            let replay = Arc::new(VoiceReplay {
+                gate: Some(VoiceGate {
+                    entered,
+                    released: gate.clone(),
+                }),
+                wrong_identity: case == "check_model_failure",
+                ..Default::default()
+            });
+            state.set_models(replay);
+            let jid = "9".repeat(32);
+            voice_job(&state, &jid);
+            let running = voice_server(&state).await;
+            let checking = case.starts_with("check") || case == "manual_off_on";
+            let pid = if checking {
+                String::new()
+            } else {
+                enroll_person(&running, &jid).await
+            };
+            let url = if checking {
+                running.url(&format!(
+                    "/api/jobs/{jid}/speakers/speaker_0/voice-suggestion"
+                ))
+            } else {
+                running.url(&format!("/api/people/{pid}/voice"))
+            };
+            let client = running.client.clone();
+            let body = json!({"revision":if checking{0}else{1},"meeting_id":jid,"track_id":"speaker_0","segment_ids":["a","b"],"consent":true});
+            let pending =
+                tokio::spawn(async move { client.post(url).json(&body).send().await.unwrap() });
+            tokio::task::spawn_blocking(move || {
+                receive.recv_timeout(Duration::from_secs(5)).unwrap()
+            })
+            .await
+            .unwrap();
+            assert!(state.admission.busy());
+            let mut replacement = None;
+            match case {
+                "words" | "bounds" => {
+                    let changes = if case == "words" {
+                        json!({"text":"Protected during voice extraction."})
+                    } else {
+                        json!({"start":0.1})
+                    };
+                    let response = running
+                        .client
+                        .patch(running.url(&format!("/api/jobs/{jid}/segments/a")))
+                        .json(&json!({"segment_revision":0,"changes":changes}))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), 200);
+                }
+                "forget" => {
+                    assert_eq!(
+                        running
+                            .client
+                            .delete(running.url(&format!("/api/people/{pid}/voice")))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        200
+                    );
+                }
+                "replace" => {
+                    let other = "a".repeat(32);
+                    voice_job(&state, &other);
+                    assert_eq!(
+                        running
+                            .client
+                            .post(
+                                running
+                                    .url(&format!("/api/jobs/{other}/speakers/speaker_0/identity"))
+                            )
+                            .json(&json!({"revision":0,"person_id":pid}))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        200
+                    );
+                    let saved=running.client.post(running.url(&format!("/api/people/{pid}/voice"))).json(&json!({"revision":1,"meeting_id":other,"track_id":"speaker_0","segment_ids":["a","b"],"consent":true})).send().await.unwrap();
+                    assert_eq!(saved.status(), 200);
+                    replacement = Some(state.store().voice_profiles().unwrap()[&pid].clone());
+                }
+                "cancel" | "check_cancel" => {
+                    assert_eq!(
+                        running
+                            .client
+                            .post(running.url(&format!("/api/jobs/{jid}/cancel")))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        200
+                    );
+                }
+                "shutdown" | "check_shutdown" => {
+                    state.cancel_all().unwrap();
+                }
+                "check_save" => {
+                    let current: Value = running
+                        .client
+                        .get(running.url(&format!("/api/jobs/{jid}")))
+                        .send()
+                        .await
+                        .unwrap()
+                        .json()
+                        .await
+                        .unwrap();
+                    let mut document = current["document"].clone();
+                    document["segments"][0]["text"] = json!("Saved while checking.");
+                    assert_eq!(
+                        running
+                            .client
+                            .put(running.url(&format!("/api/jobs/{jid}/transcript")))
+                            .json(&json!({"revision":current["revision"],"document":document}))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        200
+                    );
+                }
+                "manual_off_on" => {
+                    for enabled in [false, true] {
+                        assert_eq!(
+                            running
+                                .client
+                                .patch(running.url("/api/recognition"))
+                                .json(&json!({"enabled":enabled}))
+                                .send()
+                                .await
+                                .unwrap()
+                                .status(),
+                            200
+                        );
+                    }
+                }
+                "check_audio_failure" => {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(state.data_dir().join(&jid).join("audio.wav"))
+                        .unwrap()
+                        .set_len(48)
+                        .unwrap();
+                }
+                "check_model_failure" => {}
+                _ => unreachable!(),
+            }
+            // Cancellation cannot release admission while this model call still owns work.
+            assert!(state.admission.busy());
+            assert!(state.admission.ensure_idle().is_err());
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+            let response = tokio::time::timeout(Duration::from_secs(5), pending)
+                .await
+                .unwrap()
+                .unwrap();
+            let status = response.status();
+            let result: Value = response.json().await.unwrap();
+            let accepted = matches!(case, "words" | "manual_off_on");
+            assert_eq!(
+                status,
+                if accepted { 200 } else { 409 },
+                "case {case}: {result}"
+            );
+            assert!(!state.admission.busy());
+            let job = state
+                .store()
+                .get(&speakerdesk_core::ids::JobId::parse(&jid).unwrap(), false)
+                .unwrap()
+                .unwrap();
+            assert_eq!(job.status, "ready");
+            if case == "words" {
+                assert_eq!(
+                    job.document.unwrap().segments[0].text,
+                    "Protected during voice extraction."
+                );
+            }
+            if checking {
+                assert_ne!(job.extra["voice_checks"]["speaker_0"]["status"], "checking");
+            }
+            let profiles = state.store().voice_profiles().unwrap();
+            if let Some(replacement) = replacement {
+                assert_eq!(profiles[&pid], replacement);
+            } else {
+                assert_eq!(profiles.len(), usize::from(case == "words"), "case {case}");
+            }
+            running.shutdown().await;
+        }
+    }
+
+    #[derive(Default)]
+    // Deterministic model double: exercises HTTP/store races, never acoustic quality.
+    struct VoiceReplay {
+        calls: std::sync::atomic::AtomicUsize,
+        starts: std::sync::Mutex<Vec<f32>>,
+        gate: Option<VoiceGate>,
+        wrong_identity: bool,
+    }
+    struct VoiceGate {
+        entered: std::sync::mpsc::SyncSender<()>,
+        released: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+    impl crate::routes::ApplicationModels for VoiceReplay {
+        fn infer(
+            &self,
+            _: &speakerdesk_core::document::Job,
+            _: &tokio_util::sync::CancellationToken,
+        ) -> Result<speakerdesk_core::document::Document, String> {
+            Err("Voice replay only".into())
+        }
+        fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
+            Some(crate::native::native_voice_policy())
+        }
+        fn embed_voice(
+            &self,
+            pcm: &[f32],
+            _: &tokio_util::sync::CancellationToken,
+        ) -> Result<speakerdesk_core::ipc::VoiceEmbedding, String> {
+            let count = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(pcm.len(), 48000);
+            self.starts.lock().unwrap().push(pcm[0]);
+            if count == 0
+                && let Some(gate) = &self.gate
+            {
+                gate.entered.send(()).unwrap();
+                let (lock, wake) = &*gate.released;
+                let (released, timeout) = wake
+                    .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(10), |ready| {
+                        !*ready
+                    })
+                    .unwrap();
+                assert!(
+                    *released && !timeout.timed_out(),
+                    "test gate was never released"
+                );
+            }
+            let mut vector = vec![0.; 192];
+            vector[0] = 1.;
+            let mut model = crate::native::native_voice_policy().model;
+            if self.wrong_identity {
+                model.revision = "changed".into();
+            }
+            Ok(speakerdesk_core::ipc::VoiceEmbedding {
+                model,
+                clip: speakerdesk_core::voice::ClipEmbedding {
+                    vector,
+                    clean: true,
+                },
+            })
+        }
+    }
+
+    fn voice_job(state: &AppState, jid: &str) {
+        let mut job = intro_job(jid);
+        job["kind"] = json!("import");
+        job["duration"] = json!(9.);
+        job["document"]["segments"] = json!([
+            {"id":"a","speaker":"speaker_0","start":0.,"end":3.,"text":"First passage.","review":false},
+            {"id":"b","speaker":"speaker_0","start":4.,"end":7.,"text":"Second passage.","review":false}
+        ]);
+        write_job(state, jid, job);
+        let directory = state.data_dir().join(jid);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut wav = hound::WavWriter::create(
+            directory.join("audio.wav"),
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for sample in 0..9 * 16000 {
+            wav.write_sample(if sample < 4 * 16000 {
+                3276_i16
+            } else {
+                6553_i16
+            })
+            .unwrap();
+        }
+        wav.finalize().unwrap();
+    }
+    async fn voice_server(state: &AppState) -> Running {
+        let mut running = serve(crate::router(state.clone())).await;
+        let headers = reqwest::header::HeaderMap::from_iter([(
+            crate::http::token_header()
+                .parse::<reqwest::header::HeaderName>()
+                .unwrap(),
+            state.token().parse().unwrap(),
+        )]);
+        running.client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        running
+    }
+    async fn enroll_person(running: &Running, jid: &str) -> String {
+        let person: Value = running
+            .client
+            .post(running.url("/api/people"))
+            .json(&json!({"name":"Ada"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let pid = person["id"].as_str().unwrap().to_owned();
+        let assigned = running
+            .client
+            .post(running.url(&format!("/api/jobs/{jid}/speakers/speaker_0/identity")))
+            .json(&json!({"revision":0,"person_id":pid}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(assigned.status(), 200);
+        pid
+    }
+
+    #[tokio::test]
     async fn identity_changes_reach_the_job_and_export_authority() {
         let state = AppState::new();
         let root = state.data_dir().to_path_buf();
@@ -954,7 +1532,8 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(saved["revision"], 2);
+        assert_eq!(saved["revision"], 3);
+        assert_eq!(saved["voice_checks"]["speaker_1"]["status"], "cancelled");
         assert_eq!(saved["document"]["speakers"]["speaker_0"], "Ada");
         assert_eq!(saved["document"]["segments"][0]["text"], "Edited words");
         assert_eq!(saved["document"]["segments"][0]["end"], 2.5);
@@ -990,6 +1569,17 @@ mod tests {
             .unwrap();
         assert_eq!(stale.status(), 409);
         running.shutdown().await;
+        drop(reopened);
+        let reopened = AppState::open(&root).unwrap();
+        assert_eq!(
+            reopened
+                .store()
+                .get(&speakerdesk_core::ids::JobId::parse(&id).unwrap(), false)
+                .unwrap()
+                .unwrap()
+                .revision,
+            3
+        );
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }

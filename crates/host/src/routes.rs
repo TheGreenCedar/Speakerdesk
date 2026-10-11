@@ -4,7 +4,7 @@
 //! `X-Speakerdesk-Token` with [`speakerdesk_core::security::tokens_match`].
 //! Transcript writes go through [`speakerdesk_core::edit`]. Import runs are
 //! queued on [`crate::worker::JobWorker`]. Tests use temporary SQLite stores and
-//! [`ImportModels`] so nothing here downloads weights or spawns MLX.
+//! [`ApplicationModels`] so nothing here downloads weights or spawns MLX.
 
 use std::collections::HashMap;
 use std::fs;
@@ -77,8 +77,18 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 /// Import inference behind `POST /api/jobs/:jid/run`.
 ///
 /// The production implementation uses the resident inference supervisor.
-pub trait ImportModels: Send + Sync {
+pub trait ApplicationModels: Send + Sync {
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String>;
+    fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
+        None
+    }
+    fn embed_voice(
+        &self,
+        _pcm: &[f32],
+        _cancellation: &CancellationToken,
+    ) -> Result<speakerdesk_core::ipc::VoiceEmbedding, String> {
+        Err("Voice recognition is not available in this build.".into())
+    }
 }
 
 /// Turns an uploaded file into a duration in seconds.
@@ -90,7 +100,7 @@ pub trait AudioPrep: Send + Sync {
 #[derive(Debug, Default)]
 pub struct UnavailableModels;
 
-impl ImportModels for UnavailableModels {
+impl ApplicationModels for UnavailableModels {
     fn infer(
         &self,
         _job: &Job,
@@ -128,12 +138,19 @@ impl AudioPrep for WavPrepare {
     }
 }
 
+#[derive(Clone)]
+struct RunningOperation {
+    generation: u64,
+    cancellation: CancellationToken,
+    activity: Activity,
+}
+
 struct Shared {
     store: Mutex<SqliteJobStore>,
     _owner: fs::File,
     pub(crate) meeting_manager: Arc<Mutex<crate::meeting::MeetingManager>>,
-    models: Mutex<Arc<dyn ImportModels>>,
-    operations: Mutex<HashMap<JobId, (u64, CancellationToken)>>,
+    models: Mutex<Arc<dyn ApplicationModels>>,
+    operations: Mutex<HashMap<JobId, RunningOperation>>,
     prepare: Mutex<Arc<dyn AudioPrep>>,
     meeting: Mutex<Option<JobId>>,
     issues: Mutex<Vec<String>>,
@@ -246,8 +263,60 @@ impl AppState {
         *self.shared.issues.lock().expect("issues") = issues;
     }
 
-    pub fn set_models(&self, models: Arc<dyn ImportModels>) {
+    pub fn set_models(&self, models: Arc<dyn ApplicationModels>) {
         *self.shared.models.lock().expect("models") = models;
+    }
+
+    pub(crate) fn models(&self) -> Arc<dyn ApplicationModels> {
+        self.shared.models.lock().expect("models").clone()
+    }
+
+    pub(crate) fn begin_voice_operation(
+        &self,
+        store: &mut SqliteJobStore,
+        job: &mut Job,
+    ) -> Result<OperationGuard, ApiError> {
+        if self.admission.closed() {
+            return Err(ApiError::new(409, messages::UPDATE_RESERVED));
+        }
+        if store.count_status(ACTIVE)? > 0
+            || self
+                .shared
+                .operations
+                .lock()
+                .expect("operations")
+                .contains_key(&job.id)
+        {
+            return Err(ApiError::new(
+                409,
+                "Finish the active recording or transcription before checking voices.",
+            ));
+        }
+        let generation = job
+            .extra
+            .get("operation_generation")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| ApiError::new(409, "Operation generation exhausted"))?;
+        job.extra
+            .insert("operation_generation".into(), json!(generation));
+        store.put(job, None)?;
+        let cancellation = CancellationToken::new();
+        self.shared.operations.lock().expect("operations").insert(
+            job.id.clone(),
+            RunningOperation {
+                generation,
+                cancellation: cancellation.clone(),
+                activity: Activity::Refinement,
+            },
+        );
+        Ok(OperationGuard {
+            shared: self.shared.clone(),
+            id: job.id.clone(),
+            generation,
+            cancellation,
+        })
     }
 
     pub(crate) fn model_status(
@@ -286,9 +355,12 @@ impl AppState {
         self.admission.close();
         let mut store = self.store();
         let operations = self.shared.operations.lock().expect("operations").clone();
-        for (id, (generation, token)) in operations {
+        for (id, operation) in operations {
+            let generation = operation.generation;
+            let token = operation.cancellation;
             let active = store.get(&id, false)?.is_some_and(|job| {
-                ["queued", "processing"].contains(&job.status.as_str())
+                (operation.activity == Activity::Refinement
+                    || ["queued", "processing"].contains(&job.status.as_str()))
                     && job
                         .extra
                         .get("operation_generation")
@@ -300,17 +372,18 @@ impl AppState {
                 continue;
             }
             store.update_job(&id, |job| {
-                if ["queued", "processing"].contains(&job.status.as_str())
-                    && job
-                        .extra
-                        .get("operation_generation")
-                        .and_then(Value::as_u64)
-                        == Some(generation)
+                if job
+                    .extra
+                    .get("operation_generation")
+                    .and_then(Value::as_u64)
+                    == Some(generation)
                 {
                     job.extra
                         .insert("operation_generation".into(), json!(generation + 1));
-                    job.status = "uploaded".into();
-                    job.message = "Transcription interrupted. Saved audio is kept.".into();
+                    if ["queued", "processing"].contains(&job.status.as_str()) {
+                        job.status = "uploaded".into();
+                        job.message = "Transcription interrupted. Saved audio is kept.".into();
+                    }
                 }
                 Ok::<_, StoreError>(())
             })?;
@@ -738,11 +811,14 @@ async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -
             return store_failure(&error);
         }
         let cancellation = CancellationToken::new();
-        app.shared
-            .operations
-            .lock()
-            .expect("operations")
-            .insert(id.clone(), (generation, cancellation.clone()));
+        app.shared.operations.lock().expect("operations").insert(
+            id.clone(),
+            RunningOperation {
+                generation,
+                cancellation: cancellation.clone(),
+                activity: Activity::Import,
+            },
+        );
         drop(directory);
         let body = stored_job_json(&job);
         let shared = Arc::clone(&app.shared);
@@ -763,8 +839,24 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
             Err(error) => return from_api(error),
         };
         let result = app.store().update_job(&id, |job| {
-            if job.kind != JobKind::Import
-                || !["queued", "processing"].contains(&job.status.as_str())
+            let running = app
+                .shared
+                .operations
+                .lock()
+                .expect("operations")
+                .get(&id)
+                .cloned();
+            let voice = running.as_ref().is_some_and(|op| {
+                op.activity == Activity::Refinement
+                    && job
+                        .extra
+                        .get("operation_generation")
+                        .and_then(Value::as_u64)
+                        == Some(op.generation)
+            });
+            if !voice
+                && (job.kind != JobKind::Import
+                    || !["queued", "processing"].contains(&job.status.as_str()))
             {
                 return Err(ApiError::new(
                     409,
@@ -778,16 +870,13 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
                 .unwrap_or(0);
             job.extra
                 .insert("operation_generation".into(), json!(generation + 1));
-            job.status = "uploaded".into();
-            job.message = "Transcription cancelled. Saved audio is kept.".into();
-            let cancellation = app
-                .shared
-                .operations
-                .lock()
-                .expect("operations")
-                .get(&id)
-                .filter(|(current, _)| *current == generation)
-                .map(|(_, cancellation)| cancellation.clone());
+            if !voice {
+                job.status = "uploaded".into();
+                job.message = "Transcription cancelled. Saved audio is kept.".into();
+            }
+            let cancellation = running
+                .filter(|op| op.generation == generation)
+                .map(|op| op.cancellation);
             Ok::<_, ApiError>(cancellation)
         });
         match result {
@@ -931,29 +1020,47 @@ fn prepare_job(shared: &Shared, id: &JobId) {
         });
 }
 
-struct OperationGuard<'a> {
-    shared: &'a Shared,
-    id: &'a JobId,
+pub(crate) struct OperationGuard {
+    shared: Arc<Shared>,
+    id: JobId,
     generation: u64,
+    pub(crate) cancellation: CancellationToken,
 }
 
-impl Drop for OperationGuard<'_> {
+impl OperationGuard {
+    pub(crate) fn current(&self, job: &Job) -> bool {
+        !self.cancellation.is_cancelled()
+            && job
+                .extra
+                .get("operation_generation")
+                .and_then(Value::as_u64)
+                == Some(self.generation)
+    }
+}
+
+impl Drop for OperationGuard {
     fn drop(&mut self) {
         let mut operations = self.shared.operations.lock().expect("operations");
         if operations
-            .get(self.id)
-            .is_some_and(|(current, _)| *current == self.generation)
+            .get(&self.id)
+            .is_some_and(|current| current.generation == self.generation)
         {
-            operations.remove(self.id);
+            operations.remove(&self.id);
         }
     }
 }
 
-fn execute_import(shared: &Shared, id: &JobId, generation: u64, cancellation: &CancellationToken) {
+fn execute_import(
+    shared: &Arc<Shared>,
+    id: &JobId,
+    generation: u64,
+    cancellation: &CancellationToken,
+) {
     let _operation = OperationGuard {
-        shared,
-        id,
+        shared: shared.clone(),
+        id: id.clone(),
         generation,
+        cancellation: cancellation.clone(),
     };
     let current = shared.store.lock().expect("store").get(id, false);
     if !matches!(current, Ok(Some(ref job)) if job.status == "queued" && job.extra.get("operation_generation").and_then(Value::as_u64) == Some(generation))
@@ -1376,7 +1483,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    use super::{AppState, ImportModels, router};
+    use super::{AppState, ApplicationModels, router};
 
     const JOB_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const JOB_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1557,7 +1664,7 @@ mod tests {
         document: Document,
     }
 
-    impl ImportModels for GateModels {
+    impl ApplicationModels for GateModels {
         fn infer(
             &self,
             _job: &Job,
@@ -1734,7 +1841,9 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), 202);
             wait_until(&entered, 1).await;
-            let cancellation = state.shared.operations.lock().unwrap()[&id].1.clone();
+            let cancellation = state.shared.operations.lock().unwrap()[&id]
+                .cancellation
+                .clone();
             let cancelled = running
                 .authed(
                     running
@@ -1999,15 +2108,9 @@ mod tests {
         let clips: Value = clips.json().await.unwrap();
         assert_eq!(clips["revision"], 7);
         assert_eq!(clips["status"], "unavailable");
-        assert!(
-            clips["message"]
-                .as_str()
-                .unwrap()
-                .contains("not implemented")
-        );
+        assert!(clips["message"].as_str().unwrap().contains("qualified"));
         assert_eq!(clips["clips"], json!([]));
         assert_eq!(clips["recommended_ids"], json!([]));
-        assert_eq!(clips["excluded"], json!([]));
         assert_eq!(clips["minimum_clips"], 2);
         assert_eq!(
             running
@@ -2098,7 +2201,11 @@ mod tests {
         for (id, generation) in [(JOB_A, 4), (JOB_B, 7)] {
             state.shared.operations.lock().unwrap().insert(
                 JobId::parse(id).unwrap(),
-                (generation, tokio_util::sync::CancellationToken::new()),
+                super::RunningOperation {
+                    generation,
+                    cancellation: tokio_util::sync::CancellationToken::new(),
+                    activity: super::Activity::Import,
+                },
             );
         }
         state.cancel_all().unwrap();
@@ -2124,7 +2231,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .values()
-                .all(|(_, token)| token.is_cancelled())
+                .all(|op| op.cancellation.is_cancelled())
         );
     }
 

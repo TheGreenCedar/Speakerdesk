@@ -80,7 +80,7 @@ CREATE TABLE voice_profiles (
 INSERT INTO voice_profiles SELECT person_id,model_id,revision,artifact_sha256,dimension,centroid,
  COALESCE(json_extract(enrollment, '$.version'), CAST(profile_version AS TEXT)),consented_at,enrollment FROM old_voice_profiles;
 DROP TABLE old_voice_profiles;
-")])
+"), M::up("ALTER TABLE people ADD COLUMN voice_generation INTEGER NOT NULL DEFAULT 0;")])
 }
 
 pub fn apply_pragmas(connection: &Connection) -> Result<(), StoreError> {
@@ -121,7 +121,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let tables: Vec<String> = connection
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()

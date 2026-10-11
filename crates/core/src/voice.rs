@@ -188,7 +188,7 @@ pub fn runtime_available(
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VoiceClip {
     pub meeting_id: String,
     pub track_id: String,
@@ -509,7 +509,15 @@ fn crop_anchor(segment: &AudioSegment, track_id: &str) -> Option<(i64, i64, i64)
     {
         return None;
     }
-    let (start, end) = if let Some(anchor) = &segment.decode_context {
+    let (start, end) = if segment.canonical_state.as_deref() == Some("sealed") {
+        if (segment.speaker != track_id && segment.speaker != "unassigned")
+            || segment.finalized != Some(true)
+            || !sole_owner(&segment.source_speaker_candidates, track_id)
+        {
+            return None;
+        }
+        (segment.start_sample?, segment.end_sample?)
+    } else if let Some(anchor) = &segment.decode_context {
         // Unassigned tail words do not erase separately observed solo speaker audio.
         if anchor.policy != "speech_utterance_tail_context_v1"
             || (segment.speaker != track_id && segment.speaker != "unassigned")
@@ -518,14 +526,7 @@ fn crop_anchor(segment: &AudioSegment, track_id: &str) -> Option<(i64, i64, i64)
         }
         (anchor.start_sample, anchor.end_sample)
     } else {
-        if segment.speaker != track_id
-            || segment.finalized != Some(true)
-            || segment.canonical_state.as_deref() != Some("sealed")
-            || !sole_owner(&segment.source_speaker_candidates, track_id)
-        {
-            return None;
-        }
-        (segment.start_sample?, segment.end_sample?)
+        return None;
     };
     Some((start, end, segment.audio_revision?))
 }
@@ -724,7 +725,7 @@ pub fn make_profile(
     })
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VoiceProfile {
     pub person_id: String,
     pub version: String,

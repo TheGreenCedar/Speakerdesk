@@ -28,7 +28,7 @@ use crate::{
     admission::Activity,
     inference::InferenceSupervisor,
     native_updates,
-    routes::{AppState, ImportModels, blocking, confined_file, media_write_directory},
+    routes::{AppState, ApplicationModels, blocking, confined_file, media_write_directory},
 };
 
 #[derive(rust_embed::RustEmbed)]
@@ -39,9 +39,23 @@ struct ImportInference {
     supervisor: Arc<InferenceSupervisor>,
     root: PathBuf,
     alignment: Arc<OnceLock<speakerdesk_core::alignment::Vocabulary>>,
+    voice: Arc<OnceLock<speakerdesk_core::voice::Calibration>>,
 }
 
-impl ImportModels for ImportInference {
+impl ApplicationModels for ImportInference {
+    fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
+        self.voice.get().cloned()
+    }
+    fn embed_voice(
+        &self,
+        pcm: &[f32],
+        cancellation: &CancellationToken,
+    ) -> Result<speakerdesk_core::ipc::VoiceEmbedding, String> {
+        self.supervisor
+            .models(cancellation.clone())
+            .embed_voice(pcm)
+            .map_err(|e| e.to_string())
+    }
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String> {
         // shortcut: first Nemotron window only; remove when offline AOSC/FIFO is implemented.
         if job.duration.is_none_or(|duration| duration > 27.2) {
@@ -57,6 +71,31 @@ impl ImportModels for ImportInference {
         )
         .map_err(|e| e.to_string())
     }
+}
+
+pub(crate) fn native_voice_policy() -> speakerdesk_core::voice::Calibration {
+    use speakerdesk_core::voice::{Calibration, VoiceModel};
+    // Frozen synthetic policy verified on native Core ML; legacy profile spaces stay distinct.
+    let model = VoiceModel::new(
+        "aufklarer/ReDimNet2-B6-CoreML",
+        "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU",
+        "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+        192,
+        16000,
+    )
+    .expect("pinned voice identity");
+    Calibration::new(
+        model,
+        "macos-compact-tts-development-v1:calibration",
+        0.7264125328398843,
+        0.10003429964182987,
+        8,
+        4,
+        0.,
+        0.,
+        2,
+    )
+    .expect("measured voice policy")
 }
 
 pub(crate) fn recording_path(root: &Path, job: &Job) -> std::io::Result<PathBuf> {
@@ -104,11 +143,13 @@ async fn serve(
     let address = listener.local_addr()?;
     let alignment_directory = model_root.join("coarse-alignment");
     let alignment = Arc::new(OnceLock::new());
+    let voice = Arc::new(OnceLock::new());
     let supervisor = InferenceSupervisor::new(executable, env!("CARGO_PKG_VERSION"), model_root)?;
     app.set_models(Arc::new(ImportInference {
         supervisor: supervisor.clone(),
         root: app.data_dir().to_path_buf(),
         alignment: alignment.clone(),
+        voice: voice.clone(),
     }));
     app.set_issues(vec!["Initializing native speech models…".into()]);
     app.updates.lock().expect("updates").connect();
@@ -162,6 +203,17 @@ async fn serve(
                             timing_ms: 0,
                         });
                     }
+                }
+                match load_models.setup_check(&["redimnet2-b6".into()]) {
+                    Ok(loaded)
+                        if loaded.len() == 1
+                            && loaded[0].ok
+                            && loaded[0].model == native_voice_policy().model.revision =>
+                    {
+                        let _ = voice.set(native_voice_policy());
+                        reports.extend(loaded);
+                    }
+                    other => tracing::warn!(?other, "native voice model did not initialize"),
                 }
                 load_app.set_model_reports(reports)
             }
@@ -337,14 +389,21 @@ async fn language(State(app): State<AppState>, body: Bytes) -> Response {
     .await
 }
 
-async fn setup(State(app): State<AppState>) -> Json<Value> {
+async fn setup(State(app): State<AppState>) -> Response {
+    blocking(move || {
+    let enabled = match app.store().preference("voice_recognition") {
+        Ok(value) => value.as_deref()!=Some("false"),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
     let (issues, reports) = app.model_status();
+    let voice_available = app.models().voice_policy().is_some();
     let models: Vec<_> = ["Speech detection", "Speaker diarization", "Transcription", "Automatic language", "Supplied-text timing"].iter().enumerate().map(|(index, name)| json!({"id":index,"name":name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":0,"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
     Json(
         json!({"supported":cfg!(all(target_os="macos",target_arch="aarch64")),"ready":issues.is_empty(),"core_ready":issues.is_empty(),"automatic_language":issues.is_empty() && app.automatic_language_ready(),"status":if issues.is_empty(){"ready"}else{"failed"},"error":issues.join(" "),"models":models,"total_bytes":0,"downloaded_bytes":0,"can_download":false,
-        "voice":{"status":"unavailable","enabled":false,"available":false,"released":false,"message":"Native voice recognition is not implemented yet."},
+        "voice":{"status":if voice_available{"ready"}else{"unavailable"},"enabled":enabled,"available":voice_available,"released":false,"message":if voice_available{"Native voice enrollment and manual checking are available. Automatic checks are still pending."}else{"The native voice model did not initialize. Saved voices and names are kept."}},
         "message":format!("Native preview: imports up to 27.2 seconds. Automatic language: {}. Supplied-text timing: {}. Live capture is not implemented yet.",if app.automatic_language_ready(){"available"}else{"unavailable"},if app.alignment_ready(){"available"}else{"unavailable"})}),
-    )
+    ).into_response()
+    }).await
 }
 
 async fn setup_unavailable() -> Response {

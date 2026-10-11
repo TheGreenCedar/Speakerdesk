@@ -36,16 +36,9 @@ pub fn attach_import(segment: &mut crate::document::Segment, alignment: Value) {
     segment
         .rest
         .insert("reading_alignment".into(), alignment.clone());
-    let Some(regions) = segment
-        .rest
-        .get("activity_regions")
-        .and_then(Value::as_array)
-    else {
+    let Some(activity) = segment.speaker_activity.clone() else {
         return;
     };
-    let activity = json!({"audio_revision":0,"observed_end_sample":end,"regions":regions.iter().map(|v|json!({
-        "start_sample":(v["start"].as_f64().unwrap_or(-1.)*16000.).round() as i64,
-        "end_sample":(v["end"].as_f64().unwrap_or(-1.)*16000.).round() as i64,"speakers":v["speakers"]})).collect::<Vec<_>>()});
     let Ok(activity) = serde_json::from_value::<SpeakerActivity>(activity) else {
         return;
     };
@@ -761,7 +754,8 @@ mod tests {
         let end = 1. + s.audio_num_samples as f64 / 16000.;
         let mut segment: crate::document::Segment=serde_json::from_value(json!({
             "id":"seg-0","start":1.,"end":end,"speaker":"unassigned","text":case["text"],"language":"en",
-            "decode_context":{},"activity_regions":[{"start":1.,"end":end,"speakers":["speaker_0"]}]
+            "speaker_activity":{"audio_revision":0,"observed_end_sample":(end*16000.).round() as i64,
+                "regions":[{"start_sample":16000,"end_sample":(end*16000.).round() as i64,"speakers":["speaker_0"]}]}
         })).unwrap();
         attach_import(&mut segment, result);
         assert!(segment.reading_turns.is_some());

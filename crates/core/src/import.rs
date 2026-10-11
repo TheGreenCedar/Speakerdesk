@@ -938,6 +938,15 @@ fn segment_from_row(
                     .collect::<Vec<_>>()
             ),
         );
+        // Speaker observations remain usable even when word alignment is unavailable.
+        rest.insert(
+            "start_sample".into(),
+            json!((start * 16000.).round() as i64),
+        );
+        rest.insert("end_sample".into(), json!((end * 16000.).round() as i64));
+        rest.insert("source_speaker_candidates".into(), json!(chunk.speakers));
+        rest.insert("canonical_state".into(), json!("sealed"));
+        rest.insert("finalized".into(), json!(true));
     }
     if speaker == "unassigned"
         && let Some(boundary) = chunk.utterance_tail_boundary
@@ -952,6 +961,18 @@ fn segment_from_row(
             }),
         );
     }
+    let speaker_activity = chunk.activity_regions.as_ref().map(|activity| {
+        json!({
+            "audio_revision":0, "observed_end_sample":(end * 16000.).round() as i64,
+            "regions":activity_slice(activity, start, end).iter().map(|region| json!({
+                "start_sample":(region.start * 16000.).round() as i64,
+                "end_sample":(region.end * 16000.).round() as i64,
+                "speakers":region.speakers,
+            })).collect::<Vec<_>>()
+        })
+    });
+    let canonical_utterance_id = speaker_activity.as_ref().map(|_| id.clone());
+    let audio_revision = speaker_activity.as_ref().map(|_| 0);
     Segment {
         id,
         start,
@@ -964,15 +985,15 @@ fn segment_from_row(
         reading_turns: None,
         reading_turn_provenance: None,
         alignment: None,
-        speaker_activity: None,
+        speaker_activity,
         acoustic_evidence: row.acoustic.clone(),
         refinement_state: None,
         machine_revision: None,
         protected_fields: None,
         review_resolution: None,
         retry_candidate: None,
-        canonical_utterance_id: None,
-        audio_revision: None,
+        canonical_utterance_id,
+        audio_revision,
         review: Some(review),
         capture_source: None,
         rest,
@@ -1656,6 +1677,76 @@ mod tests {
         let exported = export::export(&document, "txt").unwrap();
         assert_eq!(exported.body.matches("en:Hello").count(), 1);
         assert!(exported.body.contains("Speaker 1"));
+    }
+
+    #[test]
+    fn imported_solo_audio_survives_internal_pauses_without_word_alignment() {
+        use serde_json::json;
+        // Replayed model observations from the actual enrollment UI failure.
+        for language in ["en", "auto"] {
+            let models = Scripted::new(
+                vec![
+                    Turn {
+                        start: 0.0,
+                        end: 4.89,
+                        speaker: "speaker_0".into(),
+                    },
+                    Turn {
+                        start: 5.14,
+                        end: 11.01,
+                        speaker: "speaker_0".into(),
+                    },
+                ],
+                vec![(512, 79_360), (82_944, 176_505)],
+            );
+            let document = import_recording(&models, &tone(176_505), language, None).unwrap();
+            let meeting_of = |document: &crate::document::Document| {
+                let segments = document
+                    .segments
+                    .iter()
+                    .map(|s| serde_json::from_value(serde_json::to_value(s).unwrap()).unwrap())
+                    .collect();
+                crate::voice::RecognitionMeeting::local("fixture", segments)
+            };
+            let meeting = meeting_of(&document);
+            let clips = crate::voice::automatic_clips(&meeting, "speaker_0", 2);
+            assert_eq!(clips.len(), 2);
+            assert_eq!((clips[0].start, clips[0].end), (0.0, 4.89));
+            assert_eq!((clips[1].start, clips[1].end), (5.14, 11.01));
+            for changes in [
+                json!({"text":"Corrected words"}),
+                json!({"speaker":"unassigned"}),
+                json!({"start":0.1}),
+                json!({"end":10.9}),
+            ] {
+                let changed = crate::edit::edit_passage(crate::edit::PassageEditInput {
+                    status: "ready",
+                    duration: 176_505. / 16000.,
+                    revision: 1,
+                    document: Some(&document),
+                    segment_id: "seg-0",
+                    body: &json!({"segment_revision":0,"changes":changes}),
+                    now: 2.,
+                })
+                .unwrap();
+                let edited_clips =
+                    crate::voice::automatic_clips(&meeting_of(&changed.document), "speaker_0", 2);
+                if changes.get("text").is_some() {
+                    assert_eq!(edited_clips, clips);
+                } else {
+                    assert!(edited_clips.is_empty());
+                }
+            }
+            let mut overlap = meeting;
+            overlap.segments[0]
+                .speaker_activity
+                .as_mut()
+                .unwrap()
+                .regions[0]
+                .speakers
+                .push("speaker_1".into());
+            assert!(crate::voice::automatic_clips(&overlap, "speaker_0", 2).is_empty());
+        }
     }
 
     #[test]
