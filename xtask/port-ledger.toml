@@ -1,0 +1,1207 @@
+[[row]]
+python = "tests/test_acceptance_contract_v2.py"
+disposition = "xtask"
+status = "pending"
+d_ref = ""
+rust = "xtask/src/commands/pending.rs"
+owner = "packaging"
+
+[[row]]
+python = "tests/test_acceptance_fixtures.py"
+disposition = "xtask"
+status = "pending"
+d_ref = ""
+rust = "xtask/src/commands/pending.rs"
+owner = "packaging"
+
+[[row]]
+python = "tests/test_acoustic_context.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/speech.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_admission_receipt.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D6"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_alignment_cache.py"
+disposition = "memo"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/memo.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_alignment_setup.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/setup.rs"
+owner = "host-setup"
+
+[[row]]
+python = "tests/test_alignment_source_identity.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D6"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_apple_capture_startup.py"
+disposition = "swift"
+status = "pending"
+d_ref = ""
+rust = "desktop/capture"
+owner = "echo"
+
+[[row]]
+python = "tests/test_apple_route_formats.py"
+disposition = "swift"
+status = "pending"
+d_ref = ""
+rust = "desktop/capture"
+owner = "echo"
+
+[[row]]
+python = "tests/test_artifact_manifest.py"
+disposition = "xtask"
+status = "pending"
+d_ref = ""
+rust = "xtask/src/commands/pending.rs"
+owner = "packaging"
+
+[[row]]
+python = "tests/test_asr_reuse_profile.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_authoritative_tail.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_best_effort_coverage.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/language.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_canonical_assembly.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_canonical_attribution.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_canonical_lifecycle.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_canonical_negative_recovery.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_canonical_runtime.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_capture_conversion.py"
+disposition = "swift"
+status = "pending"
+d_ref = ""
+rust = "desktop/capture"
+owner = "echo"
+
+[[row]]
+python = "tests/test_capture_echo.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/echo/src"
+owner = "echo"
+
+[[row]]
+python = "tests/test_capture_epoch_restart.py"
+disposition = "swift"
+status = "pending"
+d_ref = ""
+rust = "desktop/capture"
+owner = "echo"
+
+[[row]]
+python = "tests/test_capture_processing_integration.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/capture.rs"
+owner = "capture"
+
+[[row]]
+python = "tests/test_capture_source_runtime.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/capture.rs"
+owner = "capture"
+
+[[row]]
+python = "tests/test_ci_cache.py"
+disposition = "xtask"
+status = "pending"
+d_ref = ""
+rust = "xtask/src/commands/pending.rs"
+owner = "packaging"
+
+[[row]]
+python = "tests/test_constant_speech_tail.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/speech.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_context_policy.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/language.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_core_acceptance.py"
+disposition = "xtask"
+status = "pending"
+d_ref = ""
+rust = "xtask/src/commands/pending.rs"
+owner = "packaging"
+
+[[row]]
+python = "tests/test_core_plan.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_ctc_component_boundary.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D6"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_default_source_path.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_export_bounds.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/export.rs"
+owner = "core-text"
+
+[[row]]
+python = "tests/test_final_asr_reuse.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_frontend_performance.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/bin"
+owner = "fixtures"
+
+[[row]]
+python = "tests/test_gpu_alignment_model.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/models/src/ctc"
+owner = "model-ctc"
+
+[[row]]
+python = "tests/test_import_reading_contract.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/timing.rs"
+owner = "core-timing"
+
+[[row]]
+python = "tests/test_import_reading_worker.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/timing.rs"
+owner = "core-timing"
+
+[[row]]
+python = "tests/test_import_speech_bounds.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/speech.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_import_tail_context.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/import.rs"
+owner = "import"
+
+[[row]]
+python = "tests/test_import_tail_product_path.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/import.rs"
+owner = "import"
+
+[[row]]
+python = "tests/test_imports.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/import.rs"
+owner = "import"
+
+[[row]]
+python = "tests/test_job_polling.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/routes.rs"
+owner = "host-jobs"
+
+[[row]]
+python = "tests/test_language_detection.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/language.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_language_preferences.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/store"
+owner = "core-store"
+
+[[row]]
+python = "tests/test_language_probe_reuse.py"
+disposition = "memo"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/memo.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_live_language.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/language.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_live_meeting.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/meeting.rs"
+owner = "host-meeting"
+
+[[row]]
+python = "tests/test_live_progress.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_live_refinement.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_live_scheduler.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_loopback_server.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/http.rs"
+owner = "host-jobs"
+
+[[row]]
+python = "tests/test_meeting_lifecycle.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/meeting.rs"
+owner = "host-meeting"
+
+[[row]]
+python = "tests/test_multilingual_timing.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/timing.rs"
+owner = "core-timing"
+
+[[row]]
+python = "tests/test_numeric_prefix_examples.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/timing.rs"
+owner = "core-timing"
+
+[[row]]
+python = "tests/test_passage_review.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/review.rs"
+owner = "core-text"
+
+[[row]]
+python = "tests/test_people.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/people.rs"
+owner = "people-voice"
+
+[[row]]
+python = "tests/test_profile_status.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/voice.rs"
+owner = "people-voice"
+
+[[row]]
+python = "tests/test_reading_core_seams.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/timing.rs"
+owner = "core-timing"
+
+[[row]]
+python = "tests/test_reading_turns.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/timing.rs"
+owner = "core-timing"
+
+[[row]]
+python = "tests/test_refinement_tail_context.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_render_innovation.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_render_startup.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_rolling_lifecycle.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_rolling_refinement.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_routed_short_revision.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_sequential_product_path.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/import.rs"
+owner = "import"
+
+[[row]]
+python = "tests/test_silence_admission.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/speech.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_source_asr_reuse_profile.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_source_conditioning.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/speech.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_speaker_uncertainty_window.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_speech_admission.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/speech.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_speech_archive.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D6"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_turn_envelopes.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/live.rs"
+owner = "live-engine"
+
+[[row]]
+python = "tests/test_unknown_speaker_identity.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/people.rs"
+owner = "people-voice"
+
+[[row]]
+python = "tests/test_update_runtime.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/admission.rs"
+owner = "admission"
+
+[[row]]
+python = "tests/test_updater_release.py"
+disposition = "xtask"
+status = "pending"
+d_ref = ""
+rust = "xtask/src/commands/pending.rs"
+owner = "packaging"
+
+[[row]]
+python = "tests/test_utterances.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/speech.rs"
+owner = "core-speech"
+
+[[row]]
+python = "tests/test_voice_accelerator_policy.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/models/src/redimnet"
+owner = "model-redimnet"
+
+[[row]]
+python = "tests/test_voice_coreml.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D2"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "tests/test_voice_gpu_process.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/inference.rs"
+owner = "host-inference"
+
+[[row]]
+python = "tests/test_voice_gpu_startup.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/inference.rs"
+owner = "host-inference"
+
+[[row]]
+python = "tests/test_voice_measurement.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/voice.rs"
+owner = "people-voice"
+
+[[row]]
+python = "tests/test_voice_readiness.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/voice.rs"
+owner = "people-voice"
+
+[[row]]
+python = "tests/test_voice_recognition.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/voice.rs"
+owner = "people-voice"
+
+[[row]]
+python = "tests/test_voice_setup.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/host/src/setup.rs"
+owner = "host-setup"
+
+[[row]]
+python = "tests/test_voice_tools.py"
+disposition = "xtask"
+status = "pending"
+d_ref = ""
+rust = "xtask/src/commands/pending.rs"
+owner = "packaging"
+
+[[row]]
+python = "tests/test_word_alignment.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/timing.rs"
+owner = "core-timing"
+
+[[row]]
+python = "tests/test_workflows.py"
+disposition = "xtask"
+status = "pending"
+d_ref = ""
+rust = "xtask/src/commands/pending.rs"
+owner = "packaging"
+
+[[row]]
+python = "speakerdesk/admission_receipt.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D6"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/alignment_artifact.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/alignment_cache.py"
+disposition = "memo"
+status = "pending"
+d_ref = ""
+rust = "crates/core/src/memo.rs"
+owner = "core-speech"
+
+[[row]]
+python = "speakerdesk/alignment_model.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/alignment_provider.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/alignment_setup.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/alignment_text.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/app.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/asr_reuse_profile.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/audio.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/authoritative_tail.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/authority_store.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/canonical_assembly.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/canonical_runtime.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/capture_echo.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/capture_processing.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/capture_sources.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/coarse_alignment.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/context_plan.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/core_plan.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/final_asr_reuse.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/inference_worker.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/job_store.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/language_detection.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/language_preferences.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/language_probe_cache.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/live_language.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/live_meeting.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/live_refinement.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/live_worker.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/meeting_refinement.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/mlx_ctc_forward.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/mlx_voice_mil.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/model_setup.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/people.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/pipeline.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/reading_turns.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/render_innovation.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/render_startup.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D11"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/review.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/rolling_refinement.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/source_runtime.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/source_voice.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/speech_admission.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/speech_conditioning.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/thread_bound_backend.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D3"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/transcript.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/update_runtime.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/utterances.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_coreml.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D2"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_gpu_process.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D3"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_gpu_runtime.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D3"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_gpu_worker.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D3"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_measurement.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_mlx_backend.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_profile_status.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_profiles.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_readiness.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_recognition.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_setup.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_source_audio.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_waveform.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/voice_worker_registry.py"
+disposition = "drop"
+status = "dropped"
+d_ref = "D3"
+rust = ""
+owner = "coordinator"
+
+[[row]]
+python = "speakerdesk/word_alignment.py"
+disposition = "port"
+status = "pending"
+d_ref = ""
+rust = ""
+owner = "coordinator"

@@ -16,6 +16,3 @@ tokio = { version = "1", features = ["sync", "time"] }
 libc = "0.2"
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
-[profile.release]
-strip = false
-codegen-units = 16
