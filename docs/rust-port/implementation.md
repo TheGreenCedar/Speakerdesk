@@ -146,7 +146,7 @@ The explicit child model root never falls back to the installed cache.
 
 A generated 9.0903125-second two-voice fixture with a pause and 37-sample tail
 matches the independent pinned Python graph on the same native backend within
-1e-4. Against baseline MLX 0.32.3's macOS 26 backend, the largest probability
+1e-4. Against the development reference's MLX 0.32.3 macOS 26 backend, the largest probability
 difference is 0.003350228, with no changed speech-hysteresis decisions. The macOS
 15 and 26 wheel variants explain that numerical difference. On this M5, an
 optimized warm native pass took about 164 ms versus the baseline component's
@@ -322,3 +322,61 @@ lock; the separate development lockfiles specify 0.32.3. Baseline explicit-Engli
 imports still require alignment, so omitting alignment permits only a labelled
 shared-stage diagnostic, not full product performance acceptance. Small numerical
 drift is acceptable; behavioral and measured performance gates are unchanged.
+
+## Shared import-stage measurements
+
+On the M5/24 GiB/macOS 27 machine, release builds and the copied installed 0.6.6
+worker binary ran sequentially on disposable model/data copies. The baseline
+runtime SHA-256 is `a2159e95ed48dbf9f54b76dc07c25a02856115946f8e9f0efeabe8e917f64c61`.
+Its actual capability output confirms MLX 0.32.2, mlx-audio 0.5.7 and mlx-speech
+0.5.3. Exact-base Python crop planning supplied the frozen workers; alignment
+was omitted. Native measurements used the actual release HTTP host, preparation,
+resident models and SQLite publication. Neither timing includes Tauri rendering.
+Baseline memory covers worker trees, not its absent application/planning host.
+These boundaries prevent treating the results as complete product parity.
+
+The second fixture is the 7.06-second LibriSpeech sample 1688-142285-0007 from
+[the TorchAudio tutorial](https://docs.pytorch.org/audio/2.8.0/tutorials/asr_inference_with_ctc_decoder_tutorial.html),
+converted once with afconvert to canonical PCM16 and supplied identically to
+both implementations. Download SHA-256:
+`67dfc27041e572bea27936e75eedc542ccf6f3af5cc251a0ab4e1e947d787fc8`;
+PCM WAV SHA-256: `0ef932371d181b185f01b2ede213ebe649650457e5781d8e428f831dfbbe5343`.
+Both implementations returned the reference words exactly after case and
+punctuation normalization. This one public clip is an acoustic sanity check,
+not a quality benchmark or overlap/separation evidence.
+
+| Observation | Two synthetic voices, 9.09 s | Public speech, 7.06 s |
+|---|---:|---:|
+| 0.6.6 shared workers, including child startup/load | 9.73–10.45 s | 11.10 s |
+| Native process startup to initialized models | 3.08 s | 3.53 s |
+| Native first import to persisted document | 0.81 s | 0.65 s |
+| Native second import to persisted document | 0.61 s | 0.49 s |
+| Native observed physical-footprint upper bound | 2.071 GB | 2.085 GB |
+| Baseline observed ASR-worker footprint upper bound | 1.897 GB | 1.932 GB |
+
+Footprint uses macOS libproc v4 physical footprint, which includes Metal
+allocations. The upper bounds sum each owned process's last observed lifetime
+peak; they are not necessarily simultaneous. Sampling is process traversal plus
+a nominal 50 ms sleep and can miss the final interval before exit. RSS alone
+varied substantially and is not used to claim memory parity. The synthetic
+baseline timings precede a harness bookkeeping correction of at most a sampling
+interval per worker; the public result excludes those joins. One public baseline
+run overlapped compilation and was discarded from latency reporting.
+
+The original native allocator cache retained intermediates between resident
+requests. Matching the baseline's 256 MiB cache cap reduced public-clip footprint
+from about 2.41 GB to 2.16 GB; disabling only the released-buffer cache reduced
+it further to about 2.08 GB. Weights and model sessions remain resident. This
+policy now runs once at child initialization and propagates errors. All four
+post-change imports returned identical words, times and speakers to the uncapped
+candidate. The final optimized binary SHA-256 is
+`c924bd730760d0c2cb25f7efa31fc39e8b791cadf02619b3e8be2ec9307ef682`.
+Build and acoustic-service checks pass; no live-throughput claim follows.
+
+The measurement script, raw outputs and stores are retained under
+`/private/tmp/speakerdesk-shared-stages-aqno7nex/`. Independent review corrected
+its startup deadline, exceptional process-group cleanup and asymmetric timing
+bookkeeping. The remaining native-versus-worker memory difference is unresolved;
+full application memory acceptance must include equivalent alignment, UI and
+live work. This measurement is sufficient to proceed from the working first
+import to language and timing integration, not to declare the replacement done.

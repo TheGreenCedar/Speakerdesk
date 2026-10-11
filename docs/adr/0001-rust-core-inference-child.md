@@ -11,8 +11,9 @@ Axum serves the existing frontend inside Tauri. One resident child isolates
 native inference failures from recordings and the editor. Swift capture remains.
 
 Speech model graphs and decoding use Rust with mlx-rs 0.32.0. Its locked native
-runtime is MLX 0.32.2; the Python baseline uses 0.32.3. Qualify behavior and
-performance rather than asserting identical runtimes. ReDimNet uses its existing
+runtime is MLX 0.32.2, as is the packaged 0.6.6 Python runtime; the development
+Python lockfiles instead specify 0.32.3. Backend wheel variants can still differ.
+Qualify behavior and performance on the actual artifacts. ReDimNet uses its existing
 compiled artifact through objc2-core-ml; do not build a generic MIL interpreter.
 
 Heavy inference requires measured acceleration. Ordinary CPU preprocessing and

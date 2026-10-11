@@ -19,6 +19,8 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(model_root: std::path::PathBuf) -> Result<Self, ChildError> {
         crate::metallib::prepare(None)?;
+        // Weights stay resident; released intermediate buffers need not stay cached.
+        mlx_rs::memory::set_cache_limit(0).map_err(crate::weights::error)?;
         Ok(Self {
             model_root,
             silero: None,
