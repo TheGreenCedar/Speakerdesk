@@ -971,3 +971,49 @@ the explicit comparison also passed. Strict echo Clippy passes. Source review is
 closed. Evidence: `/tmp/speakerdesk-echo-{correlation-performance,nonfinite-red,final-tests,clippy}.log`.
 Capture orchestration, native default packaging and the remaining full-app gates
 are still unfinished; this library is not yet wired into active native capture.
+
+## Owned capture transport and retained source writer
+
+The host now owns the unchanged Swift helper through bounded Tokio pipes and
+channels. Partial JSON lines survive control selection. Stop retains its original
+15-second deadline; failure kills and reaps the helper. Terminal snapshots follow
+both process reaping and the blocking writer's drain. Independent verification
+reproduced a cleanup hang from an inherited stderr descriptor, then verified the
+bounded diagnostic drain fix. Unused deadline/classification scaffolding was removed.
+
+One blocking writer aligns microphone and system packets on the recording clock,
+retains the original stereo reference, and commits a sample endpoint only after
+all track headers are flushed. Hound's reusable block writer avoids individual
+sample syscalls. Qualified Apple microphone output is retained unchanged, with one
+validated helper/route receipt and no second echo pass. Raw single-source capture
+is supported; unqualified dual-source capture still needs the echo integration.
+Qualified Pause/format changes retain the tail and end that capture epoch, matching
+the existing helper boundary. A permanently stuck recording filesystem can still
+delay writer completion after the helper is reaped; no terminal success is invented.
+
+The four retained-PCM fixtures were independently generated with the exact 0.6.6
+SourceMixer from `91f7593fc9c890c69befd6663cdcdeb0072d5f70` and NumPy 2.3.5.
+Rust matches every retained byte for packet splits, delayed/inverted stereo,
+missing/late sources, half-even timestamps and final tails. This qualifies the
+identity mix and retention, not physical devices, AEC or voice-processing quality.
+A sparse recording regression also removes the accidental two-hour import limit
+from live WAV reads/writes; import policy remains unchanged, and RIFF size overflow
+is rejected.
+
+Validation: 154 core tests, 65 host tests, one native-service replay and eight
+process replays pass. After style corrections all 13 capture tests pass again;
+strict core/host Clippy passes. One network setup test and three real-model tests
+were not repeated for this transport-only change. Evidence:
+`/tmp/speakerdesk-capture-{stderr-red,tests,final-tests,clippy}.log` and
+`/private/tmp/speakerdesk-capture-reference.6D7BHy/`.
+
+The accepted complete replacement remains active and unfinished. Next join this
+transport to the real meeting routes, persistent job authority, live model engine,
+publication, language controls, final drain and shutdown. Then complete recovery,
+live timing/refinement/identity, hardware capture and long-session performance,
+native default packaging/updater, security and full equivalent 0.6.6 measurements.
+Tauri long-import/setup acceptance remains pending because CUA still reports a
+locked Mac after the user's unlock replies. The existing isolated preview and
+optimized desktop executable remain the earlier builds recorded above. No working
+app, production data, recordings or existing model cache were changed. Windows and
+issue #25 remain follow-up work.

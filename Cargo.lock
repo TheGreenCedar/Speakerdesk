@@ -4688,6 +4688,7 @@ name = "speakerdesk-host"
 version = "0.6.6"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "fs4",
  "hound",
  "libc",

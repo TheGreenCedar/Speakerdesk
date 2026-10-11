@@ -1848,16 +1848,15 @@ impl<M: Models + 'static> Engine<M> {
         if self.capture_finished {
             return Err(LiveError::Message("Audio arrived after capture finished."));
         }
-        if notice.start_sample != self.received
-            || notice.end_sample <= notice.start_sample
-            || notice.end_sample > (crate::audio::MAX_DURATION_SECONDS * RATE as f64) as i64
-        {
+        if notice.start_sample != self.received || notice.end_sample <= notice.start_sample {
             return Err(LiveError::Message("Invalid saved audio endpoint."));
         }
+        let endpoint = u32::try_from(notice.end_sample)
+            .map_err(|_| LiveError::Message("Invalid saved audio endpoint."))?;
         self.recording
-            .require_samples(notice.end_sample as u32)
+            .require_samples(endpoint)
             .map_err(|error| LiveError::Detail(error.to_string()))?;
-        self.committed = notice.end_sample as u32;
+        self.committed = endpoint;
         if self
             .timeline
             .last()

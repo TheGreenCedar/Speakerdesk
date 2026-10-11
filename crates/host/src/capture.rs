@@ -1,10 +1,14 @@
-//! Swift helper supervisor.
-//!
-//! Stdin commands stay `start`, `pause`, `resume`, and `stop`. Stdout events
-//! match the desktop helper's JSON lines. This module does not spawn Swift.
-//!
-//! `speakerdesk-echo` is not a host dependency. Route classification stays a
-//! pure function here; the echo mixer is linked later.
+//! Owned Swift capture transport and bounded, disk-backed source alignment.
+
+mod processing;
+#[cfg(test)]
+mod replay_tests;
+mod transport;
+mod writer;
+
+pub use processing::ProcessingReceipt;
+pub use transport::{CaptureSession, CaptureSupervisor};
+pub use writer::{CaptureConfig, CapturePhase, CaptureSnapshot};
 
 use std::time::Duration;
 
@@ -16,23 +20,8 @@ use thiserror::Error;
 /// `capture_processing.PROCESSED`: qualified Apple processed microphone.
 pub const PROCESSED: &str = "qualified_apple_active_processed_microphone";
 
-/// `capture_processing.LEGACY`: unknown or raw microphone route.
-pub const LEGACY: &str = "legacy_unknown_or_raw";
-
 /// Bound from `MeetingManager._stop_capture` (`threading.Timer(15, ...)`).
 pub const STALL_STOP: Duration = Duration::from_secs(15);
-
-/// JSON-lines session with the desktop capture helper.
-///
-/// The stall bound is [`StallDeadline`]. This type does not launch the helper.
-#[derive(Debug, Default)]
-pub struct CaptureSupervisor;
-
-impl CaptureSupervisor {
-    pub fn new() -> Self {
-        Self
-    }
-}
 
 /// Stdin commands from `desktop/capture/MeetingCapture.swift`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -66,54 +55,6 @@ impl Command {
         let mut line = serde_json::to_string(self)?;
         line.push('\n');
         Ok(line)
-    }
-}
-
-/// How the host retains the microphone after a processing classification.
-///
-/// The mixer is linked later. This crate does not construct an echo canceller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MicrophoneRoute {
-    /// `PROCESSED` means `microphone_clean = microphone`, with no second AEC pass.
-    CopyMicrophone,
-    /// Any other classification still needs acoustic echo cancellation.
-    NeedsAec,
-}
-
-/// `PROCESSED` copies the microphone. Every other classification needs AEC.
-pub fn classify_route(classification: &str) -> MicrophoneRoute {
-    if classification == PROCESSED {
-        MicrophoneRoute::CopyMicrophone
-    } else {
-        MicrophoneRoute::NeedsAec
-    }
-}
-
-/// Pure stall check: a stop request is late once `elapsed` reaches 15 seconds.
-pub fn stop_deadline_reached(elapsed: Duration) -> bool {
-    elapsed >= STALL_STOP
-}
-
-/// First `arm` starts the 15 second stop bound. A later `arm` leaves it in place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct StallDeadline {
-    armed_at: Option<Duration>,
-}
-
-impl StallDeadline {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn arm(&mut self, now: Duration) {
-        if self.armed_at.is_none() {
-            self.armed_at = Some(now);
-        }
-    }
-
-    pub fn reached(&self, now: Duration) -> bool {
-        self.armed_at
-            .is_some_and(|armed_at| stop_deadline_reached(now.saturating_sub(armed_at)))
     }
 }
 
@@ -202,6 +143,20 @@ pub enum CaptureError {
     MissingType,
     #[error("unknown capture event {0}")]
     UnknownEvent(String),
+    #[error("{0}")]
+    Protocol(String),
+}
+
+impl From<std::io::Error> for CaptureError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Protocol(error.to_string())
+    }
+}
+
+impl From<hound::Error> for CaptureError {
+    fn from(error: hound::Error) -> Self {
+        Self::Protocol(error.to_string())
+    }
 }
 
 /// Parses one helper JSON line. Unknown `type` values are rejected.
@@ -218,35 +173,9 @@ pub fn parse_event(line: &str) -> Result<CaptureEvent, CaptureError> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use speakerdesk_core::{limits, messages};
 
-    use super::{
-        Command, EventKind, LEGACY, MicrophoneRoute, PROCESSED, STALL_STOP, StallDeadline,
-        classify_route, disk_guard_message, parse_event, stop_deadline_reached,
-    };
-
-    #[test]
-    fn processed_route_copies_microphone_and_other_routes_need_aec() {
-        assert_eq!(classify_route(PROCESSED), MicrophoneRoute::CopyMicrophone);
-        assert_eq!(classify_route(LEGACY), MicrophoneRoute::NeedsAec);
-        assert_eq!(classify_route(""), MicrophoneRoute::NeedsAec);
-    }
-
-    #[test]
-    fn stall_deadline_trips_at_fifteen_seconds_and_does_not_reset() {
-        assert!(!stop_deadline_reached(STALL_STOP - Duration::from_nanos(1)));
-        assert!(stop_deadline_reached(STALL_STOP));
-        assert!(stop_deadline_reached(Duration::from_secs(16)));
-
-        let mut deadline = StallDeadline::new();
-        assert!(!deadline.reached(Duration::from_secs(100)));
-        deadline.arm(Duration::from_secs(10));
-        deadline.arm(Duration::from_secs(20));
-        assert!(!deadline.reached(Duration::from_secs(24)));
-        assert!(deadline.reached(Duration::from_secs(25)));
-    }
+    use super::{Command, EventKind, disk_guard_message, parse_event};
 
     #[test]
     fn parses_one_recording_json_event() {

@@ -23,14 +23,18 @@ use thiserror::Error;
 
 use crate::limits::SAMPLE_RATE;
 
-/// Python `audio.MAX_DURATION`: recordings must be nonempty and at most two hours.
+/// Python `audio.MAX_DURATION`: imported audio is limited to two hours.
 pub const MAX_DURATION_SECONDS: f64 = 7200.0;
 
 const MAX_FRAMES: u32 = (MAX_DURATION_SECONDS as u32) * SAMPLE_RATE;
+/// Mono PCM16 frames whose RIFF size (36 + two bytes per frame) fits u32.
+/// Live capture is independent of the two-hour import normalization policy.
+pub const MAX_RECORDING_FRAMES: u32 = (u32::MAX - 36) / 2;
 const HEADER_LEN: u64 = 44;
 
 const EXPECTED_PCM: &str = "Expected 16 kHz mono 16-bit PCM WAV.";
 const DURATION_LIMIT: &str = "Recordings must be nonempty and no longer than two hours.";
+const RECORDING_LIMIT: &str = "Recording exceeds the PCM16 RIFF size limit.";
 const TRUNCATED: &str = "The PCM recording is truncated.";
 const INCOMPLETE_SAMPLE: &str = "The PCM recording has an incomplete sample.";
 const DECODE_PCM: &str = "The file could not be decoded as PCM audio.";
@@ -219,9 +223,9 @@ fn round_frames(seconds: f64, rate: u32) -> Result<u32, AudioError> {
 fn advance_frames(current: u32, add: u32) -> Result<u32, AudioError> {
     let next = current
         .checked_add(add)
-        .ok_or(AudioError::message(DURATION_LIMIT))?;
-    if next > MAX_FRAMES {
-        Err(AudioError::message(DURATION_LIMIT))
+        .ok_or(AudioError::message(RECORDING_LIMIT))?;
+    if next > MAX_RECORDING_FRAMES {
+        Err(AudioError::message(RECORDING_LIMIT))
     } else {
         Ok(next)
     }
@@ -258,7 +262,7 @@ impl RecordingReader {
         end: u32,
         committed: u32,
     ) -> Result<Vec<f32>, AudioError> {
-        if start >= end || end > committed || committed > MAX_FRAMES {
+        if start >= end || end > committed || committed > MAX_RECORDING_FRAMES {
             return Err(AudioError::message(TRUNCATED));
         }
         let mut bytes = vec![0; (end - start) as usize * 2];
@@ -278,7 +282,7 @@ impl RecordingReader {
 
     /// Check the writer's announced endpoint before advancing any model session.
     pub fn require_samples(&self, committed: u32) -> Result<(), AudioError> {
-        if committed > MAX_FRAMES
+        if committed > MAX_RECORDING_FRAMES
             || self
                 .file
                 .lock()
@@ -795,8 +799,8 @@ mod tests {
             INCOMPLETE_SAMPLE
         );
         assert_eq!(
-            message(advance_frames(MAX_FRAMES, 1).unwrap_err()),
-            DURATION_LIMIT
+            message(advance_frames(MAX_RECORDING_FRAMES, 1).unwrap_err()),
+            RECORDING_LIMIT
         );
 
         let cropped = dir.join("crop.wav");
@@ -814,6 +818,44 @@ mod tests {
             .collect();
         assert_eq!(cropped, vec![2]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_recording_reads_beyond_import_limit_without_retaining_pcm() {
+        let dir =
+            std::env::temp_dir().join(format!("speakerdesk-sparse-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audio.wav");
+        let mut writer = RecordingWriter::create(&path).unwrap();
+        writer.frames = MAX_FRAMES + 17;
+        writer
+            .file
+            .set_len(HEADER_LEN + u64::from(writer.frames) * 2)
+            .unwrap();
+        writer.write_samples(&[0.25]).unwrap();
+        let reader = RecordingReader::open(&path).unwrap();
+        reader.require_samples(writer.frames()).unwrap();
+        assert_eq!(
+            reader
+                .read_samples(MAX_FRAMES + 17, MAX_FRAMES + 18, writer.frames())
+                .unwrap(),
+            vec![0.25]
+        );
+        assert!(
+            wav_duration(&path).is_err(),
+            "import duration policy remains separate"
+        );
+        assert!(reader.require_samples(MAX_RECORDING_FRAMES + 1).is_err());
+        assert_eq!(
+            advance_frames(MAX_RECORDING_FRAMES - 1, 1).unwrap(),
+            MAX_RECORDING_FRAMES
+        );
+        assert!(advance_frames(MAX_RECORDING_FRAMES, 1).is_err());
+        assert!(advance_frames(u32::MAX, 1).is_err());
+        drop(reader);
+        drop(writer);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn i16_le(bytes: &[u8]) -> Vec<i16> {
