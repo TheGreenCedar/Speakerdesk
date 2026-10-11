@@ -21,9 +21,11 @@ Local implementation branch: `codex/python-free-mac`.
    private journal recovery and legacy audio copy-on-write. Process lifecycle and
    operation cancellation implemented; active meeting state integration remains pending.
 3. In progress: Silero, the first offline Nemotron window and Cohere run through
-   the actual native child and assembled import pipeline (proof below).
-   The desktop editor, edit/save/quit/reopen/export with public audio and
-   end-to-end performance qualification remain pending.
+   the actual native child and assembled import pipeline. An isolated Tauri
+   preview now starts the Rust HTTP service and resident child. Actual HTTP
+   import/edit/name/export/restart passes on synthetic audio (proof below).
+   Desktop interaction is blocked by the locked Mac; the UI workflow, public
+   audio and end-to-end performance qualification remain pending.
 4. Pending: automatic language, CTC, native Core ML ReDimNet, identity and setup.
 5. Pending: native capture coordination, streaming tails/recovery and bounded work.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
@@ -40,8 +42,8 @@ The review evidence is outside the checkout in the calling chat's review artifac
 
 ## Environment constraints
 
-Apple M5, macOS 27, Rust 1.99.0. Only Command Line Tools are installed; the Metal
-compiler was absent at the initial build. The prebuilt MLX route below removes
+Apple M5, macOS 27, Rust 1.99.0. Initially only Command Line Tools were available;
+the Metal compiler was absent. The prebuilt MLX route below removes
 that prerequisite. Xcode appeared and became selected during implementation;
 its license is pending, so subsequent builds explicitly select the existing
 Command Line Tools. No global toolchain settings or license acceptance changed.
@@ -232,3 +234,63 @@ The child is reaped. Cohere's explicit acoustic test was separately run and
 passes; unavailable language/timing/voice paths remain explicit. Current input
 limits are the first 27.2-second Nemotron window and bounded Cohere crops.
 Normal desktop startup still uses Python; the existing editor is the next join.
+
+## Native host and desktop join
+
+An explicit `SPEAKERDESK_NATIVE_MODELS` directory selects the development native
+host in the existing Tauri shell. It also requires an explicit `SPEAKERDESK_HOME`;
+ordinary startup remains Python until the native product gates pass. The same
+executable runs the Rust host and one resident inference child. The host embeds
+the existing editor assets, serves ranged audio, persists language preferences,
+and checks the three pinned models during actual initialization. Manual-language
+readiness no longer depends on unfinished Auto or CTC. Preview setup reports
+the 27.2-second import limit and unavailable live/language/alignment/voice work.
+
+The existing bounded desktop updater control protocol now shares the host's real
+admission owner. Request, preparation and inference leases cover their actual
+lifetimes. Shutdown closes new admission, invalidates active operation generations,
+cancels/reaps the child independently of slow HTTP clients, then drains workers.
+A late completed-operation entry cannot reset a published job. Normal native
+Tauri quit waits for the matching service generation's termination; UI proof of
+that path is still pending. The unused in-process bridge, global admission owner,
+duplicate editor/preparation state and step receipts were deleted.
+
+Independent review found that the name dialog always requested a missing
+voice-clips route. Its 404 reproduced in the real router regression. The route
+now returns the current revision and explicit unavailable voice state while
+keeping naming usable. The reviewer also found shutdown ordering and test gaps;
+the corrected process test requires the inference PID to be gone when a positive
+`shutdown_ready` acknowledgement arrives, without a later grace period.
+
+On this M5, the locked optimized desktop build passes with Command Line Tools.
+Core 134, host 45, six inference-process replays, one native-service lifecycle
+matrix and 17 editor-controller tests pass. The lifecycle matrix uses the real
+host with a clearly labelled inference replay and covers stdin EOF, oversized
+control, an upload stalled after HTTP 100 Continue, and updater reservation and
+shutdown. Clippy passes with project warnings denied. Two unchanged upstream
+mlx-sys allocator-signature warnings remain in desktop builds.
+
+The disposable preview at `/private/tmp/speakerdesk-native-desktop.WJKAde/`
+starts three native processes: Tauri, Rust host and the MLX inference child.
+Launching through `/tmp` failed because Tauri rejects executable-path symlinks;
+the canonical `/private/tmp` path works. The preview also needs an existing
+Contents/Resources directory. It currently loads the pinned runtime from the
+build directory and is not a qualified standalone package.
+
+Actual HTTP calls to that app's service uploaded the synthetic two-voice fixture,
+ran the models, changed words/speaker/boundary, advanced revisions 3→4→5, exported
+TXT/SRT/VTT/JSON, and rejected the stale revision with 409. After terminating the
+owned preview process, its host and inference child exited; relaunch preserved
+the complete edited document and byte-identical exports. This is real service
+and restart evidence, not UI interaction or a normal Quit-menu test. Results and
+exports are retained under the disposable preview directory. The final preview
+executable SHA-256 is
+`8e16aacc29ea643b22bbe467996247b1507a63b0047ee7b7a5250cebe2e78402`.
+
+The Mac UI tool reports that the screen is locked and cannot unlock it. Unlock
+was requested; the next dependent step remains actual import, editing, playback,
+save, normal quit/reopen and export in the Tauri window. Do not start another
+model lane or declare batch 3 complete on the HTTP evidence. Public-audio quality,
+equivalent optimized 0.6.6 latency/backlog/memory measurements, the remaining
+models, native capture and final packaging are still open. Small numerical drift
+is acceptable; behavioral and measured performance gates remain unchanged.

@@ -11,6 +11,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--native-host") {
+        let args: Vec<_> = std::env::args_os().skip(2).collect();
+        if let Err(error) = speakerdesk_host::native::run(
+            args[0].clone().into(),
+            args[1].clone().into(),
+            std::env::current_exe().unwrap(),
+        ) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     assert_eq!(std::env::args().nth(1).as_deref(), Some("--inference"));
     let output = Arc::new(Mutex::new(std::io::stdout()));
     let mut active: Option<(u64, Arc<AtomicBool>)> = None;
@@ -24,11 +36,34 @@ fn main() {
             std::process::exit(2);
         };
         let result = match request {
-            Request::Hello { .. } => Ok(Response::Ready {
-                build_id: "fixture".into(),
+            Request::Hello { build_id } => Ok(Response::Ready {
+                build_id: if build_id == env!("CARGO_PKG_VERSION") {
+                    build_id
+                } else {
+                    "fixture".into()
+                },
                 device: "replay".into(),
                 models: Vec::new(),
             }),
+            Request::SetupCheck { models } => {
+                // Only the native-host lifecycle replay asks for setup; retain its owned PID.
+                let root = PathBuf::from(std::env::args_os().nth(2).unwrap());
+                std::fs::write(
+                    root.join("fixture-child-pid"),
+                    std::process::id().to_string(),
+                )
+                .unwrap();
+                Ok(Response::Setup(
+                    models
+                        .into_iter()
+                        .map(|model| speakerdesk_core::ipc::SetupModelReport {
+                            model: format!("replay:{model}"),
+                            ok: true,
+                            timing_ms: 0,
+                        })
+                        .collect(),
+                ))
+            }
             Request::VadOpen { .. } | Request::DiarOpen { .. } => {
                 let handle = Handle {
                     generation: 0,

@@ -36,6 +36,7 @@ use speakerdesk_core::store::{JobStore, SqliteJobStore};
 use speakerdesk_core::{export, languages, limits, messages, transcript};
 use tokio_util::sync::CancellationToken;
 
+use crate::admission::{Activity, Admission as UpdateAdmission};
 use crate::http::{security_headers, token_header};
 use crate::worker::JobWorker;
 
@@ -75,8 +76,7 @@ const AUDIO_EXTENSIONS: &[&str] = &[
 
 /// Import inference behind `POST /api/jobs/:jid/run`.
 ///
-/// Implementations must not download models or spawn MLX. The default reports
-/// that setup is unfinished.
+/// The production implementation uses the resident inference supervisor.
 pub trait ImportModels: Send + Sync {
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String>;
 }
@@ -137,6 +137,7 @@ struct Shared {
     prepare: Mutex<Arc<dyn AudioPrep>>,
     meeting: Mutex<Option<JobId>>,
     issues: Mutex<Vec<String>>,
+    reports: Mutex<Vec<speakerdesk_core::ipc::SetupModelReport>>,
     data_dir: PathBuf,
 }
 
@@ -146,6 +147,8 @@ pub struct AppState {
     token: Arc<str>,
     shared: Arc<Shared>,
     worker: Arc<JobWorker>,
+    pub(crate) admission: UpdateAdmission,
+    pub(crate) updates: Arc<Mutex<crate::native_updates::RuntimeUpdates>>,
 }
 
 impl AppState {
@@ -192,9 +195,12 @@ impl AppState {
                 prepare: Mutex::new(Arc::new(WavPrepare)),
                 meeting: Mutex::new(None),
                 issues: Mutex::new(default_issues()),
+                reports: Mutex::new(Vec::new()),
                 data_dir,
             }),
             worker: Arc::new(JobWorker::new()),
+            admission: UpdateAdmission::new(),
+            updates: Arc::new(Mutex::new(crate::native_updates::RuntimeUpdates::default())),
         })
     }
 
@@ -243,6 +249,57 @@ impl AppState {
     pub fn set_models(&self, models: Arc<dyn ImportModels>) {
         *self.shared.models.lock().expect("models") = models;
     }
+
+    pub(crate) fn model_status(
+        &self,
+    ) -> (Vec<String>, Vec<speakerdesk_core::ipc::SetupModelReport>) {
+        (
+            self.shared.issues.lock().expect("issues").clone(),
+            self.shared.reports.lock().expect("reports").clone(),
+        )
+    }
+
+    pub(crate) fn set_model_reports(&self, reports: Vec<speakerdesk_core::ipc::SetupModelReport>) {
+        *self.shared.reports.lock().expect("reports") = reports;
+        self.set_issues(Vec::new());
+    }
+
+    pub(crate) fn cancel_all(&self) -> Result<(), StoreError> {
+        self.admission.close();
+        let mut store = self.store();
+        let operations = self.shared.operations.lock().expect("operations").clone();
+        for (id, (generation, token)) in operations {
+            let active = store.get(&id, false)?.is_some_and(|job| {
+                ["queued", "processing"].contains(&job.status.as_str())
+                    && job
+                        .extra
+                        .get("operation_generation")
+                        .and_then(Value::as_u64)
+                        == Some(generation)
+            });
+            if !active {
+                token.cancel();
+                continue;
+            }
+            store.update_job(&id, |job| {
+                if ["queued", "processing"].contains(&job.status.as_str())
+                    && job
+                        .extra
+                        .get("operation_generation")
+                        .and_then(Value::as_u64)
+                        == Some(generation)
+                {
+                    job.extra
+                        .insert("operation_generation".into(), json!(generation + 1));
+                    job.status = "uploaded".into();
+                    job.message = "Transcription interrupted. Saved audio is kept.".into();
+                }
+                Ok::<_, StoreError>(())
+            })?;
+            token.cancel();
+        }
+        Ok(())
+    }
 }
 
 /// Job routes, including token checks and the v0.6.6 security headers.
@@ -250,6 +307,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(crate::people_routes::routes())
         .merge(crate::meeting::routes())
+        .merge(crate::native::routes())
+        .merge(crate::native_updates::routes())
         .route("/api/config", get(config))
         .route("/api/jobs", get(list_jobs).post(create_jobs))
         .route("/api/jobs/{jid}", get(job_detail).delete(delete_job))
@@ -281,6 +340,24 @@ async fn guard(State(app): State<AppState>, request: Request, next: Next) -> Res
             messages::TOKEN_MISMATCH,
         ));
     }
+    if let Some(origin) = request.headers().get(header::ORIGIN)
+        && origin.to_str().ok() != Some(format!("http://{host}").as_str())
+    {
+        return with_security(error_response(
+            StatusCode::FORBIDDEN,
+            messages::INVALID_REQUEST,
+        ));
+    }
+    let _activity = if is_mutating(request.method()) && request.uri().path() != "/api/updates" {
+        match app.admission.lease(Activity::Import) {
+            Ok(lease) => Some(lease),
+            Err(error) => {
+                return with_security(error_response(StatusCode::CONFLICT, error.message()));
+            }
+        }
+    } else {
+        None
+    };
     let mut response = next.run(request).await;
     apply_security(&mut response);
     response
@@ -297,7 +374,7 @@ async fn config(State(app): State<AppState>) -> Response {
             "languages": language_choices(),
             "default_language": default_language,
             "readiness": readiness_json(&issues),
-            "decoder": decoder_name(),
+            "decoder": "Symphonia",
         }))
         .into_response()
     })
@@ -350,9 +427,16 @@ async fn create_jobs(State(app): State<AppState>, request: Request) -> Response 
     blocking(move || match accept_uploads(&app, &language, files) {
         Ok(created) => {
             for job in &created {
+                let lease = match app.admission.lease(Activity::Import) {
+                    Ok(lease) => lease,
+                    Err(error) => return error_response(StatusCode::CONFLICT, error.message()),
+                };
                 let shared = Arc::clone(&app.shared);
                 let id = job.id.clone();
-                app.worker.enqueue(move || prepare_job(&shared, &id));
+                app.worker.enqueue(move || {
+                    let _lease = lease;
+                    prepare_job(&shared, &id);
+                });
             }
             (
                 StatusCode::CREATED,
@@ -582,11 +666,18 @@ async fn delete_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
 
 async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -> Response {
     blocking(move || {
+        let lease = match app.admission.lease(Activity::Import) {
+            Ok(lease) => lease,
+            Err(error) => return error_response(StatusCode::CONFLICT, error.message()),
+        };
         let id = match require_job_id(&jid) {
             Ok(id) => id,
             Err(error) => return from_api(error),
         };
         let mut directory = app.shared.store.lock().expect("jobs");
+        if app.admission.closed() {
+            return error_response(StatusCode::CONFLICT, messages::UPDATE_RESERVED);
+        }
         let mut job = match load_job(&directory, &id, false) {
             Ok(job) => job,
             Err(error) => return from_api(error),
@@ -635,8 +726,10 @@ async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -
         let body = stored_job_json(&job);
         let shared = Arc::clone(&app.shared);
         let queued = id.clone();
-        app.worker
-            .enqueue(move || execute_import(&shared, &queued, generation, &cancellation));
+        app.worker.enqueue(move || {
+            let _lease = lease;
+            execute_import(&shared, &queued, generation, &cancellation);
+        });
         (StatusCode::ACCEPTED, Json(body)).into_response()
     })
     .await
@@ -970,7 +1063,7 @@ fn remove_staged(root: &Path, ids: &[JobId]) {
     }
 }
 
-fn media_write_directory(root: &Path, job: &Job) -> PathBuf {
+pub(crate) fn media_write_directory(root: &Path, job: &Job) -> PathBuf {
     if job.extra.contains_key("legacy_media_root") {
         root.join("derived").join(job.id.as_str())
     } else {
@@ -978,7 +1071,7 @@ fn media_write_directory(root: &Path, job: &Job) -> PathBuf {
     }
 }
 
-fn confined_file(root: &Path, name: &str) -> std::io::Result<PathBuf> {
+pub(crate) fn confined_file(root: &Path, name: &str) -> std::io::Result<PathBuf> {
     let root = root.canonicalize()?;
     let path = root.join(name).canonicalize()?;
     if !path.starts_with(&root) || !path.is_file() {
@@ -1072,16 +1165,15 @@ fn language_choices() -> Value {
 }
 
 fn readiness_json(issues: &[String]) -> Value {
-    let automatic = !issues
-        .iter()
-        .any(|issue| issue == messages::LID_MODEL_MISSING);
     json!({
         "configured": issues.is_empty(),
         "issues": issues,
-        "automatic_language": automatic,
+        "automatic_language": false,
+        "word_alignment": false,
+        "live_capture": false,
         "model": MODEL_NAME,
         "speaker_limit": MODEL_SPEAKER_LIMIT,
-        "device": "mlx",
+        "device": if issues.is_empty() { "metal" } else { "unavailable" },
         "note": CONFIG_NOTE,
     })
 }
@@ -1090,32 +1182,11 @@ fn default_issues() -> Vec<String> {
     [
         messages::MISSING_DIARIZATION,
         messages::MISSING_ASR,
-        messages::DIAR_PYTHON,
-        messages::ASR_PYTHON,
         messages::SPEECH_MODEL_MISSING,
-        messages::LID_MODEL_MISSING,
-        messages::TIMING_NOT_READY,
     ]
     .into_iter()
     .map(str::to_string)
     .collect()
-}
-
-fn decoder_name() -> &'static str {
-    if command_on_path("ffmpeg") {
-        "FFmpeg"
-    } else if command_on_path("afconvert") {
-        "macOS AudioToolbox"
-    } else {
-        "PCM WAV only"
-    }
-}
-
-fn command_on_path(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
 }
 
 fn download_name(job_name: &str, kind: &str) -> String {
@@ -1768,6 +1839,198 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn desktop_routes_serve_the_editor_audio_and_persistent_preferences() {
+        let state = AppState::new();
+        state.insert_job(job(JOB_A, "uploaded", 1.0));
+        let folder = state.data_dir().join(JOB_A);
+        std::fs::create_dir_all(&folder).unwrap();
+        let wav = tiny_wav();
+        std::fs::write(folder.join("audio.wav"), &wav).unwrap();
+        let running = Running::spawn(state.clone()).await;
+        let index = running.client.get(running.url("/")).send().await.unwrap();
+        assert!(
+            index.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        let html = index.text().await.unwrap();
+        assert!(html.contains("id=\"editor\""));
+        assert!(html.contains(state.token()));
+        assert!(!html.contains("{{token}}"));
+        let script = running
+            .client
+            .get(running.url("/static/app.js"))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            script.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/javascript")
+        );
+        assert!(
+            script
+                .text()
+                .await
+                .unwrap()
+                .contains("function languageReady(mode)")
+        );
+        let audio_url = running.url(&format!("/api/jobs/{JOB_A}/audio"));
+        let head = running.client.head(&audio_url).send().await.unwrap();
+        assert_eq!(head.status(), 200);
+        assert_eq!(head.headers()["content-length"], wav.len().to_string());
+        assert!(head.bytes().await.unwrap().is_empty());
+        let range = running
+            .client
+            .get(&audio_url)
+            .header("Range", "bytes=0-15")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(range.status(), 206);
+        assert_eq!(range.bytes().await.unwrap(), wav[..16]);
+        let clips = running
+            .client
+            .get(running.url(&format!("/api/jobs/{JOB_A}/speakers/speaker_0/voice-clips")))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(clips.status(), 200);
+        let clips: Value = clips.json().await.unwrap();
+        assert_eq!(clips["revision"], 7);
+        assert_eq!(clips["status"], "unavailable");
+        assert!(
+            clips["message"]
+                .as_str()
+                .unwrap()
+                .contains("not implemented")
+        );
+        assert_eq!(clips["clips"], json!([]));
+        assert_eq!(clips["recommended_ids"], json!([]));
+        assert_eq!(clips["excluded"], json!([]));
+        assert_eq!(clips["minimum_clips"], 2);
+        assert_eq!(
+            running
+                .client
+                .get(running.url(&format!("/api/jobs/{JOB_A}/speakers/missing/voice-clips")))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+        let save = running
+            .authed(
+                running
+                    .client
+                    .patch(running.url("/api/preferences/language")),
+            )
+            .json(&json!({"language":"fr"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(save.status(), 200);
+        assert_eq!(
+            state
+                .store()
+                .preference("default_language")
+                .unwrap()
+                .as_deref(),
+            Some("fr")
+        );
+        assert_eq!(
+            running
+                .client
+                .get(running.url("/api/config"))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["default_language"],
+            "fr"
+        );
+        for path in ["/", "/static/app.js", "/api/jobs"] {
+            assert_eq!(
+                running
+                    .client
+                    .get(running.url(path))
+                    .header("Origin", "https://example.com")
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                403
+            );
+        }
+        state.admission.reserve(1, 1).unwrap();
+        let blocked = running
+            .authed(
+                running
+                    .client
+                    .patch(running.url("/api/preferences/language")),
+            )
+            .json(&json!({"language":"en"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), 409);
+        state.admission.release(1, 1).unwrap();
+        running.shutdown().await;
+    }
+
+    #[test]
+    fn shutdown_cancels_only_current_active_generations_and_preserves_terminal_results() {
+        let state = AppState::new();
+        let mut completed = job(JOB_A, "ready", 1.0);
+        completed
+            .extra
+            .insert("operation_generation".into(), json!(4));
+        state.insert_job(completed);
+        let before = state
+            .store()
+            .get(&JobId::parse(JOB_A).unwrap(), false)
+            .unwrap()
+            .unwrap();
+        let mut active = job(JOB_B, "processing", 1.0);
+        active.extra.insert("operation_generation".into(), json!(7));
+        state.insert_job(active);
+        for (id, generation) in [(JOB_A, 4), (JOB_B, 7)] {
+            state.shared.operations.lock().unwrap().insert(
+                JobId::parse(id).unwrap(),
+                (generation, tokio_util::sync::CancellationToken::new()),
+            );
+        }
+        state.cancel_all().unwrap();
+        assert!(state.admission.closed());
+        let store = state.store();
+        assert_eq!(
+            store
+                .get(&JobId::parse(JOB_A).unwrap(), false)
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        let active = store
+            .get(&JobId::parse(JOB_B).unwrap(), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.status, "uploaded");
+        assert_eq!(active.extra["operation_generation"], 8);
+        assert!(
+            state
+                .shared
+                .operations
+                .lock()
+                .unwrap()
+                .values()
+                .all(|(_, token)| token.is_cancelled())
+        );
+    }
+
+    #[tokio::test]
     async fn mutating_routes_require_the_session_token() {
         let running = Running::spawn(AppState::new()).await;
         let (content_type, body) = multipart("en", &[("clip.wav", tiny_wav().as_slice())]);
@@ -2230,6 +2493,10 @@ mod tests {
         wait_until(&entered, 1).await;
         tokio::time::sleep(Duration::from_millis(40)).await;
         assert_eq!(entered.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            running.state.admission.reserve(1, 1),
+            Err(crate::admission::AdmissionError::Busy)
+        );
         let while_busy = running
             .client
             .get(running.url(&format!("/api/jobs/{JOB_B}")))

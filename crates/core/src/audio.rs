@@ -94,6 +94,26 @@ pub fn wav_duration(path: impl AsRef<Path>) -> Result<f64, AudioError> {
     Ok(duration)
 }
 
+/// Read a normalized recording for offline inference; callers own crop limits.
+pub fn read_pcm16(path: impl AsRef<Path>) -> Result<Vec<f32>, AudioError> {
+    let mut reader = WavReader::open(path).map_err(map_open)?;
+    let spec = reader.spec();
+    if spec.channels != 1
+        || spec.bits_per_sample != 16
+        || spec.sample_rate != SAMPLE_RATE
+        || spec.sample_format != SampleFormat::Int
+    {
+        return Err(AudioError::message(EXPECTED_PCM));
+    }
+    if reader.duration() == 0 || reader.duration() > MAX_FRAMES {
+        return Err(AudioError::message(DURATION_LIMIT));
+    }
+    reader
+        .samples::<i16>()
+        .map(|sample| sample.map(|s| f32::from(s) / 32768.0).map_err(map_sample))
+        .collect()
+}
+
 /// Copy a canonical WAV, or decode and resample anything else to 16 kHz mono PCM16.
 pub fn normalize(
     source: impl AsRef<Path>,

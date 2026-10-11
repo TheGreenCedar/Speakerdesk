@@ -38,6 +38,48 @@ impl Runtime {
         if cancel.load(Ordering::Acquire) {
             return Err(ChildError::Cancelled);
         }
+        if let Request::SetupCheck { models } = &request {
+            let mut reports = Vec::new();
+            for model in models {
+                let started = std::time::Instant::now();
+                let pin = match model.as_str() {
+                    "silero-speech" => {
+                        if self.silero.is_none() {
+                            self.silero = Some(crate::silero::network::Network::load(
+                                &self.model_root.join(model),
+                            )?);
+                        }
+                        crate::silero::WEIGHT_PIN
+                    }
+                    "nemotron" => {
+                        if self.nemotron.is_none() {
+                            self.nemotron = Some(sortformer::network::Network::load(
+                                &self.model_root.join(model),
+                            )?);
+                        }
+                        sortformer::WEIGHT_PIN
+                    }
+                    "cohere-speech" => {
+                        if self.cohere.is_none() {
+                            self.cohere = Some(cohere::network::Network::load(
+                                &self.model_root.join(model),
+                            )?);
+                        }
+                        cohere::WEIGHT_PIN
+                    }
+                    _ => return Err(ChildError::Unimplemented),
+                };
+                if cancel.load(Ordering::Acquire) {
+                    return Err(ChildError::Cancelled);
+                }
+                reports.push(speakerdesk_core::ipc::SetupModelReport {
+                    model: pin.into(),
+                    ok: true,
+                    timing_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            return Ok(Response::Setup(reports));
+        }
         match request {
             Request::Hello { .. } => Ok(Response::Ready {
                 build_id: env!("CARGO_PKG_VERSION").into(),

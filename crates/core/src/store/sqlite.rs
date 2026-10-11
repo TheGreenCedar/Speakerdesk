@@ -167,6 +167,11 @@ impl SqliteJobStore {
             .map_err(StoreError::from)
     }
 
+    pub fn set_preference(&mut self, key: &str, value: &str) -> Result<(), StoreError> {
+        self.connection.execute("INSERT INTO preferences(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [key, value])?;
+        Ok(())
+    }
+
     pub fn set_recognition(&mut self, enabled: bool) -> Result<(), StoreError> {
         let tx = self
             .connection

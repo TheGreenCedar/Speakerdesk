@@ -19,7 +19,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const FILE_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 struct Call {

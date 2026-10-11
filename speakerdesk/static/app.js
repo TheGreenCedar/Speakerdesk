@@ -181,8 +181,9 @@ function renderJobs() {
   for(const child of Array.from(host.children))if(!retained.has(child))child.remove();
 }
 function languageReady(mode) {
-  return config.readiness.configured && config.readiness.automatic_language
-    && setupState?.core_ready !== false && setupState?.alignment?.ready !== false;
+  return config.readiness.configured && (mode !== 'auto' || config.readiness.automatic_language)
+    && setupState?.core_ready !== false
+    && (config.readiness.word_alignment === false || setupState?.alignment?.ready !== false);
 }
 function setStatus() {
   $('recording-name').textContent = selected.name; $('recording-name').title = selected.name;
@@ -1089,11 +1090,11 @@ function renderStartState() {
   $('setup-card').hidden=modelsReady || !state;
   if(state && !modelsReady) {
     const percent=state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0;
-    $('setup-card-text').textContent=!state.supported?'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.'
-      :`Download the local models once (${formatBytes(state.total_bytes)}). After that, meetings are transcribed offline on this Mac.`;
+    $('setup-card-text').textContent=state.message || (!state.supported?'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.'
+      :`Download the local models once (${formatBytes(state.total_bytes)}). After that, meetings are transcribed offline on this Mac.`);
     $('setup-card-progress').hidden=!busy;$('setup-card-progress').value=percent;
     $('setup-card-status').textContent=state.error || (busy?`${state.phase} · ${percent}%`:'');
-    $('setup-card-install').disabled=busy || !state.supported || state.voice?.status==='downloading';
+    $('setup-card-install').disabled=busy || !state.supported || state.can_download===false || state.voice?.status==='downloading';
     $('setup-card-install').querySelector('span').textContent=busy?'Downloading…':state.status==='failed'?'Resume download':`Download models · ${formatBytes(state.total_bytes)}`;
   }
   $('start-meeting').disabled=setupBusy || !modelsReady || !capture || changingLiveLanguage || changingDefaultLanguage;
@@ -1144,15 +1145,15 @@ async function refreshSetup() {
     const busy=state.status==='downloading';
     $('model-progress').hidden=!busy;
     $('model-progress').value=100*state.downloaded_bytes/state.total_bytes;
-    $('model-status').textContent=state.error || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'Finish required model setup before transcribing.');
+    $('model-status').textContent=state.error || state.message || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'Finish required model setup before transcribing.');
     $('install-models').hidden=state.ready;
     const voice=state.voice,voiceBusy=voice.status==='downloading';
-    $('install-models').disabled=busy || voiceBusy || !state.supported;
+    $('install-models').disabled=busy || voiceBusy || !state.supported || state.can_download===false;
     $('install-models').textContent=busy?'Downloading…':state.status==='failed'?'Resume download':`Download models · ${formatBytes(state.total_bytes)}`;
     if(voiceAvailable!==voice.available) await loadPeople();
     $('settings-voice-note').textContent=voice.enabled?voice.message:'Recognition is off. Saved names and voices stay on this Mac.';
     if(document.activeElement!==$('recognize-voices')) $('recognize-voices').checked=voice.enabled;
-    if(state.core_ready && (!config.readiness.configured || !config.readiness.automatic_language)) {
+    if(state.core_ready && (!config.readiness.configured || (state.automatic_language??true)!==config.readiness.automatic_language)) {
       await refreshConfig();renderLanguageDefault();if(selected)setStatus();
     }
     renderStartState();

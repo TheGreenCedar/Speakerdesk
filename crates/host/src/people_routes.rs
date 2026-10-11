@@ -48,6 +48,27 @@ pub fn routes() -> Router<AppState> {
             "/api/jobs/{jid}/speakers/{track}/identity",
             post(confirm_identity),
         )
+        .route(
+            "/api/jobs/{jid}/speakers/{track}/voice-clips",
+            get(voice_clips),
+        )
+}
+
+async fn voice_clips(
+    State(app): State<AppState>,
+    AxumPath((jid, track)): AxumPath<(String, String)>,
+) -> Response {
+    database(app, StatusCode::OK, move |store| {
+        let job = load_job(store, &jid)?;
+        if job["document"]["speakers"].get(&track).is_none() {
+            return Err(not_found());
+        }
+        // shortcut: availability only until native ReDimNet enrollment is implemented.
+        Ok(json!({"revision":job_revision(&job)?,"track_id":track,
+            "status":"unavailable","message":"Native voice recognition is not implemented yet. You can save the speaker name now.",
+            "minimum_clips":2,"audio_available":false,"readiness_code":"unavailable",
+            "next_action":"updates","clips":[],"recommended_ids":[],"excluded":[]}))
+    }).await
 }
 
 struct Catalog {

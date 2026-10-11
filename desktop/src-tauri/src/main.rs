@@ -94,6 +94,7 @@ struct RuntimeState {
     child: Option<CommandChild>,
     generation: u64,
     alive: bool,
+    quitting: bool,
 }
 struct RuntimeChild(Mutex<RuntimeState>);
 struct RuntimeSettings {
@@ -101,6 +102,7 @@ struct RuntimeSettings {
     capture_helper: PathBuf,
     executable: PathBuf,
     port: Arc<AtomicU16>,
+    native_models: Option<PathBuf>,
 }
 
 fn write_runtime(app: &tauri::AppHandle, generation: u64, bytes: &[u8]) -> Result<(), String> {
@@ -125,10 +127,18 @@ fn start_runtime(app: &tauri::AppHandle) -> Result<(), String> {
     if state.alive || state.child.is_some() {
         return Err("A local service is already running".into());
     }
-    let (mut rx, child) = app
-        .shell()
-        .sidecar("speakerdesk-runtime")
-        .map_err(|e| e.to_string())?
+    let command = if let Some(models) = &settings.native_models {
+        app.shell().command(&settings.executable).args([
+            std::ffi::OsStr::new("--native-host"),
+            settings.storage.as_os_str(),
+            models.as_os_str(),
+        ])
+    } else {
+        app.shell()
+            .sidecar("speakerdesk-runtime")
+            .map_err(|e| e.to_string())?
+    };
+    let (mut rx, child) = command
         .env("SPEAKERDESK_HOME", &settings.storage)
         .env("SPEAKERDESK_CAPTURE_HELPER", &settings.capture_helper)
         .set_raw_out(true)
@@ -141,6 +151,7 @@ fn start_runtime(app: &tauri::AppHandle) -> Result<(), String> {
     let generation = state.generation;
     state.child = Some(child);
     state.alive = true;
+    state.quitting = false;
     settings.port.store(0, Ordering::Relaxed);
     let port = settings.port.clone();
     let handle = app.clone();
@@ -193,11 +204,16 @@ fn start_runtime(app: &tauri::AppHandle) -> Result<(), String> {
                     terminated = true;
                     let runtime = handle.state::<RuntimeChild>();
                     let mut state = runtime.0.lock().unwrap_or_else(|p| p.into_inner());
+                    let quitting = state.generation == generation && state.quitting;
                     if state.generation == generation {
                         state.alive = false;
                         state.child = None;
                     }
                     drop(state);
+                    if quitting {
+                        handle.exit(if payload.code == Some(0) { 0 } else { 1 });
+                        continue;
+                    }
                     updates.event(updates::Event::Terminated(
                         generation,
                         payload.code == Some(0) && payload.signal.is_none(),
@@ -219,6 +235,9 @@ fn start_runtime(app: &tauri::AppHandle) -> Result<(), String> {
 
 fn recover_runtime(app: &tauri::AppHandle) -> Result<(), String> {
     let settings = app.state::<RuntimeSettings>();
+    if settings.native_models.is_some() {
+        return start_runtime(app);
+    }
     let executable = &settings.executable;
     let sidecar = executable
         .parent()
@@ -259,6 +278,22 @@ fn recovery_description(app: &tauri::AppHandle) -> String {
     }
 }
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some("--native-host".as_ref()) {
+        let args: Vec<_> = std::env::args_os().skip(2).collect();
+        if args.len() != 2 {
+            eprintln!("native host requires explicit storage and model directories");
+            std::process::exit(1);
+        }
+        if let Err(error) = speakerdesk_host::native::run(
+            args[0].clone().into(),
+            args[1].clone().into(),
+            std::env::current_exe().expect("application executable"),
+        ) {
+            eprintln!("Native host failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args_os().nth(1).as_deref() == Some("--inference".as_ref()) {
         let Some(model_root) = std::env::args_os().nth(2) else {
             eprintln!("inference requires an explicit model directory");
@@ -279,6 +314,10 @@ fn main() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             menus::install(app)?;
+            let native_models=std::env::var_os("SPEAKERDESK_NATIVE_MODELS").map(PathBuf::from);
+            if native_models.is_some() && std::env::var_os("SPEAKERDESK_HOME").is_none() {
+                return Err(std::io::Error::other("Native development requires an explicit SPEAKERDESK_HOME").into());
+            }
             let storage=std::env::var_os("SPEAKERDESK_HOME").map(std::path::PathBuf::from).unwrap_or(app.path().app_data_dir()?);
             std::fs::create_dir_all(&storage)?;
             app.state::<ExportDownloads>().protect_storage(&storage)?;
@@ -321,7 +360,7 @@ fn main() {
                 }).build()?;
             let capture_helper=app.path().resource_dir()?.join("speakerdesk-capture");
             let executable = std::env::current_exe()?;
-            app.manage(RuntimeSettings { storage, capture_helper, executable, port });
+            app.manage(RuntimeSettings { storage, capture_helper, executable, port, native_models });
             app.manage(updates::Updates::start(app.handle().clone()));
             start_runtime(app.handle()).map_err(std::io::Error::other)?;
             Ok(())
@@ -337,6 +376,28 @@ fn main() {
                 return;
             }
             app.state::<ExportDownloads>().shutdown();
+            if app.state::<RuntimeSettings>().native_models.is_some() {
+                let runtime = app.state::<RuntimeChild>();
+                let mut state = runtime.0.lock().unwrap_or_else(|p| p.into_inner());
+                if state.alive {
+                    api.prevent_exit();
+                    if !state.quitting {
+                        state.quitting = true;
+                        if let Some(child) = &mut state.child { let _ = child.write(b"shutdown\n"); }
+                        let generation = state.generation;
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                            let runtime = handle.state::<RuntimeChild>();
+                            let mut state = runtime.0.lock().unwrap_or_else(|p| p.into_inner());
+                            if state.alive && state.quitting && state.generation == generation {
+                                if let Some(child) = state.child.take() { let _ = child.kill(); }
+                            }
+                        });
+                    }
+                }
+                return;
+            }
             if let Some(mut child) = app.state::<RuntimeChild>().0.lock().unwrap_or_else(|p| p.into_inner()).child.take() {
                 let _ = child.write(b"shutdown\n");
                 std::thread::spawn(move || {
