@@ -1,4 +1,12 @@
-//! AEC3 wrapper. The macOS agent replaces the stub bodies.
+//! Acoustic echo reference clock. The macOS agent replaces the mixer stub.
+mod clock;
+mod fft;
+
+pub use clock::{
+    CorrelationDecision, DELAY, LOOKAHEAD, RATE, ReferenceClock, SCORE_THRESHOLD,
+    correlation_decision,
+};
+
 use speakerdesk_core::messages;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,10 +32,18 @@ impl std::error::Error for EchoError {}
 pub struct EchoMixer;
 
 impl EchoMixer {
+    /// Returns [`EchoError::Missing`] until the macOS static library is linked.
     pub fn start() -> Result<Self, EchoError> {
         Err(EchoError::Missing)
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ReferenceClock;
+#[cfg(all(test, not(target_os = "macos")))]
+mod tests {
+    use super::{EchoError, EchoMixer};
+
+    #[test]
+    fn mixer_stays_missing_without_the_aec_library() {
+        assert!(matches!(EchoMixer::start(), Err(EchoError::Missing)));
+    }
+}
