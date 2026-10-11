@@ -73,7 +73,6 @@ fn choose_export(webview: tauri::Webview, job: Arc<ExportJob>) {
                 return;
             }
             export_status(&webview, &job.nonce, "writing");
-            drop(downloads);
             std::thread::spawn(move || {
                 let saved = job.save_to(&path).is_ok();
                 let downloads = webview.app_handle().state::<ExportDownloads>();

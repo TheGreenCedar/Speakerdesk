@@ -37,7 +37,7 @@ pub enum Event {
     Terminated(u64, bool),
     TransportLost(u64),
     Started(u64),
-    Checked(u64, u64, Result<Option<Update>, String>),
+    Checked(u64, u64, Box<Result<Option<Update>, String>>),
     Progress(u64, u64, u64, Option<u64>),
     DownloadFinished(u64, u64),
     Downloaded(u64, u64, Result<Vec<u8>, String>),
@@ -161,7 +161,7 @@ impl Coordinator {
                 Event::Packet(generation, packet) if generation == self.generation => self.packet(packet),
                 Event::Checked(id, epoch, result) if epoch == self.epoch && self.control.current(id) && self.control.phase == Phase::Checking => {
                     self.task = None;
-                    match result {
+                    match *result {
                         Ok(Some(update)) if allowed_archive(&update) => {
                             self.selected = Some(update); self.control.phase = Phase::Available;
                         }
@@ -264,7 +264,7 @@ impl Coordinator {
                             Ok(updater) => updater.check().await.map_err(|e| e.to_string()),
                             Err(error) => Err(error.to_string()),
                         };
-                        let _ = sender.send(Event::Checked(id, epoch, result));
+                        let _ = sender.send(Event::Checked(id, epoch, Box::new(result)));
                     }));
                 }
                 self.status();
@@ -554,7 +554,7 @@ impl Coordinator {
                 .unwrap_or("The update could not be installed.");
             self.block(&format!(
                 "Speakerdesk could not restore its local service. {} {} {paths}",
-                clipped(&installation_error, 1024),
+                clipped(installation_error, 1024),
                 clipped(&error, 256)
             ));
             return;
