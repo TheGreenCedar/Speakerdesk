@@ -581,7 +581,7 @@ mod tests {
             .arg(&wav)
             .arg(&flac)
             .status()
-            .unwrap();
+            .expect("ffmpeg is required to encode the FLAC fixture");
         assert!(status.success());
         let flac_out = dir.join("flac-16k.wav");
         normalize(&flac, &flac_out).unwrap();
