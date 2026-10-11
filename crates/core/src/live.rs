@@ -15,7 +15,7 @@ use thiserror::Error;
 
 use crate::document::{Document, Segment};
 use crate::error::ChildError;
-use crate::ipc::{DiarPreset, Handle, Turn, VadFrame};
+use crate::ipc::{DiarPreset, Handle, Turn, VadFeedOut};
 use crate::language::{
     AcousticEvidence, AsrOutput, AudioState, LanguageDetector, Passage, Recognizer,
     SpeechTranscriber, TranscribeOptions,
@@ -1690,6 +1690,17 @@ pub struct Engine<M: Models> {
     events: Vec<EngineEvent>,
 }
 
+impl<M: Models> Drop for Engine<M> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.vad.take() {
+            let _ = self.models.vad_close(handle);
+        }
+        if let Some(handle) = self.diar.take() {
+            let _ = self.models.diar_close(handle);
+        }
+    }
+}
+
 impl<M: Models + 'static> Engine<M> {
     pub fn new(
         config: EngineConfig,
@@ -1773,6 +1784,7 @@ impl<M: Models + 'static> Engine<M> {
             } => self.on_language(language, generation, start_sample)?,
             LiveCommand::Refine(command) => self.on_refine(command)?,
             LiveCommand::Shutdown => {
+                self.close_streams()?;
                 self.events.push(EngineEvent::Finished {
                     duration: self.received as f64 / RATE as f64,
                 });
@@ -1813,7 +1825,8 @@ impl<M: Models + 'static> Engine<M> {
         let metrics = self.models.metrics()?;
         let _ = metrics;
         self.events.push(EngineEvent::Progress {
-            processed_seconds: self.received as f64 / RATE as f64,
+            processed_seconds: self.ledger.lock().expect("speech ledger").end_sample() as f64
+                / RATE as f64,
             received_seconds: self.received as f64 / RATE as f64,
             flush: false,
         });
@@ -1821,11 +1834,14 @@ impl<M: Models + 'static> Engine<M> {
     }
 
     fn feed_range(&mut self, start: i64, end: i64) -> Result<(), LiveError> {
+        if start != self.received {
+            return Err(LiveError::Message("Noncontiguous captured audio."));
+        }
         self.ensure_streams()?;
         let pcm = self.read_pcm(start, end)?;
         let vad = self.vad.expect("vad");
-        let frames = self.models.vad_feed(vad, &pcm, false)?;
-        self.admit_frames(start, &pcm, &frames)?;
+        let feed = self.models.vad_feed(vad, &pcm, false)?;
+        self.admit_frames(end, feed)?;
         let diar = self.diar.expect("diar");
         let diarized = self.models.diar_feed(diar, &pcm, false)?;
         let origin = start as f64 / RATE as f64;
@@ -1841,34 +1857,36 @@ impl<M: Models + 'static> Engine<M> {
         Ok(())
     }
 
-    fn admit_frames(
-        &mut self,
-        start: i64,
-        pcm: &[f32],
-        frames: &[VadFrame],
-    ) -> Result<(), LiveError> {
-        let mut cursor = 0i64;
-        for frame in frames {
-            let rel_start = i64::try_from(frame.start).unwrap_or(-1);
-            let rel_end = i64::try_from(frame.end).unwrap_or(-1);
-            if rel_start != cursor
-                || rel_end <= rel_start
-                || rel_end - rel_start > speech::FRAME_SAMPLES as i64
+    fn admit_frames(&mut self, received: i64, feed: VadFeedOut) -> Result<(), LiveError> {
+        let mut cursor = self.ledger.lock().expect("speech ledger").end_sample();
+        if feed.received != received as u64
+            || feed.observed > feed.received
+            || feed.observed < cursor as u64
+        {
+            return Err(LiveError::Message("Invalid Silero observation endpoint."));
+        }
+        for frame in feed.frames {
+            let start = i64::try_from(frame.start).unwrap_or(-1);
+            let end = i64::try_from(frame.end).unwrap_or(-1);
+            if start != cursor
+                || end <= start
+                || frame.end > feed.observed
+                || end - start > speech::FRAME_SAMPLES as i64
             {
                 return Err(LiveError::Message(
                     "Invalid or noncontiguous Silero evidence.",
                 ));
             }
-            let samples = &pcm[rel_start as usize..rel_end as usize];
+            let samples = self.read_pcm(start, end)?;
             self.ledger.lock().expect("speech ledger").append_pcm(
-                start + rel_start,
-                samples,
+                start,
+                &samples,
                 f64::from(frame.raw_p),
                 f64::from(frame.norm_p),
             )?;
-            cursor = rel_end;
+            cursor = end;
         }
-        if cursor != pcm.len() as i64 {
+        if cursor as u64 != feed.observed {
             return Err(LiveError::Message(
                 "Invalid or noncontiguous Silero evidence.",
             ));
@@ -1908,9 +1926,22 @@ impl<M: Models + 'static> Engine<M> {
     }
 
     fn on_stop(&mut self) -> Result<(), LiveError> {
+        if self.capture_finished {
+            return Ok(());
+        }
+        let result = self.finish_capture();
+        let cleanup = self.close_streams();
+        result.and(cleanup)
+    }
+
+    fn finish_capture(&mut self) -> Result<(), LiveError> {
         self.ensure_streams()?;
         if let Some(vad) = self.vad {
-            let _ = self.models.vad_feed(vad, &[], true)?;
+            let feed = self.models.vad_feed(vad, &[], true)?;
+            self.admit_frames(self.received, feed)?;
+            if self.ledger.lock().expect("speech ledger").end_sample() != self.received {
+                return Err(LiveError::Message("Incomplete final Silero observations."));
+            }
         }
         if let Some(diar) = self.diar {
             let _ = self.models.diar_feed(diar, &[], true)?;
@@ -1941,7 +1972,6 @@ impl<M: Models + 'static> Engine<M> {
         if generation != current + 1 || start_sample != self.received {
             return Err(LiveError::Message("Invalid ordered language boundary."));
         }
-        self.book.boundary(start_sample, generation)?;
         self.timeline.push(LanguageStamp {
             start_sample,
             language: language.clone(),
@@ -1976,9 +2006,34 @@ impl<M: Models + 'static> Engine<M> {
 
     fn ensure_streams(&mut self) -> Result<(), LiveError> {
         if self.vad.is_none() {
-            self.vad = Some(self.models.vad_open(None)?);
-            self.diar = Some(self.models.diar_open(DiarPreset::Low)?);
+            let vad = self.models.vad_open(None)?;
+            match self.models.diar_open(DiarPreset::Low) {
+                Ok(diar) => {
+                    self.vad = Some(vad);
+                    self.diar = Some(diar);
+                }
+                Err(error) => {
+                    let _ = self.models.vad_close(vad);
+                    return Err(error.into());
+                }
+            }
         }
+        Ok(())
+    }
+
+    fn close_streams(&mut self) -> Result<(), LiveError> {
+        let vad = self
+            .vad
+            .take()
+            .map(|handle| self.models.vad_close(handle))
+            .transpose();
+        let diar = self
+            .diar
+            .take()
+            .map(|handle| self.models.diar_close(handle))
+            .transpose();
+        vad?;
+        diar?;
         Ok(())
     }
 
@@ -2017,12 +2072,26 @@ impl<M: Models + 'static> Engine<M> {
             let ledger = self.ledger.lock().expect("speech ledger");
             self.received.min(ledger.end_sample())
         };
-        while self.book.cursor() < available {
+        loop {
+            let boundary = self
+                .timeline
+                .iter()
+                .find(|stamp| stamp.epoch == self.book.epoch + 1);
+            if let Some(stamp) = boundary
+                && stamp.start_sample == self.book.cursor()
+            {
+                self.book.boundary(stamp.start_sample, stamp.epoch)?;
+                continue;
+            }
+            let end = boundary.map_or(available, |stamp| available.min(stamp.start_sample));
+            if self.book.cursor() >= end {
+                break;
+            }
             let admission = self
                 .ledger
                 .lock()
                 .expect("speech ledger")
-                .admission(self.book.cursor(), available)?;
+                .admission(self.book.cursor(), end)?;
             self.book.observe(&admission)?;
         }
         if self.capture_finished && available == self.received && !self.book.closed() {
@@ -2033,7 +2102,6 @@ impl<M: Models + 'static> Engine<M> {
             if !self.book.rows.contains_key(&identity) {
                 continue;
             }
-            self.attach(&identity)?;
             let row = self.book.rows.get(&identity).expect("row").clone();
             let previous = self.published.get(&identity);
             if row.state == UtteranceState::Sealed
@@ -2045,6 +2113,7 @@ impl<M: Models + 'static> Engine<M> {
             {
                 continue;
             }
+            self.attach(&identity)?;
             let last = self.last_decoded.get(&identity).copied();
             let changed = last.is_none_or(|(_, revision)| revision != row.audio_revision);
             let length = row.end_sample - row.start_sample;
@@ -2806,11 +2875,11 @@ mod tests {
     use crate::edit::{PassageEditInput, edit_passage};
     use crate::ipc::{
         AsrText, CtcScoresOut, DiarFeedOut, GainPolicy, LanguageProbeOut, MetricsOut,
-        SetupModelReport,
+        SetupModelReport, VadFrame,
     };
     use crate::language::{DetectionMode, DetectionReason, LanguageDetection};
     use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn notice(start: i64, end: i64, epoch: i64) -> LiveCommand {
         LiveCommand::Audio(AudioNotice {
@@ -3197,6 +3266,11 @@ mod tests {
         timing: bool,
         ctc_calls: AtomicUsize,
         transcribe_calls: AtomicUsize,
+        vad_sessions: Mutex<BTreeMap<u64, (u64, Vec<f32>)>>,
+        next_session: AtomicUsize,
+        fail_diar_open: AtomicBool,
+        fail_vad_eof: AtomicBool,
+        diar_sessions: AtomicUsize,
     }
 
     impl FakeModels {
@@ -3205,48 +3279,74 @@ mod tests {
                 timing,
                 ctc_calls: AtomicUsize::new(0),
                 transcribe_calls: AtomicUsize::new(0),
+                vad_sessions: Mutex::new(BTreeMap::new()),
+                next_session: AtomicUsize::new(1),
+                fail_diar_open: AtomicBool::new(false),
+                fail_vad_eof: AtomicBool::new(false),
+                diar_sessions: AtomicUsize::new(0),
             }
         }
     }
 
     impl Models for FakeModels {
         fn vad_open(&self, _conditioning: Option<GainPolicy>) -> Result<Handle, ChildError> {
+            let session = self.next_session.fetch_add(1, Ordering::Relaxed) as u64;
+            self.vad_sessions
+                .lock()
+                .unwrap()
+                .insert(session, (0, Vec::new()));
             Ok(Handle {
                 generation: 1,
-                session: 1,
+                session,
             })
         }
         fn vad_feed(
             &self,
-            _handle: Handle,
+            handle: Handle,
             pcm: &[f32],
-            _last: bool,
-        ) -> Result<Vec<VadFrame>, ChildError> {
+            last: bool,
+        ) -> Result<VadFeedOut, ChildError> {
+            if last && self.fail_vad_eof.load(Ordering::Relaxed) {
+                return Err(ChildError::failed("replayed EOF failure", false));
+            }
+            let mut sessions = self.vad_sessions.lock().unwrap();
+            let (observed, pending) = sessions.get_mut(&handle.session).unwrap();
+            pending.extend_from_slice(pcm);
+            let received = *observed + pending.len() as u64;
             let mut frames = Vec::new();
-            let mut offset = 0usize;
-            while offset < pcm.len() {
-                let count = (pcm.len() - offset).min(speech::FRAME_SAMPLES);
-                let peak = pcm[offset..offset + count]
+            while pending.len() >= speech::FRAME_SAMPLES || (last && !pending.is_empty()) {
+                let count = pending.len().min(speech::FRAME_SAMPLES);
+                let peak = pending[..count]
                     .iter()
                     .map(|sample| sample.abs())
                     .fold(0.0f32, f32::max);
                 let probability = if peak > 0.05 { 0.9 } else { 0.1 };
                 frames.push(VadFrame {
-                    start: offset as u64,
-                    end: (offset + count) as u64,
+                    start: *observed,
+                    end: *observed + count as u64,
                     raw_p: probability,
                     norm_p: probability,
                     gain: 1.0,
                     constant: false,
                 });
-                offset += count;
+                *observed += count as u64;
+                pending.drain(..count);
             }
-            Ok(frames)
+            Ok(VadFeedOut {
+                frames,
+                received,
+                observed: *observed,
+            })
         }
-        fn vad_close(&self, _handle: Handle) -> Result<(), ChildError> {
+        fn vad_close(&self, handle: Handle) -> Result<(), ChildError> {
+            self.vad_sessions.lock().unwrap().remove(&handle.session);
             Ok(())
         }
         fn diar_open(&self, _preset: DiarPreset) -> Result<Handle, ChildError> {
+            if self.fail_diar_open.load(Ordering::Relaxed) {
+                return Err(ChildError::failed("replayed open failure", false));
+            }
+            self.diar_sessions.fetch_add(1, Ordering::Relaxed);
             Ok(Handle {
                 generation: 1,
                 session: 2,
@@ -3274,6 +3374,7 @@ mod tests {
             })
         }
         fn diar_close(&self, _handle: Handle) -> Result<(), ChildError> {
+            self.diar_sessions.fetch_sub(1, Ordering::Relaxed);
             Ok(())
         }
         fn diarize_file(&self, _path: &Path) -> Result<Vec<Turn>, ChildError> {
@@ -3368,6 +3469,72 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn buffered_vad_tail_and_language_boundary_reach_publication() {
+        let mut engine = Engine::single(
+            EngineConfig::new("buffered", "en"),
+            FakeModels::english(false),
+        )
+        .unwrap();
+        engine.append_pcm(&loud(16_037));
+        let events = engine.handle(notice(0, 16_037, 0)).unwrap();
+        assert_eq!(engine.ledger.lock().unwrap().end_sample(), 15_872);
+        assert!(events.iter().any(|event| matches!(event, EngineEvent::Progress {processed_seconds, received_seconds, ..}
+            if *processed_seconds == 15_872.0 / 16_000.0 && *received_seconds == 16_037.0 / 16_000.0)));
+        engine
+            .handle(LiveCommand::Language {
+                language: "de".into(),
+                generation: 1,
+                start_sample: 16_037,
+            })
+            .unwrap();
+        assert_eq!(engine.book.epoch, 0);
+        let events = engine.handle(LiveCommand::Stop).unwrap();
+        assert_eq!(engine.ledger.lock().unwrap().end_sample(), 16_037);
+        assert_eq!(engine.book.epoch, 1);
+        assert!(
+            revisions(&events)
+                .iter()
+                .any(|segment| segment.language.as_deref() == Some("en")
+                    && segment.end == 16_037.0 / 16_000.0)
+        );
+        assert!(engine.models.vad_sessions.lock().unwrap().is_empty());
+        assert_eq!(engine.models.diar_sessions.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn model_streams_close_on_partial_open_failed_stop_and_drop() {
+        for failure in 0..3 {
+            let mut engine = Engine::single(
+                EngineConfig::new("cleanup", "en"),
+                FakeModels::english(false),
+            )
+            .unwrap();
+            let models = engine.models.clone();
+            if failure == 0 {
+                models.fail_diar_open.store(true, Ordering::Relaxed);
+            }
+            engine.append_pcm(&loud(512));
+            let opened = engine.handle(notice(0, 512, 0));
+            if failure == 0 {
+                assert!(opened.is_err());
+            } else {
+                opened.unwrap();
+            }
+            if failure == 1 {
+                models.fail_vad_eof.store(true, Ordering::Relaxed);
+                assert!(engine.handle(LiveCommand::Stop).is_err());
+            }
+            if failure < 2 {
+                assert!(models.vad_sessions.lock().unwrap().is_empty());
+                assert_eq!(models.diar_sessions.load(Ordering::Relaxed), 0);
+            }
+            drop(engine);
+            assert!(models.vad_sessions.lock().unwrap().is_empty());
+            assert_eq!(models.diar_sessions.load(Ordering::Relaxed), 0);
+        }
     }
 
     #[test]
@@ -3505,6 +3672,13 @@ mod tests {
                 {
                     speakers.push(candidate.speaker);
                 }
+            }
+        }
+        for event in runtime.handle(LiveCommand::Stop).unwrap() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event
+                && candidate.text == "hello"
+            {
+                speakers.push(candidate.speaker);
             }
         }
         assert_eq!(

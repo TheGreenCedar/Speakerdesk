@@ -27,6 +27,7 @@ fn main() {
             Request::Hello { .. } => Ok(Response::Ready {
                 build_id: "fixture".into(),
                 device: "replay".into(),
+                models: Vec::new(),
             }),
             Request::VadOpen { .. } | Request::DiarOpen { .. } => {
                 let handle = Handle {
@@ -42,7 +43,11 @@ fn main() {
                 if race_error {
                     Err(ChildError::failed("fixture model error", false))
                 } else {
-                    Ok(Response::Vad(Vec::new()))
+                    Ok(Response::Vad(speakerdesk_core::ipc::VadFeedOut {
+                        frames: Vec::new(),
+                        received: 0,
+                        observed: 0,
+                    }))
                 }
             }
             Request::VadClose { handle } | Request::DiarClose { handle } => {

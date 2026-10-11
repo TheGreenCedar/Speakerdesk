@@ -2,16 +2,28 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-use crate::{dispatch, metallib};
+use crate::dispatch;
 use speakerdesk_core::error::ChildError;
 use speakerdesk_core::ipc::{Envelope, EnvelopeBody, Request, Response};
 pub use speakerdesk_core::ipc::{read_envelope, write_envelope};
 
 type Active = Arc<Mutex<Option<(u64, Arc<AtomicBool>)>>>;
 
-pub fn serve() -> std::io::Result<()> {
-    metallib::prepare(None).map_err(std::io::Error::other)?;
-    serve_on(std::io::stdin(), std::io::stdout())
+pub fn serve(model_root: std::path::PathBuf) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut runtime = dispatch::Runtime::new(model_root).map_err(std::io::Error::other)?;
+        serve_with(
+            std::io::stdin(),
+            std::io::stdout(),
+            move |request, cancel| runtime.execute(request, cancel),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = model_root;
+        Err(std::io::Error::other(ChildError::MetalUnavailable))
+    }
 }
 
 pub fn serve_on<R: Read, W: Write + Send>(reader: R, writer: W) -> std::io::Result<()> {
@@ -160,9 +172,14 @@ mod tests {
         .unwrap();
         let ready = read_envelope(&mut parent).unwrap();
         match ready.body {
-            EnvelopeBody::Response(Ok(Response::Ready { build_id, device })) => {
+            EnvelopeBody::Response(Ok(Response::Ready {
+                build_id,
+                device,
+                models,
+            })) => {
                 assert_eq!(build_id, "test");
                 assert_eq!(device, "unavailable");
+                assert!(models.is_empty());
                 assert_eq!(ready.request_id, 7);
             }
             other => panic!("unexpected {other:?}"),

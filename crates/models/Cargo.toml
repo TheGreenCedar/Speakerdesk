@@ -13,6 +13,9 @@ serde_json = "1.0.153"
 speakerdesk-core = { path = "../core" }
 thiserror = "2.0.21"
 
+[dev-dependencies]
+hound = "3.5.1"
+
 # Resolved on macOS agents. Linux CI does not compile these.
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-rs = { version = "0.32.0", features = ["metal", "accelerate", "safetensors"] }

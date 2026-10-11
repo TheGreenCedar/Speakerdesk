@@ -1,13 +1,12 @@
 //! Silero VAD v6. Upstream: `Blaizzy/mlx-audio@feb25a37`.
 //! Weights: `mlx-community/silero-vad-v6@2ebf4a5`
-//! (`2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06`). The silero agent replaces these bodies.
-//!
-//! Linux cannot run MLX and this module does not call mlx-rs. `vad_open`, `vad_feed`,
-//! and `vad_close` stay unimplemented until a macOS run loads that pin.
-//! Ignored `parity_silero` tests are the macOS check against those weights.
-use speakerdesk_core::error::ChildError;
-use speakerdesk_core::ipc::{GainPolicy, Handle, VadFrame};
+//! (`2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06`).
 use speakerdesk_core::limits::{VAD_CONTEXT_SAMPLES, VAD_FRAME_SAMPLES};
+
+#[cfg(target_os = "macos")]
+pub mod network;
+#[cfg(target_os = "macos")]
+pub mod session;
 
 /// New samples in one Silero 16 kHz frame (`chunk_size` in the pinned branch).
 pub const FRAME_SAMPLES: usize = VAD_FRAME_SAMPLES;
@@ -27,18 +26,6 @@ const GAIN_MAX: f32 = 256.0;
 
 /// Short weight pin. Full revision is `2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06`.
 pub const WEIGHT_PIN: &str = "mlx-community/silero-vad-v6@2ebf4a5";
-
-pub fn vad_open(_conditioning: Option<GainPolicy>) -> Result<Handle, ChildError> {
-    Err(ChildError::Unimplemented)
-}
-
-pub fn vad_feed(_handle: Handle, _pcm: &[f32], _last: bool) -> Result<Vec<VadFrame>, ChildError> {
-    Err(ChildError::Unimplemented)
-}
-
-pub fn vad_close(_handle: Handle) -> Result<(), ChildError> {
-    Err(ChildError::Unimplemented)
-}
 
 /// One 512-sample step, plus the 64-sample context that precedes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,11 +270,5 @@ mod tests {
         assert!(constant.latch);
         let resumed = hysteresis_flag(constant.latch, 0.4, false);
         assert!(resumed.speaking && resumed.latch);
-    }
-
-    #[test]
-    #[ignore = "runs on macOS with pinned weights mlx-community/silero-vad-v6@2ebf4a5"]
-    fn parity_silero() {
-        panic!("Not implemented: real model comparison has not run.");
     }
 }

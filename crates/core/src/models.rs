@@ -3,18 +3,13 @@ use std::path::Path;
 use crate::error::ChildError;
 use crate::ipc::{
     AsrText, CtcScoresOut, DiarFeedOut, DiarPreset, GainPolicy, Handle, LanguageProbeOut,
-    MetricsOut, SetupModelReport, Turn, VadFrame,
+    MetricsOut, SetupModelReport, Turn, VadFeedOut,
 };
 /// Sync model seam. `ChildModels`, `FakeModels`, and `ReplayModels` implement it.
 /// Model calls must not run under the job-store lock.
 pub trait Models: Send + Sync {
     fn vad_open(&self, conditioning: Option<GainPolicy>) -> Result<Handle, ChildError>;
-    fn vad_feed(
-        &self,
-        handle: Handle,
-        pcm: &[f32],
-        last: bool,
-    ) -> Result<Vec<VadFrame>, ChildError>;
+    fn vad_feed(&self, handle: Handle, pcm: &[f32], last: bool) -> Result<VadFeedOut, ChildError>;
     fn vad_close(&self, handle: Handle) -> Result<(), ChildError>;
     fn diar_open(&self, preset: DiarPreset) -> Result<Handle, ChildError>;
     fn diar_feed(&self, handle: Handle, pcm: &[f32], last: bool)
@@ -48,7 +43,7 @@ impl Models for UnimplementedModels {
         _handle: Handle,
         _pcm: &[f32],
         _last: bool,
-    ) -> Result<Vec<VadFrame>, ChildError> {
+    ) -> Result<VadFeedOut, ChildError> {
         Err(ChildError::Unimplemented)
     }
     fn vad_close(&self, _handle: Handle) -> Result<(), ChildError> {

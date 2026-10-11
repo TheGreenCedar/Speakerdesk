@@ -4698,6 +4698,7 @@ dependencies = [
 name = "speakerdesk-models"
 version = "0.6.6"
 dependencies = [
+ "hound",
  "mlx-rs",
  "postcard",
  "safetensors",

@@ -995,12 +995,15 @@ fn admit<M: Models + ?Sized + 'static>(
         let end = (offset + speech::FRAME_SAMPLES).min(pcm.len());
         let last = end == pcm.len();
         match models.vad_feed(handle, &pcm[offset..end], last) {
-            Ok(frames) => {
-                let before = ledger.end_sample();
-                for frame in frames {
+            Ok(feed) => {
+                if feed.received != end as u64 || feed.observed > feed.received {
+                    failed = Some(ImportError::new(messages::PROCESSING_FAILED));
+                    break;
+                }
+                for frame in feed.frames {
                     let start = i64::try_from(frame.start).unwrap_or(-1);
                     let frame_end = i64::try_from(frame.end).unwrap_or(-1);
-                    if start < 0 || frame_end <= start || frame_end as usize > pcm.len() {
+                    if start < 0 || frame_end <= start || frame.end > feed.observed {
                         failed = Some(ImportError::new(messages::PROCESSING_FAILED));
                         break;
                     }
@@ -1014,7 +1017,7 @@ fn admit<M: Models + ?Sized + 'static>(
                         break;
                     }
                 }
-                if failed.is_none() && ledger.end_sample() != before + (end - offset) as i64 {
+                if failed.is_none() && ledger.end_sample() != feed.observed as i64 {
                     failed = Some(ImportError::new(messages::PROCESSING_FAILED));
                 }
             }
@@ -1130,7 +1133,8 @@ mod tests {
     };
     use crate::export;
     use crate::ipc::{
-        self, AsrText, DiarFeedOut, GainPolicy, Handle, LanguageProbeOut, Turn, VadFrame,
+        self, AsrText, DiarFeedOut, GainPolicy, Handle, LanguageProbeOut, Turn, VadFeedOut,
+        VadFrame,
     };
     use crate::language;
     use crate::languages;
@@ -1219,7 +1223,7 @@ mod tests {
             _handle: Handle,
             pcm: &[f32],
             _last: bool,
-        ) -> Result<Vec<VadFrame>, crate::error::ChildError> {
+        ) -> Result<VadFeedOut, crate::error::ChildError> {
             let mut cursor = self.cursor.lock().unwrap();
             let start = *cursor;
             let end = start + pcm.len();
@@ -1229,14 +1233,18 @@ mod tests {
                 .iter()
                 .any(|(region_start, region_end)| start < *region_end && end > *region_start);
             let probability = if speech { 0.9 } else { 0.01 };
-            Ok(vec![VadFrame {
-                start: start as u64,
-                end: end as u64,
-                raw_p: probability,
-                norm_p: probability,
-                gain: 1.0,
-                constant: false,
-            }])
+            Ok(VadFeedOut {
+                frames: vec![VadFrame {
+                    start: start as u64,
+                    end: end as u64,
+                    raw_p: probability,
+                    norm_p: probability,
+                    gain: 1.0,
+                    constant: false,
+                }],
+                received: end as u64,
+                observed: end as u64,
+            })
         }
         fn vad_close(&self, _handle: Handle) -> Result<(), crate::error::ChildError> {
             Ok(())

@@ -28,12 +28,22 @@ pub enum DiarPreset {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VadFrame {
+    /// Absolute sample coordinates within this session, never packet offsets.
     pub start: u64,
     pub end: u64,
     pub raw_p: f32,
     pub norm_p: f32,
     pub gain: f32,
     pub constant: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VadFeedOut {
+    pub frames: Vec<VadFrame>,
+    /// PCM accepted, including the incomplete frame buffered for the next feed.
+    pub received: u64,
+    /// Exclusive endpoint of contiguous neural observations.
+    pub observed: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -140,9 +150,13 @@ pub enum Request {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Response {
-    Ready { build_id: String, device: String },
+    Ready {
+        build_id: String,
+        device: String,
+        models: Vec<String>,
+    },
     Handle(Handle),
-    Vad(Vec<VadFrame>),
+    Vad(VadFeedOut),
     Diar(DiarFeedOut),
     Turns(Vec<Turn>),
     Probe(LanguageProbeOut),

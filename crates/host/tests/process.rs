@@ -5,7 +5,40 @@ use speakerdesk_host::inference::InferenceSupervisor;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 fn supervisor() -> std::sync::Arc<InferenceSupervisor> {
-    InferenceSupervisor::new(env!("CARGO_BIN_EXE_inference-fixture"), "fixture").unwrap()
+    InferenceSupervisor::new(
+        env!("CARGO_BIN_EXE_inference-fixture"),
+        "fixture",
+        std::env::temp_dir(),
+    )
+    .unwrap()
+}
+
+#[test]
+#[ignore = "requires SPEAKERDESK_TEST_CHILD desktop binary and SPEAKERDESK_TEST_MODELS disposable model root"]
+fn actual_desktop_child_runs_buffered_silero_and_reaps() {
+    let child = std::env::var_os("SPEAKERDESK_TEST_CHILD").expect("desktop binary");
+    let model_root = std::env::var_os("SPEAKERDESK_TEST_MODELS").expect("model directory");
+    let host = InferenceSupervisor::new(child, env!("CARGO_PKG_VERSION"), model_root).unwrap();
+    let models = host.models(CancellationToken::new());
+    let first = models.vad_open(None).unwrap();
+    let second = models.vad_open(None).unwrap();
+    assert_ne!(first, second);
+    let buffered = models.vad_feed(first, &[0.0; 511], false).unwrap();
+    assert_eq!((buffered.received, buffered.observed), (511, 0));
+    assert!(buffered.frames.is_empty());
+    let full = models.vad_feed(first, &[0.0; 38], false).unwrap();
+    assert_eq!((full.received, full.observed), (549, 512));
+    assert_eq!(full.frames.len(), 1);
+    let tail = models.vad_feed(first, &[], true).unwrap();
+    assert_eq!((tail.received, tail.observed), (549, 549));
+    assert_eq!((tail.frames[0].start, tail.frames[0].end), (512, 549));
+    models.vad_close(first).unwrap();
+    let other = models.vad_feed(second, &[0.0; 512], true).unwrap();
+    assert_eq!((other.frames[0].start, other.observed), (0, 512));
+    models.vad_close(second).unwrap();
+    let pid = host.child_pid().unwrap();
+    host.shutdown();
+    reaped(pid);
 }
 fn wait_for(path: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -111,9 +144,12 @@ fn malformed_frames_and_bad_handshakes_are_reaped() {
     assert!(models.transcribe(&[], "malformed", (0, 0)).is_err());
     reaped(pid);
     host.shutdown();
-    let wrong =
-        InferenceSupervisor::new(env!("CARGO_BIN_EXE_inference-fixture"), "different-build")
-            .unwrap();
+    let wrong = InferenceSupervisor::new(
+        env!("CARGO_BIN_EXE_inference-fixture"),
+        "different-build",
+        std::env::temp_dir(),
+    )
+    .unwrap();
     assert!(wrong.models(CancellationToken::new()).metrics().is_err());
     assert_eq!(wrong.child_pid(), None);
     wrong.shutdown();

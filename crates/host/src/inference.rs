@@ -11,7 +11,7 @@ use speakerdesk_core::error::ChildError;
 use speakerdesk_core::ipc::{
     AsrText, CtcScoresOut, DiarFeedOut, DiarPreset, Envelope, EnvelopeBody, GainPolicy, Handle,
     LanguageProbeOut, MAX_FRAME_BYTES, MetricsOut, Request, Response, SetupModelReport, Turn,
-    VadFrame, request_timeout,
+    VadFeedOut, request_timeout,
 };
 use speakerdesk_core::models::Models;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -45,6 +45,7 @@ impl InferenceSupervisor {
     pub fn new(
         executable: impl Into<PathBuf>,
         build_id: impl Into<String>,
+        model_root: impl Into<PathBuf>,
     ) -> Result<Arc<Self>, ChildError> {
         let (calls, receiver) = mpsc::channel(1);
         let stop = CancellationToken::new();
@@ -55,12 +56,15 @@ impl InferenceSupervisor {
             .map_err(io_to_child)?;
         let executable = executable.into();
         let build_id = build_id.into();
+        let model_root = model_root.into();
         let actor_stop = stop.clone();
         let actor_pid = pid.clone();
         let worker = std::thread::Builder::new()
             .name("inference-control".into())
             .spawn(move || {
-                runtime.block_on(run(receiver, actor_stop, actor_pid, executable, build_id));
+                runtime.block_on(run(
+                    receiver, actor_stop, actor_pid, executable, build_id, model_root,
+                ));
             })
             .map_err(io_to_child)?;
         Ok(Arc::new(Self {
@@ -137,12 +141,7 @@ impl Models for ChildModels {
         }
     }
 
-    fn vad_feed(
-        &self,
-        handle: Handle,
-        pcm: &[f32],
-        last: bool,
-    ) -> Result<Vec<VadFrame>, ChildError> {
+    fn vad_feed(&self, handle: Handle, pcm: &[f32], last: bool) -> Result<VadFeedOut, ChildError> {
         match self.exchange(Request::VadFeed {
             handle,
             pcm: pcm.to_vec(),
@@ -266,9 +265,14 @@ struct Process {
 }
 
 impl Process {
-    async fn start(executable: &Path, generation: u64) -> Result<Self, ChildError> {
+    async fn start(
+        executable: &Path,
+        generation: u64,
+        model_root: &Path,
+    ) -> Result<Self, ChildError> {
         let mut child = Command::new(executable)
             .arg("--inference")
+            .arg(model_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -364,6 +368,7 @@ async fn run(
     pid: Arc<AtomicU32>,
     executable: PathBuf,
     build_id: String,
+    model_root: PathBuf,
 ) {
     let mut process: Option<Process> = None;
     let mut generation = 0_u64;
@@ -376,7 +381,7 @@ async fn run(
         }
         if process.is_none() {
             generation += 1;
-            let started = Process::start(&executable, generation).await;
+            let started = Process::start(&executable, generation, &model_root).await;
             match started {
                 Ok(mut child) => {
                     pid.store(child.child.id().unwrap_or(0), Ordering::Release);

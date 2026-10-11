@@ -20,7 +20,8 @@ Local implementation branch: `codex/python-free-mac`.
    transactions, guarded import publication, consistent migration snapshots,
    private journal recovery and legacy audio copy-on-write. Process lifecycle and
    operation cancellation implemented; active meeting state integration remains pending.
-3. Pending: Silero, offline Nemotron and Cohere through the real desktop;
+3. In progress: Silero runs in the real native child (proof below). Offline
+   Nemotron and Cohere remain pending through the real desktop;
    edit/save/quit/reopen/export with a short public fixture and measured Metal.
 4. Pending: automatic language, CTC, native Core ML ReDimNet, identity and setup.
 5. Pending: native capture coordination, streaming tails/recovery and bounded work.
@@ -130,3 +131,37 @@ resources were disabled for this compile check, so it is not a qualified package
 The installed app was read only to establish version 0.6.6. PR/base remain the
 starting SHAs above. Independent source review verified the ABI, artifact minimum
 OS, unchanged bindings, and fetch boundary; its ignore-rule finding was fixed.
+
+## First model: Silero
+
+The pinned 16 kHz graph now loads through mlx-rs and executes on Metal. The child
+retains one network and independent raw/normalized recurrent states per session.
+Feeds keep at most one partial 512-sample frame, report absolute received and
+observed endpoints, and inspect EOF padding without extending physical time.
+Cancellation checks occur between frames and invalidate partially advanced state.
+The explicit child model root never falls back to the installed cache.
+
+A generated 9.0903125-second two-voice fixture with a pause and 37-sample tail
+matches the independent pinned Python graph on the same native backend within
+1e-4. Against baseline MLX 0.32.3's macOS 26 backend, the largest probability
+difference is 0.003350228, with no changed speech-hysteresis decisions. The macOS
+15 and 26 wheel variants explain that numerical difference. On this M5, an
+optimized warm native pass took about 164 ms versus the baseline component's
+193 ms. These are component observations, not end-to-end acceptance measurements.
+Reusing MLX's default GPU stream removed per-frame stream creation and its cost.
+
+Actual Session tests cover packet sizes 1/511/512/513/16000, empty feeds, EOF,
+interleaved sessions and targeted cancellation. Caller tests cover delayed
+language boundaries, final-tail publication, partial-open cleanup, failed stop
+and drop. Core 130, host 46, models 34 and six replay-process tests pass; five
+other acoustic model placeholders remain ignored. Silero's ignored acoustic
+test was explicitly run and passes. Clippy passes with warnings denied for these
+crates; the vendored binding still emits its two upstream allocator-signature
+warnings. An independent source verifier found no remaining Silero-slice defect.
+
+The release desktop binary's actual `--inference` entry point passes the buffered
+Silero pipe test and is reaped afterward. That test runs the built binary directly
+with the pinned build library path; Cargo overrides DYLD_LIBRARY_PATH when running
+the host-only harness, so the direct test executable was used. It is not packaged
+app proof. Normal desktop startup still launches Python. Nemotron, Cohere, the
+editor workflow, full model setup and all later acceptance gates remain open.

@@ -260,7 +260,11 @@ fn recovery_description(app: &tauri::AppHandle) -> String {
 }
 fn main() {
     if std::env::args_os().nth(1).as_deref() == Some("--inference".as_ref()) {
-        if let Err(error) = speakerdesk_models::serve() {
+        let Some(model_root) = std::env::args_os().nth(2) else {
+            eprintln!("inference requires an explicit model directory");
+            std::process::exit(1);
+        };
+        if let Err(error) = speakerdesk_models::serve(model_root.into()) {
             eprintln!("{error}");
             std::process::exit(1);
         }

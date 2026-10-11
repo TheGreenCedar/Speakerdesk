@@ -37,3 +37,4 @@ __pycache__/
 desktop/capture/echo/libspeakerdesk_echo.dylib
 
 !crates/core/tests/testdata/*.flac
+!crates/models/tests/data/two-voice.wav
