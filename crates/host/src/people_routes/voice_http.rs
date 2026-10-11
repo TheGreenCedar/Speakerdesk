@@ -26,10 +26,10 @@ use speakerdesk_core::{
     voice::{self, Calibration, RecognitionMeeting, VoiceClip, VoiceProfile},
 };
 
-fn conflict(message: impl Into<String>) -> HttpError {
+pub(super) fn conflict(message: impl Into<String>) -> HttpError {
     HttpError::new(StatusCode::CONFLICT, message)
 }
-fn voice_error(error: voice::VoiceError) -> HttpError {
+pub(super) fn voice_error(error: voice::VoiceError) -> HttpError {
     HttpError::new(StatusCode::BAD_REQUEST, error.to_string())
 }
 fn reply(result: Result<Value, HttpError>) -> Response {
@@ -39,7 +39,7 @@ fn reply(result: Result<Value, HttpError>) -> Response {
     }
 }
 
-fn meeting(job: &Job) -> Result<RecognitionMeeting, HttpError> {
+pub(super) fn meeting(job: &Job) -> Result<RecognitionMeeting, HttpError> {
     let doc = job
         .document
         .as_ref()
@@ -178,7 +178,7 @@ pub(super) async fn voice_suggestion(
     .await
 }
 
-fn assignment<'a>(job: &'a Job, track: &str) -> Option<&'a Value> {
+pub(super) fn assignment<'a>(job: &'a Job, track: &str) -> Option<&'a Value> {
     job.extra
         .get("speaker_assignments")
         .and_then(|a| a.get(track))
@@ -193,7 +193,7 @@ fn confirmed(job: &Job, track: &str, pid: &str) -> bool {
     })
 }
 
-fn selected_audio_unchanged(
+pub(super) fn selected_audio_unchanged(
     current: &Job,
     original: &Job,
     clips: &[VoiceClip],
@@ -280,29 +280,13 @@ fn run_voice(
     let result = (|| {
         let path = recording_path(app.data_dir(), &original)
             .map_err(|_| conflict("Meeting audio is unavailable."))?;
-        let mut vectors = Vec::with_capacity(clips.len());
-        for clip in &clips {
-            if operation.cancellation.is_cancelled() {
-                return Err(conflict("Voice operation cancelled."));
-            }
-            let pcm = audio::read_pcm16_range(&path, clip.start, clip.end)
-                .map_err(|e| conflict(e.to_string()))?;
-            let result = models
-                .embed_voice(&pcm, &operation.cancellation)
-                .map_err(conflict)?;
-            if result.model != policy.model {
-                return Err(conflict(
-                    "The voice model changed. Refresh passages and try again.",
-                ));
-            }
-            if !result.clip.clean {
-                return Err(voice_error(voice::VoiceError::Unusable));
-            }
-            vectors.push(
-                voice::normalized(&result.clip.vector, policy.model.dimension)
-                    .map_err(voice_error)?,
-            );
-        }
+        let vectors = embeddings(
+            models.as_ref(),
+            &path,
+            &policy,
+            &clips,
+            &operation.cancellation,
+        )?;
         let mut store = app.store();
         if app.admission.closed() || operation.cancellation.is_cancelled() {
             return Err(conflict("Voice operation cancelled."));
@@ -426,9 +410,39 @@ pub(super) fn policy_json(policy: &Calibration) -> Value {
     json!({"dataset_id":policy.dataset_id,"threshold":policy.threshold,"margin":policy.margin,"minimum_clips":policy.minimum_clips})
 }
 
-fn pending_check(job: &Job, track: &str, id: &str) -> bool {
+pub(super) fn pending_check(job: &Job, track: &str, id: &str) -> bool {
     job.extra
         .get("voice_checks")
         .and_then(|checks| checks.get(track))
         .is_some_and(|check| check["id"] == id && check["status"] == "checking")
+}
+
+pub(super) fn embeddings(
+    models: &dyn crate::routes::ApplicationModels,
+    path: &std::path::Path,
+    policy: &Calibration,
+    clips: &[VoiceClip],
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<Vec<f64>>, HttpError> {
+    let mut vectors = Vec::with_capacity(clips.len());
+    for clip in clips {
+        if cancellation.is_cancelled() {
+            return Err(conflict("Voice operation cancelled."));
+        }
+        let pcm = audio::read_pcm16_range(path, clip.start, clip.end)
+            .map_err(|e| conflict(e.to_string()))?;
+        let result = models.embed_voice(&pcm, cancellation).map_err(conflict)?;
+        if result.model != policy.model {
+            return Err(conflict(
+                "The voice model changed. Refresh passages and try again.",
+            ));
+        }
+        if !result.clip.clean {
+            return Err(voice_error(voice::VoiceError::Unusable));
+        }
+        vectors.push(
+            voice::normalized(&result.clip.vector, policy.model.dimension).map_err(voice_error)?,
+        );
+    }
+    Ok(vectors)
 }

@@ -674,3 +674,51 @@ Release executable SHA256:
 signed preview SHA256:
 `f048ff64952774129eb7ce43ea7394e1dbe058da675e6cb2a9b2038c18ef0406`.
 The remaining replacement gates listed above are still open.
+
+## Automatic saved-voice checks after import
+
+Successful imports now publish an editable transcript, then check eligible tracks
+under the same serial worker, operation generation and admission lease. Existing
+core planning/matching rules retain one decision per track, compatible profile
+identity, opt-out and conflicting-introduction behavior. Publication reloads the
+document, preserves unrelated edits/metadata and merges only the target decision.
+Names remain tentative (`automatic_voice`, `confirmed: false`); recognition never
+enrolls or updates a voice. Ready jobs report ongoing inference ownership until
+cleanup, keeping deletion and updater admission consistent.
+
+The assembled import replay failed before integration with zero embedding calls.
+Five eligibility cases and an eleven-case blocked, two-track matrix now pass,
+including edits, names, forget/replacement, opt-out toggling, cancellation,
+shutdown, malformed model identity and truncated audio. Review caught an overly
+broad profile guard: forgetting an unrelated incompatible profile cancelled the
+second track. The regression reproduces two calls instead of four before the
+compatible-only fix, then checks both matched identities afterward. These tests
+use explicit model doubles, not acoustic evidence.
+
+Real MLX/Core ML inference in the isolated optimized Tauri app recognized the
+held-out Daniel fixture at score 0.9643743364. Its two verified crops were
+0–5.99 s and 6.24–12.12 s. A local name correction persisted at revision 6 through
+whole-app quit/reopen; the reopened API document equals its saved predecessor.
+Quit reaped owned PIDs 57333/57366/57367. The profile remained unchanged.
+
+The real editor also exposed a presentation gap: a canonical unassigned passage
+could have an attributed reading turn, hiding the existing recognition marker.
+Reading turns now show their own recognized status and remove it upon confirmation.
+The final preview's fresh import shows `Daniel fixture Recognized`; applying the
+saved person removes the marker without changing the transcript or saved profile.
+The renderer regression fails before this change and passes afterward. Its cache
+key tracks assignment sources, avoiding serialization of profile evidence per row.
+
+Core 145, host 50 and 34 renderer/performance checks pass; one optional external
+reading fixture is skipped. Strict core/host Clippy and the locked release build
+pass, with the previously recorded upstream mlx-sys warnings. Independent review
+found no remaining slice blocker. Final release SHA256:
+`a7fa550f5a2088e34356a3f0ff00a28750a201ab925262e0007d86288f696306`;
+signed preview SHA256:
+`78aa479b8f30a404fe205db45d953600a39e60738dcdb540e5fa0ffbf0b77277`.
+Evidence is `automatic-voice-*.json` under the disposable desktop directory.
+
+Remaining acceptance: native passage retry/language repair, long-file diarization,
+model download/setup, live capture/recovery, Python-free default packaging/updater,
+and full cold/warm/live performance gates. Synthetic voice evidence does not
+establish human-population accuracy or compatibility with legacy embedding spaces.

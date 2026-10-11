@@ -214,3 +214,13 @@ test('read-only actual source projection reduces presentation fragmentation with
     console.log(JSON.stringify({actualCanonicalSlices:112,readingParagraphs:paragraphs.length,paragraphsWithUnassignedWords:notes.length,
       inlineUnassignedSpans:c.querySelectorAll('.reading-turn-unassigned').length,words:1061}));
   });
+
+test('reading turns expose automatic recognition and remove it after confirmation',()=>{
+  const f=fixture(parts);
+  f.run("selected.speaker_assignments={speaker_0:{source:'automatic_voice',confirmed:false}};renderSegments()");
+  const badges=()=>card(f).querySelectorAll('.reading-turn-meta .review-tag').map(e=>e.textContent);
+  assert.deepEqual(badges(),['Recognized','Recognized']);
+  assert.equal(card(f).querySelectorAll('.reading-turn-words').map(e=>e.textContent).join(''),parts.map(t=>t.text).join(''));
+  f.run("selected.speaker_assignments.speaker_0={source:'manual',confirmed:true};renderSegments()");
+  assert.deepEqual(badges(),[]);
+});

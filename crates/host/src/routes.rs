@@ -578,7 +578,13 @@ async fn job_detail(
         } else {
             (job, None)
         };
-        let owned = meeting_id(&app.shared).as_ref() == Some(&id);
+        let owned = meeting_id(&app.shared).as_ref() == Some(&id)
+            || app
+                .shared
+                .operations
+                .lock()
+                .expect("operations")
+                .contains_key(&id);
         Json(detail_json(
             &job,
             known.is_some() && unchanged == Some(true),
@@ -1056,7 +1062,7 @@ fn execute_import(
     generation: u64,
     cancellation: &CancellationToken,
 ) {
-    let _operation = OperationGuard {
+    let operation = OperationGuard {
         shared: shared.clone(),
         id: id.clone(),
         generation,
@@ -1095,44 +1101,63 @@ fn execute_import(
     let inferred = models
         .infer(&job, cancellation)
         .and_then(|document| checked_document(document, job.duration.unwrap_or(0.0)));
-    let result = shared
-        .store
-        .lock()
-        .expect("store")
-        .update_job(id, |current| {
-            if cancellation.is_cancelled()
-                || current.status != "processing"
-                || current.revision != job.revision
-                || current
-                    .extra
-                    .get("operation_generation")
-                    .and_then(Value::as_u64)
-                    != Some(generation)
-            {
-                return Err(ApiError::new(
-                    409,
-                    "The inference operation is no longer current.",
-                ));
+    let mut store = shared.store.lock().expect("store");
+    let result = store.update_job(id, |current| {
+        if cancellation.is_cancelled()
+            || current.status != "processing"
+            || current.revision != job.revision
+            || current
+                .extra
+                .get("operation_generation")
+                .and_then(Value::as_u64)
+                != Some(generation)
+        {
+            return Err(ApiError::new(
+                409,
+                "The inference operation is no longer current.",
+            ));
+        }
+        match inferred {
+            Ok(document) => {
+                current.document = Some(document);
+                current.status = "ready".into();
+                current.message = messages::TRANSCRIPT_READY.into();
             }
-            match inferred {
-                Ok(document) => {
-                    current.document = Some(document);
-                    current.status = "ready".into();
-                    current.message = messages::TRANSCRIPT_READY.into();
-                }
-                Err(message) => {
-                    current.status = "failed".into();
-                    current.message = if message.is_empty() {
-                        messages::PROCESSING_FAILED.into()
-                    } else {
-                        message
-                    };
-                }
+            Err(message) => {
+                current.status = "failed".into();
+                current.message = if message.is_empty() {
+                    messages::PROCESSING_FAILED.into()
+                } else {
+                    message
+                };
             }
-            Ok::<_, ApiError>(())
-        });
-    if let Err(error) = result {
-        tracing::warn!(message = %error.message, "import result was not published");
+        }
+        Ok::<_, ApiError>(())
+    });
+    let published = match result {
+        Ok(Some((job, ()))) if job.status == "ready" => Some(job),
+        Err(error) => {
+            tracing::warn!(message = %error.message, "import result was not published");
+            None
+        }
+        _ => None,
+    };
+    if published.is_some()
+        && let Some(active) = shared.operations.lock().expect("operations").get_mut(id)
+        && active.generation == generation
+    {
+        // Retain ownership while the editable result receives optional voice checks.
+        active.activity = Activity::Refinement;
+    }
+    drop(store);
+    if let Some(job) = published {
+        crate::people_routes::check_import_voices(
+            &shared.store,
+            &shared.data_dir,
+            models.as_ref(),
+            &operation,
+            &job,
+        );
     }
 }
 

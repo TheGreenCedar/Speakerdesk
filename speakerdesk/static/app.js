@@ -391,7 +391,7 @@ function refreshReadingTurnView(card,segment) {
     text.addEventListener('input',()=>refreshReadingTurnView(card,current()));
   }
   const {host,text,button}=binding;
-  const signature=JSON.stringify([turns,doc.speakers]);
+  const signature=JSON.stringify([turns,doc.speakers,turns?.map(turn=>selected.speaker_assignments?.[turn.speaker]?.source)]);
   if(signature!==binding.signature) {
     binding.signature=signature;host.replaceChildren();
     const groups=[];
@@ -428,6 +428,9 @@ function refreshReadingTurnView(card,segment) {
       const row=node('section',undefined,'reading-turn');
       row.dataset.attribution=turn.includesUnassigned?'single_with_unassigned':turn.attribution;
       const label=node('div',undefined,'reading-turn-meta');label.append(node('span',readingTurnLabel(turn),'reading-turn-speaker'));
+      if(turn.attribution==='single' && selected.speaker_assignments?.[turn.speaker]?.source==='automatic_voice') {
+        const recognized=node('span','Recognized','review-tag');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';label.append(recognized);
+      }
       if(turn.includesUnassigned)label.append(node('span','Includes unassigned words','reading-unassigned-note'));
       if(turn.start!==null)label.append(node('span',passageTime(turn.start),'reading-turn-time'));
       const words=node('p',undefined,'reading-turn-words');

@@ -22,9 +22,11 @@ use crate::routes::AppState;
 
 const NOT_FOUND: &str = "The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.";
 const NAMING_BUSY: &[&str] = &["preparing", "queued", "processing", "finishing"];
-const VOICE_READY: &str = "Save voices with explicit consent, then check another speaker's passages for a possible match.";
+const VOICE_READY: &str = "Saved voices can recognize speakers in new recordings. Confirm a speaker before saving their voice.";
 const VOICE_UNQUALIFIED: &str = "Voice recognition needs a qualified GPU/ANE runtime. Saved names and voices are kept. Install a Speakerdesk update with qualified voice recognition.";
+mod automatic;
 mod voice_http;
+pub(crate) use automatic::check_import_voices;
 
 const PROFILE_KEPT: &str = "Your saved voice is kept. Voice recognition is currently unavailable.";
 
@@ -1317,9 +1319,444 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn completed_import_checks_saved_voices_once_without_enrollment() {
+        use speakerdesk_core::{ids::JobId, store::JobStore};
+        use std::sync::{Arc, atomic::Ordering};
+        for case in [
+            "match",
+            "disabled",
+            "checked",
+            "incompatible",
+            "introduction",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let state = AppState::open(root.path()).unwrap();
+            state.set_issues(Vec::new());
+            state.set_models(Arc::new(VoiceReplay::default()));
+            let enrollment = "7".repeat(32);
+            voice_job(&state, &enrollment);
+            let running = voice_server(&state).await;
+            let pid = enroll_person(&running, &enrollment).await;
+            let saved = running.client.post(running.url(&format!("/api/people/{pid}/voice")))
+                .json(&json!({"revision":1,"meeting_id":enrollment,"track_id":"speaker_0","segment_ids":["a","b"],"consent":true}))
+                .send().await.unwrap();
+            assert_eq!(saved.status(), 200);
+            if case == "disabled" {
+                state.store().set_recognition(false).unwrap();
+            }
+            if case == "incompatible" {
+                let mut profile = state.store().voice_profiles().unwrap()[&pid].clone();
+                profile["model"]["revision"] = json!("legacy-space");
+                let profile = serde_json::from_value(profile).unwrap();
+                let mut store = state.store();
+                let generation = store.voice_generation(&pid).unwrap().unwrap();
+                assert!(
+                    store
+                        .publish_voice(
+                            &JobId::parse(&enrollment).unwrap(),
+                            generation,
+                            &profile,
+                            |_| Ok::<_, speakerdesk_core::error::StoreError>(true)
+                        )
+                        .unwrap()
+                );
+            }
+            let profiles = state.store().voice_profiles().unwrap();
+            let jid = "8".repeat(32);
+            voice_job(&state, &jid);
+            let id = JobId::parse(&jid).unwrap();
+            let mut job = state.store().get(&id, false).unwrap().unwrap();
+            let mut document = job.document.take().unwrap();
+            if case == "introduction" {
+                document.segments[0].text = "My name is Priya.".into();
+            }
+            if case == "checked" {
+                job.extra.insert(
+                    "voice_checks".into(),
+                    json!({"speaker_0":{"status":"manual","unknown":"keep"}}),
+                );
+            }
+            job.status = "uploaded".into();
+            job.language = "en".into();
+            state.insert_job(job);
+            let replay = Arc::new(VoiceReplay {
+                document: Some(document),
+                ..Default::default()
+            });
+            state.set_models(replay.clone());
+            let response = running
+                .client
+                .post(running.url(&format!("/api/jobs/{jid}/run")))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                202,
+                "case {case}: {}",
+                response.text().await.unwrap()
+            );
+            let waiting = state.clone();
+            tokio::task::spawn_blocking(move || waiting.drain())
+                .await
+                .unwrap();
+            let job = state.store().get(&id, false).unwrap().unwrap();
+            let checks = &job.extra.get("voice_checks").cloned().unwrap_or_default();
+            let expected_calls = if matches!(case, "match" | "introduction") {
+                2
+            } else {
+                0
+            };
+            assert_eq!(
+                replay.calls.load(Ordering::SeqCst),
+                expected_calls,
+                "case {case}"
+            );
+            assert_eq!(job.status, "ready");
+            if case == "match" {
+                let assignment = &job.extra["speaker_assignments"]["speaker_0"];
+                assert_eq!(assignment["person_id"], pid);
+                assert_eq!(assignment["source"], "automatic_voice");
+                assert_eq!(assignment["confirmed"], false);
+                assert_eq!(assignment["evidence"]["clips"].as_array().unwrap().len(), 2);
+                assert_eq!(job.document.as_ref().unwrap().speakers["speaker_0"], "Ada");
+                assert_eq!(checks["speaker_0"]["status"], "matched");
+                assert_eq!(job.revision, 4); // processing, transcript, checking, decision
+            } else {
+                assert!(job.extra.get("speaker_assignments").is_none());
+                assert_eq!(
+                    job.document.as_ref().unwrap().speakers["speaker_0"],
+                    "Speaker 1"
+                );
+                if case == "introduction" {
+                    assert_eq!(checks["speaker_0"]["status"], "unknown");
+                }
+                if case == "checked" {
+                    assert_eq!(checks["speaker_0"]["unknown"], "keep");
+                }
+            }
+            assert_eq!(state.store().voice_profiles().unwrap(), profiles);
+            assert!(!state.admission.busy());
+            assert_eq!(
+                running
+                    .client
+                    .post(running.url(&format!("/api/jobs/{jid}/run")))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                409
+            );
+            assert_eq!(replay.calls.load(Ordering::SeqCst), expected_calls);
+            running.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_checks_reconcile_concurrent_changes_and_keep_admission_until_return() {
+        use speakerdesk_core::{ids::JobId, store::JobStore};
+        use std::sync::{Arc, Condvar, Mutex, atomic::Ordering, mpsc};
+        for case in [
+            "words",
+            "bounds",
+            "name",
+            "forget",
+            "unrelated_legacy",
+            "replace",
+            "off_on",
+            "cancel",
+            "shutdown",
+            "model",
+            "audio",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let state = AppState::open(root.path()).unwrap();
+            state.set_issues(Vec::new());
+            state.set_models(Arc::new(VoiceReplay::default()));
+            let enrollment = "7".repeat(32);
+            voice_job(&state, &enrollment);
+            let running = voice_server(&state).await;
+            let pid = enroll_person(&running, &enrollment).await;
+            assert_eq!(running.client.post(running.url(&format!("/api/people/{pid}/voice")))
+                .json(&json!({"revision":1,"meeting_id":enrollment,"track_id":"speaker_0","segment_ids":["a","b"],"consent":true}))
+                .send().await.unwrap().status(), 200);
+            let legacy = if case == "unrelated_legacy" {
+                let legacy_id = "6".repeat(32);
+                voice_job(&state, &legacy_id);
+                let other_pid = enroll_person(&running, &legacy_id).await;
+                let mut store = state.store();
+                let mut profile: speakerdesk_core::voice::VoiceProfile =
+                    serde_json::from_value(store.voice_profiles().unwrap()[&pid].clone()).unwrap();
+                profile.person_id = other_pid.clone();
+                profile.model.revision = "legacy-space".into();
+                let generation = store.voice_generation(&other_pid).unwrap().unwrap();
+                assert!(
+                    store
+                        .publish_voice(
+                            &JobId::parse(&legacy_id).unwrap(),
+                            generation,
+                            &profile,
+                            |_| Ok::<_, speakerdesk_core::error::StoreError>(true)
+                        )
+                        .unwrap()
+                );
+                Some(other_pid)
+            } else {
+                None
+            };
+            let jid = "8".repeat(32);
+            voice_job(&state, &jid);
+            let id = JobId::parse(&jid).unwrap();
+            let mut job = state.store().get(&id, false).unwrap().unwrap();
+            let mut document = job.document.take().unwrap();
+            // A second eligible track proves cancellation also drains unstarted checks.
+            document
+                .speakers
+                .insert("speaker_1".into(), "Speaker 2".into());
+            let mut second = document.segments.clone();
+            for segment in &mut second {
+                segment.id.push('2');
+                segment.speaker = "speaker_1".into();
+            }
+            document.segments.extend(second);
+            job.status = "uploaded".into();
+            job.language = "en".into();
+            job.extra.remove("voice_checks");
+            job.extra
+                .insert("retained_metadata".into(), json!({"keep":true}));
+            state.insert_job(job);
+            let (entered, receive) = mpsc::sync_channel(1);
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            let replay = Arc::new(VoiceReplay {
+                document: Some(document),
+                gate: Some(VoiceGate {
+                    entered,
+                    released: gate.clone(),
+                }),
+                wrong_identity: case == "model",
+                ..Default::default()
+            });
+            state.set_models(replay.clone());
+            assert_eq!(
+                running
+                    .client
+                    .post(running.url(&format!("/api/jobs/{jid}/run")))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                202
+            );
+            tokio::task::spawn_blocking(move || {
+                receive.recv_timeout(Duration::from_secs(5)).unwrap()
+            })
+            .await
+            .unwrap();
+            let current = state.store().get(&id, false).unwrap().unwrap();
+            assert_eq!(current.status, "ready");
+            let detail: Value = running
+                .client
+                .get(running.url(&format!("/api/jobs/{jid}")))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(detail["inference_owned"], true);
+            assert!(state.admission.busy());
+            match case {
+                "words" | "bounds" => {
+                    let changes = if case == "words" {
+                        json!({"text":"Protected words."})
+                    } else {
+                        json!({"start":0.1})
+                    };
+                    assert_eq!(
+                        running
+                            .client
+                            .patch(running.url(&format!("/api/jobs/{jid}/segments/a")))
+                            .json(&json!({"segment_revision":0,"changes":changes}))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        200
+                    );
+                }
+                "name" => {
+                    assert_eq!(
+                        running
+                            .client
+                            .post(
+                                running
+                                    .url(&format!("/api/jobs/{jid}/speakers/speaker_0/identity"))
+                            )
+                            .json(&json!({"revision":current.revision,"name":"Chosen name"}))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        200
+                    );
+                }
+                "forget" => {
+                    assert_eq!(
+                        running
+                            .client
+                            .delete(running.url(&format!("/api/people/{pid}/voice")))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        200
+                    );
+                }
+                "unrelated_legacy" => {
+                    assert_eq!(
+                        running
+                            .client
+                            .delete(running.url(&format!("/api/people/{}/voice", legacy.unwrap())))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        200
+                    );
+                }
+                "replace" => {
+                    let mut store = state.store();
+                    let mut profile: speakerdesk_core::voice::VoiceProfile =
+                        serde_json::from_value(store.voice_profiles().unwrap()[&pid].clone())
+                            .unwrap();
+                    profile.version = "replacement-profile".into();
+                    let generation = store.voice_generation(&pid).unwrap().unwrap();
+                    assert!(
+                        store
+                            .publish_voice(&id, generation, &profile, |_| Ok::<
+                                _,
+                                speakerdesk_core::error::StoreError,
+                            >(
+                                true
+                            ))
+                            .unwrap()
+                    );
+                }
+                "off_on" => {
+                    for enabled in [false, true] {
+                        assert_eq!(
+                            running
+                                .client
+                                .patch(running.url("/api/recognition"))
+                                .json(&json!({"enabled":enabled}))
+                                .send()
+                                .await
+                                .unwrap()
+                                .status(),
+                            200
+                        );
+                    }
+                }
+                "cancel" => {
+                    assert_eq!(
+                        running
+                            .client
+                            .post(running.url(&format!("/api/jobs/{jid}/cancel")))
+                            .send()
+                            .await
+                            .unwrap()
+                            .status(),
+                        200
+                    );
+                }
+                "shutdown" => {
+                    state.cancel_all().unwrap();
+                }
+                "audio" => {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(state.data_dir().join(&jid).join("audio.wav"))
+                        .unwrap()
+                        .set_len(48)
+                        .unwrap();
+                }
+                "model" => {}
+                _ => unreachable!(),
+            }
+            let profiles = state.store().voice_profiles().unwrap();
+            assert!(state.admission.ensure_idle().is_err());
+            let during = state.store().get(&id, false).unwrap().unwrap();
+            if matches!(case, "cancel" | "shutdown") {
+                assert!(
+                    during.extra["operation_generation"].as_u64()
+                        > current.extra["operation_generation"].as_u64()
+                );
+            }
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+            let waiting = state.clone();
+            tokio::task::spawn_blocking(move || waiting.drain())
+                .await
+                .unwrap();
+            let saved = state.store().get(&id, false).unwrap().unwrap();
+            assert_eq!(saved.status, "ready");
+            assert_eq!(saved.extra["retained_metadata"]["keep"], true);
+            assert!(!state.admission.busy());
+            assert_eq!(state.store().voice_profiles().unwrap(), profiles);
+            for track in ["speaker_0", "speaker_1"] {
+                assert_ne!(
+                    saved.extra["voice_checks"][track]["status"], "checking",
+                    "case {case}, {track}"
+                );
+            }
+            let doc = saved.document.unwrap();
+            if case == "name" {
+                assert_eq!(doc.speakers["speaker_0"], "Chosen name");
+            } else if !matches!(case, "words" | "unrelated_legacy") {
+                assert_eq!(doc.speakers["speaker_0"], "Speaker 1", "case {case}");
+            }
+            if case == "words" {
+                assert_eq!(doc.segments[0].text, "Protected words.");
+            }
+            let expected_calls = match case {
+                "words" | "bounds" | "name" | "unrelated_legacy" => 4,
+                "forget" | "replace" | "off_on" | "model" => 2,
+                _ => 1,
+            };
+            assert_eq!(
+                replay.calls.load(Ordering::SeqCst),
+                expected_calls,
+                "case {case}"
+            );
+            let expected = match case {
+                "words" | "unrelated_legacy" => "matched",
+                "name" => "manual",
+                "model" | "audio" => "unavailable",
+                _ => "cancelled",
+            };
+            assert_eq!(
+                saved.extra["voice_checks"]["speaker_0"]["status"], expected,
+                "case {case}"
+            );
+            if case == "unrelated_legacy" {
+                assert_eq!(
+                    saved.extra["voice_checks"]["speaker_1"]["status"],
+                    "matched"
+                );
+                assert_eq!(
+                    saved.extra["speaker_assignments"]["speaker_1"]["person_id"],
+                    pid
+                );
+            }
+            running.shutdown().await;
+        }
+    }
+
     #[derive(Default)]
     // Deterministic model double: exercises HTTP/store races, never acoustic quality.
     struct VoiceReplay {
+        document: Option<speakerdesk_core::document::Document>,
         calls: std::sync::atomic::AtomicUsize,
         starts: std::sync::Mutex<Vec<f32>>,
         gate: Option<VoiceGate>,
@@ -1335,7 +1772,9 @@ mod tests {
             _: &speakerdesk_core::document::Job,
             _: &tokio_util::sync::CancellationToken,
         ) -> Result<speakerdesk_core::document::Document, String> {
-            Err("Voice replay only".into())
+            self.document
+                .clone()
+                .ok_or_else(|| "Voice replay only".into())
         }
         fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
             Some(crate::native::native_voice_policy())
