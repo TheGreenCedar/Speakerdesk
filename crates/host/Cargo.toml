@@ -14,6 +14,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 rust-embed = "8.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.153"
+sha2 = "0.10.9"
 speakerdesk-core = { path = "../core" }
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["full"] }
@@ -22,6 +23,9 @@ tower-http = { version = "0.7.1", features = ["fs", "limit", "set-header", "trac
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.190"
 
 [features]
 default = []

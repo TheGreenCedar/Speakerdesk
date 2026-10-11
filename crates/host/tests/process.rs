@@ -14,6 +14,31 @@ fn supervisor() -> std::sync::Arc<InferenceSupervisor> {
 }
 
 #[test]
+fn installation_restart_reaps_the_resident_child_and_invalidates_old_handles() {
+    let host = supervisor();
+    let cancel = CancellationToken::new();
+    let models = host.models(cancel.clone());
+    let old = models.vad_open(None).unwrap();
+    let pid = host.child_pid().unwrap();
+    host.restart(&cancel).unwrap();
+    reaped(pid);
+    assert_eq!(host.child_pid(), None);
+    assert!(
+        models
+            .vad_feed(old, &[0.; 512], false)
+            .unwrap_err()
+            .to_string()
+            .contains("stale model session")
+    );
+    let new = models.vad_open(None).unwrap();
+    assert_ne!(old.generation, new.generation);
+    models.vad_close(new).unwrap();
+    let pid = host.child_pid().unwrap();
+    host.shutdown();
+    reaped(pid);
+}
+
+#[test]
 fn recording_larger_than_ipc_frame_uses_bounded_feeds_and_includes_eof() {
     let host = supervisor();
     let models = host.models(CancellationToken::new());

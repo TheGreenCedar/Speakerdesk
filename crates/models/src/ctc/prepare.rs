@@ -7,9 +7,21 @@ use safetensors::{
 };
 use sha2::{Digest, Sha256};
 use speakerdesk_core::error::ChildError;
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 pub fn convert(directory: &Path, destination: &Path) -> Result<(), ChildError> {
+    convert_cancellable(directory, destination, &AtomicBool::new(false))
+}
+
+pub fn convert_cancellable(
+    directory: &Path,
+    destination: &Path,
+    cancel: &AtomicBool,
+) -> Result<(), ChildError> {
     verify(
         directory,
         &[
@@ -25,6 +37,9 @@ pub fn convert(directory: &Path, destination: &Path) -> Result<(), ChildError> {
     let mut tensors = Vec::new();
     let mut used = HashSet::new();
     for parameter in &manifest.parameters {
+        if cancel.load(Ordering::Acquire) {
+            return Err(ChildError::Cancelled);
+        }
         let tensor = convert_parameter(&source, &manifest, parameter).map_err(error)?;
         if tensor.data.iter().any(|value| !value.is_finite()) {
             return Err(error(format!("nonfinite CTC weight {}", parameter.target)));
@@ -57,5 +72,8 @@ pub fn convert(directory: &Path, destination: &Path) -> Result<(), ChildError> {
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err(ChildError::Cancelled);
+    }
     serialize_to_file(views, None, destination).map_err(error)
 }

@@ -119,6 +119,28 @@ impl Runtime {
             return Ok(Response::Setup(reports));
         }
         match request {
+            Request::PrepareAlignment => {
+                let directory = self.model_root.join(".staging/coarse-alignment");
+                // The parent owns this private staging directory; never follow an old partial link.
+                let output = directory.join("model.safetensors.part");
+                match std::fs::symlink_metadata(&output) {
+                    Ok(meta) if !meta.is_file() || meta.is_symlink() => {
+                        return Err(crate::weights::error(
+                            "CTC staging output is not a regular file",
+                        ));
+                    }
+                    Ok(_) => std::fs::remove_file(&output).map_err(crate::weights::error)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(crate::weights::error(error)),
+                }
+                ctc::prepare::convert_cancellable(&directory, &output, cancel)?;
+                if cancel.load(Ordering::Acquire) {
+                    return Err(ChildError::Cancelled);
+                }
+                std::fs::rename(output, directory.join("model.safetensors"))
+                    .map_err(crate::weights::error)?;
+                Ok(Response::Ack)
+            }
             Request::Hello { .. } => Ok(Response::Ready {
                 build_id: env!("CARGO_PKG_VERSION").into(),
                 device: "metal".into(),
@@ -324,7 +346,7 @@ pub fn dispatch(request: Request, cancel: &AtomicBool) -> Result<Response, Child
             ctc::ctc_scores(&pcm, &token_ids).map(Response::Ctc)
         }
         Request::EmbedVoice { pcm } => redimnet::embed_voice(&pcm).map(Response::Embedding),
-        Request::SetupCheck { .. } => Err(ChildError::Unimplemented),
+        Request::SetupCheck { .. } | Request::PrepareAlignment => Err(ChildError::Unimplemented),
         Request::Metrics => memory::metrics().map(Response::Metrics),
         Request::Cancel { .. } | Request::Shutdown => Ok(Response::Ack),
     }

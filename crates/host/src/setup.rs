@@ -1,390 +1,1027 @@
-//! Model downloads, Range resume, and the setup state machine.
-//!
-//! Mirrors the admission and disk checks in `speakerdesk/model_setup.py`.
-//! A partial file is resumed with an HTTP Range at its length. Nothing here
-//! sends that request.
+//! Pinned downloads into private staging directories; activation exposes complete models.
+use reqwest::{
+    Client, StatusCode,
+    header::{CONTENT_RANGE, RANGE},
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    io,
+    path::{Component, Path, PathBuf},
+    sync::Mutex,
+    time::Duration,
+};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
+use tokio_util::sync::CancellationToken;
 
-use std::io;
-use std::path::Path;
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct FilePin {
+    pub size: u64,
+    pub sha256: String,
+}
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct ModelArtifact {
+    pub id: String,
+    pub name: String,
+    pub repo: String,
+    pub revision: String,
+    pub files: BTreeMap<String, FilePin>,
+    #[serde(default)]
+    pub prepared: BTreeMap<String, FilePin>,
+}
+impl ModelArtifact {
+    pub fn download_bytes(&self) -> u64 {
+        self.files.values().map(|f| f.size).sum()
+    }
+    pub fn stored_bytes(&self) -> u64 {
+        self.download_bytes() + self.prepared.values().map(|f| f.size).sum::<u64>()
+    }
+}
+pub(crate) fn artifacts() -> Vec<ModelArtifact> {
+    serde_json::from_str(include_str!("model-artifacts.json")).expect("bundled model pins")
+}
 
-use reqwest::header::RANGE;
-use speakerdesk_core::{limits, messages};
-use thiserror::Error;
-
-/// Bytes observed while a model download is in progress.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DownloadProgress {
+#[derive(Clone, Default, Serialize)]
+pub(crate) struct Progress {
+    pub status: &'static str,
+    pub phase: String,
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
+    pub error: Option<String>,
 }
-
-impl DownloadProgress {
-    pub const fn new(downloaded_bytes: u64, total_bytes: u64) -> Self {
-        Self {
-            downloaded_bytes,
-            total_bytes,
-        }
-    }
+#[derive(Default)]
+pub(crate) struct SetupService {
+    progress: Mutex<Progress>,
 }
-
-/// Setup lifecycle. `Downloading` carries progress; `Failed` keeps the user-facing message.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum SetupState {
-    #[default]
-    Idle,
-    Downloading {
-        progress: DownloadProgress,
-    },
-    Ready,
-    Failed {
-        message: String,
-    },
-}
-
-/// Gates checked before `POST /api/setup` starts a download.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SetupGates {
-    /// Apple Silicon Mac running macOS 15 or later.
-    pub apple_silicon: bool,
-    /// A meeting or transcription currently holds the runtime.
-    pub meeting_busy: bool,
-    /// Voice model setup is already downloading.
-    pub voice_setup_downloading: bool,
-}
-
-impl SetupGates {
-    /// No admission blocker. Disk space is checked separately.
-    pub const fn clear() -> Self {
-        Self {
-            apple_silicon: true,
-            meeting_busy: false,
-            voice_setup_downloading: false,
-        }
-    }
-}
-
-/// Result of asking setup to start.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Start {
-    Started,
-    AlreadyDownloading,
-}
-
-/// Admission or disk refusal. The text is a frozen v0.6.6 message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum SetupError {
-    #[error("{0}")]
-    Refused(&'static str),
-}
-
-/// Owned setup state. Callers supply free-byte counts so tests never touch the network.
-#[derive(Debug, Default)]
-pub struct SetupService {
-    state: SetupState,
-}
-
 impl SetupService {
-    pub fn new() -> Self {
-        Self {
-            state: SetupState::Idle,
-        }
+    pub fn progress(&self) -> Progress {
+        self.progress.lock().expect("setup progress").clone()
     }
-
-    pub fn state(&self) -> &SetupState {
-        &self.state
-    }
-
-    /// Admit a setup start in the same order as `model_setup.start`.
-    ///
-    /// Apple Silicon, a busy meeting, and an in-progress voice download are
-    /// refused. An in-progress model download is left unchanged.
-    pub fn start(&mut self, gates: SetupGates) -> Result<Start, SetupError> {
-        if !gates.apple_silicon {
-            return Err(SetupError::Refused(messages::NEEDS_APPLE_SILICON));
-        }
-        if gates.meeting_busy {
-            return Err(SetupError::Refused(messages::SETUP_BUSY_MEETING));
-        }
-        if gates.voice_setup_downloading {
-            return Err(SetupError::Refused(messages::WAIT_FOR_VOICE_SETUP));
-        }
-        if matches!(self.state, SetupState::Downloading { .. }) {
-            return Ok(Start::AlreadyDownloading);
-        }
-        self.state = SetupState::Downloading {
-            progress: DownloadProgress::new(0, 0),
-        };
-        Ok(Start::Started)
-    }
-
-    /// Record download progress while setup is downloading.
-    pub fn record_progress(&mut self, progress: DownloadProgress) -> bool {
-        if let SetupState::Downloading { progress: current } = &mut self.state {
-            *current = progress;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn finish(&mut self) {
-        self.state = SetupState::Ready;
-    }
-
-    pub fn fail(&mut self, message: impl Into<String>) {
-        self.state = SetupState::Failed {
-            message: message.into(),
+    pub fn begin(&self, models: &[ModelArtifact]) {
+        *self.progress.lock().expect("setup progress") = Progress {
+            status: "downloading",
+            phase: "Checking installed models".into(),
+            total_bytes: models.iter().map(ModelArtifact::download_bytes).sum(),
+            ..Progress::default()
         };
     }
-
-    /// Refuse setup when free space is under [`limits::SETUP_FREE_BYTES`].
-    ///
-    /// Failure stores [`messages::FREE_SPACE_SETUP`] on the state machine.
-    /// A passing check leaves the current state in place.
-    pub fn require_free_space(&mut self, free_bytes: u64) -> Result<(), SetupError> {
-        if free_bytes < limits::SETUP_FREE_BYTES {
-            self.fail(messages::FREE_SPACE_SETUP);
-            Err(SetupError::Refused(messages::FREE_SPACE_SETUP))
-        } else {
-            Ok(())
-        }
+    pub fn phase(&self, phase: impl Into<String>) {
+        self.progress.lock().expect("setup progress").phase = phase.into();
+    }
+    pub fn bytes(&self, bytes: u64) {
+        self.progress
+            .lock()
+            .expect("setup progress")
+            .downloaded_bytes = bytes;
+    }
+    pub fn finish(&self, result: Result<(), String>) {
+        let mut progress = self.progress.lock().expect("setup progress");
+        progress.status = if result.is_ok() { "ready" } else { "failed" };
+        progress.error = result.err();
     }
 }
 
-/// Free bytes available to a normal user on the filesystem that holds `path`.
-///
-/// Matches `shutil.disk_usage(path).free` (`f_bavail`).
 pub fn directory_free_bytes(path: &Path) -> io::Result<u64> {
     fs4::available_space(path)
 }
-
-/// How the next model request should continue a partial file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResumePlan {
-    pub offset: u64,
-    /// `bytes={offset}-` when `offset` is greater than zero.
-    pub range: Option<String>,
+fn error(message: impl Into<String>) -> io::Error {
+    io::Error::other(message.into())
+}
+fn checked(cancel: &CancellationToken) -> io::Result<()> {
+    if cancel.is_cancelled() {
+        Err(error(
+            "Model setup cancelled. Downloaded files can be resumed.",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
-impl ResumePlan {
-    /// Header plan for a known partial length. Zero starts a fresh request.
-    pub fn for_length(offset: u64) -> Self {
-        let range = (offset > 0).then(|| format!("bytes={offset}-"));
-        Self { offset, range }
-    }
-
-    /// Read a `.part` file and plan the next request at its length.
-    ///
-    /// A missing file starts at byte zero with no Range header, matching
-    /// `headers={'Range': f'bytes={offset}-'} if offset else {}`.
-    pub fn for_partial(path: &Path) -> io::Result<Self> {
-        match std::fs::metadata(path) {
-            Ok(metadata) => Ok(Self::for_length(metadata.len())),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::for_length(0)),
-            Err(error) => Err(error),
+// The directory is private and has one installer owner. Reject existing links at every component.
+async fn directory(path: &Path) -> io::Result<()> {
+    let mut current = PathBuf::new();
+    for part in path.components() {
+        if matches!(part, Component::ParentDir) {
+            return Err(error("Invalid model directory"));
+        }
+        current.push(part);
+        match fs::symlink_metadata(&current).await {
+            Ok(meta) if meta.is_dir() && !meta.is_symlink() => {}
+            Ok(_) => return Err(error("Model directory contains a link or non-directory")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&current).await?;
+            }
+            Err(e) => return Err(e),
         }
     }
-
-    pub fn range_header(&self) -> Option<&str> {
-        self.range.as_deref()
+    Ok(())
+}
+fn relative(name: &str) -> io::Result<&Path> {
+    let path = Path::new(name);
+    if name.is_empty()
+        || path
+            .components()
+            .any(|p| !matches!(p, Component::Normal(_)))
+    {
+        return Err(error("Invalid model artifact path"));
     }
-
-    /// Attach the Range header to a request builder. Does not send it.
-    pub fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self.range_header() {
-            Some(value) => builder.header(RANGE, value),
-            None => builder,
+    Ok(path)
+}
+async fn regular(path: &Path) -> io::Result<Option<u64>> {
+    match fs::symlink_metadata(path).await {
+        Ok(meta) if meta.is_file() && !meta.is_symlink() => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if meta.nlink() != 1 {
+                    return Err(error("Model artifact has multiple hard links"));
+                }
+            }
+            Ok(Some(meta.len()))
         }
+        Ok(_) => Err(error("Model artifact is not a regular file")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+fn partial_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".part");
+    PathBuf::from(name)
+}
+fn open_options() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    options
+}
+async fn matches(path: &Path, pin: &FilePin, cancel: &CancellationToken) -> io::Result<bool> {
+    checked(cancel)?;
+    if regular(path).await? != Some(pin.size) {
+        return Ok(false);
+    }
+    let mut file = open_options().read(true).open(path).await?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        checked(cancel)?;
+        let count = file.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()) == pin.sha256)
+}
+async fn installed(
+    root: &Path,
+    model: &ModelArtifact,
+    cancel: &CancellationToken,
+) -> io::Result<bool> {
+    match fs::symlink_metadata(root).await {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+        Ok(meta) if !meta.is_dir() || meta.is_symlink() => {
+            return Err(error("Model directory is not a regular directory"));
+        }
+        _ => {}
+    }
+    let inventory_root = root.to_owned();
+    let inventory_model = model.clone();
+    if !tokio::task::spawn_blocking(move || inventory(&inventory_root, &inventory_model, false))
+        .await
+        .map_err(|e| error(e.to_string()))??
+    {
+        return Ok(false);
+    }
+    for (name, pin) in model.files.iter().chain(&model.prepared) {
+        let path = root.join(relative(name)?);
+        let mut parent = root.to_owned();
+        for component in relative(name)?
+            .parent()
+            .unwrap_or(Path::new(""))
+            .components()
+        {
+            parent.push(component);
+            match fs::symlink_metadata(&parent).await {
+                Ok(meta) if meta.is_dir() && !meta.is_symlink() => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e),
+                _ => return Err(error("Model artifact parent is not a regular directory")),
+            }
+        }
+        if !matches(&path, pin, cancel).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) struct Installer {
+    pub root: PathBuf,
+    client: Client,
+    // The lock lives through conversion, activation and initialization, including cancellation.
+    _owner: std::fs::File,
+}
+impl Installer {
+    pub async fn open(root: &Path) -> io::Result<Self> {
+        if fs::symlink_metadata(root)
+            .await
+            .is_ok_and(|meta| meta.is_symlink())
+        {
+            return Err(error("Model root is a symlink"));
+        }
+        fs::create_dir_all(root).await?;
+        let root = fs::canonicalize(root).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).await?;
+        }
+        let lock = root.join(".setup.lock");
+        regular(&lock).await?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let owner = options.open(lock)?;
+        fs4::FileExt::try_lock(&owner)
+            .map_err(|_| error("Another process is setting up these models"))?;
+        Ok(Self {
+            root,
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .read_timeout(Duration::from_secs(30))
+                .https_only(true)
+                .build()
+                .map_err(|e| error(e.to_string()))?,
+            _owner: owner,
+        })
+    }
+    pub async fn installed(
+        &self,
+        model: &ModelArtifact,
+        cancel: &CancellationToken,
+    ) -> io::Result<bool> {
+        installed(&self.root.join(relative(&model.id)?), model, cancel).await
+    }
+    pub async fn needs_preparation(
+        &self,
+        model: &ModelArtifact,
+        staging: &Path,
+        cancel: &CancellationToken,
+    ) -> io::Result<bool> {
+        for (name, pin) in &model.prepared {
+            if !matches(&staging.join(relative(name)?), pin, cancel).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    pub async fn stage(
+        &self,
+        model: &ModelArtifact,
+        completed: u64,
+        progress: &SetupService,
+        cancel: &CancellationToken,
+    ) -> io::Result<PathBuf> {
+        checked(cancel)?;
+        let staging = self.root.join(".staging").join(relative(&model.id)?);
+        directory(&staging).await?;
+        let inspect = staging.clone();
+        let pinned = model.clone();
+        if !tokio::task::spawn_blocking(move || inventory(&inspect, &pinned, true))
+            .await
+            .map_err(|e| error(e.to_string()))??
+        {
+            checked(cancel)?;
+            // A crash after RENAME_SWAP may leave the previous model here; it is private staging.
+            fs::remove_dir_all(&staging).await?;
+            directory(&staging).await?;
+        }
+        for name in model.prepared.keys() {
+            let path = staging.join(relative(name)?);
+            directory(path.parent().expect("prepared parent")).await?;
+            regular(&path).await?;
+        }
+        let mut missing = 0;
+        for (name, pin) in model.files.iter().chain(&model.prepared) {
+            let path = staging.join(relative(name)?);
+            directory(path.parent().expect("artifact parent")).await?;
+            if matches(&path, pin, cancel).await? {
+                continue;
+            }
+            let partial = partial_path(&path);
+            let mut stored = regular(&partial).await?.unwrap_or(0);
+            if stored >= pin.size && !matches(&partial, pin, cancel).await? {
+                stored = 0;
+            }
+            missing += pin.size.saturating_sub(stored);
+        }
+        if directory_free_bytes(&staging)? < missing {
+            return Err(error(format!(
+                "Model setup needs {missing} more bytes of free disk space."
+            )));
+        }
+        let mut done = completed;
+        for (name, pin) in &model.files {
+            checked(cancel)?;
+            progress.phase(format!("Downloading {} · {name}", model.name));
+            let url = format!(
+                "https://huggingface.co/{}/resolve/{}/{name}?download=true",
+                model.repo, model.revision
+            );
+            self.download(&url, &staging.join(name), pin, done, progress, cancel)
+                .await?;
+            done += pin.size;
+            progress.bytes(done);
+        }
+        Ok(staging)
+    }
+    async fn download(
+        &self,
+        url: &str,
+        path: &Path,
+        pin: &FilePin,
+        done: u64,
+        progress: &SetupService,
+        cancel: &CancellationToken,
+    ) -> io::Result<()> {
+        if matches(path, pin, cancel).await? {
+            let partial = partial_path(path);
+            if regular(&partial).await?.is_some() {
+                fs::remove_file(partial).await?;
+            }
+            return Ok(());
+        }
+        let partial = partial_path(path);
+        let mut offset = regular(&partial).await?.unwrap_or(0);
+        if offset >= pin.size {
+            if offset == pin.size && matches(&partial, pin, cancel).await? {
+                checked(cancel)?;
+                fs::rename(&partial, path).await?;
+                return Ok(());
+            }
+            open_options()
+                .write(true)
+                .truncate(true)
+                .open(&partial)
+                .await?;
+            offset = 0;
+        }
+        let mut request = self.client.get(url);
+        if offset != 0 {
+            request = request.header(RANGE, format!("bytes={offset}-"));
+        }
+        let mut response = tokio::select! { biased; _ = cancel.cancelled() => return checked(cancel), response = request.send() => response.map_err(|e| error(e.to_string()))? };
+        match response.status() {
+            StatusCode::OK => offset = 0,
+            StatusCode::PARTIAL_CONTENT => {
+                let expected = format!("bytes {offset}-{}/{}", pin.size - 1, pin.size);
+                if response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    != Some(expected.as_str())
+                {
+                    return Err(error("Invalid model download Content-Range"));
+                }
+            }
+            status => return Err(error(format!("Model download returned HTTP {status}"))),
+        }
+        if response
+            .content_length()
+            .is_some_and(|len| len != pin.size - offset)
+        {
+            return Err(error("Model download length differs from its pin"));
+        }
+        let mut output = open_options()
+            .write(true)
+            .create(true)
+            .truncate(offset == 0)
+            .append(offset != 0)
+            .open(&partial)
+            .await?;
+        loop {
+            let chunk = tokio::select! { biased; _ = cancel.cancelled() => return checked(cancel), chunk = response.chunk() => chunk.map_err(|e| error(e.to_string()))? };
+            let Some(chunk) = chunk else {
+                break;
+            };
+            if chunk.len() as u64 > pin.size - offset {
+                return Err(error("Model download exceeds its pinned size"));
+            }
+            output.write_all(&chunk).await?;
+            output.flush().await?;
+            offset += chunk.len() as u64;
+            progress.bytes(done + offset);
+        }
+        output.sync_all().await?;
+        drop(output);
+        progress.phase(format!(
+            "Verifying {}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        if !matches(&partial, pin, cancel).await? {
+            return Err(error(
+                "Model checksum differs. Retry setup to download this file again.",
+            ));
+        }
+        checked(cancel)?;
+        fs::rename(&partial, path).await?;
+        Ok(())
+    }
+    pub async fn activate(
+        &self,
+        model: &ModelArtifact,
+        staging: &Path,
+        cancel: &CancellationToken,
+    ) -> io::Result<()> {
+        if !installed(staging, model, cancel).await? {
+            return Err(error("Prepared model failed verification"));
+        }
+        // Pin verification is installation-only. No recursive receipt checks run during inference.
+        checked(cancel)?;
+        let source = staging.to_owned();
+        let target = self.root.join(relative(&model.id)?);
+        let parent = self.root.clone();
+        let model = model.clone();
+        let cancellation = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            sync_artifact(&source, &model)?;
+            checked(&cancellation)?;
+            match std::fs::symlink_metadata(&target) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => std::fs::rename(&source, &target)?,
+                Err(e) => return Err(e),
+                Ok(meta) if meta.is_symlink() || !meta.is_dir() => {
+                    return Err(error("Model destination is not a regular directory"));
+                }
+                Ok(_) => {
+                    exchange_directories(&source, &target)?;
+                    sync_directory(&parent)?;
+                    std::fs::remove_dir_all(&source)?;
+                }
+            }
+            sync_directory(&parent)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| error(e.to_string()))?
+    }
+}
+fn sync_directory(path: &Path) -> io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+fn sync_artifact(root: &Path, model: &ModelArtifact) -> io::Result<()> {
+    for name in model.files.keys().chain(model.prepared.keys()) {
+        let path = root.join(name);
+        std::fs::File::open(&path)?.sync_all()?;
+        let mut parent = path.parent().expect("artifact parent");
+        while parent.starts_with(root) {
+            sync_directory(parent)?;
+            if parent == root {
+                break;
+            }
+            parent = parent.parent().expect("model parent");
+        }
+    }
+    Ok(())
+}
+fn inventory(root: &Path, model: &ModelArtifact, partials: bool) -> io::Result<bool> {
+    let mut files = std::collections::HashSet::new();
+    let mut parents = std::collections::HashSet::new();
+    for name in model.files.keys().chain(model.prepared.keys()) {
+        let path = relative(name)?.to_owned();
+        files.insert(path.clone());
+        if partials {
+            files.insert(partial_path(&path));
+        }
+        for parent in path.ancestors().skip(1) {
+            parents.insert(parent.to_owned());
+        }
+    }
+    let mut directories = vec![root.to_owned()];
+    let mut exact = true;
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            let relative = path.strip_prefix(root).map_err(|e| error(e.to_string()))?;
+            if kind.is_dir() {
+                exact &= parents.contains(relative);
+                directories.push(path);
+            } else if kind.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if entry.metadata()?.nlink() != 1 {
+                        return Err(error("Model artifact has multiple hard links"));
+                    }
+                }
+                exact &= files.contains(relative);
+            } else {
+                return Err(error("Unexpected link or special file in model directory"));
+            }
+        }
+    }
+    Ok(exact)
+}
+fn exchange_directories(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let source =
+            CString::new(source.as_os_str().as_bytes()).map_err(|e| error(e.to_string()))?;
+        let target =
+            CString::new(target.as_os_str().as_bytes()).map_err(|e| error(e.to_string()))?;
+        // RENAME_SWAP atomically retains the previous directory at the staging path.
+        if unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_SWAP) } == 0 {
+            return Ok(());
+        }
+        Err(io::Error::last_os_error())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (source, target);
+        Err(error(
+            "Atomic model replacement is not implemented on this platform",
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    use super::{
-        DownloadProgress, ResumePlan, SetupError, SetupGates, SetupService, SetupState, Start,
-        directory_free_bytes,
+    use super::*;
+    use axum::{
+        Router,
+        body::Body,
+        http::{HeaderMap, Response},
+        routing::get,
     };
-    use reqwest::header::RANGE;
-    use speakerdesk_core::{limits, messages};
-
-    static TEMP_DIRS: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let id = TEMP_DIRS.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("speakerdesk-setup-{}-{id}", std::process::id()));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
+    use std::sync::Arc;
+    fn pin(bytes: &[u8]) -> FilePin {
+        FilePin {
+            size: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
         }
     }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+    async fn server(
+        mode: &'static str,
+        seen: Arc<Mutex<Vec<Option<String>>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/file",
+            get(move |headers: HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    let range = headers.get(RANGE).map(|v| v.to_str().unwrap().to_owned());
+                    seen.lock().unwrap().push(range.clone());
+                    if mode == "hang" {
+                        std::future::pending::<()>().await;
+                    }
+                    let mut response = Response::builder();
+                    let bytes: &'static [u8] = match mode {
+                        "bad-hash" => b"abcxef",
+                        "short" => b"abc",
+                        "oversized" => b"abcdefgh",
+                        "resume" | "bad-range" if range.is_some() => {
+                            response = response.status(206).header(
+                                CONTENT_RANGE,
+                                if mode == "resume" {
+                                    "bytes 3-5/6"
+                                } else {
+                                    "bytes 2-5/6"
+                                },
+                            );
+                            b"def"
+                        }
+                        _ => b"abcdef",
+                    };
+                    response.body(Body::from(bytes)).unwrap()
+                }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (format!("http://{address}/file"), task)
+    }
+    #[tokio::test]
+    async fn actual_http_resume_restart_and_checksum_matrix() {
+        for mode in [
+            "resume",
+            "restart",
+            "bad-range",
+            "short",
+            "oversized",
+            "bad-hash",
+        ] {
+            let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+            let mut installer = Installer::open(temp.path()).await.unwrap();
+            installer.client = Client::new();
+            let path = temp.path().join("model.bin");
+            fs::write(temp.path().join("model.bin.part"), b"abc")
+                .await
+                .unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (url, task) = server(mode, seen.clone()).await;
+            let result = installer
+                .download(
+                    &url,
+                    &path,
+                    &pin(b"abcdef"),
+                    0,
+                    &SetupService::default(),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert_eq!(seen.lock().unwrap().as_slice(), &[Some("bytes=3-".into())]);
+            if ["resume", "restart"].contains(&mode) {
+                result.unwrap();
+                assert_eq!(fs::read(&path).await.unwrap(), b"abcdef");
+            } else {
+                assert!(result.is_err(), "{mode}");
+                assert!(!path.exists(), "{mode}");
+            }
+            task.abort();
         }
     }
-
-    fn range_on_request(plan: &ResumePlan) -> Option<String> {
-        let request = plan
-            .apply(reqwest::Client::new().get("https://example.invalid/model.safetensors"))
-            .build()
-            .expect("building a request does not download");
-        request
-            .headers()
-            .get(RANGE)
-            .map(|value| value.to_str().unwrap().to_string())
+    #[tokio::test]
+    async fn complete_partial_verifies_without_network_and_corrupt_partial_retries() {
+        for bytes in [
+            b"abcdef".as_slice(),
+            b"xxxxxx".as_slice(),
+            b"toolong".as_slice(),
+        ] {
+            let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+            let mut installer = Installer::open(temp.path()).await.unwrap();
+            installer.client = Client::new();
+            let path = temp.path().join("weights");
+            fs::write(temp.path().join("weights.part"), bytes)
+                .await
+                .unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (url, task) = server("restart", seen.clone()).await;
+            installer
+                .download(
+                    &url,
+                    &path,
+                    &pin(b"abcdef"),
+                    0,
+                    &SetupService::default(),
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(fs::read(path).await.unwrap(), b"abcdef");
+            assert_eq!(seen.lock().unwrap().len(), usize::from(bytes != b"abcdef"));
+            task.abort();
+        }
     }
-
-    #[test]
-    fn preconditions_use_the_frozen_messages() {
-        let mut setup = SetupService::new();
-        assert_eq!(setup.state(), &SetupState::Idle);
-
-        let unsupported = setup
-            .start(SetupGates {
-                apple_silicon: false,
-                ..SetupGates::clear()
-            })
-            .unwrap_err();
-        assert_eq!(
-            unsupported,
-            SetupError::Refused(messages::NEEDS_APPLE_SILICON)
+    #[tokio::test]
+    async fn cancellation_interrupts_headers_and_holds_the_storage_owner_until_cleanup() {
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let mut installer = Installer::open(temp.path()).await.unwrap();
+        installer.client = Client::new();
+        assert!(Installer::open(temp.path()).await.is_err());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (url, server) = server("hang", seen.clone()).await;
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let root = temp.path().to_owned();
+        let download = tokio::spawn(async move {
+            let result = installer
+                .download(
+                    &url,
+                    &root.join("weights"),
+                    &pin(b"abcdef"),
+                    0,
+                    &SetupService::default(),
+                    &token,
+                )
+                .await;
+            assert!(result.is_err());
+        });
+        while seen.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), download)
+            .await
+            .unwrap()
+            .unwrap();
+        Installer::open(temp.path()).await.unwrap();
+        server.abort();
+    }
+    #[tokio::test]
+    async fn publication_never_exposes_unverified_or_cancelled_models() {
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let installer = Installer::open(temp.path()).await.unwrap();
+        let model = ModelArtifact {
+            id: "fixture".into(),
+            name: "Replay".into(),
+            repo: "fixture/test".into(),
+            revision: "pin".into(),
+            files: BTreeMap::from([
+                ("weights".into(), pin(b"abcdef")),
+                ("config.json".into(), pin(b"config")),
+            ]),
+            prepared: BTreeMap::new(),
+        };
+        let staging = temp.path().join(".staging/fixture");
+        directory(&staging).await.unwrap();
+        fs::write(staging.join("weights"), b"abcdef").await.unwrap();
+        fs::write(staging.join("config.json"), b"wrong!")
+            .await
+            .unwrap();
+        assert!(
+            installer
+                .activate(&model, &staging, &CancellationToken::new())
+                .await
+                .is_err()
         );
-        assert_eq!(setup.state(), &SetupState::Idle);
-
-        let busy = setup
-            .start(SetupGates {
-                meeting_busy: true,
-                ..SetupGates::clear()
-            })
-            .unwrap_err();
-        assert_eq!(busy, SetupError::Refused(messages::SETUP_BUSY_MEETING));
-
-        let voice = setup
-            .start(SetupGates {
-                voice_setup_downloading: true,
-                ..SetupGates::clear()
-            })
-            .unwrap_err();
-        assert_eq!(voice, SetupError::Refused(messages::WAIT_FOR_VOICE_SETUP));
-        assert_eq!(setup.state(), &SetupState::Idle);
-    }
-
-    #[test]
-    fn earlier_preconditions_win_and_a_second_start_keeps_progress() {
-        let mut setup = SetupService::new();
-        let both = setup
-            .start(SetupGates {
-                apple_silicon: false,
-                meeting_busy: true,
-                voice_setup_downloading: true,
-            })
-            .unwrap_err();
-        assert_eq!(both, SetupError::Refused(messages::NEEDS_APPLE_SILICON));
-
-        assert_eq!(setup.start(SetupGates::clear()).unwrap(), Start::Started);
-        let progress = DownloadProgress::new(12, 40);
-        assert!(setup.record_progress(progress));
-        assert_eq!(
-            setup.start(SetupGates::clear()).unwrap(),
-            Start::AlreadyDownloading
+        assert!(!temp.path().join("fixture").exists());
+        fs::write(staging.join("config.json"), b"config")
+            .await
+            .unwrap();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(
+            installer
+                .activate(&model, &staging, &cancelled)
+                .await
+                .is_err()
         );
-        assert_eq!(setup.state(), &SetupState::Downloading { progress });
-
-        let blocked = setup
-            .start(SetupGates {
-                voice_setup_downloading: true,
-                ..SetupGates::clear()
-            })
-            .unwrap_err();
-        assert_eq!(blocked, SetupError::Refused(messages::WAIT_FOR_VOICE_SETUP));
-        assert_eq!(setup.state(), &SetupState::Downloading { progress });
-    }
-
-    #[test]
-    fn free_space_under_the_reserve_fails_with_the_setup_message() {
-        assert_eq!(limits::SETUP_FREE_BYTES, 2_400_000_000);
-        let mut setup = SetupService::new();
-        assert_eq!(setup.start(SetupGates::clear()).unwrap(), Start::Started);
-        let progress = DownloadProgress::new(3, 9);
-        assert!(setup.record_progress(progress));
-
-        setup.require_free_space(limits::SETUP_FREE_BYTES).unwrap();
-        assert_eq!(setup.state(), &SetupState::Downloading { progress });
-
-        let error = setup
-            .require_free_space(limits::SETUP_FREE_BYTES - 1)
-            .unwrap_err();
-        assert_eq!(error, SetupError::Refused(messages::FREE_SPACE_SETUP));
-        assert_eq!(error.to_string(), messages::FREE_SPACE_SETUP);
+        assert!(!temp.path().join("fixture").exists());
+        installer
+            .activate(&model, &staging, &CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(
-            setup.state(),
-            &SetupState::Failed {
-                message: messages::FREE_SPACE_SETUP.to_string(),
+            fs::read(temp.path().join("fixture/weights")).await.unwrap(),
+            b"abcdef"
+        );
+        assert!(
+            installer
+                .installed(&model, &CancellationToken::new())
+                .await
+                .unwrap()
+        );
+        #[cfg(target_os = "macos")]
+        {
+            directory(&staging).await.unwrap();
+            fs::write(staging.join("weights"), b"abcdef").await.unwrap();
+            fs::write(staging.join("config.json"), b"config")
+                .await
+                .unwrap();
+            fs::write(temp.path().join("fixture/weights"), b"oldbad")
+                .await
+                .unwrap();
+            installer
+                .activate(&model, &staging, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(
+                !staging.exists(),
+                "swapped invalid model should be cleaned up"
+            );
+            assert_eq!(
+                fs::read(temp.path().join("fixture/weights")).await.unwrap(),
+                b"abcdef"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn unexpected_active_inventory_is_repairable_and_old_staging_does_not_poison_retries() {
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let installer = Installer::open(temp.path()).await.unwrap();
+        let model = ModelArtifact {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            repo: "fixture/test".into(),
+            revision: "pin".into(),
+            files: BTreeMap::from([("weights".into(), pin(b"abcdef"))]),
+            prepared: BTreeMap::new(),
+        };
+        let active = temp.path().join("fixture");
+        directory(&active).await.unwrap();
+        fs::write(active.join("weights"), b"abcdef").await.unwrap();
+        fs::create_dir(active.join("unexpected-empty-directory"))
+            .await
+            .unwrap();
+        assert!(
+            !installer
+                .installed(&model, &CancellationToken::new())
+                .await
+                .unwrap()
+        );
+        let staging = temp.path().join(".staging/fixture");
+        directory(&staging).await.unwrap();
+        fs::write(staging.join("weights"), b"abcdef").await.unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            installer
+                .activate(&model, &staging, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(
+                installer
+                    .installed(&model, &CancellationToken::new())
+                    .await
+                    .unwrap()
+            );
+            assert!(!staging.exists());
+            // Model the private old directory retained by an interruption immediately after swap.
+            directory(&staging).await.unwrap();
+            fs::write(staging.join("unknown"), b"old").await.unwrap();
+            assert!(!inventory(&staging, &model, true).unwrap());
+            let prepared_model = ModelArtifact {
+                files: BTreeMap::new(),
+                prepared: model.files.clone(),
+                ..model.clone()
+            };
+            installer
+                .stage(
+                    &prepared_model,
+                    0,
+                    &SetupService::default(),
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert!(!staging.join("unknown").exists());
+            fs::write(staging.join("weights"), b"abcdef").await.unwrap();
+            installer
+                .activate(&prepared_model, &staging, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(
+                installer
+                    .installed(&prepared_model, &CancellationToken::new())
+                    .await
+                    .unwrap()
+            );
+        }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn links_never_write_outside_model_storage() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let outside = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        fs::write(outside.path().join("sentinel"), b"private")
+            .await
+            .unwrap();
+        let installer = Installer::open(temp.path()).await.unwrap();
+        symlink(
+            outside.path().join("sentinel"),
+            temp.path().join("weights.part"),
+        )
+        .unwrap();
+        assert!(
+            installer
+                .download(
+                    "https://example.invalid",
+                    &temp.path().join("weights"),
+                    &pin(b"abcdef"),
+                    0,
+                    &SetupService::default(),
+                    &CancellationToken::new()
+                )
+                .await
+                .is_err()
+        );
+        symlink(outside.path(), temp.path().join(".staging")).unwrap();
+        assert!(
+            directory(&temp.path().join(".staging/model"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).await.unwrap(),
+            b"private"
+        );
+        assert!(!outside.path().join("model").exists());
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_linked_partials_do_not_truncate_or_append_to_outside_files() {
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let outside = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let sentinel = outside.path().join("private");
+        fs::write(&sentinel, b"private").await.unwrap();
+        let installer = Installer::open(temp.path()).await.unwrap();
+        std::fs::hard_link(&sentinel, temp.path().join("weights.part")).unwrap();
+        assert!(
+            installer
+                .download(
+                    "https://example.invalid",
+                    &temp.path().join("weights"),
+                    &pin(b"abcdef"),
+                    0,
+                    &SetupService::default(),
+                    &CancellationToken::new()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read(&sentinel).await.unwrap(), b"private");
+    }
+    #[tokio::test]
+    async fn interrupted_body_keeps_a_resumable_prefix() {
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        let mut installer = Installer::open(temp.path()).await.unwrap();
+        installer.client = Client::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        let sender = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 2048];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabc")
+                .await
+                .unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let path = temp.path().join("weights");
+        assert!(
+            installer
+                .download(
+                    &url,
+                    &path,
+                    &pin(b"abcdef"),
+                    0,
+                    &SetupService::default(),
+                    &CancellationToken::new()
+                )
+                .await
+                .is_err()
+        );
+        sender.await.unwrap();
+        assert_eq!(fs::read(partial_path(&path)).await.unwrap(), b"abc");
+        assert!(!path.exists());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (url, server) = server("resume", seen.clone()).await;
+        installer
+            .download(
+                &url,
+                &path,
+                &pin(b"abcdef"),
+                0,
+                &SetupService::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fs::read(path).await.unwrap(), b"abcdef");
+        assert_eq!(seen.lock().unwrap()[0], Some("bytes=3-".into()));
+        server.abort();
+    }
+    #[tokio::test]
+    #[ignore = "downloads the pinned 1.25 MB Silero artifact to SPEAKERDESK_SETUP_TEST_ROOT"]
+    async fn real_pinned_download_activates_into_disposable_storage() {
+        let root = PathBuf::from(
+            std::env::var_os("SPEAKERDESK_SETUP_TEST_ROOT").expect("explicit disposable directory"),
+        );
+        let installer = Installer::open(&root).await.unwrap();
+        let model = artifacts().remove(0);
+        let cancel = CancellationToken::new();
+        let progress = SetupService::default();
+        progress.begin(std::slice::from_ref(&model));
+        let staging = installer
+            .stage(&model, 0, &progress, &cancel)
+            .await
+            .unwrap();
+        installer.activate(&model, &staging, &cancel).await.unwrap();
+        assert!(installer.installed(&model, &cancel).await.unwrap());
+        assert_eq!(progress.progress().downloaded_bytes, model.download_bytes());
+    }
+    #[test]
+    fn catalog_is_pinned_and_paths_are_relative() {
+        let catalog = artifacts();
+        assert_eq!(catalog.len(), 6);
+        for model in catalog {
+            assert!(relative(&model.id).is_ok());
+            assert_eq!(model.revision.len(), 40);
+            for (path, pin) in model.files.iter().chain(&model.prepared) {
+                assert!(relative(path).is_ok());
+                assert!(pin.size > 0);
+                assert_eq!(pin.sha256.len(), 64);
+                assert!(pin.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
             }
-        );
-    }
-
-    #[test]
-    fn finish_and_fail_move_the_state_machine() {
-        let mut setup = SetupService::new();
-        assert!(!setup.record_progress(DownloadProgress::new(1, 1)));
-        setup.start(SetupGates::clear()).unwrap();
-        setup.finish();
-        assert_eq!(setup.state(), &SetupState::Ready);
-        setup.fail("Model verification failed. Retry the download.");
-        assert_eq!(
-            setup.state(),
-            &SetupState::Failed {
-                message: "Model verification failed. Retry the download.".to_string(),
-            }
-        );
-        assert_eq!(setup.start(SetupGates::clear()).unwrap(), Start::Started);
-        assert_eq!(
-            setup.state(),
-            &SetupState::Downloading {
-                progress: DownloadProgress::new(0, 0),
-            }
-        );
-    }
-
-    #[test]
-    fn partial_file_plans_a_range_header_at_its_length() {
-        let fake_length = 7_u64;
-        let dir = TempDir::new();
-        let partial = dir.0.join("model.safetensors.part");
-        let file = File::create(&partial).unwrap();
-        file.set_len(fake_length).unwrap();
-        drop(file);
-
-        let plan = ResumePlan::for_partial(&partial).unwrap();
-        assert_eq!(plan, ResumePlan::for_length(fake_length));
-        assert_eq!(plan.range_header(), Some("bytes=7-"));
-        assert_eq!(range_on_request(&plan).as_deref(), Some("bytes=7-"));
-
-        let missing = dir.0.join("absent.part");
-        let fresh = ResumePlan::for_partial(&missing).unwrap();
-        assert_eq!(fresh.range_header(), None);
-        assert_eq!(range_on_request(&fresh), None);
-
-        let empty = dir.0.join("empty.part");
-        File::create(&empty).unwrap();
-        let empty_plan = ResumePlan::for_partial(&empty).unwrap();
-        assert_eq!(empty_plan.offset, 0);
-        assert_eq!(range_on_request(&empty_plan), None);
-    }
-
-    #[test]
-    fn directory_free_bytes_reads_the_filesystem() {
-        let dir = TempDir::new();
-        let free = directory_free_bytes(&dir.0).unwrap();
-        assert!(free > 0);
+        }
+        for path in ["/tmp/no", "../bad", "x/../../bad", ""] {
+            assert!(relative(path).is_err());
+        }
     }
 }

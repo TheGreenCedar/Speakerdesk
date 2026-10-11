@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 pub(crate) const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Call {
-    request: Request,
+    // None resets and reaps the child before newly installed artifacts are loaded.
+    request: Option<Request>,
     cancellation: CancellationToken,
     reply: oneshot::Sender<Result<Response, ChildError>>,
 }
@@ -88,6 +89,35 @@ impl InferenceSupervisor {
         }
     }
 
+    pub fn restart(&self, cancellation: &CancellationToken) -> Result<(), ChildError> {
+        ack(self.call(None, cancellation.clone())?)
+    }
+
+    pub fn prepare_alignment(&self, cancellation: &CancellationToken) -> Result<(), ChildError> {
+        ack(self.call(Some(Request::PrepareAlignment), cancellation.clone())?)
+    }
+
+    fn call(
+        &self,
+        request: Option<Request>,
+        cancellation: CancellationToken,
+    ) -> Result<Response, ChildError> {
+        if cancellation.is_cancelled() || self.stop.is_cancelled() {
+            return Err(ChildError::Cancelled);
+        }
+        let (reply, receive) = oneshot::channel();
+        self.calls
+            .blocking_send(Call {
+                request,
+                cancellation,
+                reply,
+            })
+            .map_err(|_| ChildError::failed("inference supervisor stopped", false))?;
+        receive
+            .blocking_recv()
+            .map_err(|_| ChildError::failed("inference supervisor stopped", true))?
+    }
+
     /// Waits for the owned process to be reaped. Call off the async executor.
     pub fn shutdown(&self) {
         self.stop.cancel();
@@ -114,21 +144,7 @@ impl ChildModels {
         } else {
             self.cancellation.clone()
         };
-        if cancellation.is_cancelled() || self.supervisor.stop.is_cancelled() {
-            return Err(ChildError::Cancelled);
-        }
-        let (reply, receive) = oneshot::channel();
-        self.supervisor
-            .calls
-            .blocking_send(Call {
-                request,
-                cancellation,
-                reply,
-            })
-            .map_err(|_| ChildError::failed("inference supervisor stopped", false))?;
-        receive
-            .blocking_recv()
-            .map_err(|_| ChildError::failed("inference supervisor stopped", true))?
+        self.supervisor.call(Some(request), cancellation)
     }
 }
 
@@ -365,6 +381,14 @@ async fn run(
             let _ = call.reply.send(Err(ChildError::Cancelled));
             continue;
         }
+        let Some(mut request) = call.request else {
+            if let Some(child) = process.take() {
+                child.reap().await;
+            }
+            pid.store(0, Ordering::Release);
+            let _ = call.reply.send(Ok(Response::Ack));
+            continue;
+        };
         if process.is_none() {
             generation += 1;
             let started = Process::start(&executable, generation, &model_root).await;
@@ -406,7 +430,6 @@ async fn run(
             }
         }
         let child = process.as_mut().expect("started child");
-        let mut request = call.request;
         if let Some(handle) = request_handle(&mut request) {
             if handle.generation != child.generation {
                 let _ = call.reply.send(Err(ChildError::failed(

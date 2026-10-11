@@ -20,6 +20,8 @@ pub enum Activity {
     Import,
     Refinement,
     PendingExport,
+    /// Short persistence mutations stay available during model setup, but block updates.
+    Mutation,
 }
 
 impl Activity {
@@ -97,6 +99,16 @@ impl Admission {
         let mut state = self.lock();
         if state.reservation.is_some() || state.shutting_down {
             return Err(AdmissionError::Reserved);
+        }
+        if (activity == Activity::Setup
+            && state
+                .leases
+                .values()
+                .any(|held| *held != Activity::Mutation))
+            || (activity != Activity::Mutation
+                && state.leases.values().any(|held| *held == Activity::Setup))
+        {
+            return Err(AdmissionError::Busy);
         }
         state.next_lease = state
             .next_lease
@@ -238,6 +250,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn setup_excludes_work_in_both_directions_and_releases_after_cleanup() {
+        let admission = Admission::new();
+        for work in [
+            Activity::Import,
+            Activity::Refinement,
+            Activity::recording(),
+            Activity::PendingExport,
+        ] {
+            let lease = admission.lease(work).unwrap();
+            assert!(matches!(
+                admission.lease(Activity::Setup),
+                Err(AdmissionError::Busy)
+            ));
+            drop(lease);
+            let setup = admission.lease(Activity::Setup).unwrap();
+            assert!(matches!(admission.lease(work), Err(AdmissionError::Busy)));
+            assert!(matches!(
+                admission.lease(Activity::Setup),
+                Err(AdmissionError::Busy)
+            ));
+            drop(setup);
+            drop(admission.lease(work).unwrap());
+        }
+    }
+
+    #[test]
     fn busy_activities_block_reservation_until_their_lease_is_dropped() {
         for activity in [
             Activity::recording(),
@@ -246,6 +284,7 @@ mod tests {
             Activity::Import,
             Activity::Refinement,
             Activity::PendingExport,
+            Activity::Mutation,
         ] {
             let admission = Admission::new();
             let lease = admission.lease(activity).unwrap();

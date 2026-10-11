@@ -53,3 +53,11 @@ User-facing strings live in `speakerdesk_core::messages` and are copied from v0.
 ## Ledger
 
 `xtask/port-ledger.toml` lists every `tests/test_*.py`. Dropped rows carry a `D`-reference. `pending` rows are allowed until the owning agent lands tests. `cargo xtask ledger --check` fails if a test file is missing from the ledger.
+
+Native model installation is owned by the parent, with one fs4 installer lock and
+an exclusive setup admission lease. The child receives only `PrepareAlignment`
+for its fixed private staging path, never an arbitrary installation destination.
+Cancellation retains admission until terminal cleanup. Atomic model publication is
+followed by parent-controlled child restart; old session generations cannot survive
+an installation. Readiness comes from initialization of the activated identities.
+The installer does not enroll voices or hold a SQLite transaction during I/O.

@@ -171,6 +171,7 @@ struct Shared {
 /// Shared route state. Clone is cheap; the worker and directory are shared.
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) native: Arc<std::sync::OnceLock<Arc<crate::native::NativeModels>>>,
     token: Arc<str>,
     shared: Arc<Shared>,
     worker: Arc<JobWorker>,
@@ -212,6 +213,7 @@ impl AppState {
         let mut store = SqliteJobStore::open(database)?;
         store.recover(ACTIVE)?;
         Ok(Self {
+            native: Arc::new(std::sync::OnceLock::new()),
             token: Arc::from(random_hex(32)),
             shared: Arc::new(Shared {
                 store: Mutex::new(store),
@@ -459,7 +461,15 @@ async fn guard(State(app): State<AppState>, request: Request, next: Next) -> Res
         ));
     }
     let _activity = if is_mutating(request.method()) && request.uri().path() != "/api/updates" {
-        match app.admission.lease(Activity::Import) {
+        // Long inference handlers take their own lease; ordinary edits may run during setup.
+        let activity = if (request.method() == Method::POST && request.uri().path() == "/api/jobs")
+            || request.uri().path().starts_with("/api/meetings")
+        {
+            Activity::Import
+        } else {
+            Activity::Mutation
+        };
+        match app.admission.lease(activity) {
             Ok(lease) => Some(lease),
             Err(error) => {
                 return with_security(error_response(StatusCode::CONFLICT, error.message()));

@@ -194,6 +194,8 @@ pub enum Request {
         request_id: u64,
     },
     Shutdown,
+    /// Convert pinned CTC sources in the child's fixed private setup directory.
+    PrepareAlignment,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -234,7 +236,7 @@ pub fn request_timeout(request: &Request) -> Duration {
         Request::CtcScores { .. } => 30,
         Request::EmbedVoice { .. } => 10,
         Request::VadFeed { .. } | Request::DiarFeed { .. } => 10,
-        Request::SetupCheck { .. } => 120,
+        Request::SetupCheck { .. } | Request::PrepareAlignment => 120,
         Request::Hello { .. }
         | Request::VadOpen { .. }
         | Request::VadClose { .. }

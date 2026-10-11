@@ -42,3 +42,19 @@ test('setup polling enables native import after initialization with no download 
   assert.equal(progress.value,0);
   assert.equal(f.document.getElementById('install-models').hidden,true);
 });
+
+test('setup completion refreshes timing capability even when manual transcription was already ready', async () => {
+  const f=frontend(path.resolve(__dirname,'..')); f.seed(0,'uploaded');
+  f.run('config.readiness={configured:true,automatic_language:false,word_alignment:false};');
+  let configReads=0;
+  f.context.fetch=async url=>({ok:true,json:async()=>url==='/api/setup'?{
+    core_ready:true,ready:true,status:'ready',automatic_language:false,models:[],
+    total_bytes:6,downloaded_bytes:6,supported:true,can_download:true,can_cancel:false,
+    alignment:{id:'coarse-alignment',status:'ready',ready:true,supported_languages:['en'],timing_accuracy_calibrated_languages:['en'],total_bytes:6,stored_bytes:6,required_free_bytes:6,message:'Ready'},
+    voice:{status:'unavailable',available:false,enabled:false,message:'Unavailable'}
+  }:(configReads++,{languages:{en:'English',auto:'Automatic'},default_language:'en',readiness:{configured:true,automatic_language:false,word_alignment:true,live_capture:false}})});
+  await f.run('refreshSetup()');
+  assert.equal(configReads,1);
+  assert.equal(f.run('config.readiness.word_alignment'),true);
+  assert.equal(f.document.getElementById('cancel-model-setup').hidden,true);
+});

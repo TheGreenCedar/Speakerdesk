@@ -1010,6 +1010,10 @@ function wire() {
     }
   });
   $('install-alignment').addEventListener('click',()=>alignmentAction('POST').catch(error=>{ $('alignment-status').textContent=error.message; }));
+  $('cancel-model-setup').addEventListener('click', async () => {
+    try { await api('/api/setup/cancel',{method:'POST'}); await refreshSetup(); }
+    catch(error) { $('model-status').textContent=error.message; }
+  });
   $('install-models').addEventListener('click',() => installModels().catch(error => { $('model-status').textContent=error.message; }));
   $('recognize-voices').addEventListener('change',async event => {
     const control=event.target;control.disabled=true;
@@ -1162,7 +1166,7 @@ function renderAlignment(state) {
   $('alignment-status').textContent=alignment.error || (busy?`${alignment.phase} · ${Math.round(100*alignment.downloaded_bytes/alignment.total_bytes)}%`:alignment.ready?'Ready':'Not ready');
   $('alignment-progress').hidden=!busy;
   $('alignment-progress').value=alignment.total_bytes?100*alignment.downloaded_bytes/alignment.total_bytes:0;
-  $('install-alignment').hidden=alignment.ready && alignment.status!=='failed';
+  $('install-alignment').hidden=(alignment.ready && alignment.status!=='failed') || alignment.can_download===false;
   $('install-alignment').disabled=alignmentChanging || !alignment.can_download;
   $('install-alignment').textContent=busy?'Setting up…':['failed','interrupted'].includes(alignment.status)?'Retry setup': 'Finish setup';
 }
@@ -1177,7 +1181,7 @@ async function refreshSetup() {
       const size=formatBytes(model.bytes);
       const item=node('div',undefined,'model-item');
       const alignment=model.id===state.alignment?.id?state.alignment:null;
-      const label=model.name==='Voice recognition' && state.voice?.released===false?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':model.optional?`Optional · ${size}`:size;
+      const label=model.name==='Voice recognition' && state.voice?.released===false && !state.voice?.available?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':model.optional?`Optional · ${size}`:size;
       item.append(node('strong',model.name),node('span',label));list.append(item);
     });
     renderAlignment(state);
@@ -1187,13 +1191,14 @@ async function refreshSetup() {
     $('model-progress').value=state.total_bytes?100*state.downloaded_bytes/state.total_bytes:0;
     $('model-status').textContent=state.error || state.message || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'Finish required model setup before transcribing.');
     $('install-models').hidden=state.ready;
+    $('cancel-model-setup').hidden=!state.can_cancel;
     const voice=state.voice,voiceBusy=voice.status==='downloading';
     $('install-models').disabled=busy || voiceBusy || !state.supported || state.can_download===false;
     $('install-models').textContent=busy?'Downloading…':state.status==='failed'?'Resume download':`Download models · ${formatBytes(state.total_bytes)}`;
     if(voiceAvailable!==voice.available) await loadPeople();
     $('settings-voice-note').textContent=voice.enabled?voice.message:'Recognition is off. Saved names and voices stay on this Mac.';
     if(document.activeElement!==$('recognize-voices')) $('recognize-voices').checked=voice.enabled;
-    if(state.core_ready && (!config.readiness.configured || (state.automatic_language??true)!==config.readiness.automatic_language)) {
+    if(typeof state.core_ready==='boolean' && (state.core_ready !== config.readiness.configured || (state.automatic_language??true)!==config.readiness.automatic_language || (state.alignment?.ready??config.readiness.word_alignment)!==config.readiness.word_alignment)) {
       await refreshConfig();renderLanguageDefault();if(selected)setStatus();
     }
     renderStartState();

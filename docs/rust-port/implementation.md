@@ -845,3 +845,66 @@ saved-audio recovery, Python-free default packaging/updater, security qualificat
 and full cold/warm/live performance comparisons against 0.6.6. Windows and issue
 #25 remain follow-up scope. A source checkpoint or successful model slice does
 not replace those acceptance criteria.
+
+## Native model setup and repair
+
+The native settings path now downloads the pinned artifact catalog, resumes partial
+HTTP downloads, verifies every consumed file, prepares CTC weights in the resident
+child, and activates complete model directories. Core ML is fetched as individual
+pinned files, so setup has no archive extraction path. A private fs4 owner prevents
+competing installers; links and multiply linked writable files are rejected.
+The Mac uses atomic directory exchange for repair. Unknown inventory marks an
+installation incomplete; interrupted swapped staging is rebuilt safely on retry.
+Disk admission uses missing artifact and conversion bytes instead of the old fixed
+2.4 GB reserve. No database transaction spans setup work.
+
+Setup owns the existing admission lease through download, conversion, initialization
+and cancellation cleanup. Short data mutations remain available and still block an
+updater reservation. Review caught the old middleware taking an Import lease for
+every write: it would reject setup itself and block cancellation and editor saves.
+The real-router regression now covers those joins. The parent restarts and reaps
+the inference child before final initialization, invalidating old model handles.
+Capability cells and reports are refreshed from checked model identities. The
+settings screen exposes cancellation and refreshes timing capability after setup.
+The native alignment-only action is hidden; the main control sets up all models.
+
+Validation on this M5 Mac: 148 core tests, 57 host tests, one native-service lifecycle
+replay and eight process replays pass. The renderer suite passes 101 tests with one
+optional external fixture skipped. Strict core/host/models Clippy and the locked
+optimized desktop build pass; the previously recorded upstream mlx-sys warnings
+remain. New failure tests cover bad/missing ranges, HTTP restart, interrupted bodies,
+wrong sizes and hashes, cancellation, competing installers, symlinks/hard links,
+partial activation, unexpected inventory, stale staged directories, and process reset.
+Independent read-only verification found no remaining source-slice blocker.
+
+Real pinned Silero download (1,247,300 bytes) passed in
+`/private/tmp/speakerdesk-native-setup.cLJP4C/models`. To avoid downloading the large
+unchanged weights again, five other models' pinned source files were APFS-cloned
+from this task's qualification copies into private staging. The production HTTP
+setup route verified/activated those files, ran real native CTC conversion, restarted
+the child, and initialized all six capabilities. A real import of `two-voice.wav`
+produced the expected two passages and timed reading turns for two speakers.
+The first harness assertion incorrectly required silence-gap rows to contain text;
+retained output proves two spoken passages plus two legitimate blank gap rows.
+No inference rerun was needed to correct that assertion. People remained empty:
+setup did not enroll any voices.
+
+A subsequent whole-host restart preserved that output. A saved edit, TXT export and
+409 stale-save rejection passed while exercising the same file-backed store. All six
+models initialized again, and the host exited successfully. This is native service
+and actual-model proof, not Tauri/editor acceptance or a performance comparison.
+Logs, setup snapshots, retained model output, edited document and export are in the
+same disposable directory. Test/build logs are `/tmp/speakerdesk-setup-*`.
+Optimized executable SHA256:
+`f5ddb1e4cccef83484d5e4a1d797f0cf985c8d5f73d579ae0be80ec79a27e1bb`.
+Only this worktree's regenerable debug incremental compiler output was reclaimed
+when free space fell below 1 GB; binaries, test evidence, installed app, recordings,
+production databases and the existing model cache were preserved.
+
+The UI tool still reports a locked Mac despite the user's unlock replies. The old
+isolated desktop preview remains at the earlier retry build. Both the long-recording
+editor check and setup controls in Tauri remain pending. Continue the accepted full
+outcome: native live capture coordination/drain and saved-audio recovery, bounded
+memory/history work, Python-free default package and updater, security qualification,
+and equivalent cold/warm/live performance gates. Do not treat this checkpoint as
+replacement completion. Windows and issue #25 remain follow-up scope.

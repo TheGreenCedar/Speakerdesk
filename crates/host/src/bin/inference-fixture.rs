@@ -58,7 +58,13 @@ fn main() {
                     models
                         .into_iter()
                         .map(|model| speakerdesk_core::ipc::SetupModelReport {
-                            model: format!("replay:{model}"),
+                            // Protocol replay only: no tensors are initialized in this fixture.
+                            model: match model.as_str() {
+                                "silero-speech" => "mlx-community/silero-vad-v6@2ebf4a5".into(),
+                                "nemotron" => "mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f".into(),
+                                "cohere-speech" => "spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12".into(),
+                                _ => format!("replay:{model}"),
+                            },
                             ok: true,
                             timing_ms: 0,
                         })

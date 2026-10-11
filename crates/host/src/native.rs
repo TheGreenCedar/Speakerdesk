@@ -19,7 +19,7 @@ use speakerdesk_core::{
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, RwLock},
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
@@ -35,14 +35,17 @@ use crate::{
 #[folder = "../../speakerdesk/static/"]
 struct Assets;
 
-struct ImportInference {
+pub(crate) struct NativeModels {
     supervisor: Arc<InferenceSupervisor>,
     root: PathBuf,
-    alignment: Arc<OnceLock<speakerdesk_core::alignment::Vocabulary>>,
-    voice: Arc<OnceLock<speakerdesk_core::voice::Calibration>>,
+    alignment: RwLock<Option<Arc<speakerdesk_core::alignment::Vocabulary>>>,
+    voice: RwLock<Option<speakerdesk_core::voice::Calibration>>,
+    model_root: PathBuf,
+    setup: crate::setup::SetupService,
+    task: Mutex<Option<(CancellationToken, tokio::task::JoinHandle<()>)>>,
 }
 
-impl ApplicationModels for ImportInference {
+impl ApplicationModels for NativeModels {
     fn retry_passage(
         &self,
         pcm: &[f32],
@@ -59,7 +62,7 @@ impl ApplicationModels for ImportInference {
         .map_err(|error| error.to_string())
     }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
-        self.voice.get().cloned()
+        self.voice.read().expect("voice capability").clone()
     }
     fn embed_voice(
         &self,
@@ -74,13 +77,212 @@ impl ApplicationModels for ImportInference {
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String> {
         let path = recording_path(&self.root, job).map_err(|e| e.to_string())?;
         let pcm = audio::read_pcm16(path).map_err(|e| e.to_string())?;
+        let alignment = self.alignment.read().expect("alignment capability").clone();
         speakerdesk_core::import::import_recording(
             &self.supervisor.models(cancellation.clone()),
             &pcm,
             &job.language,
-            self.alignment.get(),
+            alignment.as_deref(),
         )
         .map_err(|e| e.to_string())
+    }
+}
+
+impl NativeModels {
+    fn start(
+        self: &Arc<Self>,
+        app: AppState,
+        download: bool,
+    ) -> Result<(), crate::admission::AdmissionError> {
+        let mut task = self.task.lock().expect("setup task");
+        if task.as_ref().is_some_and(|(_, task)| !task.is_finished()) {
+            return Ok(());
+        }
+        let lease = app.admission.lease(Activity::Setup)?;
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let native = self.clone();
+        native.setup.begin(&crate::setup::artifacts());
+        native.setup.phase(if download {
+            "Checking installed models"
+        } else {
+            "Initializing native speech models"
+        });
+        if !download {
+            app.set_issues(vec!["Initializing native speech models…".into()]);
+        }
+        let handle = tokio::spawn(async move {
+            let _lease = lease;
+            let result = if download {
+                native.install(&app, &token).await
+            } else {
+                native
+                    .initialize_async(app.clone(), token.clone(), false)
+                    .await
+            };
+            if let Err(error) = &result {
+                // Do not leave a first-run failure looking like an indefinitely pending load.
+                if app.model_status().1.is_empty() {
+                    app.set_issues(vec![error.clone()]);
+                }
+            }
+            native.setup.finish(result);
+        });
+        *task = Some((cancel, handle));
+        Ok(())
+    }
+    fn cancel(&self) {
+        if let Some((cancel, task)) = self.task.lock().expect("setup task").as_ref()
+            && !task.is_finished()
+        {
+            self.setup.phase("Cancelling model setup");
+            cancel.cancel();
+        }
+    }
+    async fn join(&self) -> Result<(), tokio::task::JoinError> {
+        let task = self.task.lock().expect("setup task").take();
+        if let Some((cancel, task)) = task {
+            cancel.cancel();
+            task.await?;
+        }
+        Ok(())
+    }
+    async fn initialize_async(
+        self: &Arc<Self>,
+        app: AppState,
+        cancel: CancellationToken,
+        all: bool,
+    ) -> Result<(), String> {
+        let native = self.clone();
+        tokio::task::spawn_blocking(move || native.initialize(&app, &cancel, all))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+    fn initialize(
+        &self,
+        app: &AppState,
+        cancel: &CancellationToken,
+        all: bool,
+    ) -> Result<(), String> {
+        let models = self.supervisor.models(cancel.clone());
+        let mut reports = Vec::new();
+        let mut failures = Vec::new();
+        let mut core_failures = Vec::new();
+        let mut alignment = None;
+        let mut voice = None;
+        for (index, artifact) in crate::setup::artifacts().iter().enumerate() {
+            if cancel.is_cancelled() {
+                return Err("Model setup cancelled".into());
+            }
+            let identity = match artifact.id.as_str() {
+                "silero-speech" => format!("{}@{}", artifact.repo, &artifact.revision[..7]),
+                "coarse-alignment" => speakerdesk_core::alignment::CHECKPOINT.into(),
+                "redimnet2-b6" => native_voice_policy().model.revision,
+                _ => format!("{}@{}", artifact.repo, artifact.revision),
+            };
+            self.setup.phase(format!("Initializing {}", artifact.name));
+            let loaded = models
+                .setup_check(std::slice::from_ref(&artifact.id))
+                .map_err(|e| e.to_string())
+                .and_then(|mut loaded| {
+                    if loaded.len() != 1 || !loaded[0].ok || loaded[0].model != identity {
+                        return Err("Model initialization returned an unexpected identity".into());
+                    }
+                    if artifact.id == "coarse-alignment" {
+                        let tokens = std::fs::read_to_string(
+                            self.model_root.join("coarse-alignment/tokens.txt"),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        alignment = Some(Arc::new(speakerdesk_core::alignment::Vocabulary::parse(
+                            &tokens,
+                        )?));
+                    }
+                    if artifact.id == "redimnet2-b6" {
+                        voice = Some(native_voice_policy());
+                    }
+                    Ok(loaded.remove(0))
+                });
+            match loaded {
+                Ok(report) => reports.push(report),
+                Err(error) => {
+                    let message = format!("{}: {error}", artifact.name);
+                    if index < 3 {
+                        core_failures.push(message.clone());
+                    }
+                    failures.push(message);
+                    reports.push(speakerdesk_core::ipc::SetupModelReport {
+                        model: identity,
+                        ok: false,
+                        timing_ms: 0,
+                    });
+                }
+            }
+        }
+        if cancel.is_cancelled() || app.admission.closed() {
+            return Err("Model setup cancelled".into());
+        }
+        *self.alignment.write().expect("alignment capability") = alignment;
+        *self.voice.write().expect("voice capability") = voice;
+        app.set_model_reports(reports);
+        app.set_issues(core_failures.clone());
+        let errors = if all { failures } else { core_failures };
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join(" "))
+        }
+    }
+    async fn install(
+        self: &Arc<Self>,
+        app: &AppState,
+        cancel: &CancellationToken,
+    ) -> Result<(), String> {
+        let installer = crate::setup::Installer::open(&self.model_root)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut completed = 0;
+        for model in crate::setup::artifacts() {
+            if !installer
+                .installed(&model, cancel)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                let staging = installer
+                    .stage(&model, completed, &self.setup, cancel)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if installer
+                    .needs_preparation(&model, &staging, cancel)
+                    .await
+                    .map_err(|e| e.to_string())?
+                {
+                    self.setup.phase("Preparing native timing weights");
+                    let supervisor = self.supervisor.clone();
+                    let cancellation = cancel.clone();
+                    tokio::task::spawn_blocking(move || {
+                        supervisor.prepare_alignment(&cancellation)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                }
+                installer
+                    .activate(&model, &staging, cancel)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            completed += model.download_bytes();
+            self.setup.bytes(completed);
+        }
+        self.setup.phase("Restarting the model worker");
+        let supervisor = self.supervisor.clone();
+        let cancellation = cancel.clone();
+        tokio::task::spawn_blocking(move || supervisor.restart(&cancellation))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        self.initialize_async(app.clone(), cancel.clone(), true)
+            .await
     }
 }
 
@@ -152,88 +354,24 @@ async fn serve(
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let alignment_directory = model_root.join("coarse-alignment");
-    let alignment = Arc::new(OnceLock::new());
-    let voice = Arc::new(OnceLock::new());
-    let supervisor = InferenceSupervisor::new(executable, env!("CARGO_PKG_VERSION"), model_root)?;
-    app.set_models(Arc::new(ImportInference {
+    let supervisor =
+        InferenceSupervisor::new(executable, env!("CARGO_PKG_VERSION"), model_root.clone())?;
+    let native = Arc::new(NativeModels {
         supervisor: supervisor.clone(),
         root: app.data_dir().to_path_buf(),
-        alignment: alignment.clone(),
-        voice: voice.clone(),
-    }));
-    app.set_issues(vec!["Initializing native speech models…".into()]);
-    app.updates.lock().expect("updates").connect();
-    let cancel = CancellationToken::new();
-    let load_app = app.clone();
-    let load_models = supervisor.models(cancel.clone());
-    let lease = app.admission.lease(Activity::Setup)?;
-    let initialize = tokio::task::spawn_blocking(move || {
-        let _lease = lease;
-        match load_models.setup_check(&[
-            "silero-speech".into(),
-            "nemotron".into(),
-            "cohere-speech".into(),
-        ]) {
-            Ok(mut reports) if reports.len() == 3 && reports.iter().all(|report| report.ok) => {
-                // Auto is optional: a missing language model must not block manual imports.
-                match load_models.setup_check(&["whisper-language".into()]) {
-                    Ok(language) => reports.extend(language),
-                    Err(error) => {
-                        tracing::warn!(%error, "automatic language model did not initialize");
-                        reports.push(speakerdesk_core::ipc::SetupModelReport {
-                            model: languages::LID_CHECKPOINT.into(),
-                            ok: false,
-                            timing_ms: 0,
-                        });
-                    }
-                }
-                let timing = std::fs::read_to_string(alignment_directory.join("tokens.txt"))
-                    .map_err(|e| e.to_string())
-                    .and_then(|tokens| speakerdesk_core::alignment::Vocabulary::parse(&tokens))
-                    .and_then(|vocabulary| {
-                        let report = load_models
-                            .setup_check(&["coarse-alignment".into()])
-                            .map_err(|e| e.to_string())?;
-                        if report.len() != 1
-                            || !report[0].ok
-                            || report[0].model != speakerdesk_core::alignment::CHECKPOINT
-                        {
-                            return Err("Native alignment did not initialize".into());
-                        }
-                        let _ = alignment.set(vocabulary);
-                        Ok(report)
-                    });
-                match timing {
-                    Ok(timing) => reports.extend(timing),
-                    Err(error) => {
-                        tracing::warn!(%error,"supplied-text timing did not initialize");
-                        reports.push(speakerdesk_core::ipc::SetupModelReport {
-                            model: speakerdesk_core::alignment::CHECKPOINT.into(),
-                            ok: false,
-                            timing_ms: 0,
-                        });
-                    }
-                }
-                match load_models.setup_check(&["redimnet2-b6".into()]) {
-                    Ok(loaded)
-                        if loaded.len() == 1
-                            && loaded[0].ok
-                            && loaded[0].model == native_voice_policy().model.revision =>
-                    {
-                        let _ = voice.set(native_voice_policy());
-                        reports.extend(loaded);
-                    }
-                    other => tracing::warn!(?other, "native voice model did not initialize"),
-                }
-                load_app.set_model_reports(reports)
-            }
-            Ok(_) => {
-                load_app.set_issues(vec!["The native speech models did not initialize.".into()])
-            }
-            Err(error) => load_app.set_issues(vec![format!("Native model setup failed: {error}")]),
-        }
+        model_root,
+        alignment: RwLock::new(None),
+        voice: RwLock::new(None),
+        setup: crate::setup::SetupService::default(),
+        task: Mutex::new(None),
     });
+    app.set_models(native.clone());
+    app.native
+        .set(native.clone())
+        .ok()
+        .expect("native setup configured once");
+    app.updates.lock().expect("updates").connect();
+    native.start(app.clone(), false)?;
     let stop = CancellationToken::new();
     let server_stop = stop.clone();
     let router = crate::router(app.clone());
@@ -284,7 +422,7 @@ async fn serve(
     };
     app.admission.close();
     stop.cancel();
-    cancel.cancel();
+    native.cancel();
     let close_app = app.clone();
     let close_supervisor = supervisor.clone();
     let cleanup = tokio::task::spawn_blocking(move || {
@@ -304,7 +442,7 @@ async fn serve(
         }
     };
     let cleanup = cleanup.await?;
-    initialize.await?;
+    native.join().await?;
     if update_shutdown {
         native_updates::emit(
             &app.admission
@@ -328,7 +466,8 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/static/{*path}", get(asset))
         .route("/api/jobs/{jid}/audio", get(playback))
         .route("/api/preferences/language", patch(language))
-        .route("/api/setup", get(setup).post(setup_unavailable))
+        .route("/api/setup", get(setup).post(start_setup))
+        .route("/api/setup/cancel", axum::routing::post(cancel_setup))
         .route("/api/notices", get(notices))
 }
 
@@ -402,25 +541,58 @@ async fn language(State(app): State<AppState>, body: Bytes) -> Response {
 
 async fn setup(State(app): State<AppState>) -> Response {
     blocking(move || {
-    let enabled = match app.store().preference("voice_recognition") {
-        Ok(value) => value.as_deref()!=Some("false"),
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    let (issues, reports) = app.model_status();
-    let voice_available = app.models().voice_policy().is_some();
-    let models: Vec<_> = ["Speech detection", "Speaker diarization", "Transcription", "Automatic language", "Supplied-text timing"].iter().enumerate().map(|(index, name)| json!({"id":index,"name":name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":0,"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
-    Json(
-        json!({"supported":cfg!(all(target_os="macos",target_arch="aarch64")),"ready":issues.is_empty(),"core_ready":issues.is_empty(),"automatic_language":issues.is_empty() && app.automatic_language_ready(),"status":if issues.is_empty(){"ready"}else{"failed"},"error":issues.join(" "),"models":models,"total_bytes":0,"downloaded_bytes":0,"can_download":false,
-        "voice":{"status":if voice_available{"ready"}else{"unavailable"},"enabled":enabled,"available":voice_available,"released":false,"message":if voice_available{"Native voice enrollment and manual and automatic checks are available."}else{"The native voice model did not initialize. Saved voices and names are kept."}},
-        "message":format!("Native preview. Automatic language: {}. Supplied-text timing: {}. Live capture is not implemented yet.",if app.automatic_language_ready(){"available"}else{"unavailable"},if app.alignment_ready(){"available"}else{"unavailable"})}),
-    ).into_response()
+        let enabled = match app.store().preference("voice_recognition") {
+            Ok(value) => value.as_deref()!=Some("false"),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+        let (issues, reports) = app.model_status();
+        let core_ready = issues.is_empty();
+        let voice = app.models().voice_policy().is_some();
+        let automatic = core_ready && app.automatic_language_ready();
+        let timing = core_ready && app.alignment_ready();
+        let ready = core_ready && automatic && timing && voice;
+        let progress = app.native.get().map(|native| native.setup.progress()).unwrap_or_default();
+        let busy = progress.status=="downloading";
+        let supported = cfg!(all(target_os="macos",target_arch="aarch64"));
+        let can_download = supported && app.native.get().is_some() && !app.admission.busy() && !app.admission.closed() && !app.admission.reserved();
+        let catalog = crate::setup::artifacts();
+        let models: Vec<_> = catalog.iter().enumerate().map(|(index, model)| json!({"id":model.id,"name":model.name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":model.download_bytes(),"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
+        let alignment = &catalog[4];
+        let status = if busy {"downloading"} else if progress.error.is_some() {"failed"} else if ready {"ready"} else {"idle"};
+        Json(json!({
+            "supported":supported,"ready":ready,"core_ready":core_ready,"automatic_language":automatic,
+            "status":status,"phase":progress.phase,"error":progress.error,
+            "models":models,"total_bytes":catalog.iter().map(|m| m.download_bytes()).sum::<u64>(),
+            "downloaded_bytes":progress.downloaded_bytes,"required_free_bytes":catalog.iter().map(|m| m.stored_bytes()).sum::<u64>(),
+            "can_download":can_download,"can_cancel":busy && app.native.get().is_some(),
+            "alignment":{"id":alignment.id,"status":if busy {"downloading"}else if timing {"ready"}else {"idle"},"ready":timing,"can_download":false,
+                "supported_languages":languages::LANGUAGES.iter().map(|(code,_)| *code).collect::<Vec<_>>(),"timing_accuracy_calibrated_languages":["en"],"total_bytes":alignment.download_bytes(),"stored_bytes":alignment.stored_bytes(),"required_free_bytes":alignment.stored_bytes(),
+                "message":"Supplied-text timing preserves authoritative transcript words. Use Download models below to finish setup for all local models.","phase":progress.phase,"downloaded_bytes":0},
+            "voice":{"status":if voice {"ready"}else {"unavailable"},"enabled":enabled,"available":voice,"released":false,
+                "message":if voice {"Native voice enrollment and manual and automatic checks are available."}else {"The native voice model did not initialize. Saved voices and names are kept."}},
+            "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing: {}. Live capture is not implemented yet.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
+        })).into_response()
     }).await
 }
 
-async fn setup_unavailable() -> Response {
-    failure(
-        "Native model downloads are not implemented yet. This development build uses its explicit model directory.",
-    )
+async fn start_setup(State(app): State<AppState>) -> Response {
+    let Some(native) = app.native.get().cloned() else {
+        return failure("Native model setup is unavailable in this runtime");
+    };
+    match native.start(app, true) {
+        Ok(()) => Json(json!({"status":"downloading"})).into_response(),
+        Err(error) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+async fn cancel_setup(State(app): State<AppState>) -> Response {
+    if let Some(native) = app.native.get() {
+        native.cancel();
+    }
+    Json(json!({"status":"cancelling"})).into_response()
 }
 async fn notices() -> Response {
     (
@@ -437,4 +609,123 @@ async fn notices() -> Response {
 }
 fn failure(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({"error":message}))).into_response()
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+    #[tokio::test]
+    async fn actual_router_allows_edits_and_cancellation_until_setup_cleanup_finishes() {
+        // Model work is a held replay. Requests use the production router and file-backed store.
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::open(temp.path().join("data")).unwrap();
+        let jid = "12345678901234567890123456789012";
+        let document = json!({"speakers":{"speaker_0":"Speaker 1"},"segments":[{"id":"one","start":0.,"end":1.,"speaker":"speaker_0","text":"Original words."}]});
+        app.insert_job(serde_json::from_value(json!({"id":jid,"name":"Replay","status":"ready","language":"en","duration":1.,"created":0.,"updated":0.,"revision":0,"document":document})).unwrap());
+        let invalid_root = temp.path().join("invalid-model-directory");
+        std::fs::write(&invalid_root, b"fixture prevents network access").unwrap();
+        let supervisor =
+            InferenceSupervisor::new(std::env::current_exe().unwrap(), "test", &invalid_root)
+                .unwrap();
+        let native = Arc::new(NativeModels {
+            supervisor: supervisor.clone(),
+            root: app.data_dir().into(),
+            model_root: invalid_root,
+            alignment: RwLock::new(None),
+            voice: RwLock::new(None),
+            setup: crate::setup::SetupService::default(),
+            task: Mutex::new(None),
+        });
+        app.native.set(native.clone()).ok().unwrap();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let cleanup = Arc::new(tokio::sync::Notify::new());
+        let gate = cleanup.clone();
+        let lease = app.admission.lease(Activity::Setup).unwrap();
+        native.setup.begin(&crate::setup::artifacts());
+        *native.task.lock().unwrap() = Some((
+            cancel.clone(),
+            tokio::spawn(async move {
+                let _lease = lease;
+                token.cancelled().await;
+                gate.notified().await;
+            }),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = crate::router(app.clone());
+        let stop = CancellationToken::new();
+        let stopped = stop.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(stopped.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}");
+        let post = |path: &str| {
+            client
+                .post(format!("{url}{path}"))
+                .header("X-Speakerdesk-Token", app.token())
+        };
+        assert_eq!(
+            post("/api/setup").send().await.unwrap().status(),
+            200,
+            "duplicate setup should reach the owner"
+        );
+        let mut edited = document;
+        edited["segments"][0]["text"] = json!("Saved while setup waits.");
+        let saved = client
+            .put(format!("{url}/api/jobs/{jid}/transcript"))
+            .header("X-Speakerdesk-Token", app.token())
+            .json(&json!({"revision":0,"document":edited}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+        assert_eq!(
+            post(&format!("/api/jobs/{jid}/run"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        assert_eq!(
+            post("/api/setup/cancel").send().await.unwrap().status(),
+            200
+        );
+        assert!(cancel.is_cancelled());
+        assert!(
+            app.admission.busy(),
+            "cancel acknowledgement must retain admission through cleanup"
+        );
+        assert!(app.admission.reserve(1, 1).is_err());
+        assert_eq!(
+            app.store()
+                .get(&JobId::parse(jid).unwrap(), false)
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
+        );
+        cleanup.notify_one();
+        native.join().await.unwrap();
+        assert!(!app.admission.busy());
+        assert_eq!(
+            post("/api/setup").send().await.unwrap().status(),
+            200,
+            "fresh setup must not hold an Import lease in middleware"
+        );
+        let task = native.task.lock().unwrap().take().unwrap().1;
+        task.await.unwrap();
+        assert_eq!(native.setup.progress().status, "failed");
+        assert!(native.setup.progress().error.is_some());
+        stop.cancel();
+        server.await.unwrap();
+        tokio::task::spawn_blocking(move || supervisor.shutdown())
+            .await
+            .unwrap();
+    }
 }
