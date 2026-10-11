@@ -948,3 +948,26 @@ bespoke echo FFT and measure correlation choices; then qualify live hardware,
 native default packaging/updater, security and equivalent 0.6.6 performance. The
 actual Tauri setup/long-import checks remain pending. Installed app, production data
 and existing model cache stay untouched; Windows and issue #25 remain follow-ups.
+
+## Maintained FFT and measured reference correlation
+
+Removed the project-owned Bluestein/complex FFT implementation. The echo clock now
+uses the workspace's already pinned `realfft` 3.5.0 for power spectra and linear
+correlation. Independent DFT equations cover even, odd and prime lengths; direct
+dot products check every valid correlation lag, including the production 9,999 by
+1,999 sample shape. The existing polarity, stereo-channel, tonal rejection, delay
+and drift tests pass through the new implementation.
+
+On this M5 Mac in an optimized build, seven alternating comparisons included
+planning and allocation. Direct correlation took 8.259–12.206 ms per channel
+(median 9.327 ms); FFT took 0.167–0.637 ms (median 0.210 ms). This supports choosing
+FFT for the production correlation shape. It is a DSP-kernel comparison, not an
+end-to-end capture or 0.6.6 performance acceptance result.
+
+Independent review found a new nonfinite-input panic at the inverse FFT. A release
+regression reproduced it, then passed after the public correlation boundary began
+rejecting NaN and infinities from every source. Final optimized echo tests: 16 pass;
+the explicit comparison also passed. Strict echo Clippy passes. Source review is
+closed. Evidence: `/tmp/speakerdesk-echo-{correlation-performance,nonfinite-red,final-tests,clippy}.log`.
+Capture orchestration, native default packaging and the remaining full-app gates
+are still unfinished; this library is not yet wired into active native capture.

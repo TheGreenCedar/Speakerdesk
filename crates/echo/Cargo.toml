@@ -8,6 +8,7 @@ description = "AEC3 echo mixer. macOS static library; stub elsewhere."
 
 [dependencies]
 libc = "0.2.190"
+realfft = "3.5.0"
 speakerdesk-core = { path = "../core" }
 
 [target.'cfg(target_os = "macos")'.build-dependencies]

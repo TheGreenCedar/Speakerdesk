@@ -1,152 +1,146 @@
-//! Length-n real DFTs for tonal rejection.
-//!
-//! `realfft` lives in `speakerdesk-core`. This crate keeps a small Bluestein
-//! transform so Linux builds do not link the C++ canceller or add FFT crates.
+//! Real FFTs for tonal rejection and reference correlation.
 
-use std::f64::consts::PI;
-
-#[derive(Clone, Copy)]
-struct Complex {
-    re: f64,
-    im: f64,
-}
-
-impl Complex {
-    const fn new(re: f64, im: f64) -> Self {
-        Self { re, im }
-    }
-
-    fn conj(self) -> Self {
-        Self {
-            re: self.re,
-            im: -self.im,
-        }
-    }
-
-    fn mul(self, other: Self) -> Self {
-        Self {
-            re: self.re * other.re - self.im * other.im,
-            im: self.re * other.im + self.im * other.re,
-        }
-    }
-}
-
-fn fft(values: &mut [Complex], inverse: bool) {
-    let n = values.len();
-    debug_assert!(n.is_power_of_two());
-    if n <= 1 {
-        return;
-    }
-    let mut reversed = 0;
-    for index in 1..n {
-        let mut bit = n >> 1;
-        while reversed & bit != 0 {
-            reversed ^= bit;
-            bit >>= 1;
-        }
-        reversed ^= bit;
-        if index < reversed {
-            values.swap(index, reversed);
-        }
-    }
-    let mut length = 2;
-    while length <= n {
-        let angle = if inverse { 2.0 } else { -2.0 } * PI / length as f64;
-        let step = Complex::new(angle.cos(), angle.sin());
-        let mut start = 0;
-        while start < n {
-            let mut twiddle = Complex::new(1.0, 0.0);
-            for offset in 0..length / 2 {
-                let even = values[start + offset];
-                let odd = values[start + offset + length / 2].mul(twiddle);
-                values[start + offset] = Complex::new(even.re + odd.re, even.im + odd.im);
-                values[start + offset + length / 2] =
-                    Complex::new(even.re - odd.re, even.im - odd.im);
-                twiddle = twiddle.mul(step);
-            }
-            start += length;
-        }
-        length <<= 1;
-    }
-    if inverse {
-        let scale = 1.0 / n as f64;
-        for value in values.iter_mut() {
-            *value = Complex::new(value.re * scale, value.im * scale);
-        }
-    }
-}
+use realfft::{RealFftPlanner, num_complex::Complex};
 
 /// One-sided power spectrum `|rfft(samples)|^2`, unnormalized like NumPy.
 pub(crate) fn power_spectrum(samples: &[f64]) -> Vec<f64> {
     real_dft(samples)
         .into_iter()
-        .map(|bin| bin.re * bin.re + bin.im * bin.im)
+        .map(|bin| bin.norm_sqr())
         .collect()
 }
 
-fn real_dft(samples: &[f64]) -> Vec<Complex> {
-    let bins = samples.len() / 2 + 1;
-    bluestein(samples).into_iter().take(bins).collect()
-}
-
-fn bluestein(samples: &[f64]) -> Vec<Complex> {
-    let n = samples.len();
-    if n == 0 {
+fn real_dft(samples: &[f64]) -> Vec<Complex<f64>> {
+    if samples.is_empty() {
         return Vec::new();
     }
-    if n == 1 {
-        return vec![Complex::new(samples[0], 0.0)];
+    let transform = RealFftPlanner::<f64>::new().plan_fft_forward(samples.len());
+    let mut output = transform.make_output_vec();
+    transform
+        .process(&mut samples.to_vec(), &mut output)
+        .expect("matching FFT lengths");
+    output
+}
+
+/// Valid dot products against every full reference window, with zero-padding to avoid wraparound.
+pub(crate) fn correlation(reference: &[f64], near: &[f64]) -> Vec<f64> {
+    assert!(!near.is_empty() && reference.len() >= near.len());
+    let size = (reference.len() + near.len() - 1).next_power_of_two();
+    let mut planner = RealFftPlanner::<f64>::new();
+    let forward = planner.plan_fft_forward(size);
+    let inverse = planner.plan_fft_inverse(size);
+    let mut input = forward.make_input_vec();
+    input[..reference.len()].copy_from_slice(reference);
+    let mut far = forward.make_output_vec();
+    forward
+        .process(&mut input, &mut far)
+        .expect("matching FFT lengths");
+    input.fill(0.);
+    input[..near.len()].copy_from_slice(near);
+    let mut microphone = forward.make_output_vec();
+    forward
+        .process(&mut input, &mut microphone)
+        .expect("matching FFT lengths");
+    for (far, microphone) in far.iter_mut().zip(microphone) {
+        *far *= microphone.conj();
     }
-    let chirp: Vec<Complex> = (0..n)
-        .map(|bin| {
-            let angle = -PI * (bin as f64) * (bin as f64) / n as f64;
-            Complex::new(angle.cos(), angle.sin())
-        })
-        .collect();
-    let padded = (2 * n - 1).next_power_of_two();
-    let mut left = vec![Complex::new(0.0, 0.0); padded];
-    let mut right = vec![Complex::new(0.0, 0.0); padded];
-    right[0] = Complex::new(1.0, 0.0);
-    for index in 0..n {
-        left[index] = Complex::new(samples[index], 0.0).mul(chirp[index]);
-        if index > 0 {
-            let conj = chirp[index].conj();
-            right[index] = conj;
-            right[padded - index] = conj;
-        }
-    }
-    fft(&mut left, false);
-    fft(&mut right, false);
-    for index in 0..padded {
-        left[index] = left[index].mul(right[index]);
-    }
-    fft(&mut left, true);
-    left.into_iter()
-        .take(n)
-        .enumerate()
-        .map(|(index, value)| value.mul(chirp[index]))
-        .collect()
+    inverse
+        .process(&mut far, &mut input)
+        .expect("real correlation spectrum");
+    input.truncate(reference.len() - near.len() + 1);
+    input.iter_mut().for_each(|sample| *sample /= size as f64);
+    input
 }
 
 #[cfg(test)]
 mod tests {
-    use super::real_dft;
+    use super::*;
 
-    fn close(actual: (f64, f64), expected: (f64, f64)) {
-        let error = (actual.0 - expected.0).hypot(actual.1 - expected.1);
-        assert!(error < 1e-9, "{actual:?} != {expected:?} (error {error})");
+    fn direct(reference: &[f64], near: &[f64]) -> Vec<f64> {
+        reference
+            .windows(near.len())
+            .map(|window| window.iter().zip(near).map(|(a, b)| a * b).sum())
+            .collect()
     }
 
     #[test]
-    fn real_dft_matches_numpy_rfft() {
-        let four = real_dft(&[1.0, 2.0, 3.0, 4.0]);
-        close((four[0].re, four[0].im), (10.0, 0.0));
-        close((four[1].re, four[1].im), (-2.0, 2.0));
-        close((four[2].re, four[2].im), (-2.0, 0.0));
+    fn real_dft_matches_independent_definition_for_even_odd_and_prime_lengths() {
+        for length in [1, 2, 3, 4, 5, 16, 31, 127] {
+            let samples: Vec<_> = (0..length)
+                .map(|i| ((i * 37 % 101) as f64 - 50.) / 100.)
+                .collect();
+            for (k, actual) in real_dft(&samples).iter().enumerate() {
+                let expected: Complex<f64> = samples
+                    .iter()
+                    .enumerate()
+                    .map(|(n, sample)| {
+                        Complex::from_polar(
+                            *sample,
+                            -std::f64::consts::TAU * (k * n) as f64 / length as f64,
+                        )
+                    })
+                    .sum();
+                assert!(
+                    (*actual - expected).norm() < 1e-10,
+                    "length {length}, bin {k}"
+                );
+            }
+        }
+        assert!(power_spectrum(&[]).is_empty());
+        assert_eq!(power_spectrum(&[1., 2., 3., 4.]), vec![100., 8., 4.]);
+    }
 
-        let five = real_dft(&[1.0, 2.0, 3.0, 4.0, 5.0]);
-        close((five[0].re, five[0].im), (15.0, 0.0));
-        close((five[1].re, five[1].im), (-2.5, 3.440_954_801_177_934));
-        close((five[2].re, five[2].im), (-2.5, 0.812_299_240_582_266));
+    #[test]
+    fn fft_correlation_matches_direct_dot_products_including_tail_lags() {
+        for (length, near_length) in [(1, 1), (5, 3), (448, 400), (9999, 1999)] {
+            let reference: Vec<_> = (0..length)
+                .map(|i| ((i * 37 % 101) as f64 - 50.) / 100.)
+                .collect();
+            let near: Vec<_> = (0..near_length)
+                .map(|i| ((i * 19 % 97) as f64 - 48.) / 100.)
+                .collect();
+            let actual = correlation(&reference, &near);
+            let expected = direct(&reference, &near);
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "optimized production-size comparison; run explicitly with --release --ignored --nocapture"]
+    fn compare_production_correlation() {
+        let reference: Vec<_> = (0..9999)
+            .map(|i| ((i * 37 % 101) as f64 - 50.) / 100.)
+            .collect();
+        let near = &reference[715..2714];
+        let mut direct_times = Vec::new();
+        let mut fft_times = Vec::new();
+        for round in 0..7 {
+            for fft in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let start = std::time::Instant::now();
+                let result = if fft {
+                    correlation(std::hint::black_box(&reference), std::hint::black_box(near))
+                } else {
+                    direct(std::hint::black_box(&reference), std::hint::black_box(near))
+                };
+                std::hint::black_box(result);
+                let elapsed = start.elapsed().as_secs_f64() * 1000.;
+                if fft {
+                    fft_times.push(elapsed);
+                } else {
+                    direct_times.push(elapsed);
+                }
+            }
+        }
+        println!(
+            "9999 reference samples, 1999 microphone samples; milliseconds per channel, allocation and planning included\ndirect={direct_times:?}\nfft={fft_times:?}"
+        );
     }
 }

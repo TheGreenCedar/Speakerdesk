@@ -46,7 +46,11 @@ pub fn correlation_decision(
     microphone: &[f32],
     search: usize,
 ) -> Option<CorrelationDecision> {
-    if microphone.len() < 2 || far.len() != microphone.len() + search {
+    if microphone.len() < 2
+        || far.len().checked_sub(microphone.len()) != Some(search)
+        || microphone.iter().any(|sample| !sample.is_finite())
+        || far.iter().flatten().any(|sample| !sample.is_finite())
+    {
         return None;
     }
     let reference = [
@@ -72,7 +76,7 @@ pub fn correlation_decision(
             score[channel] = vec![0.0; lags];
             continue;
         }
-        let raw = linear_correlation(&reference[channel], &near);
+        let raw = crate::fft::correlation(&reference[channel], &near);
         let energy = window_energy(&reference[channel], near.len());
         let normalized = raw
             .iter()
@@ -254,13 +258,6 @@ fn is_tonal(samples: &[f64]) -> bool {
     let total = spectrum.iter().sum::<f64>().max(1e-20);
     let peak = spectrum.iter().copied().fold(0.0, f64::max);
     peak > TONAL_FRACTION * total
-}
-
-fn linear_correlation(reference: &[f64], near: &[f64]) -> Vec<f64> {
-    let lags = reference.len() - near.len() + 1;
-    (0..lags)
-        .map(|lag| dot(&reference[lag..lag + near.len()], near))
-        .collect()
 }
 
 fn window_energy(samples: &[f64], window: usize) -> Vec<f64> {
@@ -472,6 +469,25 @@ mod tests {
         assert_eq!(DELAY, 64);
         assert_eq!(RATE, 16_000);
         assert_eq!(SCORE_THRESHOLD, 0.3);
+    }
+
+    #[test]
+    fn nonfinite_capture_samples_do_not_enter_fft_correlation() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for input in 0..3 {
+                let mut far = stereo(&lcg(448, 1), &lcg(448, 2));
+                let mut microphone = far[28..428]
+                    .iter()
+                    .map(|frame| frame[0])
+                    .collect::<Vec<_>>();
+                if input == 0 {
+                    microphone[10] = value;
+                } else {
+                    far[10][input - 1] = value;
+                }
+                assert!(correlation_decision(&far, &microphone, 48).is_none());
+            }
+        }
     }
 
     #[test]
