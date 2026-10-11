@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/echo",
+    "crates/host",
+    "crates/models",
+    "desktop/src-tauri",
+    "xtask",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.7.0"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.release]
+strip = false
+codegen-units = 16

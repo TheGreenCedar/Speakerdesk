@@ -1,0 +1,8 @@
+[package]
+name = "speakerdesk-echo"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true

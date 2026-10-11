@@ -1,0 +1,10 @@
+[package]
+name = "speakerdesk-core"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

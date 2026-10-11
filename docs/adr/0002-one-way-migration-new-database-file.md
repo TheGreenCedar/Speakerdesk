@@ -1,0 +1,3 @@
+# One-way migration to a new database file; legacy jobs.sqlite retained untouched
+
+On first launch, 0.7 copies product data from `recordings/jobs.sqlite` into a new typed database, `speakerdesk.sqlite`, and never writes to the old file again. The old file stays byte-identical, so it is both the lossless backup and the state 0.6.6 sees if the user rolls back. Edits made in 0.7 are not visible to 0.6.6. The owner accepted that trade over keeping both apps writing one schema, which would have forced 0.7 to carry every legacy receipt field. Migration writes to `speakerdesk.sqlite.partial` and renames it only after the transaction commits, so a failed migration leaves only the old database.

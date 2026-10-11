@@ -13,6 +13,7 @@ target/
 desktop/src-tauri/binaries/
 desktop/src-tauri/gen/
 desktop/capture/speakerdesk-capture
+desktop/capture/speakerdesk-capture.capability.json
 __pycache__/
 *.py[cod]
 .DS_Store

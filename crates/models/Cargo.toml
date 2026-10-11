@@ -1,0 +1,10 @@
+[package]
+name = "speakerdesk-models"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,1179 @@
+# Port ledger (plan §7.1): one row per tracked Python file.
+#
+# Tracked scope (checked by `cargo xtask ledger --check`):
+#   tests/**/*.py, speakerdesk/**/*.py, scripts/*.py
+#
+# Fields:
+#   path        repo-relative Python file
+#   disposition port | simplify | drop | memo | xtask | swift | allowlist
+#   rust        list of Rust test/module paths that cover the row (may be
+#               empty while status = "pending")
+#   reason      required for `drop`; must cite a locked decision (e.g. "D11")
+#   status      pending | done
+#   deleted     true once the Python file is removed (M6); keeps the row valid
+
+# --- tests/: fixtures and helpers -------------------------------------------
+
+[[row]]
+path = "tests/metadata/whisper-tiny/detect_language.py"
+disposition = "allowlist"
+status = "pending"
+rust = []
+reason = "Standalone upstream-derived test data adapter; imports no app modules."
+
+[[row]]
+path = "tests/pcm_peer.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/people_browser_fixture.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/rolling_browser_fixture.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/voice_process_fixture.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/support/live_language_browser.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/support/live_timeline_server.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/support/meeting_harness.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/support/meeting_protocol.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/support/resident_fixture.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/support/rolling_protocol.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+# --- tests/: test files ------------------------------------------------------
+
+[[row]]
+path = "tests/test_acceptance_contract_v2.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_acceptance_fixtures.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_acoustic_context.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_admission_receipt.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D6: qualification receipts are not produced."
+
+[[row]]
+path = "tests/test_alignment_cache.py"
+disposition = "memo"
+status = "pending"
+rust = []
+reason = "D11: alignment reuse becomes the exact-input memo."
+
+[[row]]
+path = "tests/test_alignment_setup.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_alignment_source_identity.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D6: implementation-source identities are not produced."
+
+[[row]]
+path = "tests/test_apple_capture_startup.py"
+disposition = "swift"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_apple_route_formats.py"
+disposition = "swift"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_artifact_manifest.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_asr_reuse_profile.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: ASR reuse profiles are dropped; reuse is the exact-input memo."
+
+[[row]]
+path = "tests/test_authoritative_tail.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_best_effort_coverage.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_canonical_assembly.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_canonical_attribution.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_canonical_lifecycle.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_canonical_negative_recovery.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_canonical_runtime.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_capture_conversion.py"
+disposition = "swift"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_capture_echo.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_capture_epoch_restart.py"
+disposition = "swift"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_capture_processing_integration.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_capture_source_runtime.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_ci_cache.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_constant_speech_tail.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_context_policy.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_core_acceptance.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_core_plan.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_ctc_component_boundary.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D6: component-boundary qualification is not produced."
+
+[[row]]
+path = "tests/test_default_source_path.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_export_bounds.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_final_asr_reuse.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: final-ASR reuse is dropped; reuse is the exact-input memo."
+
+[[row]]
+path = "tests/test_frontend_performance.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_gpu_alignment_model.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_import_reading_contract.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_import_reading_worker.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_import_speech_bounds.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_import_tail_context.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_import_tail_product_path.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_imports.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_job_polling.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_language_detection.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_language_preferences.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_language_probe_reuse.py"
+disposition = "memo"
+status = "pending"
+rust = []
+reason = "D11: probe reuse becomes the exact-input memo."
+
+[[row]]
+path = "tests/test_live_language.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_live_meeting.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_live_progress.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_live_refinement.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_live_scheduler.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_loopback_server.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_meeting_lifecycle.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_multilingual_timing.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_numeric_prefix_examples.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_passage_review.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_people.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_profile_status.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_reading_core_seams.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_reading_turns.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_refinement_tail_context.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_render_innovation.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: dev capture innovation is dropped."
+
+[[row]]
+path = "tests/test_render_startup.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: dev capture innovation is dropped."
+
+[[row]]
+path = "tests/test_rolling_lifecycle.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_rolling_refinement.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_routed_short_revision.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_sequential_product_path.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_silence_admission.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_source_asr_reuse_profile.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: source ASR reuse profiles are dropped."
+
+[[row]]
+path = "tests/test_source_conditioning.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_speaker_uncertainty_window.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_speech_admission.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_speech_archive.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D6: FrameArchive/RevisionArchive evidence journals are not produced."
+
+[[row]]
+path = "tests/test_turn_envelopes.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_unknown_speaker_identity.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_update_runtime.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_updater_release.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_utterances.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_voice_accelerator_policy.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_voice_coreml.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D2: the CoreML voice backend is replaced by models::redimnet on mlx-rs."
+
+[[row]]
+path = "tests/test_voice_gpu_process.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_voice_gpu_startup.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_voice_measurement.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_voice_readiness.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_voice_recognition.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_voice_setup.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_voice_tools.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_word_alignment.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "tests/test_workflows.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+# --- speakerdesk/: app modules ----------------------------------------------
+
+[[row]]
+path = "speakerdesk/admission_receipt.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D6: qualification receipts are not produced."
+
+[[row]]
+path = "speakerdesk/alignment_artifact.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/alignment_cache.py"
+disposition = "memo"
+status = "pending"
+rust = []
+reason = "D11: the disk alignment cache becomes the exact-input memo."
+
+[[row]]
+path = "speakerdesk/alignment_model.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/alignment_provider.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/alignment_setup.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/alignment_text.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/app.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/asr_reuse_profile.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: ASR reuse profiles are dropped; reuse is the exact-input memo."
+
+[[row]]
+path = "speakerdesk/audio.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/authoritative_tail.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/authority_store.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: the reuse authority store is dropped."
+
+[[row]]
+path = "speakerdesk/canonical_assembly.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/canonical_runtime.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/capture_echo.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/capture_processing.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/capture_sources.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/coarse_alignment.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/context_plan.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/core_plan.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/final_asr_reuse.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: final-ASR reuse is dropped; reuse is the exact-input memo."
+
+[[row]]
+path = "speakerdesk/inference_worker.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/job_store.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/language_detection.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/language_preferences.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/language_probe_cache.py"
+disposition = "memo"
+status = "pending"
+rust = []
+reason = "D11: the probe cache becomes the exact-input memo."
+
+[[row]]
+path = "speakerdesk/live_language.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/live_meeting.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/live_refinement.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/live_worker.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/meeting_refinement.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/mlx_ctc_components/__init__.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/mlx_ctc_components/models/__init__.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/mlx_ctc_components/models/base.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/mlx_ctc_components/models/mms/__init__.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/mlx_ctc_components/models/mms/mms.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/mlx_ctc_components/models/wav2vec/__init__.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/mlx_ctc_components/models/wav2vec/wav2vec.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/mlx_ctc_forward.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/mlx_voice_mil.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/model_setup.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/people.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/pipeline.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/reading_turns.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/render_innovation.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: dev capture innovation is dropped."
+
+[[row]]
+path = "speakerdesk/render_startup.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D11: dev capture innovation is dropped."
+
+[[row]]
+path = "speakerdesk/review.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/rolling_refinement.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/source_runtime.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/source_voice.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/speech_admission.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/speech_conditioning.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/thread_bound_backend.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D3: the thread-bound worker backend is replaced by the resident inference child."
+
+[[row]]
+path = "speakerdesk/transcript.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/update_runtime.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/utterances.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/voice_coreml.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D2: the CoreML voice backend is replaced by models::redimnet on mlx-rs."
+
+[[row]]
+path = "speakerdesk/voice_gpu_process.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D3: per-worker GPU processes are replaced by the resident inference child."
+
+[[row]]
+path = "speakerdesk/voice_gpu_runtime.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D3: the GPU worker runtime is replaced by the resident inference child; thresholds become model constants."
+
+[[row]]
+path = "speakerdesk/voice_gpu_worker.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D3: GPU worker processes are replaced by the resident inference child."
+
+[[row]]
+path = "speakerdesk/voice_measurement.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+reason = "Ported only as the D7 contingency via `cargo xtask voice-calibrate`."
+
+[[row]]
+path = "speakerdesk/voice_mlx_backend.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/voice_profile_status.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/voice_profiles.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/voice_readiness.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/voice_recognition.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/voice_setup.py"
+disposition = "simplify"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/voice_source_audio.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/voice_waveform.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+[[row]]
+path = "speakerdesk/voice_worker_registry.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D3: the worker registry is replaced by the resident inference child."
+
+[[row]]
+path = "speakerdesk/word_alignment.py"
+disposition = "port"
+status = "pending"
+rust = []
+
+# --- scripts/: dev tooling ---------------------------------------------------
+
+[[row]]
+path = "scripts/acceptance_contract_v2.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/acceptance_fixtures.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/artifact_manifest.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/capture_capability.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/check_source.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/check_workflows.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/ci_cache.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/component_cache.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D9: the CI rewrite uses sccache and plain action caches instead."
+
+[[row]]
+path = "scripts/core_acceptance.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/download_voice_model.py"
+disposition = "allowlist"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/echo_compile_guard.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/echo_fixture.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/generate_voice_fixtures.py"
+disposition = "allowlist"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/measure_voice.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/packaged_replay.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/promote_release.py"
+disposition = "allowlist"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/replay_capture.py"
+disposition = "xtask"
+status = "pending"
+rust = []
+
+[[row]]
+path = "scripts/runtime_capability.py"
+disposition = "drop"
+status = "pending"
+rust = []
+reason = "D6: packaged-runtime capability receipts are not produced; `--model-capability` is dropped."
+
+[[row]]
+path = "scripts/setup_echo.py"
+disposition = "xtask"
+status = "pending"
+rust = []

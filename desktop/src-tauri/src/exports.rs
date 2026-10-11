@@ -5,8 +5,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -1,0 +1,14 @@
+[package]
+name = "speakerdesk-host"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+
+[[bin]]
+name = "speakerdesk-dev"
+path = "src/bin/speakerdesk-dev.rs"
+
+[lints]
+workspace = true

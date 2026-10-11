@@ -1,15 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicU16, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU16, Ordering},
 };
 use tauri::webview::DownloadEvent;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::{
-    process::{CommandChild, CommandEvent},
     ShellExt,
+    process::{CommandChild, CommandEvent},
 };
 mod exports;
 #[cfg(target_os = "macos")]
@@ -73,7 +73,6 @@ fn choose_export(webview: tauri::Webview, job: Arc<ExportJob>) {
                 return;
             }
             export_status(&webview, &job.nonce, "writing");
-            drop(downloads);
             std::thread::spawn(move || {
                 let saved = job.save_to(&path).is_ok();
                 let downloads = webview.app_handle().state::<ExportDownloads>();
@@ -156,33 +155,31 @@ fn start_runtime(app: &tauri::AppHandle) -> Result<(), String> {
                     for line in lines.push(&bytes) {
                         if let Some(packet) = line.strip_prefix(b"SPEAKERDESK_UPDATE=") {
                             updates.packet(generation, packet);
-                        } else if !opened {
-                            if let Some(url) = line
+                        } else if !opened
+                            && let Some(url) = line
                                 .strip_prefix(b"SPEAKERDESK_URL=")
                                 .and_then(|value| std::str::from_utf8(value).ok())
+                            && let Ok(parsed) = url.parse::<tauri::Url>()
+                        {
+                            if parsed.scheme() != "http"
+                                || parsed.host_str() != Some("127.0.0.1")
+                                || parsed.port().is_none()
+                                || !parsed.username().is_empty()
+                                || parsed.password().is_some()
+                                || parsed.query().is_some()
+                                || parsed.fragment().is_some()
+                                || parsed.path() != "/"
                             {
-                                if let Ok(parsed) = url.parse::<tauri::Url>() {
-                                    if parsed.scheme() != "http"
-                                        || parsed.host_str() != Some("127.0.0.1")
-                                        || parsed.port().is_none()
-                                        || !parsed.username().is_empty()
-                                        || parsed.password().is_some()
-                                        || parsed.query().is_some()
-                                        || parsed.fragment().is_some()
-                                        || parsed.path() != "/"
-                                    {
-                                        continue;
+                                continue;
+                            }
+                            port.store(parsed.port().unwrap(), Ordering::Relaxed);
+                            if let Some(window) = handle.get_webview_window("main") {
+                                match window.navigate(parsed) {
+                                    Ok(()) => {
+                                        opened = true;
+                                        updates.event(updates::Event::Started(generation));
                                     }
-                                    port.store(parsed.port().unwrap(), Ordering::Relaxed);
-                                    if let Some(window) = handle.get_webview_window("main") {
-                                        match window.navigate(parsed) {
-                                            Ok(()) => {
-                                                opened = true;
-                                                updates.event(updates::Event::Started(generation));
-                                            }
-                                            Err(error) => eprintln!("Window error: {error}"),
-                                        }
-                                    }
+                                    Err(error) => eprintln!("Window error: {error}"),
                                 }
                             }
                         }

@@ -17,7 +17,9 @@ pub fn bundle(executable: &Path) -> Result<PathBuf, &'static str> {
         .components()
         .any(|component| matches!(component, Component::Normal(name) if name == "AppTranslocation"))
     {
-        return Err("Move Speakerdesk to Applications, close this copy, and reopen the installed app before updating.");
+        return Err(
+            "Move Speakerdesk to Applications, close this copy, and reopen the installed app before updating.",
+        );
     }
     if !app.is_dir() || !executable.is_file() {
         return Err("Speakerdesk's installed app bundle is unavailable.");
@@ -41,11 +43,15 @@ pub fn preflight(executable: &Path) -> Result<(), &'static str> {
         // mount flags; the official updater handles writable-location prompts.
         let result = unsafe { libc::statfs(path.as_ptr(), filesystem.as_mut_ptr()) };
         if result != 0 {
-            return Err("Speakerdesk could not verify whether its install volume is writable. Reopen the installed app and try again.");
+            return Err(
+                "Speakerdesk could not verify whether its install volume is writable. Reopen the installed app and try again.",
+            );
         }
         let filesystem = unsafe { filesystem.assume_init() };
         if filesystem.f_flags & libc::MNT_RDONLY as u32 != 0 {
-            return Err("Speakerdesk is on a read-only volume. Move it to Applications, close this copy, and reopen the installed app before updating.");
+            return Err(
+                "Speakerdesk is on a read-only volume. Move it to Applications, close this copy, and reopen the installed app before updating.",
+            );
         }
     }
     Ok(())

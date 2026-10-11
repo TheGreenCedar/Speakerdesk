@@ -1,12 +1,12 @@
 //! Rust owns update policy and verified bytes. The loopback page can request only
 //! fixed operations; it receives no updater IPC capability, URL, key, or file path.
 use crate::exports::ExportDownloads;
-use crate::update_control::{Control, Phase, MAX_FRAME_BYTES, MAX_REQUEST_ID};
+use crate::update_control::{Control, MAX_FRAME_BYTES, MAX_REQUEST_ID, Phase};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -32,6 +32,7 @@ pub struct Packet {
     #[serde(default)]
     preparation: Option<u64>,
 }
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     Packet(u64, Packet),
     Terminated(u64, bool),
@@ -69,24 +70,23 @@ impl Updates {
         if bytes.len() > MAX_FRAME_BYTES {
             return;
         }
-        if let Ok(packet) = serde_json::from_slice::<Packet>(bytes) {
-            if packet.id > 0
-                && packet.id <= MAX_REQUEST_ID
-                && matches!(
-                    packet.op.as_str(),
-                    "check"
-                        | "download"
-                        | "install"
-                        | "cancel"
-                        | "editor_ready"
-                        | "editor_error"
-                        | "reserved"
-                        | "released"
-                        | "shutdown_ready"
-                )
-            {
-                let _ = self.sender.send(Event::Packet(generation, packet));
-            }
+        if let Ok(packet) = serde_json::from_slice::<Packet>(bytes)
+            && packet.id > 0
+            && packet.id <= MAX_REQUEST_ID
+            && matches!(
+                packet.op.as_str(),
+                "check"
+                    | "download"
+                    | "install"
+                    | "cancel"
+                    | "editor_ready"
+                    | "editor_error"
+                    | "reserved"
+                    | "released"
+                    | "shutdown_ready"
+            )
+        {
+            let _ = self.sender.send(Event::Packet(generation, packet));
         }
     }
     pub fn event(&self, event: Event) {
@@ -554,7 +554,7 @@ impl Coordinator {
                 .unwrap_or("The update could not be installed.");
             self.block(&format!(
                 "Speakerdesk could not restore its local service. {} {} {paths}",
-                clipped(&installation_error, 1024),
+                clipped(installation_error, 1024),
                 clipped(&error, 256)
             ));
             return;

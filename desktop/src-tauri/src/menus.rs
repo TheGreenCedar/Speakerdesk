@@ -1,8 +1,8 @@
 //! Native accelerators call the same guarded page actions as buttons.
 //! Predefined editing items retain WebKit's standard text editing behavior.
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{App, AppHandle, Manager, Runtime};
@@ -125,7 +125,9 @@ fn route_menu_action<R: Runtime>(
     // accepting an optional call to a missing receiver. No actions are queued
     // across navigation and no browser fallback is enabled alongside native.
     let encoded = serde_json::to_string(action).expect("fixed menu action");
-    let script = format!("(() => {{ if (typeof window.speakerdeskAction !== 'function') return 0; void window.speakerdeskAction({encoded}); return 1; }})()");
+    let script = format!(
+        "(() => {{ if (typeof window.speakerdeskAction !== 'function') return 0; void window.speakerdeskAction({encoded}); return 1; }})()"
+    );
     if trace {
         let action = action.to_owned();
         window.eval_with_callback(script, move |result| {
@@ -147,7 +149,7 @@ fn route_menu_action<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tauri::test::{mock_app, MockRuntime};
+    use tauri::test::{MockRuntime, mock_app};
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     #[test]
