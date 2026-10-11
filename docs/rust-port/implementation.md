@@ -165,3 +165,31 @@ with the pinned build library path; Cargo overrides DYLD_LIBRARY_PATH when runni
 the host-only harness, so the direct test executable was used. It is not packaged
 app proof. Normal desktop startup still launches Python. Nemotron, Cohere, the
 editor workflow, full model setup and all later acceptance gates remain open.
+
+## First offline Nemotron window
+
+The child now retains the pinned Nemotron network and serves the import caller's
+`DiarizeWindow` request. Artifact hashes and all 363 tensor layouts are checked
+once at load. Preprocessing, 31 BF16 transformer blocks and the subpixel speaker
+head run through maintained MLX operations. Valid 10 ms frames remain separate
+from padded feature and encoder shapes. Inputs beyond the first 27.2-second
+offline window explicitly fail until AOSC/FIFO state is implemented.
+
+The independent upstream reference generator is retained with source hashes.
+On the nine-second fixture, all 909 by 8 probabilities match the same native
+backend and both speaker turns match exactly. The independent verifier found
+that mlx-rs's GELU promoted BF16 through float32 constants; a small compiled
+expression with dtype-preserving constants fixes that. Removing unnecessary
+per-layer evaluation reduced the optimized warm run from 54 ms to 12 ms;
+the matching Python graph measured 16 ms. Model load including one SHA-256 pass
+took about 349 ms. These measurements do not establish end-to-end performance.
+
+The short/tail/pad-boundary, cancellation, nonfinite and over-window cases pass.
+Host 46, models 34 and six subprocess replay tests pass; four other model
+placeholders remain ignored. The release desktop child's actual pipe path passes
+Silero plus this two-turn diarization and is reaped. Clippy passes for host/models
+with project warnings denied. The same two upstream binding warnings remain.
+
+Long diarization, streaming speaker identity, Cohere, the actual editor workflow
+and later batches remain open. Cohere's pinned checkpoint has been downloaded
+and checksum verified in disposable scratch storage for the next implementation.

@@ -9,6 +9,7 @@ use crate::{cohere, ctc, memory, redimnet, sortformer, whisper_lid};
 pub struct Runtime {
     model_root: std::path::PathBuf,
     silero: Option<crate::silero::network::Network>,
+    nemotron: Option<sortformer::network::Network>,
     vad_sessions: std::collections::HashMap<u64, crate::silero::session::Session>,
     next_session: u64,
 }
@@ -20,6 +21,7 @@ impl Runtime {
         Ok(Self {
             model_root,
             silero: None,
+            nemotron: None,
             vad_sessions: Default::default(),
             next_session: 1,
         })
@@ -38,11 +40,17 @@ impl Runtime {
             Request::Hello { .. } => Ok(Response::Ready {
                 build_id: env!("CARGO_PKG_VERSION").into(),
                 device: "metal".into(),
-                models: if self.silero.is_some() {
-                    vec![crate::silero::WEIGHT_PIN.into()]
-                } else {
-                    vec![]
-                },
+                models: [
+                    self.silero
+                        .as_ref()
+                        .map(|_| crate::silero::WEIGHT_PIN.into()),
+                    self.nemotron
+                        .as_ref()
+                        .map(|_| sortformer::WEIGHT_PIN.into()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
             }),
             Request::VadOpen { conditioning } => {
                 let session = crate::silero::session::Session::new(conditioning)?;
@@ -84,6 +92,19 @@ impl Runtime {
                 }
                 self.vad_sessions.remove(&handle.session);
                 Ok(Response::Ack)
+            }
+            Request::DiarizeWindow { pcm } => {
+                if self.nemotron.is_none() {
+                    self.nemotron = Some(sortformer::network::Network::load(
+                        &self.model_root.join("nemotron"),
+                    )?);
+                }
+                let probabilities = self
+                    .nemotron
+                    .as_mut()
+                    .expect("loaded above")
+                    .probabilities(&pcm, cancel)?;
+                Ok(Response::Turns(sortformer::frames_to_turns(&probabilities)))
             }
             other => dispatch(other, cancel),
         }

@@ -5,6 +5,12 @@ use std::path::Path;
 use speakerdesk_core::error::ChildError;
 use speakerdesk_core::ipc::{DiarFeedOut, DiarPreset, Handle, Turn};
 
+#[cfg(target_os = "macos")]
+pub mod network;
+
+pub const WEIGHT_PIN: &str =
+    "mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f";
+
 pub fn diar_open(_preset: DiarPreset) -> Result<Handle, ChildError> {
     Err(ChildError::Unimplemented)
 }
@@ -164,12 +170,5 @@ mod tests {
         assert!(frames_to_turns(&[] as &[[f32; 8]]).is_empty());
         let below = [[0.5_f32; 8], [0.0; 8]];
         assert!(frames_to_turns(&below).is_empty());
-    }
-
-    /// Full-model parity needs the pinned checkpoint and is not run here.
-    #[test]
-    #[ignore = "weights mlx-community/Nemotron-3-Diarization@59ed2db"]
-    fn parity_sortformer() {
-        panic!("Not implemented: real model comparison has not run.");
     }
 }

@@ -15,7 +15,7 @@ fn supervisor() -> std::sync::Arc<InferenceSupervisor> {
 
 #[test]
 #[ignore = "requires SPEAKERDESK_TEST_CHILD desktop binary and SPEAKERDESK_TEST_MODELS disposable model root"]
-fn actual_desktop_child_runs_buffered_silero_and_reaps() {
+fn actual_desktop_child_runs_speech_models_and_reaps() {
     let child = std::env::var_os("SPEAKERDESK_TEST_CHILD").expect("desktop binary");
     let model_root = std::env::var_os("SPEAKERDESK_TEST_MODELS").expect("model directory");
     let host = InferenceSupervisor::new(child, env!("CARGO_PKG_VERSION"), model_root).unwrap();
@@ -36,6 +36,30 @@ fn actual_desktop_child_runs_buffered_silero_and_reaps() {
     let other = models.vad_feed(second, &[0.0; 512], true).unwrap();
     assert_eq!((other.frames[0].start, other.observed), (0, 512));
     models.vad_close(second).unwrap();
+    let mut reader = hound::WavReader::open(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../models/tests/data/two-voice.wav"),
+    )
+    .unwrap();
+    let pcm: Vec<f32> = reader
+        .samples::<i16>()
+        .map(|s| f32::from(s.unwrap()) / 32768.0)
+        .collect();
+    let turns = models.diarize_window(&pcm).unwrap();
+    assert_eq!(
+        turns,
+        vec![
+            speakerdesk_core::ipc::Turn {
+                start: 0.03,
+                end: 4.05,
+                speaker: "speaker_0".into()
+            },
+            speakerdesk_core::ipc::Turn {
+                start: 5.0,
+                end: 8.86,
+                speaker: "speaker_1".into()
+            },
+        ]
+    );
     let pid = host.child_pid().unwrap();
     host.shutdown();
     reaped(pid);

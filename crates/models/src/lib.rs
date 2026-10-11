@@ -11,4 +11,7 @@ pub mod silero;
 pub mod sortformer;
 pub mod whisper_lid;
 
+#[cfg(target_os = "macos")]
+mod weights;
+
 pub use serve::serve;

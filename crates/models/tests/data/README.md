@@ -1,4 +1,4 @@
-# Silero acoustic fixture
+# Speech model fixture
 
 `two-voice.wav` is 16 kHz mono PCM16 generated on macOS with the installed
 Samantha (US) and Daniel (UK) `say` voices at 175 words/minute. It contains:
@@ -9,10 +9,10 @@ Samantha (US) and Daniel (UK) `say` voices at 175 words/minute. It contains:
 
 There are 1600 leading zero samples and a silent final tail. The complete file
 has 145445 samples (9.0903125 seconds), leaving a 37-sample partial Silero frame.
-It contains no user recordings. It is a speech detector fixture, not evidence of
-diarization quality or a substitute for public multi-speaker acoustic acceptance.
+It contains no user recordings. It tests graph execution and speaker boundaries,
+but is not a substitute for public multi-speaker acoustic acceptance.
 
-The two JSON files were generated independently from the pinned Python
+The two Silero JSON files were generated independently from the pinned Python
 `SileroVADBranch` at `Blaizzy/mlx-audio@feb25a37b07923bae556e59111995071d66afa0d`,
 using the pinned `mlx-community/silero-vad-v6@2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06`
 weights. The source hash and WAV hash are recorded in each file. Both raw and
@@ -38,4 +38,21 @@ Run with the explicit, disposable model directory:
 ```sh
 SPEAKERDESK_TEST_SILERO=/path/to/models/silero-speech \
   cargo test --release --locked -p speakerdesk-models --test silero -- --ignored --nocapture
+```
+
+`nemotron-reference.json` runs the pinned upstream Nemotron graph and its actual
+offline generation path on the same WAV. It records 909 valid 10 ms frames and
+two turns: speaker 0 at 0.03–4.05 s and speaker 1 at 5.00–8.86 s. Its MLX 0.32.2
+macOS 15 backend matches Rust's runtime. `generate_nemotron_reference.py` takes
+the upstream source directory, model directory, WAV, output path and `--backend`
+as arguments. Source/artifact checksums are checked before execution.
+
+The Rust test reports numerical drift and requires identical turns, valid tail
+lengths, silent short inputs, cancellation, and explicit rejection past the
+currently supported first offline window. It does not qualify longer recordings
+or AOSC speaker-cache behavior.
+
+```sh
+SPEAKERDESK_TEST_NEMOTRON=/path/to/models/nemotron \
+  cargo test --release --locked -p speakerdesk-models --test nemotron -- --ignored --nocapture
 ```

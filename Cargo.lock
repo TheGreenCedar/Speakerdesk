@@ -4677,6 +4677,7 @@ version = "0.6.6"
 dependencies = [
  "axum",
  "fs4",
+ "hound",
  "libc",
  "postcard",
  "reqwest",
@@ -4704,6 +4705,7 @@ dependencies = [
  "safetensors",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "speakerdesk-core",
  "thiserror 2.0.21",
  "tokenizers",

@@ -38,5 +38,6 @@ path = "src/bin/inference-fixture.rs"
 required-features = ["fixtures"]
 
 [dev-dependencies]
+hound = "3.5.1"
 libc = "0.2.190"
 tempfile = "3"
