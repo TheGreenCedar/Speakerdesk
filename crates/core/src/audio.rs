@@ -4,8 +4,9 @@
 //! mixed to mono, and resampled with rubato. macOS `afconvert` is not available here.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Mutex;
 
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -223,6 +224,72 @@ fn advance_frames(current: u32, add: u32) -> Result<u32, AudioError> {
         Err(AudioError::message(DURATION_LIMIT))
     } else {
         Ok(next)
+    }
+}
+
+/// A recording opened once; the writer's notices authorize reads of committed samples.
+pub struct RecordingReader {
+    file: Mutex<File>,
+    data_offset: u64,
+}
+
+impl RecordingReader {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, AudioError> {
+        let reader = WavReader::new(File::open(path)?).map_err(map_open)?;
+        let spec = reader.spec();
+        if spec.channels != 1
+            || spec.bits_per_sample != 16
+            || spec.sample_rate != SAMPLE_RATE
+            || spec.sample_format != SampleFormat::Int
+        {
+            return Err(AudioError::message(EXPECTED_PCM));
+        }
+        let mut file = reader.into_inner();
+        let data_offset = file.stream_position()?;
+        Ok(Self {
+            file: Mutex::new(file),
+            data_offset,
+        })
+    }
+
+    pub fn read_samples(
+        &self,
+        start: u32,
+        end: u32,
+        committed: u32,
+    ) -> Result<Vec<f32>, AudioError> {
+        if start >= end || end > committed || committed > MAX_FRAMES {
+            return Err(AudioError::message(TRUNCATED));
+        }
+        let mut bytes = vec![0; (end - start) as usize * 2];
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| AudioError::message(DECODE_PCM))?;
+        file.seek(SeekFrom::Start(self.data_offset + u64::from(start) * 2))?;
+        file.read_exact(&mut bytes)?;
+        Ok(bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| f32::from(i16::from_le_bytes(*pair)) / 32768.)
+            .collect())
+    }
+
+    /// Check the writer's announced endpoint before advancing any model session.
+    pub fn require_samples(&self, committed: u32) -> Result<(), AudioError> {
+        if committed > MAX_FRAMES
+            || self
+                .file
+                .lock()
+                .map_err(|_| AudioError::message(DECODE_PCM))?
+                .metadata()?
+                .len()
+                < self.data_offset + u64::from(committed) * 2
+        {
+            return Err(AudioError::message(TRUNCATED));
+        }
+        Ok(())
     }
 }
 
@@ -543,6 +610,44 @@ mod tests {
             message(pcm16_bytes(&[f32::INFINITY]).unwrap_err()),
             FINITE_MONO
         );
+    }
+
+    #[test]
+    fn resident_reader_observes_only_committed_crops_of_a_growing_recording() {
+        let dir =
+            std::env::temp_dir().join(format!("speakerdesk-growing-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recording.wav");
+        let mut writer = super::RecordingWriter::create(&path).unwrap();
+        let reader = super::RecordingReader::open(&path).unwrap();
+        assert!(reader.read_samples(0, 1, 0).is_err());
+        writer.write_samples(&[0.25, -0.5, 0.75]).unwrap();
+        assert_eq!(reader.read_samples(0, 2, 2).unwrap(), [0.25, -0.5]);
+        assert!(
+            reader.read_samples(0, 3, 2).is_err(),
+            "unannounced samples are unavailable"
+        );
+        writer.write_samples(&[-1., 0.]).unwrap();
+        assert_eq!(reader.read_samples(2, 5, 5).unwrap(), [0.75, -1., 0.]);
+        assert_eq!(
+            reader.read_samples(0, 1, 5).unwrap(),
+            [0.25],
+            "old crops remain available"
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(48)
+            .unwrap();
+        assert!(
+            reader.read_samples(2, 5, 5).is_err(),
+            "truncation must surface"
+        );
+        let stereo = dir.join("stereo.wav");
+        write_i16(&stereo, 2, SAMPLE_RATE, &[1, 2]);
+        assert!(super::RecordingReader::open(stereo).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

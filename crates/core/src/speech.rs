@@ -317,14 +317,17 @@ impl SpeechLedger {
         Self::build(origin, GainMode::QuietSpeech, INPUT_POLICY, None)
     }
 
-    pub fn with_unity(origin: i64, contract_sha256: &str) -> Result<Self, SpeechError> {
+    pub fn with_processed_microphone(
+        origin: i64,
+        contract_sha256: &str,
+    ) -> Result<Self, SpeechError> {
         if !is_sha256_hex(contract_sha256) {
             return Err(SpeechError::InvalidConditioning);
         }
         Self::build(
             origin,
             GainMode::Unity,
-            SOURCE_UNITY_POLICY,
+            PRODUCTION_UNITY_POLICY,
             Some(contract_sha256.to_owned()),
         )
     }
@@ -446,11 +449,9 @@ impl SpeechLedger {
         if start < 0 || end <= start {
             return Err(SpeechError::InvalidRange);
         }
-        let selected: Vec<&Frame> = self
-            .frames
-            .iter()
-            .filter(|frame| frame.start < end && frame.end > start)
-            .collect();
+        let first = self.frames.partition_point(|frame| frame.end <= start);
+        let last = self.frames.partition_point(|frame| frame.start < end);
+        let selected: Vec<&Frame> = self.frames[first..last].iter().collect();
         let covered = self.range_covered(start, end, &selected);
         let mut result = pending_admission(start, end, self.end_sample);
         result.complete = covered;
@@ -871,15 +872,17 @@ mod tests {
     #[test]
     fn unity_conditioning_does_not_boost_and_negative_regions_clip() {
         let sha = "c".repeat(64);
-        let mut ledger = SpeechLedger::with_unity(0, &sha).unwrap();
+        let mut ledger = SpeechLedger::with_processed_microphone(0, &sha).unwrap();
         assert_eq!(
-            SpeechLedger::with_unity(0, "bad").unwrap_err().to_string(),
+            SpeechLedger::with_processed_microphone(0, "bad")
+                .unwrap_err()
+                .to_string(),
             "Invalid source conditioning identity."
         );
         let quiet = ramp(FRAME_SAMPLES, -0.001, 0.001);
         ledger.append_pcm(0, &quiet, 0.02, 0.02).unwrap();
         assert_eq!(ledger.frames()[0].observation.as_ref().unwrap().gain, 1.0);
-        assert_eq!(ledger.input_policy(), SOURCE_UNITY_POLICY);
+        assert_eq!(ledger.input_policy(), PRODUCTION_UNITY_POLICY);
         let mut voiced = SpeechLedger::new(0).unwrap();
         voiced.append_pcm(0, &quiet, 0.01, 0.9).unwrap();
         assert!((voiced.frames()[0].observation.as_ref().unwrap().gain - 250.0).abs() < 1e-2);

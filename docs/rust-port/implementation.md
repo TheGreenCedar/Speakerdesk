@@ -908,3 +908,43 @@ outcome: native live capture coordination/drain and saved-audio recovery, bounde
 memory/history work, Python-free default package and updater, security qualification,
 and equivalent cold/warm/live performance gates. Do not treat this checkpoint as
 replacement completion. Windows and issue #25 remain follow-up scope.
+
+## Live engine reads retained audio
+
+The live engine now opens its canonical recording once and reads bounded PCM16
+crops from the writer's committed sample range. It no longer retains whole-session
+PCM or a second mutable transcript document. Both source endpoints are checked
+before either model session advances, so an incomplete system write cannot leave
+the microphone session ahead. Replay tests use real growing WAV files, including
+arbitrary splits around 512 samples, final partial frames, and reconstruction by a
+fresh engine from the retained file. These remain model replays, not capture proof.
+
+Only unfinished utterances are revisited. Speaker activity older than the active
+utterance or next onset context is discarded; speech evidence lookup uses binary
+range selection. Activity projection uses a boundary sweep instead of scanning
+every turn for every region. Sealed candidate and decode caches are released. The
+utterance book and speech metadata still grow with the transcript; long-session
+memory and performance gates remain outstanding.
+
+A reproduced two-source bug assigned the same utterance ID to simultaneous
+microphone and system passages. Native IDs now include the source namespace.
+Qualified microphone configuration selects unity gain and the production input
+policy; the system source retains quiet-speech conditioning. Verification of the
+Swift processing receipt belongs to the upcoming host capture join.
+
+Validation: 153 core tests, 57 host tests, one native-service lifecycle replay and
+eight disposable-process replays pass. The network setup test and three real-model
+qualification tests were not repeated for this engine-only change. Strict core/host
+Clippy passes. The independent verifier closed source review after the dual-source
+preflight and production conditioning corrections. Logs: `/tmp/speakerdesk-live-reader-*`
+and `/tmp/speakerdesk-live-source-id-red.log` (the reproduced identity collision).
+The optimized desktop executable remains the prior setup build; capture is not yet
+wired to these engines. No real UI check was possible: CUA still reports the Mac
+locked despite the user's unlock replies.
+
+The accepted replacement outcome remains active and unfinished. Continue the Swift
+capture process/writer/store join, recovery and stop/drain handling; replace the
+bespoke echo FFT and measure correlation choices; then qualify live hardware,
+native default packaging/updater, security and equivalent 0.6.6 performance. The
+actual Tauri setup/long-import checks remain pending. Installed app, production data
+and existing model cache stay untouched; Windows and issue #25 remain follow-ups.

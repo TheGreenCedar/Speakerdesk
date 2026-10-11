@@ -3,9 +3,10 @@
 //! Inbox coalescing, utterance admission, short routed revisions, the English
 //! authoritative tail, the non-English core plan, and compare-and-swap window
 //! reconciliation. Model calls go through [`crate::models::Models`]. This module
-//! does not load MLX, read a WAV, or keep an ASR reuse profile.
+//! reads bounded crops from the retained WAV; it does not load MLX.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -13,9 +14,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::audio::RecordingReader;
 use crate::document::{Document, Segment};
 use crate::error::ChildError;
-use crate::ipc::{DiarPreset, Handle, Turn, VadFeedOut};
+use crate::ipc::{DiarPreset, GainPolicy, Handle, Turn, VadFeedOut};
 use crate::language::{
     AcousticEvidence, AsrOutput, AudioState, LanguageDetector, Passage, Recognizer,
     SpeechTranscriber, TranscribeOptions,
@@ -797,37 +799,44 @@ pub fn activity_regions(turns: &[Turn], start: i64, end: i64) -> Vec<timing::Act
     if start >= end {
         return Vec::new();
     }
-    let mut points = vec![start, end];
+    let mut boundaries: BTreeMap<i64, Vec<(&str, i32)>> = BTreeMap::new();
+    boundaries.entry(start).or_default();
+    boundaries.entry(end).or_default();
     for turn in turns {
         let turn_start = round_samples(turn.start).clamp(start, end);
         let turn_end = round_samples(turn.end).clamp(start, end);
         if turn_start < turn_end {
-            points.push(turn_start);
-            points.push(turn_end);
+            boundaries
+                .entry(turn_start)
+                .or_default()
+                .push((&turn.speaker, 1));
+            boundaries
+                .entry(turn_end)
+                .or_default()
+                .push((&turn.speaker, -1));
         }
     }
-    points.sort_unstable();
-    points.dedup();
-    points
-        .windows(2)
-        .map(|pair| {
-            let (region_start, region_end) = (pair[0], pair[1]);
-            let mut speakers: Vec<String> = turns
-                .iter()
-                .filter(|turn| {
-                    round_samples(turn.start) < region_end && round_samples(turn.end) > region_start
-                })
-                .map(|turn| turn.speaker.clone())
-                .collect();
-            speakers.sort();
-            speakers.dedup();
-            timing::ActivityRegion {
-                start_sample: region_start,
-                end_sample: region_end,
-                speakers,
+    let mut active = BTreeMap::<&str, i32>::new();
+    let mut previous = start;
+    let mut regions = Vec::new();
+    for (sample, changes) in boundaries {
+        if previous < sample {
+            regions.push(timing::ActivityRegion {
+                start_sample: previous,
+                end_sample: sample,
+                speakers: active.keys().map(|speaker| (*speaker).to_owned()).collect(),
+            });
+        }
+        for (speaker, delta) in changes {
+            let count = active.entry(speaker).or_default();
+            *count += delta;
+            if *count == 0 {
+                active.remove(speaker);
             }
-        })
-        .collect()
+        }
+        previous = sample;
+    }
+    regions
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1565,6 +1574,8 @@ pub struct EngineConfig {
     pub audio_batch_seconds: i64,
     pub fast_sequence: i64,
     pub source_id: Option<String>,
+    /// Set only after the host verifies the processed microphone's source-bound receipt.
+    pub processed_microphone_contract: Option<String>,
 }
 
 impl EngineConfig {
@@ -1576,6 +1587,7 @@ impl EngineConfig {
             audio_batch_seconds: 6,
             fast_sequence: 0,
             source_id: None,
+            processed_microphone_contract: None,
         }
     }
 }
@@ -1684,22 +1696,23 @@ struct CorePart {
     complete: bool,
 }
 
-/// Canonical resident engine. PCM stays in memory; weights stay behind `M`.
+/// Canonical resident engine. PCM stays on disk; weights stay behind `M`.
 pub struct Engine<M: Models> {
     config: EngineConfig,
     models: Arc<M>,
     inbox: Arc<Mutex<Inbox>>,
-    pcm: Vec<f32>,
+    recording: RecordingReader,
+    committed: u32,
     received: i64,
     turns: Vec<Turn>,
     diar_observed: i64,
     timeline: Vec<LanguageStamp>,
-    document: Document,
     capture_finished: bool,
     fast_sequence: i64,
     book: UtteranceBook,
     last_decoded: HashMap<String, (i64, i64)>,
     published: HashMap<String, Segment>,
+    next_utterance: usize,
     vad: Option<Handle>,
     diar: Option<Handle>,
     ledger: Arc<Mutex<SpeechLedger>>,
@@ -1723,10 +1736,29 @@ impl<M: Models + 'static> Engine<M> {
         config: EngineConfig,
         models: Arc<M>,
         inbox: Arc<Mutex<Inbox>>,
+        recording: RecordingReader,
     ) -> Result<Self, LiveError> {
         // shortcut: enable after live publication is wired to the supplied-text adapter.
         let timing_apis = false;
-        let book = UtteranceBook::new(config.job_id.clone())?;
+        let namespace = if let Some(source) = &config.source_id {
+            if !SOURCE_IDS.contains(&source.as_str()) {
+                return Err(LiveError::Message("Unknown capture input."));
+            }
+            format!("{}:{source}", config.job_id)
+        } else {
+            config.job_id.clone()
+        };
+        let book = UtteranceBook::new(namespace)?;
+        let ledger = if let Some(contract) = &config.processed_microphone_contract {
+            if config.source_id.as_deref() != Some("microphone_clean") {
+                return Err(LiveError::Message(
+                    "Unity conditioning requires the verified microphone source.",
+                ));
+            }
+            SpeechLedger::with_processed_microphone(0, contract)?
+        } else {
+            SpeechLedger::new(0)?
+        };
         let timeline = vec![LanguageStamp {
             start_sample: 0,
             language: config.language.clone(),
@@ -1737,41 +1769,40 @@ impl<M: Models + 'static> Engine<M> {
             config,
             models,
             inbox,
-            pcm: Vec::new(),
+            recording,
+            committed: 0,
             received: 0,
             turns: Vec::new(),
             diar_observed: 0,
             timeline,
-            document: empty_document(),
             capture_finished: false,
             book,
             last_decoded: HashMap::new(),
             published: HashMap::new(),
+            next_utterance: 0,
             vad: None,
             diar: None,
-            ledger: Arc::new(Mutex::new(SpeechLedger::new(0)?)),
+            ledger: Arc::new(Mutex::new(ledger)),
             timing_apis,
             events: Vec::new(),
         })
     }
 
-    pub fn single(config: EngineConfig, models: M) -> Result<Self, LiveError> {
+    pub fn single(
+        config: EngineConfig,
+        models: M,
+        recording: impl AsRef<Path>,
+    ) -> Result<Self, LiveError> {
         let batch = config.audio_batch_seconds;
         let models = Arc::new(models);
         let inbox = Arc::new(Mutex::new(Inbox::new(batch, 0)?));
-        Self::new(config, models, inbox)
+        let recording =
+            RecordingReader::open(recording).map_err(|e| LiveError::Detail(e.to_string()))?;
+        Self::new(config, models, inbox, recording)
     }
 
     pub fn inbox(&self) -> Arc<Mutex<Inbox>> {
         Arc::clone(&self.inbox)
-    }
-
-    pub fn document(&self) -> &Document {
-        &self.document
-    }
-
-    pub fn append_pcm(&mut self, pcm: &[f32]) {
-        self.pcm.extend_from_slice(pcm);
     }
 
     pub fn timing_apis(&self) -> bool {
@@ -1817,6 +1848,16 @@ impl<M: Models + 'static> Engine<M> {
         if self.capture_finished {
             return Err(LiveError::Message("Audio arrived after capture finished."));
         }
+        if notice.start_sample != self.received
+            || notice.end_sample <= notice.start_sample
+            || notice.end_sample > (crate::audio::MAX_DURATION_SECONDS * RATE as f64) as i64
+        {
+            return Err(LiveError::Message("Invalid saved audio endpoint."));
+        }
+        self.recording
+            .require_samples(notice.end_sample as u32)
+            .map_err(|error| LiveError::Detail(error.to_string()))?;
+        self.committed = notice.end_sample as u32;
         if self
             .timeline
             .last()
@@ -1841,8 +1882,6 @@ impl<M: Models + 'static> Engine<M> {
             self.commit(false, current)?;
             cursor = next;
         }
-        let metrics = self.models.metrics()?;
-        let _ = metrics;
         self.events.push(EngineEvent::Progress {
             processed_seconds: self.ledger.lock().expect("speech ledger").end_sample() as f64
                 / RATE as f64,
@@ -1856,8 +1895,8 @@ impl<M: Models + 'static> Engine<M> {
         if start != self.received {
             return Err(LiveError::Message("Noncontiguous captured audio."));
         }
-        self.ensure_streams()?;
         let pcm = self.read_pcm(start, end)?;
+        self.ensure_streams()?;
         let vad = self.vad.expect("vad");
         let feed = self.models.vad_feed(vad, &pcm, false)?;
         self.admit_frames(end, feed)?;
@@ -2041,7 +2080,12 @@ impl<M: Models + 'static> Engine<M> {
 
     fn ensure_streams(&mut self) -> Result<(), LiveError> {
         if self.vad.is_none() {
-            let vad = self.models.vad_open(None)?;
+            let conditioning = self
+                .config
+                .processed_microphone_contract
+                .as_ref()
+                .map(|_| GainPolicy { peak: None });
+            let vad = self.models.vad_open(conditioning)?;
             match self.models.diar_open(DiarPreset::Low) {
                 Ok(diar) => {
                     self.vad = Some(vad);
@@ -2076,10 +2120,9 @@ impl<M: Models + 'static> Engine<M> {
         if start < 0 || end <= start || end - start > MAX_DECODE_SAMPLES {
             return Err(LiveError::Message("Oversized audio read."));
         }
-        let Some(pcm) = self.pcm.get(start as usize..end as usize) else {
-            return Err(LiveError::Message("Requested audio is not yet saved."));
-        };
-        Ok(pcm.to_vec())
+        self.recording
+            .read_samples(start as u32, end as u32, self.committed)
+            .map_err(|error| LiveError::Detail(error.to_string()))
     }
 
     fn prefix_speaker(&self, local: &str) -> Result<String, LiveError> {
@@ -2137,7 +2180,7 @@ impl<M: Models + 'static> Engine<M> {
         if self.capture_finished && available == self.received && !self.book.closed() {
             self.book.finish();
         }
-        let order = self.book.order.clone();
+        let order = self.book.order[self.next_utterance..].to_vec();
         for identity in order {
             if !self.book.rows.contains_key(&identity) {
                 continue;
@@ -2180,6 +2223,19 @@ impl<M: Models + 'static> Engine<M> {
             let row = self.book.rows.get(&identity).expect("row").clone();
             self.publish(row)?;
         }
+        while let Some(identity) = self.book.order.get(self.next_utterance) {
+            if self.book.rows[identity].state != UtteranceState::Sealed {
+                break;
+            }
+            self.published.remove(identity);
+            self.last_decoded.remove(identity);
+            self.next_utterance += 1;
+        }
+        let earliest = self.book.active.as_ref().map_or(
+            self.book.cursor().saturating_sub(UTTERANCE_CONTEXT_SAMPLES),
+            |id| self.book.rows[id].start_sample,
+        );
+        self.turns.retain(|turn| round_samples(turn.end) > earliest);
         Ok(())
     }
 
@@ -2451,7 +2507,6 @@ impl<M: Models + 'static> Engine<M> {
         }
         self.published.insert(row.id.clone(), candidate.clone());
         self.fast_sequence += 1;
-        self.document = apply_canonical_candidate(&self.document, &candidate);
         self.events.push(EngineEvent::CanonicalRevision {
             candidate: Box::new(candidate),
             fast_sequence: self.fast_sequence,
@@ -2648,6 +2703,7 @@ fn pending_admission(start: i64, end: i64) -> Admission {
     }
 }
 
+#[cfg(test)]
 fn empty_document() -> Document {
     Document {
         schema_version: 1,
@@ -2670,17 +2726,25 @@ pub struct SourceRuntime<M: Models> {
 }
 
 impl<M: Models + 'static> SourceRuntime<M> {
-    pub fn new(config: EngineConfig, models: M) -> Result<Self, LiveError> {
+    pub fn new(
+        config: EngineConfig,
+        models: M,
+        recordings: [RecordingReader; 2],
+    ) -> Result<Self, LiveError> {
         let models = Arc::new(models);
         let inbox = Arc::new(Mutex::new(Inbox::new(config.audio_batch_seconds, 0)?));
         let mut engines = Vec::new();
-        for source_id in SOURCE_IDS {
+        for (source_id, recording) in SOURCE_IDS.into_iter().zip(recordings) {
             let mut source_config = config.clone();
             source_config.source_id = Some(source_id.to_string());
+            if source_id != "microphone_clean" {
+                source_config.processed_microphone_contract = None;
+            }
             engines.push(Engine::new(
                 source_config,
                 Arc::clone(&models),
                 Arc::clone(&inbox),
+                recording,
             )?);
         }
         Ok(Self {
@@ -2689,16 +2753,6 @@ impl<M: Models + 'static> SourceRuntime<M> {
             engines,
             received: 0,
         })
-    }
-
-    pub fn append_pcm(&mut self, source_id: &str, pcm: &[f32]) -> Result<(), LiveError> {
-        let engine = self
-            .engines
-            .iter_mut()
-            .find(|engine| engine.config.source_id.as_deref() == Some(source_id))
-            .ok_or(LiveError::Message("Unknown capture input."))?;
-        engine.append_pcm(pcm);
-        Ok(())
     }
 
     pub fn push(&self, command: LiveCommand) -> Result<(), LiveError> {
@@ -2717,14 +2771,13 @@ impl<M: Models + 'static> SourceRuntime<M> {
                     "Capture sources require contiguous ordered audio.",
                 ));
             }
-            if self
-                .engines
-                .iter()
-                .any(|engine| engine.pcm.len() < notice.end_sample as usize)
-            {
-                return Err(LiveError::Message(
-                    "Capture input has not reached the shared endpoint.",
-                ));
+            let endpoint = u32::try_from(notice.end_sample)
+                .map_err(|_| LiveError::Message("Invalid saved audio endpoint."))?;
+            for engine in &self.engines {
+                engine
+                    .recording
+                    .require_samples(endpoint)
+                    .map_err(|error| LiveError::Detail(error.to_string()))?;
             }
         }
         let mut pending: BTreeMap<&'static str, Vec<EngineEvent>> = BTreeMap::new();
@@ -2881,6 +2934,54 @@ mod tests {
     };
     use crate::language::{DetectionMode, DetectionReason, LanguageDetection};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct TestRecording {
+        path: std::path::PathBuf,
+        writer: crate::audio::RecordingWriter,
+    }
+
+    impl TestRecording {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("speakerdesk-live-{}.wav", uuid::Uuid::new_v4()));
+            let writer = crate::audio::RecordingWriter::create(&path).unwrap();
+            Self { path, writer }
+        }
+    }
+
+    impl Drop for TestRecording {
+        fn drop(&mut self) {
+            std::fs::remove_file(&self.path).unwrap();
+        }
+    }
+
+    struct TestEngine {
+        engine: Engine<FakeModels>,
+        recording: TestRecording,
+    }
+
+    impl TestEngine {
+        fn new(config: EngineConfig, models: FakeModels) -> Result<Self, LiveError> {
+            let recording = TestRecording::new();
+            let engine = Engine::single(config, models, &recording.path)?;
+            Ok(Self { engine, recording })
+        }
+        fn append_pcm(&mut self, pcm: &[f32]) {
+            self.recording.writer.write_samples(pcm).unwrap();
+        }
+    }
+
+    impl std::ops::Deref for TestEngine {
+        type Target = Engine<FakeModels>;
+        fn deref(&self) -> &Self::Target {
+            &self.engine
+        }
+    }
+    impl std::ops::DerefMut for TestEngine {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.engine
+        }
+    }
 
     fn notice(start: i64, end: i64, epoch: i64) -> LiveCommand {
         LiveCommand::Audio(AudioNotice {
@@ -3264,6 +3365,7 @@ mod tests {
     }
 
     struct FakeModels {
+        conditioning: Mutex<Vec<Option<GainPolicy>>>,
         ctc_calls: AtomicUsize,
         transcribe_calls: AtomicUsize,
         vad_sessions: Mutex<BTreeMap<u64, (u64, Vec<f32>)>>,
@@ -3278,6 +3380,7 @@ mod tests {
     impl FakeModels {
         fn english() -> Self {
             Self {
+                conditioning: Mutex::new(Vec::new()),
                 ctc_calls: AtomicUsize::new(0),
                 transcribe_calls: AtomicUsize::new(0),
                 vad_sessions: Mutex::new(BTreeMap::new()),
@@ -3292,7 +3395,8 @@ mod tests {
     }
 
     impl Models for FakeModels {
-        fn vad_open(&self, _conditioning: Option<GainPolicy>) -> Result<Handle, ChildError> {
+        fn vad_open(&self, conditioning: Option<GainPolicy>) -> Result<Handle, ChildError> {
+            self.conditioning.lock().unwrap().push(conditioning);
             let session = self.next_session.fetch_add(1, Ordering::Relaxed) as u64;
             self.vad_sessions
                 .lock()
@@ -3446,11 +3550,11 @@ mod tests {
             .collect()
     }
 
-    fn drive(engine: &mut Engine<FakeModels>, pcm: &[f32], language: &str) {
-        let start = engine.pcm.len() as i64;
+    fn drive(engine: &mut TestEngine, pcm: &[f32], language: &str) {
+        let start = i64::from(engine.recording.writer.frames());
         engine.append_pcm(pcm);
         let mut cursor = start;
-        let end = engine.pcm.len() as i64;
+        let end = i64::from(engine.recording.writer.frames());
         while cursor < end {
             let next = (cursor + RATE).min(end);
             engine
@@ -3476,9 +3580,146 @@ mod tests {
     }
 
     #[test]
+    fn activity_sweep_preserves_clipped_overlaps_duplicates_touching_turns_and_gaps() {
+        let turns = [
+            (5., 7., "c"),
+            (2., 5., "a"),
+            (9., 11., "d"),
+            (1., 3., "a"),
+            (3., 4., "b"),
+        ]
+        .map(|(start, end, speaker)| Turn {
+            start,
+            end,
+            speaker: speaker.into(),
+        });
+        let actual = activity_regions(&turns, 2 * RATE, 10 * RATE);
+        let expected = [
+            (2, 3, vec!["a"]),
+            (3, 4, vec!["a", "b"]),
+            (4, 5, vec!["a"]),
+            (5, 7, vec!["c"]),
+            (7, 9, vec![]),
+            (9, 10, vec!["d"]),
+        ];
+        assert_eq!(
+            actual,
+            expected.map(|(start, end, speakers)| timing::ActivityRegion {
+                start_sample: start * RATE,
+                end_sample: end * RATE,
+                speakers: speakers.into_iter().map(str::to_owned).collect(),
+            })
+        );
+        assert!(activity_regions(&turns, 10, 9).is_empty());
+        assert_eq!(
+            activity_regions(&[], 1, 2),
+            [timing::ActivityRegion {
+                start_sample: 1,
+                end_sample: 2,
+                speakers: vec![]
+            }]
+        );
+    }
+
+    #[test]
+    fn saved_audio_replay_handles_packet_splits_and_does_not_revisit_sealed_utterances() {
+        let pcm = [loud(16_037), vec![0.; 16_000], loud(8_013)].concat();
+        let mut split =
+            TestEngine::new(EngineConfig::new("saved", "en"), FakeModels::english()).unwrap();
+        let mut split_document = empty_document();
+        let mut cursor = 0;
+        for end in [1, 511, 512, 513, 1023, 1024, 16_037, 32_037, pcm.len()] {
+            split.append_pcm(&pcm[cursor..end]);
+            for event in split.handle(notice(cursor as i64, end as i64, 0)).unwrap() {
+                if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                    split_document = apply_canonical_candidate(&split_document, &candidate);
+                }
+            }
+            cursor = end;
+        }
+        for event in split.handle(LiveCommand::Stop).unwrap() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                split_document = apply_canonical_candidate(&split_document, &candidate);
+            }
+        }
+        assert_eq!(split.next_utterance, split.book.order.len());
+        assert!(split.published.is_empty());
+        assert!(split.last_decoded.is_empty());
+        let decoded = split.models.transcribe_calls.load(Ordering::Relaxed);
+        assert!(
+            revisions(
+                &split
+                    .handle(LiveCommand::Flush {
+                        request_id: None,
+                        through_sample: None
+                    })
+                    .unwrap()
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            decoded,
+            split.models.transcribe_calls.load(Ordering::Relaxed)
+        );
+
+        // New model state reconstructs from the same retained file, without appending PCM.
+        let mut replay = Engine::single(
+            EngineConfig::new("saved", "en"),
+            FakeModels::english(),
+            &split.recording.path,
+        )
+        .unwrap();
+        let mut replay_document = empty_document();
+        for event in replay
+            .handle(notice(0, pcm.len() as i64, 0))
+            .unwrap()
+            .into_iter()
+            .chain(replay.handle(LiveCommand::Stop).unwrap())
+        {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                replay_document = apply_canonical_candidate(&replay_document, &candidate);
+            }
+        }
+        let content = |document: &Document| {
+            document
+                .segments
+                .iter()
+                .map(|s| {
+                    (
+                        s.id.clone(),
+                        s.start,
+                        s.end,
+                        s.speaker.clone(),
+                        s.text.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(content(&split_document), content(&replay_document));
+        assert_eq!(replay.ledger.lock().unwrap().end_sample(), pcm.len() as i64);
+        assert_eq!(replay.diar_observed, pcm.len() as i64 / 160 * 160);
+    }
+
+    #[test]
+    fn missing_audio_and_invalid_conditioning_fail_before_inference() {
+        let mut engine =
+            TestEngine::new(EngineConfig::new("missing", "en"), FakeModels::english()).unwrap();
+        assert!(engine.handle(notice(0, 512, 0)).is_err());
+        assert_eq!(engine.received, 0);
+        assert!(engine.models.conditioning.lock().unwrap().is_empty());
+        let mut config = EngineConfig::new("bad-source", "en");
+        config.source_id = Some("system".into());
+        config.processed_microphone_contract = Some("a".repeat(64));
+        assert!(TestEngine::new(config.clone(), FakeModels::english()).is_err());
+        config.source_id = Some("microphone_clean".into());
+        config.processed_microphone_contract = Some("bad".into());
+        assert!(TestEngine::new(config, FakeModels::english()).is_err());
+    }
+
+    #[test]
     fn language_boundary_inside_unobserved_final_hop_stays_unknown() {
         let mut engine =
-            Engine::single(EngineConfig::new("partial", "en"), FakeModels::english()).unwrap();
+            TestEngine::new(EngineConfig::new("partial", "en"), FakeModels::english()).unwrap();
         engine.append_pcm(&loud(16_037));
         engine.handle(notice(0, 16_037, 0)).unwrap();
         engine
@@ -3506,7 +3747,7 @@ mod tests {
     #[test]
     fn delayed_diarization_and_final_only_turns_reach_sealed_passages() {
         let mut engine =
-            Engine::single(EngineConfig::new("delayed", "en"), FakeModels::english()).unwrap();
+            TestEngine::new(EngineConfig::new("delayed", "en"), FakeModels::english()).unwrap();
         engine.models.delayed_diar.store(true, Ordering::Relaxed);
         let pcm = [loud(48_000), vec![0.; 16_000], loud(16_037)].concat();
         engine.append_pcm(&pcm);
@@ -3516,7 +3757,7 @@ mod tests {
             0,
             "unobserved speaker evidence cannot seal passages"
         );
-        assert!(engine.document.segments.is_empty());
+        assert!(engine.published.is_empty());
         let events = engine.handle(LiveCommand::Stop).unwrap();
         assert_eq!(engine.diar_observed, 80_000);
         assert_eq!(engine.book.cursor(), 80_037);
@@ -3542,7 +3783,7 @@ mod tests {
     #[test]
     fn buffered_vad_tail_and_language_boundary_reach_publication() {
         let mut engine =
-            Engine::single(EngineConfig::new("buffered", "en"), FakeModels::english()).unwrap();
+            TestEngine::new(EngineConfig::new("buffered", "en"), FakeModels::english()).unwrap();
         engine.append_pcm(&loud(16_037));
         let events = engine.handle(notice(0, 16_037, 0)).unwrap();
         assert_eq!(engine.ledger.lock().unwrap().end_sample(), 15_872);
@@ -3573,7 +3814,7 @@ mod tests {
     fn model_streams_close_on_partial_open_failed_stop_and_drop() {
         for failure in 0..3 {
             let mut engine =
-                Engine::single(EngineConfig::new("cleanup", "en"), FakeModels::english()).unwrap();
+                TestEngine::new(EngineConfig::new("cleanup", "en"), FakeModels::english()).unwrap();
             let models = engine.models.clone();
             if failure == 0 {
                 models.fail_diar_open.store(true, Ordering::Relaxed);
@@ -3602,7 +3843,7 @@ mod tests {
     #[test]
     fn canonical_engine_publishes_a_provisional_revision_then_flush_language_and_stop() {
         let mut engine =
-            Engine::single(EngineConfig::new("job-1", "en"), FakeModels::english()).unwrap();
+            TestEngine::new(EngineConfig::new("job-1", "en"), FakeModels::english()).unwrap();
         assert!(!engine.timing_apis());
         drive(&mut engine, &loud(RATE as usize), "en");
         let mut seen = Vec::new();
@@ -3680,7 +3921,7 @@ mod tests {
     #[test]
     fn unwired_live_timing_never_probes_or_calls_the_acoustic_model() {
         let mut english =
-            Engine::single(EngineConfig::new("job-en", "en"), FakeModels::english()).unwrap();
+            TestEngine::new(EngineConfig::new("job-en", "en"), FakeModels::english()).unwrap();
         assert!(!english.timing_apis());
         drive(&mut english, &loud((21 * RATE) as usize), "en");
         let mut events = Vec::new();
@@ -3694,7 +3935,7 @@ mod tests {
         assert_eq!(english.models.ctc_calls.load(Ordering::SeqCst), 0);
 
         let mut german =
-            Engine::single(EngineConfig::new("job-de", "de"), FakeModels::english()).unwrap();
+            TestEngine::new(EngineConfig::new("job-de", "de"), FakeModels::english()).unwrap();
         drive(&mut german, &loud((25 * RATE) as usize), "de");
         let mut events = Vec::new();
         while let Some(batch) = german.poll().unwrap() {
@@ -3710,22 +3951,33 @@ mod tests {
 
     #[test]
     fn two_sources_prefix_speaker_ids_on_one_clock() {
-        let mut runtime =
-            SourceRuntime::new(EngineConfig::new("job-src", "en"), FakeModels::english()).unwrap();
+        let mut inputs = [TestRecording::new(), TestRecording::new()];
+        let mut config = EngineConfig::new("job-src", "en");
+        config.processed_microphone_contract = Some("a".repeat(64));
+        let mut runtime = SourceRuntime::new(
+            config,
+            FakeModels::english(),
+            inputs
+                .each_ref()
+                .map(|input| RecordingReader::open(&input.path).unwrap()),
+        )
+        .unwrap();
         let speech = loud(RATE as usize);
         let silence = quiet((RATE / 2) as usize);
-        for source in SOURCE_IDS {
-            runtime.append_pcm(source, &speech).unwrap();
-            runtime.append_pcm(source, &silence).unwrap();
+        for input in &mut inputs {
+            input.writer.write_samples(&speech).unwrap();
+            input.writer.write_samples(&silence).unwrap();
         }
         runtime.push(notice(0, RATE, 0)).unwrap();
         runtime.push(notice(RATE, RATE + RATE / 2, 0)).unwrap();
         let mut speakers = Vec::new();
+        let mut identities = std::collections::BTreeSet::new();
         while let Some(events) = runtime.poll().unwrap() {
             for event in events {
                 if let EngineEvent::CanonicalRevision { candidate, .. } = event
                     && candidate.text == "hello"
                 {
+                    identities.insert(candidate.id.clone());
                     speakers.push(candidate.speaker);
                 }
             }
@@ -3734,6 +3986,7 @@ mod tests {
             if let EngineEvent::CanonicalRevision { candidate, .. } = event
                 && candidate.text == "hello"
             {
+                identities.insert(candidate.id.clone());
                 speakers.push(candidate.speaker);
             }
         }
@@ -3741,8 +3994,53 @@ mod tests {
             speakers,
             vec!["speaker_0".to_string(), "speaker_32".to_string()]
         );
+        assert_eq!(
+            identities.len(),
+            2,
+            "source-local utterances must coexist in one document"
+        );
+        assert_eq!(
+            *runtime.engines[0].models.conditioning.lock().unwrap(),
+            [Some(GainPolicy { peak: None }), None]
+        );
+        assert_eq!(
+            runtime.engines[0].ledger.lock().unwrap().gain_mode(),
+            speech::GainMode::Unity
+        );
+        assert_eq!(
+            runtime.engines[0].ledger.lock().unwrap().input_policy(),
+            speech::PRODUCTION_UNITY_POLICY
+        );
+        assert_eq!(
+            runtime.engines[1].ledger.lock().unwrap().gain_mode(),
+            speech::GainMode::QuietSpeech
+        );
         assert_eq!(speaker_id("system", "speaker_0").unwrap(), "speaker_32");
         assert!(speaker_id("system", "speaker_32").is_err());
+    }
+
+    #[test]
+    fn both_saved_sources_are_checked_before_either_model_session_advances() {
+        let mut inputs = [TestRecording::new(), TestRecording::new()];
+        let mut runtime = SourceRuntime::new(
+            EngineConfig::new("missing-source", "en"),
+            FakeModels::english(),
+            inputs
+                .each_ref()
+                .map(|input| RecordingReader::open(&input.path).unwrap()),
+        )
+        .unwrap();
+        inputs[0].writer.write_samples(&loud(512)).unwrap();
+        inputs[1].writer.write_samples(&loud(511)).unwrap();
+        assert!(runtime.handle(notice(0, 512, 0)).is_err());
+        for engine in &runtime.engines {
+            assert_eq!(engine.received, 0);
+            assert!(engine.models.conditioning.lock().unwrap().is_empty());
+        }
+        inputs[1].writer.write_samples(&[-0.1]).unwrap();
+        runtime.handle(notice(0, 512, 0)).unwrap();
+        runtime.handle(LiveCommand::Stop).unwrap();
+        assert_eq!(runtime.received, 512);
     }
 
     #[test]
