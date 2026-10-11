@@ -21,3 +21,24 @@ test('required alignment on the existing runtime still blocks import until ready
   f.run("setupState.alignment.ready=true;setStatus();");
   assert.equal(f.document.getElementById('run').disabled, false);
 });
+
+test('setup polling enables native import after initialization with no download total', async () => {
+  const f = frontend(path.resolve(__dirname, '..'));f.seed(0, 'uploaded');
+  f.run("config.readiness.configured=false;setStatus();");
+  const progress=f.document.getElementById('model-progress');let value=0;
+  // WebKit rejects non-finite HTMLProgressElement values; the lightweight DOM does not.
+  Object.defineProperty(progress,'value',{get:()=>value,set:next=>{
+    if(!Number.isFinite(next))throw new TypeError('The provided value is non-finite');value=next;
+  }});
+  f.context.fetch=async url=>({ok:true,json:async()=>url==='/api/setup'?{
+    core_ready:true,ready:true,status:'ready',automatic_language:false,models:[],
+    total_bytes:0,downloaded_bytes:0,supported:true,can_download:false,
+    voice:{status:'unavailable',available:false,enabled:false,message:'Unavailable'}
+  }:{languages:{en:'English',auto:'Automatic'},default_language:'en',
+    readiness:{configured:true,automatic_language:false,word_alignment:false,live_capture:false}}});
+  await f.run('refreshSetup()');
+  assert.equal(f.document.getElementById('model-status').textContent,'Ready to transcribe on this Mac.');
+  assert.equal(f.document.getElementById('run').disabled,false);
+  assert.equal(progress.value,0);
+  assert.equal(f.document.getElementById('install-models').hidden,true);
+});

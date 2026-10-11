@@ -1144,7 +1144,7 @@ async function refreshSetup() {
     if(state.required_free_bytes)$('setup-disk-note').textContent=`First setup needs an internet connection and about ${formatBytes(state.required_free_bytes)} of free disk space including prepared timing weights.`;
     const busy=state.status==='downloading';
     $('model-progress').hidden=!busy;
-    $('model-progress').value=100*state.downloaded_bytes/state.total_bytes;
+    $('model-progress').value=state.total_bytes?100*state.downloaded_bytes/state.total_bytes:0;
     $('model-status').textContent=state.error || state.message || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'Finish required model setup before transcribing.');
     $('install-models').hidden=state.ready;
     const voice=state.voice,voiceBusy=voice.status==='downloading';

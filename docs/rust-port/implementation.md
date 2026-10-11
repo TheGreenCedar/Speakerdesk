@@ -251,8 +251,7 @@ admission owner. Request, preparation and inference leases cover their actual
 lifetimes. Shutdown closes new admission, invalidates active operation generations,
 cancels/reaps the child independently of slow HTTP clients, then drains workers.
 A late completed-operation entry cannot reset a published job. Normal native
-Tauri quit waits for the matching service generation's termination; UI proof of
-that path is still pending. The unused in-process bridge, global admission owner,
+Tauri quit waits for the matching service generation's termination. The unused in-process bridge, global admission owner,
 duplicate editor/preparation state and step receipts were deleted.
 
 Independent review found that the name dialog always requested a missing
@@ -284,13 +283,42 @@ owned preview process, its host and inference child exited; relaunch preserved
 the complete edited document and byte-identical exports. This is real service
 and restart evidence, not UI interaction or a normal Quit-menu test. Results and
 exports are retained under the disposable preview directory. The final preview
-executable SHA-256 is
+executable SHA-256 at that service-only checkpoint was
 `8e16aacc29ea643b22bbe467996247b1507a63b0047ee7b7a5250cebe2e78402`.
 
-The Mac UI tool reports that the screen is locked and cannot unlock it. Unlock
-was requested; the next dependent step remains actual import, editing, playback,
-save, normal quit/reopen and export in the Tauri window. Do not start another
-model lane or declare batch 3 complete on the HTTP evidence. Public-audio quality,
-equivalent optimized 0.6.6 latency/backlog/memory measurements, the remaining
-models, native capture and final packaging are still open. Small numerical drift
-is acceptable; behavioral and measured performance gates remain unchanged.
+## First native editor workflow
+
+After the Mac was unlocked, the actual WebKit editor exposed a setup-polling
+failure: initialized native models report zero download bytes and zero total
+bytes. Assigning their quotient to HTMLProgressElement.value throws in WebKit,
+preventing the subsequent config refresh and leaving Transcribe disabled.
+The shared controller now uses zero progress when there is no download total.
+The regression drives refreshSetup with WebKit's finite-value setter behavior;
+it fails before the change and passes after it. All 18 focused controller tests
+pass. The locked optimized desktop rebuild passed in 18.77 s.
+
+The rebuilt disposable Tauri preview completed import of `two-voice.wav`, real
+model transcription, playback, word editing, speaker assignment/naming and a
+start-boundary edit to 0.10 s. Job `2b4ae227979644b28df177e667aca9ab` reached
+revision 7. Normal Cmd-Q exited successfully and all three owned processes were
+gone. Relaunching the whole app preserved the words, `UI Speaker One` and edited
+boundary. Native Text export saved a 273-byte file identical to the service's
+TXT export. A revision-6 PUT against that same job returned 409 and left the
+document unchanged; this conflict check was HTTP, not a stale-save UI action.
+The other three export formats retain their earlier HTTP evidence, not native
+save-dialog coverage.
+
+The preview executable SHA-256 for this UI run is
+`d6d0d5b223f544b2f9e62f8431808a8b41accd8085a315d6c99d4b07365c534a`.
+Its source is `fc324c0` plus the finite-progress fix; edited data, text export and
+receipt remain in `/private/tmp/speakerdesk-native-desktop.WJKAde/`.
+The nine-second fixture is synthetic speech: this establishes product integration,
+not broad acoustic quality. The preview still loads MLX from the build directory.
+
+Public-audio quality, equivalent optimized 0.6.6 latency/backlog/memory
+measurements, the remaining models, native capture and final packaging remain
+open. The copied installed 0.6.6 runtime reports MLX 0.32.2, matching its packaging
+lock; the separate development lockfiles specify 0.32.3. Baseline explicit-English
+imports still require alignment, so omitting alignment permits only a labelled
+shared-stage diagnostic, not full product performance acceptance. Small numerical
+drift is acceptable; behavioral and measured performance gates are unchanged.
