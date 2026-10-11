@@ -4,6 +4,7 @@ use crate::exports::ExportDownloads;
 use crate::update_control::{Control, Phase, MAX_FRAME_BYTES, MAX_REQUEST_ID};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use speakerdesk_host::admission::UpdateBridge;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -44,6 +45,28 @@ pub enum Event {
     Installed(u64, Result<(), String>),
     Timeout(u64, Phase, u64),
 }
+enum Wake {
+    Event(Option<Event>),
+    Reply(Option<Value>),
+}
+
+fn allow_packet(packet: &Packet) -> bool {
+    packet.id > 0
+        && packet.id <= MAX_REQUEST_ID
+        && matches!(
+            packet.op.as_str(),
+            "check"
+                | "download"
+                | "install"
+                | "cancel"
+                | "editor_ready"
+                | "editor_error"
+                | "reserved"
+                | "released"
+                | "shutdown_ready"
+        )
+}
+
 #[derive(Clone)]
 pub struct Updates {
     sender: mpsc::UnboundedSender<Event>,
@@ -55,13 +78,16 @@ impl Updates {
         let (sender, receiver) = mpsc::unbounded_channel();
         let guarded = Arc::new(AtomicBool::new(false));
         let replacing = Arc::new(AtomicBool::new(false));
+        let (bridge, replies) =
+            UpdateBridge::bind(speakerdesk_host::admission::Admission::shared());
+        crate::set_update_bridge(bridge.clone());
         let updates = Self {
             sender: sender.clone(),
             guarded: guarded.clone(),
             replacing: replacing.clone(),
         };
         tauri::async_runtime::spawn(
-            Coordinator::new(app, sender, guarded, replacing).run(receiver),
+            Coordinator::new(app, sender, guarded, replacing, bridge, replies).run(receiver),
         );
         updates
     }
@@ -70,21 +96,7 @@ impl Updates {
             return;
         }
         if let Ok(packet) = serde_json::from_slice::<Packet>(bytes) {
-            if packet.id > 0
-                && packet.id <= MAX_REQUEST_ID
-                && matches!(
-                    packet.op.as_str(),
-                    "check"
-                        | "download"
-                        | "install"
-                        | "cancel"
-                        | "editor_ready"
-                        | "editor_error"
-                        | "reserved"
-                        | "released"
-                        | "shutdown_ready"
-                )
-            {
+            if allow_packet(&packet) {
                 let _ = self.sender.send(Event::Packet(generation, packet));
             }
         }
@@ -105,6 +117,8 @@ struct Coordinator {
     sender: mpsc::UnboundedSender<Event>,
     guarded: Arc<AtomicBool>,
     replacing: Arc<AtomicBool>,
+    bridge: UpdateBridge,
+    replies: mpsc::UnboundedReceiver<Value>,
     control: Control,
     generation: u64,
     selected: Option<Update>,
@@ -123,12 +137,16 @@ impl Coordinator {
         sender: mpsc::UnboundedSender<Event>,
         guarded: Arc<AtomicBool>,
         replacing: Arc<AtomicBool>,
+        bridge: UpdateBridge,
+        replies: mpsc::UnboundedReceiver<Value>,
     ) -> Self {
         Self {
             app,
             sender,
             guarded,
             replacing,
+            bridge,
+            replies,
             control: Control::default(),
             generation: 0,
             selected: None,
@@ -143,7 +161,24 @@ impl Coordinator {
         }
     }
     async fn run(mut self, mut receiver: mpsc::UnboundedReceiver<Event>) {
-        while let Some(event) = receiver.recv().await {
+        let mut replies_open = true;
+        loop {
+            let wake = tokio::select! {
+                event = receiver.recv() => Wake::Event(event),
+                reply = self.replies.recv(), if replies_open => Wake::Reply(reply),
+            };
+            let event = match wake {
+                Wake::Reply(None) => {
+                    replies_open = false;
+                    continue;
+                }
+                Wake::Reply(Some(reply)) => {
+                    self.forward_reply(reply);
+                    continue;
+                }
+                Wake::Event(None) => break,
+                Wake::Event(Some(event)) => event,
+            };
             match event {
                 Event::Started(generation) => {
                     self.generation = generation;
@@ -426,6 +461,14 @@ impl Coordinator {
             _ => {}
         }
     }
+    fn forward_reply(&self, reply: Value) {
+        let Ok(packet) = serde_json::from_value::<Packet>(reply) else {
+            return;
+        };
+        if allow_packet(&packet) {
+            let _ = self.sender.send(Event::Packet(self.generation, packet));
+        }
+    }
     fn status(&self) {
         let mut status = json!({"op":"status", "id":self.control.id, "state":self.control.phase.status(),
             "downloaded_bytes":self.downloaded, "reserved":self.guarded.load(Ordering::Acquire),
@@ -448,13 +491,13 @@ impl Coordinator {
         let _ = self.send(status);
     }
     fn send(&self, value: Value) -> Result<(), String> {
-        let mut bytes = b"SPEAKERDESK_UPDATE=".to_vec();
-        bytes.extend(serde_json::to_vec(&value).map_err(|e| e.to_string())?);
-        if bytes.len() + 1 > MAX_FRAME_BYTES {
+        let payload = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+        if payload.len() > MAX_FRAME_BYTES {
             return Err("Oversized native update control".into());
         }
-        bytes.push(b'\n');
-        crate::write_runtime(&self.app, self.generation, &bytes)
+        self.bridge
+            .dispatch(value)
+            .map_err(|error| error.to_string())
     }
     fn fail(&mut self, error: &str) {
         self.control.phase = Phase::Error;
