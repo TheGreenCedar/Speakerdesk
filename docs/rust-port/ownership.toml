@@ -21,6 +21,7 @@ paths = [
   "xtask/src/commands/ledger.rs",
   "xtask/src/commands/ownership.rs",
   "xtask/src/commands/pending.rs",
+  "xtask/src/commands/probe.rs",
   "crates/core/Cargo.toml",
   "crates/core/src/lib.rs",
   "crates/core/src/ids.rs",

@@ -44,6 +44,8 @@ enum Command {
         kind: Option<String>,
     },
     FetchUpstream,
+    /// Compare Silero, Sortformer, and Cohere with packaged 0.6.6. macOS only.
+    Probe,
 }
 
 fn main() -> ExitCode {
@@ -69,6 +71,7 @@ fn main() -> ExitCode {
             commands::pending::run("e2e")
         }
         Command::FetchUpstream => commands::pending::run("fetch-upstream"),
+        Command::Probe => commands::probe::run(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
