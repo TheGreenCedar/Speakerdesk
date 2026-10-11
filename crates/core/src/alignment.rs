@@ -746,6 +746,56 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_import_publishes_usable_timing_from_independent_ctc_replay() {
+        let all = cases();
+        let case = &all["cases"][0];
+        let (vocabulary, _, scores, _) = replay(case);
+        let samples = scores.audio_num_samples as usize;
+        let duration = samples as f64 / 16000.;
+        let mut models = crate::import::tests::Scripted::new(
+            vec![crate::ipc::Turn {
+                start: 0.,
+                end: duration,
+                speaker: "speaker_0".into(),
+            }],
+            vec![(0, samples)],
+        );
+        models.alignment = Some((case["text"].as_str().unwrap().into(), scores));
+        let pcm: Vec<f32> = (0..samples)
+            .map(|i| ((i % 17) as f32 - 8.) / 1000.)
+            .collect();
+        let document =
+            crate::import::import_recording(&models, &pcm, "en", Some(&vocabulary)).unwrap();
+        assert_eq!(document.segments.len(), 1);
+        let segment = &document.segments[0];
+        assert_eq!(segment.text, case["text"].as_str().unwrap());
+        assert!(
+            segment
+                .reading_turns
+                .as_ref()
+                .is_some_and(|turns| !turns.as_array().unwrap().is_empty())
+        );
+        assert!(segment.reading_turn_provenance.is_some());
+        let mut reading: timing::ReadingSegment =
+            serde_json::from_value(serde_json::to_value(segment).unwrap()).unwrap();
+        reading.installed_provider_identity = Some(NATIVE_PROVIDER.into());
+        assert_eq!(timing::validated_turns(&reading), reading.reading_turns);
+        assert!(!segment.rest.contains_key("decode_context"));
+        assert_eq!(
+            segment.rest["reading_alignment"]["audio_anchor"],
+            json!({"start_sample":0,"end_sample":samples})
+        );
+        assert!(
+            !document.provenance.as_ref().unwrap()["timing"]
+                .as_str()
+                .unwrap()
+                .contains("no word alignment")
+        );
+        let text = crate::export::export(&document, "txt").unwrap().body;
+        assert!(text.contains("Speaker 1:"));
+    }
+
+    #[test]
     fn native_projection_survives_serialization_and_exports_reject_stale_or_forged_evidence() {
         let all = cases();
         let case = &all["cases"][0];

@@ -642,3 +642,35 @@ This remains a blocking import-correctness task for the next slice. Ordinary
 non-tail passages also still lack supplied-text alignment. Live capture, long
 imports, automatic voice checks, packaged independence and the full performance
 gate remain unfinished; this slice does not complete the replacement.
+
+## Bridged tails and ordinary passage timing
+
+Import now joins a final unassigned tail to a solo passage whose complete activity
+ledger contains only that speaker and silence. It retains internal pauses and
+appends the tail as unassigned; incomplete, competing or nonadjacent activity still
+rejects the join. Ordinary passages publish their observed audio independently of
+alignment and run supplied-text CTC on their displayed bounds. Timing provenance
+describes the available projections and canonical fallback accurately.
+
+The two regressions fail before the change: the bridged Daniel replay produces two
+passages, and an ordinary supplied-text replay has no reading turns. Core 145 and
+host 48 tests, strict core/host Clippy and the locked optimized desktop build pass.
+Independent review found no blocker. In the actual isolated editor, importing the
+same Daniel enrollment WAV now produces one aligned passage through the final
+11.0315625-second sample, without the previous hallucinated "Oh." Its two verified
+voice crops and internal pause remain intact. This is real MLX inference; the CTC
+boundary test separately uses an independently generated numerical replay.
+
+The current ready app imports and persists the unchanged two-voice fixture in
+1.386 seconds with 3.546 GB sampled aggregate physical footprint, versus the
+retained equivalent 0.6.6 run's 3.422 seconds and 3.935 GB. Words and reading turns
+are unchanged. The same sampler includes owned descendants and WebKit; maximum
+interval is 0.144 seconds. This checks warm HTTP publication, not cold startup,
+UI rendering latency or sustained live performance. Evidence:
+`/private/tmp/speakerdesk-native-voice-performance/native-two-voice-1791756542556898000/`
+and `tail-timing-{fixed,clips}.json` in the disposable desktop directory.
+Release executable SHA256:
+`d07486e83c078c35549cc4ebe6b668220e2b9cda6405261fb6bd365afc616ff2`;
+signed preview SHA256:
+`f048ff64952774129eb7ce43ea7394e1dbe058da675e6cb2a9b2038c18ef0406`.
+The remaining replacement gates listed above are still open.

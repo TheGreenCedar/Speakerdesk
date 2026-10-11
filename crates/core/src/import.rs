@@ -284,13 +284,13 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
                 &row,
             );
             if let Some(alignment) = alignment
-                && segment.rest.contains_key("decode_context")
+                && row.audio_state.is_none()
                 && !segment.text.trim().is_empty()
                 && let Some(language) = &segment.language
                 && languages::is_supported(language)
             {
-                let a = seconds_to_sample(row.start, pcm.len() as i64) as usize;
-                let b = seconds_to_sample(row.end, pcm.len() as i64) as usize;
+                let a = seconds_to_sample(segment.start, pcm.len() as i64) as usize;
+                let b = seconds_to_sample(segment.end, pcm.len() as i64) as usize;
                 let result = alignment
                     .align(models, &pcm[a..b], &segment.text, a as i64, language)
                     .map_err(child_err)?;
@@ -299,6 +299,9 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
             segments.push(segment);
         }
     }
+    let supplied_timing = segments
+        .iter()
+        .any(|s| s.rest.contains_key("reading_alignment"));
     let mut document = Document {
         schema_version: 1,
         speakers,
@@ -312,6 +315,11 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
         edited_at: None,
         rest: Map::new(),
     };
+    if supplied_timing {
+        document.provenance.as_mut().expect("import provenance")["timing"] =
+            json!("Supplied-text CTC timing where supported; speech crop boundaries otherwise");
+        document.warnings[0] = "Word timing is model-estimated. Uncertain or edited passages use speech crop boundaries; review subtitle timing.".into();
+    }
     review::retain_unassigned_audio(&mut document, duration);
     let value = serde_json::to_value(&document)
         .map_err(|_| ImportError::new(messages::PROCESSING_FAILED))?;
@@ -579,7 +587,17 @@ fn utterance_tail_chunks(
         }
         if let Some(following) = remaining.peek_mut()
             && current.speakers.len() == 1
-            && current.activity_regions.is_none()
+            && current.activity_regions.as_ref().is_none_or(|activity| {
+                let mut cursor = current.start;
+                activity.iter().all(|part| {
+                    let valid = (part.start - cursor).abs() <= BOUNDARY_EPSILON
+                        && part.start < part.end
+                        && part.end <= current.end
+                        && (part.speakers.is_empty() || part.speakers == current.speakers);
+                    cursor = part.end;
+                    valid
+                }) && (cursor - current.end).abs() <= BOUNDARY_EPSILON
+            })
             && following.speakers.is_empty()
             && (current.end - following.start).abs() <= BOUNDARY_EPSILON
             && let Some(&(span, regions)) = utterances.peek()
@@ -595,18 +613,18 @@ fn utterance_tail_chunks(
                 .any(|part| part.start_sample < boundary && boundary < part.end_sample)
         {
             let end = span.end_sample as f64 / f64::from(limits::SAMPLE_RATE);
-            current.activity_regions = Some(vec![
-                ActivitySlice {
+            let activity = current.activity_regions.get_or_insert_with(|| {
+                vec![ActivitySlice {
                     start: current.start,
                     end: current.end,
                     speakers: current.speakers.clone(),
-                },
-                ActivitySlice {
-                    start: following.start,
-                    end,
-                    speakers: Vec::new(),
-                },
-            ]);
+                }]
+            });
+            activity.push(ActivitySlice {
+                start: following.start,
+                end,
+                speakers: Vec::new(),
+            });
             current.utterance_tail_boundary = Some(boundary);
             current.end = end;
             current.audio_end = end;
@@ -924,30 +942,38 @@ fn segment_from_row(
     if let Some(padding) = &row.padding {
         rest.insert("cohere_input_padding".into(), padding.clone());
     }
-    if let Some(activity) = &chunk.activity_regions {
-        rest.insert(
-            "activity_regions".into(),
-            json!(
-                activity_slice(activity, start, end)
-                    .into_iter()
-                    .map(|part| json!({
-                        "start": part.start,
-                        "end": part.end,
-                        "speakers": part.speakers,
-                    }))
-                    .collect::<Vec<_>>()
-            ),
-        );
-        // Speaker observations remain usable even when word alignment is unavailable.
-        rest.insert(
-            "start_sample".into(),
-            json!((start * 16000.).round() as i64),
-        );
-        rest.insert("end_sample".into(), json!((end * 16000.).round() as i64));
-        rest.insert("source_speaker_candidates".into(), json!(chunk.speakers));
-        rest.insert("canonical_state".into(), json!("sealed"));
-        rest.insert("finalized".into(), json!(true));
-    }
+    let activity = chunk.activity_regions.as_ref().map_or_else(
+        || {
+            vec![ActivitySlice {
+                start,
+                end,
+                speakers: chunk.speakers.clone(),
+            }]
+        },
+        |regions| activity_slice(regions, start, end),
+    );
+    rest.insert(
+        "activity_regions".into(),
+        json!(
+            activity
+                .iter()
+                .map(|part| json!({
+                    "start": part.start,
+                    "end": part.end,
+                    "speakers": part.speakers,
+                }))
+                .collect::<Vec<_>>()
+        ),
+    );
+    // Speaker observations remain usable even when word alignment is unavailable.
+    rest.insert(
+        "start_sample".into(),
+        json!((start * 16000.).round() as i64),
+    );
+    rest.insert("end_sample".into(), json!((end * 16000.).round() as i64));
+    rest.insert("source_speaker_candidates".into(), json!(chunk.speakers));
+    rest.insert("canonical_state".into(), json!("sealed"));
+    rest.insert("finalized".into(), json!(true));
     if speaker == "unassigned"
         && let Some(boundary) = chunk.utterance_tail_boundary
     {
@@ -961,18 +987,16 @@ fn segment_from_row(
             }),
         );
     }
-    let speaker_activity = chunk.activity_regions.as_ref().map(|activity| {
-        json!({
-            "audio_revision":0, "observed_end_sample":(end * 16000.).round() as i64,
-            "regions":activity_slice(activity, start, end).iter().map(|region| json!({
-                "start_sample":(region.start * 16000.).round() as i64,
-                "end_sample":(region.end * 16000.).round() as i64,
-                "speakers":region.speakers,
-            })).collect::<Vec<_>>()
-        })
-    });
-    let canonical_utterance_id = speaker_activity.as_ref().map(|_| id.clone());
-    let audio_revision = speaker_activity.as_ref().map(|_| 0);
+    let speaker_activity = Some(json!({
+        "audio_revision":0, "observed_end_sample":(end * 16000.).round() as i64,
+        "regions":activity.iter().map(|region| json!({
+            "start_sample":(region.start * 16000.).round() as i64,
+            "end_sample":(region.end * 16000.).round() as i64,
+            "speakers":region.speakers,
+        })).collect::<Vec<_>>()
+    }));
+    let canonical_utterance_id = Some(id.clone());
+    let audio_revision = Some(0);
     Segment {
         id,
         start,
@@ -1264,7 +1288,7 @@ fn child_err(error: ChildError) -> ImportError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         ActivitySlice, CROP_PADDING_SECONDS, DEFAULT_MAX_SECONDS, IMPORT_MAX_SECONDS,
         TURN_GAP_SECONDS, crop_context, decode_regions, import_recording, retry_passage,
@@ -1299,17 +1323,18 @@ mod tests {
         Transcribe(AsrCall),
     }
 
-    struct Scripted {
+    pub(crate) struct Scripted {
         turns: Vec<Turn>,
         speech: Vec<(usize, usize)>,
         token_count: u32,
         probe_scores: Mutex<std::collections::VecDeque<Vec<f32>>>,
         cursor: Mutex<usize>,
         events: Mutex<Vec<Event>>,
+        pub(crate) alignment: Option<(String, ipc::CtcScoresOut)>,
     }
 
     impl Scripted {
-        fn new(turns: Vec<Turn>, speech: Vec<(usize, usize)>) -> Self {
+        pub(crate) fn new(turns: Vec<Turn>, speech: Vec<(usize, usize)>) -> Self {
             Self {
                 turns,
                 speech,
@@ -1317,6 +1342,7 @@ mod tests {
                 probe_scores: Mutex::new(Default::default()),
                 cursor: Mutex::new(0),
                 events: Mutex::new(Vec::new()),
+                alignment: None,
             }
         }
 
@@ -1442,8 +1468,14 @@ mod tests {
                 padding,
             }));
             Ok(AsrText {
-                text: format!("{language}:Hello"),
-                raw_text: format!("  {language}:Hello  "),
+                text: self
+                    .alignment
+                    .as_ref()
+                    .map_or_else(|| format!("{language}:Hello"), |(text, _)| text.clone()),
+                raw_text: self
+                    .alignment
+                    .as_ref()
+                    .map_or_else(|| format!("  {language}:Hello  "), |(text, _)| text.clone()),
                 token_count: self.token_count,
             })
         }
@@ -1452,6 +1484,27 @@ mod tests {
             pcm: &[f32],
             token_ids: &[i32],
         ) -> Result<ipc::CtcScoresOut, crate::error::ChildError> {
+            if let Some((_, scores)) = &self.alignment {
+                assert_eq!(pcm.len(), scores.audio_num_samples as usize);
+                let columns: Vec<_> = token_ids
+                    .iter()
+                    .map(|id| {
+                        scores
+                            .token_ids
+                            .iter()
+                            .position(|known| id == known)
+                            .unwrap()
+                    })
+                    .collect();
+                let mut replay = scores.clone();
+                replay.gathered = scores
+                    .gathered
+                    .chunks(scores.token_ids.len())
+                    .flat_map(|frame| columns.iter().map(|i| frame[*i]))
+                    .collect();
+                replay.token_ids = token_ids.to_vec();
+                return Ok(replay);
+            }
             UnimplementedModels.ctc_scores(pcm, token_ids)
         }
         fn embed_voice(
@@ -1700,6 +1753,28 @@ mod tests {
                 vec![(512, 79_360), (82_944, 176_505)],
             );
             let document = import_recording(&models, &tone(176_505), language, None).unwrap();
+            assert_eq!(
+                document
+                    .segments
+                    .iter()
+                    .filter(|s| !s.text.is_empty())
+                    .count(),
+                1,
+                "the final 345 samples must not be decoded in isolation"
+            );
+            assert_eq!(document.segments[0].end, 176_505. / 16000.);
+            assert_eq!(
+                document.segments[0].rest["activity_regions"][1]["speakers"],
+                json!([])
+            );
+            assert_eq!(
+                document.segments[0].rest["activity_regions"][3]["speakers"],
+                json!([])
+            );
+            assert!(models.calls().iter().all(|call| call.samples >= 16000));
+            if language == "en" {
+                assert_eq!(models.calls().len(), 1);
+            }
             let meeting_of = |document: &crate::document::Document| {
                 let segments = document
                     .segments
@@ -1836,7 +1911,10 @@ mod tests {
         for case in [
             "switch",
             "overlap",
-            "bridged",
+            "activity_prefix",
+            "activity_gap",
+            "activity_overrun",
+            "activity_owner",
             "earlier_speech",
             "short_gap",
             "noncontiguous",
@@ -1845,11 +1923,22 @@ mod tests {
             match case {
                 "switch" => chunks[1].speakers.push("speaker_1".into()),
                 "overlap" => chunks[0].speakers.push("speaker_1".into()),
-                "bridged" => {
+                "activity_prefix" | "activity_gap" | "activity_overrun" | "activity_owner" => {
                     chunks[0].activity_regions = Some(vec![super::ActivitySlice {
-                        start: 0.0,
-                        end: 2.8,
-                        speakers: vec!["speaker_0".into()],
+                        start: if case == "activity_prefix" { 0.1 } else { 0.0 },
+                        end: match case {
+                            "activity_gap" => 2.7,
+                            "activity_overrun" => 2.9,
+                            _ => 2.8,
+                        },
+                        speakers: vec![
+                            if case == "activity_owner" {
+                                "speaker_1"
+                            } else {
+                                "speaker_0"
+                            }
+                            .into(),
+                        ],
                     }])
                 }
                 "earlier_speech" => chunks[0].start = 0.1,
