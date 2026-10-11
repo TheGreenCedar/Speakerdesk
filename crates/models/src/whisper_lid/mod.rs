@@ -1,7 +1,13 @@
 //! Whisper-tiny LID. Upstream: `Blaizzy/mlx-audio@feb25a37`.
 //! Weights: `mlx-community/whisper-tiny-asr-fp16@77fa3f5`.
+#[cfg(target_os = "macos")]
+mod features;
+#[cfg(target_os = "macos")]
+pub mod network;
 mod select;
 mod tokens;
+
+pub use speakerdesk_core::languages::LID_CHECKPOINT as WEIGHT_PIN;
 
 pub use select::{
     LanguageSelection, LanguageSelectionError, TopMargin, argmax_language_token, select_language,
@@ -14,16 +20,4 @@ use speakerdesk_core::ipc::LanguageProbeOut;
 
 pub fn language_probe(_pcm: &[f32]) -> Result<LanguageProbeOut, ChildError> {
     Err(ChildError::Unimplemented)
-}
-
-#[cfg(test)]
-mod tests {
-    /// Full decoder parity needs the macOS weights
-    /// `mlx-community/whisper-tiny-asr-fp16@77fa3f5`
-    /// (`77fa3f52b482ec80d086df55f893065a9baab172`). This child does not call mlx-rs.
-    #[test]
-    #[ignore = "macOS weights mlx-community/whisper-tiny-asr-fp16@77fa3f5"]
-    fn parity_whisper_lid() {
-        panic!("Not implemented: real model comparison has not run.");
-    }
 }

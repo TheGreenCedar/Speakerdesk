@@ -30,9 +30,7 @@ const NOT_FOUND: &str = "The requested URL was not found on the server. If you e
 const TITLE_MAX_CHARS: usize = 160;
 const PACKET_LIMIT: usize = 120;
 const LIVE_STATUSES: &[&str] = &["starting", "recording", "paused", "finishing"];
-/// `language_detection.LID_CHECKPOINT` (`repo` + `@` + `revision`).
-const LID_CHECKPOINT: &str =
-    "mlx-community/whisper-tiny-asr-fp16@77fa3f52b482ec80d086df55f893065a9baab172";
+use speakerdesk_core::languages::LID_CHECKPOINT;
 
 /// How a JSON field was supplied.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -380,3 +380,65 @@ bookkeeping. The remaining native-versus-worker memory difference is unresolved;
 full application memory acceptance must include equivalent alignment, UI and
 live work. This measurement is sufficient to proceed from the working first
 import to language and timing integration, not to declare the replacement done.
+
+## Automatic language through the native editor
+
+Whisper-tiny now runs in Rust through the resident MLX child. The pinned FP16
+encoder and one-SOT decoder step score all 99 language tokens. Only the SOT and
+language embedding rows stay resident; transcript generation remains Cohere's
+job. Each probe has local activations and cancellation checks between layers.
+Weights and support files are verified once per load. Raw input is padded or
+trimmed to 30 seconds before the centered Hann400/hop160 Slaney-mel frontend.
+
+On the M5, four acoustic cases and two independent calls matched every pinned
+reference language score within `1.2e-7`; 50 mel points per case passed `1e-4`.
+The reference is unchanged upstream Python graph code executed independently
+with the same MLX 0.32.2 native backend. These are numerical fixtures, not proof
+of multilingual acoustic quality. The reference generator and sampled results
+are under `crates/models/tests/data/`; logs are
+`/tmp/speakerdesk-whisper-numerical.log` and
+`/tmp/speakerdesk-whisper-features.log`.
+
+The Auto join exposed a publication defect: merged language windows lost all
+their original probe decisions when converted to the saved document. Publication
+now retains a flat list of absolute spans, selected languages, decisions and
+review flags. A two-probe replay with distinct confident/uncertain decisions
+failed before the fix and passes after import, SQLite close and reopen. It is an
+orchestration replay, not an acoustic assertion.
+
+The language model is optional for manual imports. Both readiness endpoints and
+the server-side Auto run guard require its successful initialized checkpoint
+identity. The HTTP matrix covers an unknown identity, success and failure;
+manual admission still succeeds after Auto failure. A separate real native host
+started with the three-model directory and no Whisper: core readiness remained
+true, Auto remained false, and shutdown reaped the child. Its disposable output
+is `/var/folders/8s/9n6rxkrx6dv46zhjfnhg69rw0000gn/T/speakerdesk-optional-whisper-rmil3yvl/`.
+
+The optimized desktop was built with the same packaging-resource override as
+CI; its binary SHA-256 is
+`4602bd9c4411b2edf51a5421bf058997bbe41ad4ec18f951a95b3e49190ffce6`.
+In the existing disposable native app, the actual UI workflow passed:
+
+1. Select Automatic in Settings; observe the initialized language model.
+2. Import `two-voice.wav` through the native picker and transcribe.
+3. Observe two editable passages, both detected as English; edit and save words.
+4. Quit the entire application and verify all three owned PIDs exited.
+5. Reopen the same store, observe the edited words, and export a JSON project
+   through the native Save dialog.
+
+Job `9a478a9463224475881bf95a9e8ac8a0`, revision 4, retained four original language
+probes and its complete document across restart. Exported segments equal the
+saved document's segments. The Auto default also persisted. The app used PIDs
+16552/16567/16568, then 18026/18040/18041; both complete process trees were reaped
+after normal quit. Raw edited/reopened JSON and native export are retained beside
+the earlier UI evidence in `/private/tmp/speakerdesk-native-desktop.WJKAde/`.
+JSON export SHA-256:
+`cb3fd6d51c78b7f2470296c95f363e35571c1606f86991c467ecda2021a3fc01`.
+
+Core 135, host 46 and tooling 14 tests pass, as do six disposable child lifecycle
+replays and the four-case native-host lifecycle matrix. Clippy passes with
+warnings denied for the application crates; upstream mlx-sys retains its two
+allocator-signature warnings. Independent review found no further defect in
+this slice. This extends the editable import milestone; alignment, voice,
+language repair/retry integration, live capture, packaged independence and
+equivalent full-application performance remain unfinished.

@@ -264,6 +264,15 @@ impl AppState {
         self.set_issues(Vec::new());
     }
 
+    pub(crate) fn automatic_language_ready(&self) -> bool {
+        self.shared
+            .reports
+            .lock()
+            .expect("reports")
+            .iter()
+            .any(|report| report.ok && report.model == languages::LID_CHECKPOINT)
+    }
+
     pub(crate) fn cancel_all(&self) -> Result<(), StoreError> {
         self.admission.close();
         let mut store = self.store();
@@ -373,7 +382,7 @@ async fn config(State(app): State<AppState>) -> Response {
         Json(json!({
             "languages": language_choices(),
             "default_language": default_language,
-            "readiness": readiness_json(&issues),
+            "readiness": readiness_json(&issues, app.automatic_language_ready()),
             "decoder": "Symphonia",
         }))
         .into_response()
@@ -701,6 +710,9 @@ async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -
         let issues = app.shared.issues.lock().expect("issues").clone();
         if !issues.is_empty() {
             return error_response(StatusCode::CONFLICT, &issues.join(" "));
+        }
+        if job.language == languages::AUTOMATIC && !app.automatic_language_ready() {
+            return error_response(StatusCode::CONFLICT, messages::LID_MODEL_MISSING);
         }
         let generation = job
             .extra
@@ -1164,11 +1176,11 @@ fn language_choices() -> Value {
     Value::Object(choices)
 }
 
-fn readiness_json(issues: &[String]) -> Value {
+fn readiness_json(issues: &[String], automatic: bool) -> Value {
     json!({
         "configured": issues.is_empty(),
         "issues": issues,
-        "automatic_language": false,
+        "automatic_language": issues.is_empty() && automatic,
         "word_alignment": false,
         "live_capture": false,
         "model": MODEL_NAME,
@@ -1836,6 +1848,83 @@ mod tests {
         assert_eq!(body["readiness"]["configured"], false);
         let _ = shutdown.send(());
         let _ = tokio::time::timeout(Duration::from_secs(3), server).await;
+    }
+
+    #[tokio::test]
+    async fn auto_readiness_requires_the_initialized_checkpoint_without_blocking_manual_imports() {
+        use speakerdesk_core::{ipc::SetupModelReport, languages::LID_CHECKPOINT};
+        let state = AppState::new();
+        state.set_issues(Vec::new());
+        let mut automatic = job(JOB_A, "uploaded", 1.0);
+        automatic.language = "auto".into();
+        automatic.document = None;
+        state.insert_job(automatic);
+        let mut manual = job(JOB_B, "uploaded", 2.0);
+        manual.document = None;
+        state.insert_job(manual);
+        let running = Running::spawn(state.clone()).await;
+        for (checkpoint, ok, expected) in [
+            ("unknown-checkpoint", true, false),
+            (LID_CHECKPOINT, true, true),
+            (LID_CHECKPOINT, false, false),
+        ] {
+            state.set_model_reports(vec![SetupModelReport {
+                model: checkpoint.into(),
+                ok,
+                timing_ms: 0,
+            }]);
+            let config: Value = running
+                .client
+                .get(running.url("/api/config"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(config["readiness"]["configured"], true);
+            assert_eq!(config["readiness"]["automatic_language"], expected);
+            let setup: Value = running
+                .client
+                .get(running.url("/api/setup"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(setup["core_ready"], true);
+            assert_eq!(setup["automatic_language"], expected);
+        }
+        let rejected = running
+            .authed(
+                running
+                    .client
+                    .post(running.url(&format!("/api/jobs/{JOB_A}/run"))),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), 409);
+        assert!(
+            rejected
+                .text()
+                .await
+                .unwrap()
+                .contains(messages::LID_MODEL_MISSING)
+        );
+        let accepted = running
+            .authed(
+                running
+                    .client
+                    .post(running.url(&format!("/api/jobs/{JOB_B}/run"))),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(accepted.status().is_success());
+        state.drain();
+        running.shutdown().await;
     }
 
     #[tokio::test]

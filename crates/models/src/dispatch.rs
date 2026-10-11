@@ -11,6 +11,7 @@ pub struct Runtime {
     silero: Option<crate::silero::network::Network>,
     nemotron: Option<sortformer::network::Network>,
     cohere: Option<cohere::network::Network>,
+    whisper: Option<whisper_lid::network::Network>,
     vad_sessions: std::collections::HashMap<u64, crate::silero::session::Session>,
     next_session: u64,
 }
@@ -26,6 +27,7 @@ impl Runtime {
             silero: None,
             nemotron: None,
             cohere: None,
+            whisper: None,
             vad_sessions: Default::default(),
             next_session: 1,
         })
@@ -69,6 +71,14 @@ impl Runtime {
                         }
                         cohere::WEIGHT_PIN
                     }
+                    "whisper-language" => {
+                        if self.whisper.is_none() {
+                            self.whisper = Some(whisper_lid::network::Network::load(
+                                &self.model_root.join(model),
+                            )?);
+                        }
+                        whisper_lid::WEIGHT_PIN
+                    }
                     _ => return Err(ChildError::Unimplemented),
                 };
                 if cancel.load(Ordering::Acquire) {
@@ -94,6 +104,9 @@ impl Runtime {
                         .as_ref()
                         .map(|_| sortformer::WEIGHT_PIN.into()),
                     self.cohere.as_ref().map(|_| cohere::WEIGHT_PIN.into()),
+                    self.whisper
+                        .as_ref()
+                        .map(|_| whisper_lid::WEIGHT_PIN.into()),
                 ]
                 .into_iter()
                 .flatten()
@@ -168,6 +181,18 @@ impl Runtime {
                     .expect("loaded above")
                     .transcribe(&pcm, &language, padding, cancel)
                     .map(Response::Text)
+            }
+            Request::LanguageProbe { pcm } => {
+                if self.whisper.is_none() {
+                    self.whisper = Some(whisper_lid::network::Network::load(
+                        &self.model_root.join("whisper-language"),
+                    )?);
+                }
+                self.whisper
+                    .as_mut()
+                    .expect("loaded above")
+                    .probe(&pcm, cancel)
+                    .map(Response::Probe)
             }
             other => dispatch(other, cancel),
         }

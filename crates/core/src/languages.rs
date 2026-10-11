@@ -18,6 +18,8 @@ pub const LANGUAGES: &[(&str, &str)] = &[
 
 pub const CALIBRATED_LANGUAGES: &[&str] = &["en"];
 pub const AUTOMATIC: &str = "auto";
+pub const LID_CHECKPOINT: &str =
+    "mlx-community/whisper-tiny-asr-fp16@77fa3f52b482ec80d086df55f893065a9baab172";
 
 pub fn is_supported(code: &str) -> bool {
     LANGUAGES.iter().any(|(id, _)| *id == code)

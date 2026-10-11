@@ -42,9 +42,6 @@ struct ImportInference {
 
 impl ImportModels for ImportInference {
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String> {
-        if job.language == "auto" {
-            return Err("Choose an explicit language. Automatic language detection is not available in this native preview.".into());
-        }
         // shortcut: first Nemotron window only; remove when offline AOSC/FIFO is implemented.
         if job.duration.is_none_or(|duration| duration > 27.2) {
             return Err("This native preview supports imports up to 27.2 seconds. Longer diarization is not implemented yet.".into());
@@ -121,7 +118,19 @@ async fn serve(
             "nemotron".into(),
             "cohere-speech".into(),
         ]) {
-            Ok(reports) if reports.len() == 3 && reports.iter().all(|report| report.ok) => {
+            Ok(mut reports) if reports.len() == 3 && reports.iter().all(|report| report.ok) => {
+                // Auto is optional: a missing language model must not block manual imports.
+                match load_models.setup_check(&["whisper-language".into()]) {
+                    Ok(language) => reports.extend(language),
+                    Err(error) => {
+                        tracing::warn!(%error, "automatic language model did not initialize");
+                        reports.push(speakerdesk_core::ipc::SetupModelReport {
+                            model: languages::LID_CHECKPOINT.into(),
+                            ok: false,
+                            timing_ms: 0,
+                        });
+                    }
+                }
                 load_app.set_model_reports(reports)
             }
             Ok(_) => {
@@ -298,11 +307,11 @@ async fn language(State(app): State<AppState>, body: Bytes) -> Response {
 
 async fn setup(State(app): State<AppState>) -> Json<Value> {
     let (issues, reports) = app.model_status();
-    let models: Vec<_> = ["Speech detection", "Speaker diarization", "Transcription"].iter().enumerate().map(|(index, name)| json!({"id":index,"name":name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":0,"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
+    let models: Vec<_> = ["Speech detection", "Speaker diarization", "Transcription", "Automatic language"].iter().enumerate().map(|(index, name)| json!({"id":index,"name":name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":0,"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
     Json(
-        json!({"supported":cfg!(all(target_os="macos",target_arch="aarch64")),"ready":issues.is_empty(),"core_ready":issues.is_empty(),"automatic_language":false,"status":if issues.is_empty(){"ready"}else{"failed"},"error":issues.join(" "),"models":models,"total_bytes":0,"downloaded_bytes":0,"can_download":false,
+        json!({"supported":cfg!(all(target_os="macos",target_arch="aarch64")),"ready":issues.is_empty(),"core_ready":issues.is_empty(),"automatic_language":issues.is_empty() && app.automatic_language_ready(),"status":if issues.is_empty(){"ready"}else{"failed"},"error":issues.join(" "),"models":models,"total_bytes":0,"downloaded_bytes":0,"can_download":false,
         "voice":{"status":"unavailable","enabled":false,"available":false,"released":false,"message":"Native voice recognition is not implemented yet."},
-        "message":"Native preview: explicit-language imports up to 27.2 seconds. Automatic language, word alignment and live capture are not implemented yet."}),
+        "message":if app.automatic_language_ready() { "Native preview: automatic and explicit-language imports up to 27.2 seconds. Word alignment and live capture are not implemented yet." } else { "Native preview: explicit-language imports up to 27.2 seconds. Automatic language is unavailable; check the local Whisper artifact. Word alignment and live capture are not implemented yet." }}),
     )
 }
 

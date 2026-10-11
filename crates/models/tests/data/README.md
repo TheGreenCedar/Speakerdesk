@@ -74,3 +74,20 @@ dtypes follow the reference's mixed Float32/BF16 execution.
 SPEAKERDESK_TEST_COHERE=/path/to/models/cohere-speech \
   cargo test --release --locked -p speakerdesk-models --test cohere -- --ignored --nocapture
 ```
+
+`whisper-reference.json` records the pinned mlx-audio Whisper-tiny language-only
+pass using MLX 0.32.2 and the same macOS 15 backend as Rust. It covers this whole
+WAV, its first three seconds, a nonzero 549-sample crop, and 512 silent samples.
+Each case has all 99 language probabilities and 50 sampled log-mel values.
+Repeated Rust calls check independent probe state; silence is a numerical case,
+not speech admission. Silero owns speech admission in the application.
+
+`generate_whisper_reference.py` takes the upstream Whisper source directory,
+upstream `dsp.py`, checkpoint directory, WAV, and output path. It verifies source
+and checkpoint hashes, then executes the unchanged upstream definitions with
+the checkpoint's token metadata. It does not invoke Rust or generate text.
+
+```sh
+SPEAKERDESK_TEST_WHISPER=/path/to/models/whisper-language \
+  cargo test --release --locked -p speakerdesk-models --test whisper -- --ignored --nocapture
+```

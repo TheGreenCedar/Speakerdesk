@@ -973,6 +973,26 @@ fn manual_language(language: &str) -> Option<String> {
 }
 
 fn detection_value(detection: &LanguageDetection) -> Value {
+    let mut value = detection_summary(detection);
+    if !detection.probes.is_empty() {
+        value["probes"] = json!(
+            detection
+                .probes
+                .iter()
+                .map(|probe| json!({
+                    "start_sample": probe.start_sample,
+                    "end_sample": probe.end_sample,
+                    "language": probe.language,
+                    "decision": detection_summary(&probe.decision),
+                    "review": probe.review,
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
+    value
+}
+
+fn detection_summary(detection: &LanguageDetection) -> Value {
     json!({
         "mode": detection.mode.as_str(),
         "reason": detection.reason.as_str(),
@@ -1248,6 +1268,7 @@ mod tests {
         turns: Vec<Turn>,
         speech: Vec<(usize, usize)>,
         token_count: u32,
+        probe_scores: Mutex<std::collections::VecDeque<Vec<f32>>>,
         cursor: Mutex<usize>,
         events: Mutex<Vec<Event>>,
     }
@@ -1258,6 +1279,7 @@ mod tests {
                 turns,
                 speech,
                 token_count: 1,
+                probe_scores: Mutex::new(Default::default()),
                 cursor: Mutex::new(0),
                 events: Mutex::new(Vec::new()),
             }
@@ -1365,7 +1387,12 @@ mod tests {
             self.events.lock().unwrap().push(Event::Probe);
             Ok(LanguageProbeOut {
                 codes: vec!["en".to_string(), "fr".to_string()],
-                probabilities: vec![0.99, 0.01],
+                probabilities: self
+                    .probe_scores
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| vec![0.99, 0.01]),
             })
         }
         fn transcribe(
@@ -1973,6 +2000,79 @@ mod tests {
                 .iter()
                 .any(|warning| warning == super::WARN_AUTO)
         );
+    }
+
+    #[test]
+    fn merged_automatic_probes_survive_publication_and_store_reopen() {
+        use crate::{
+            document::Job,
+            store::{JobStore, SqliteJobStore},
+        };
+        let samples = 96_000;
+        let models = Scripted::new(
+            vec![Turn {
+                start: 0.0,
+                end: 6.0,
+                speaker: "speaker_0".into(),
+            }],
+            vec![(0, samples)],
+        );
+        models
+            .probe_scores
+            .lock()
+            .unwrap()
+            .extend([vec![0.99, 0.01], vec![0.6, 0.4]]);
+        let document = import_recording(&models, &tone(samples), languages::AUTOMATIC).unwrap();
+        assert_eq!(
+            models
+                .events()
+                .iter()
+                .filter(|event| *event == "probe")
+                .count(),
+            2
+        );
+        assert_eq!(
+            models.calls().len(),
+            1,
+            "compatible probes use one ASR crop"
+        );
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "id":uuid::Uuid::new_v4().simple().to_string(), "name":"replay", "status":"done",
+            "language":"auto", "created":0.0, "updated":0.0, "document":document,
+        }))
+        .unwrap();
+        let path = std::env::temp_dir().join(format!("speakerdesk-probes-{}.sqlite", job.id));
+        let mut store = SqliteJobStore::open(&path).unwrap();
+        store.initialize().unwrap();
+        store.put(&job, None).unwrap();
+        drop(store);
+        let store = SqliteJobStore::open(&path).unwrap();
+        let reopened = store.get(&job.id, false).unwrap().unwrap();
+        drop(store);
+        std::fs::remove_file(&path).unwrap();
+        let document = reopened.document.unwrap();
+        let spoken = document
+            .segments
+            .iter()
+            .find(|s| !s.text.is_empty())
+            .unwrap();
+        let probes = spoken.language_detection.as_ref().unwrap()["probes"]
+            .as_array()
+            .expect("published probe decisions");
+        assert_eq!(probes.len(), 2);
+        for (index, probe) in probes.iter().enumerate() {
+            assert_eq!(probe["start_sample"], index * 48_000);
+            assert_eq!(probe["end_sample"], (index + 1) * 48_000);
+            assert_eq!(probe["language"], "en");
+            assert!(
+                probe["decision"].get("probes").is_none(),
+                "probe snapshots contain no nested history"
+            );
+        }
+        assert_eq!(probes[0]["decision"]["reason"], "detected");
+        assert_eq!(probes[0]["review"], false);
+        assert_eq!(probes[1]["decision"]["reason"], "best_effort");
+        assert_eq!(probes[1]["review"], true);
     }
 
     #[test]
