@@ -1,7 +1,9 @@
 //! New database at `<storage>/speakerdesk.sqlite`. The legacy `jobs.sqlite` is never written.
 mod legacy;
+mod sqlite;
 
 pub use legacy::import_legacy;
+pub use sqlite::SqliteJobStore;
 
 use std::time::Duration;
 
