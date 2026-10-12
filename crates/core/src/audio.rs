@@ -1,7 +1,8 @@
 //! Decode, resample, mix, and recording writes. Owned by the core-audio agent.
 //!
 //! Canonical input is 16 kHz mono PCM16. Anything else is decoded with symphonia,
-//! mixed to mono, and resampled with rubato. macOS `afconvert` is not available here.
+//! mixed to mono, and resampled with rubato. macOS uses its system decoder only
+//! when symphonia reports an unsupported format or codec.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -27,6 +28,9 @@ use crate::limits::SAMPLE_RATE;
 pub const MAX_DURATION_SECONDS: f64 = 7200.0;
 
 const MAX_FRAMES: u32 = (MAX_DURATION_SECONDS as u32) * SAMPLE_RATE;
+// afconvert uses a 4096-byte WAV header. Allow bounded ancillary chunks.
+#[cfg(target_os = "macos")]
+const MAX_APPLE_WAV_BYTES: u64 = MAX_FRAMES as u64 * 2 + 65536;
 /// Mono PCM16 frames whose RIFF size (36 + two bytes per frame) fits u32.
 /// Live capture is independent of the two-hour import normalization policy.
 pub const MAX_RECORDING_FRAMES: u32 = (u32::MAX - 36) / 2;
@@ -170,7 +174,12 @@ pub fn normalize(
         }
         Err(_) => {}
     }
-    let (rate, mono) = decode_mono(source)?;
+    let Some((rate, mono)) = decode_mono(source)? else {
+        #[cfg(target_os = "macos")]
+        return normalize_apple(source, destination);
+        #[cfg(not(target_os = "macos"))]
+        return Err(AudioError::message(DECODE_RECORDING));
+    };
     let resampled = if mono.is_empty() {
         Vec::new()
     } else {
@@ -428,21 +437,23 @@ fn write_pcm16_wav(path: &Path, samples: &[f32]) -> Result<(), AudioError> {
     Ok(())
 }
 
-fn decode_mono(path: &Path) -> Result<(u32, Vec<f32>), AudioError> {
+fn decode_mono(path: &Path) -> Result<Option<(u32, Vec<f32>)>, AudioError> {
     let file = File::open(path)?;
     let source = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
     if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
         hint.with_extension(extension);
     }
-    let mut format = symphonia::default::get_probe()
-        .probe(
-            &hint,
-            source,
-            FormatOptions::default(),
-            MetadataOptions::default(),
-        )
-        .map_err(|_| AudioError::message(DECODE_RECORDING))?;
+    let mut format = match symphonia::default::get_probe().probe(
+        &hint,
+        source,
+        FormatOptions::default(),
+        MetadataOptions::default(),
+    ) {
+        Ok(format) => format,
+        Err(SymphoniaError::Unsupported(_)) => return Ok(None),
+        Err(_) => return Err(AudioError::message(DECODE_RECORDING)),
+    };
     let track = format
         .default_track(TrackType::Audio)
         .or_else(|| {
@@ -462,9 +473,13 @@ fn decode_mono(path: &Path) -> Result<(u32, Vec<f32>), AudioError> {
     {
         return Err(AudioError::message(DURATION_LIMIT));
     }
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = match symphonia::default::get_codecs()
         .make_audio_decoder(&params, &AudioDecoderOptions::default())
-        .map_err(|_| AudioError::message(DECODE_RECORDING))?;
+    {
+        Ok(decoder) => decoder,
+        Err(SymphoniaError::Unsupported(_)) => return Ok(None),
+        Err(_) => return Err(AudioError::message(DECODE_RECORDING)),
+    };
     let mut rate = params.sample_rate.filter(|rate| *rate > 0);
     let mut mono = Vec::new();
     loop {
@@ -498,7 +513,88 @@ fn decode_mono(path: &Path) -> Result<(u32, Vec<f32>), AudioError> {
         append_mono(&mut mono, &decoded)?;
     }
     let rate = rate.ok_or(AudioError::message(DECODE_RECORDING))?;
-    Ok((rate, mono))
+    Ok(Some((rate, mono)))
+}
+
+#[cfg(target_os = "macos")]
+struct AppleConversion {
+    directory: std::path::PathBuf,
+    child: Option<std::process::Child>,
+    deadline: std::time::Instant,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for AppleConversion {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl AppleConversion {
+    fn wait(&mut self) -> Result<(), AudioError> {
+        let output = self.directory.join("audio.wav");
+        let child = self.child.as_mut().expect("conversion child");
+        loop {
+            if fs::metadata(&output).is_ok_and(|meta| meta.len() > MAX_APPLE_WAV_BYTES) {
+                return Err(AudioError::message(DURATION_LIMIT));
+            }
+            if let Some(status) = child.try_wait()? {
+                if !status.success() {
+                    return Err(AudioError::message(DECODE_RECORDING));
+                }
+                if fs::metadata(&output)?.len() > MAX_APPLE_WAV_BYTES {
+                    return Err(AudioError::message(DURATION_LIMIT));
+                }
+                return Ok(());
+            }
+            if std::time::Instant::now() >= self.deadline {
+                return Err(AudioError::message(
+                    "Audio conversion exceeded three minutes.",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_apple(source: &Path, destination: &Path) -> Result<f64, AudioError> {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::process::{Command, Stdio};
+    let source = fs::canonicalize(source)?;
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory =
+        fs::canonicalize(parent)?.join(format!(".speakerdesk-audio-{}", uuid::Uuid::new_v4()));
+    fs::DirBuilder::new().mode(0o700).create(&directory)?;
+    let mut conversion = AppleConversion {
+        directory,
+        child: None,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(180),
+    };
+    let output = conversion.directory.join("audio.wav");
+    conversion.child = Some(
+        Command::new("/usr/bin/afconvert")
+            .arg(source)
+            .arg(&output)
+            .args(["-f", "WAVE", "-d", "LEI16@16000", "-c", "1"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?,
+    );
+    conversion.wait()?;
+    let duration = wav_duration(&output)?;
+    fs::rename(&output, destination)?;
+    Ok(duration)
 }
 
 fn append_mono(
@@ -726,6 +822,127 @@ mod tests {
             DECODE_RECORDING
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_normalizes_ogg_opus_with_os_decoder() {
+        let dir =
+            std::env::temp_dir().join(format!("speakerdesk-audio-opus-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.ogg");
+        fs::write(
+            &source,
+            include_bytes!("../tests/testdata/authored-tone.ogg"),
+        )
+        .unwrap();
+        let destination = dir.join("audio.wav");
+        let duration = normalize(&source, &destination).unwrap();
+        assert_eq!(duration, 16006. / f64::from(SAMPLE_RATE));
+        let pcm = read_pcm16(&destination).unwrap();
+        assert_eq!(pcm.len(), 16006);
+        let rms = (pcm.iter().map(|sample| sample * sample).sum::<f32>() / pcm.len() as f32).sqrt();
+        assert!((0.14..0.18).contains(&rms), "{rms}");
+        assert!(pcm.iter().any(|sample| *sample > 0.1));
+        assert!(pcm.iter().any(|sample| *sample < -0.1));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn apple_conversion_limits_kill_and_reap_the_child_and_remove_partial_output() {
+        use std::process::{Command, Stdio};
+        for (oversized, completed) in [(false, false), (true, false), (true, true)] {
+            let directory = std::env::temp_dir()
+                .join(format!("speakerdesk-audio-bound-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&directory).unwrap();
+            let partial = File::create(directory.join("audio.wav")).unwrap();
+            partial
+                .set_len(if oversized {
+                    MAX_APPLE_WAV_BYTES + 1
+                } else {
+                    1
+                })
+                .unwrap();
+            drop(partial);
+            let mut child = Command::new("/bin/sleep")
+                .arg(if completed { "0" } else { "30" })
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            if completed {
+                assert!(child.wait().unwrap().success());
+            }
+            let pid = child.id();
+            let mut conversion = AppleConversion {
+                directory: directory.clone(),
+                child: Some(child),
+                deadline: std::time::Instant::now()
+                    + std::time::Duration::from_secs(if oversized { 180 } else { 0 }),
+            };
+            assert_eq!(
+                message(conversion.wait().unwrap_err()),
+                if oversized {
+                    DURATION_LIMIT
+                } else {
+                    "Audio conversion exceeded three minutes."
+                }
+            );
+            drop(conversion);
+            assert!(!directory.exists());
+            let mut status = 0;
+            assert_eq!(
+                unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) },
+                -1
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+        }
+    }
+
+    #[test]
+    fn normalization_errors_preserve_the_existing_destination() {
+        let dir =
+            std::env::temp_dir().join(format!("speakerdesk-audio-errors-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("audio.wav");
+        write_i16(&destination, 1, SAMPLE_RATE, &[1000, -1000]);
+        let original = fs::read(&destination).unwrap();
+
+        let nonfinite = dir.join("nonfinite.wav");
+        let mut writer = WavWriter::create(
+            &nonfinite,
+            WavSpec {
+                channels: 1,
+                sample_rate: SAMPLE_RATE,
+                bits_per_sample: 32,
+                sample_format: SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        writer.write_sample(f32::NAN).unwrap();
+        writer.finalize().unwrap();
+        assert_eq!(
+            message(normalize(&nonfinite, &destination).unwrap_err()),
+            FINITE_MONO
+        );
+        assert_eq!(fs::read(&destination).unwrap(), original);
+
+        let invalid = dir.join("invalid.ogg");
+        fs::write(&invalid, b"not an audio container").unwrap();
+        assert_eq!(
+            message(normalize(&invalid, &destination).unwrap_err()),
+            DECODE_RECORDING
+        );
+        assert_eq!(fs::read(&destination).unwrap(), original);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 3);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

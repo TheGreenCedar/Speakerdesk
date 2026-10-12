@@ -127,6 +127,7 @@ impl RuntimeSettings {
     ) -> tauri_plugin_shell::process::Command {
         app.shell()
             .command(&self.executable)
+            .set_process_group(true)
             .args([
                 std::ffi::OsStr::new("--native-host"),
                 self.storage.as_os_str(),
@@ -503,6 +504,55 @@ mod runtime_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn forced_runtime_shutdown_terminates_owned_descendants() {
+        let bundle = Bundle::new();
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_shell::init())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        fs::write(
+            bundle.0.join("Contents/MacOS/speakerdesk"),
+            b"#!/bin/sh\n/bin/sleep 30 &\nprintf '%s\\n' \"$!\"\nwait\n",
+        )
+        .unwrap();
+        let (mut events, child) = bundle.settings(None).command(app.handle()).spawn().unwrap();
+        let descendant = tauri::async_runtime::block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut bytes = Vec::new();
+                while let Some(event) = events.recv().await {
+                    if let CommandEvent::Stdout(chunk) = event {
+                        bytes.extend(chunk);
+                        if bytes.contains(&b'\n') {
+                            return String::from_utf8(bytes)
+                                .unwrap()
+                                .trim()
+                                .parse::<i32>()
+                                .unwrap();
+                        }
+                    }
+                }
+                panic!("Host did not report its owned descendant")
+            })
+            .await
+        });
+        child.kill().unwrap();
+        let pid = descendant.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let survived = unsafe { libc::kill(pid, 0) } == 0;
+        if survived {
+            // Clean up the real fixture process even when this regression fails.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(
+            !survived,
+            "Forced host shutdown left its descendant running"
+        );
     }
 
     #[test]

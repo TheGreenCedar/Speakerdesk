@@ -4,7 +4,8 @@ Accepted outcome: complete the native Mac application, preserving the shipped
 0.6.6 behavior and saved data. Real import/capture must produce an editable
 transcript that survives full application restart and export. Equivalent release
 measurements must match or improve baseline latency, sustained live processing,
-and peak memory. MossFormer2/episode work belongs to issue 25; Windows comes later.
+and peak memory, except for the explicitly accepted extra Stop time described
+below. MossFormer2/episode work belongs to issue 25; Windows comes later.
 
 Starting PR head: `01e757cd5f3db3f8fccfcfa34e94e91cadc0fe26`.
 Starting base: `59e7b0c860f72ca94c24e6eab18ac820b144ee24`.
@@ -19,15 +20,28 @@ disposable updater replacement. The canonical signed package runs without a
 Python application runtime. The optimization work did not replace these broader
 migration acceptance criteria.
 
-The accepted replacement is not complete: Stop remains slower than 0.6.6,
-qualified by native final-passage timing absent from the measured baseline.
-Equivalent-quality long-import and comparative cancellation/recovery performance
-also remain unqualified. A later format check reproduced an accepted Ogg/Opus
-upload failing native preparation while the unchanged legacy normalization path
-succeeds through system `afconvert`. Existing legacy voice profiles are preserved
+Final package qualification is in progress for the repaired Ogg/Opus preparation
+path and forced-shutdown process cleanup. The bounded long-import comparison and
+dispatched-accuracy cancellation check below establish no observed regression on
+those fixtures; baseline lacks an automatic child-recovery comparator. Existing legacy voice profiles are preserved
 but incompatible model identities do not participate in native recognition;
 new native enrollment/recognition does not qualify historical profile reuse.
+That exclusion implements the accepted preservation policy rather than a missing
+embedding-space bridge: the existing People flow asks the user to save the voice
+again, and guarded replacement preserves the old profile until consented success.
 Windows and issue 25 remain deliberate follow-ups.
+
+On October 12 the owner explicitly accepted this PR's extra Stop time for final
+refinement. The retained 2.570-second native versus 1.952–1.959-second baseline
+result remains disclosed, with native final-passage timing absent from that
+baseline. It is no longer a completion blocker. This acceptance does not waive
+unrelated latency, sustained backlog or peak-memory regressions. Neural Engine
+execution/overlap for the speech models is separate follow-up work, not part of
+this rewrite. Existing ReDimNet compute policy stays measured CPU_AND_GPU.
+
+PR head `40c3827b9bc20b67423beb405d3c5d5fab246dd5` passed all three GitHub CI
+jobs: source, Linux Rust and Mac Rust. Local implementation continues from that
+clean revision; the results below remain scoped to their recorded artifacts.
 
 Legacy Python application sources remain test/oracle references, not package
 inputs. Current CI, reference generators and source-boundary checks still depend
@@ -305,11 +319,19 @@ or editor-render clocks. Both actual editors displayed the saved transcript.
 The same native process then imported the unchanged 82.010-second fixture in
 7.974 seconds to HTTP Ready and 7.993 seconds to verified persisted aligned
 output: all ten spoken rows are timed. The phase sampled 3.597 GB peak owned
-physical footprint and 4.441 CPU seconds. The earlier baseline long import
-retains only one aligned spoken row out of eighteen and eight standalone “you”
-rows; its collector lost the clocks on that quality failure. No repeat was run
-to manufacture a like-for-like long comparison. All measured native/baseline
-root, service and model processes were reaped through actual UI Quit. Evidence:
+physical footprint and 4.441 CPU seconds. A bounded baseline repeat with the
+repaired collector measured 8.932 seconds from import to HTTP Ready and 8.937
+seconds to verified persistence. It reproduced the earlier baseline output:
+only one aligned spoken row out of eighteen, including eight standalone “you”
+rows. The baseline short-plus-long process tree sampled 4.029 GB peak owned
+physical footprint and 12.755 CPU seconds; those cumulative CPU observations
+are not the native warm-phase CPU scope. The native result is faster on this
+fixture while producing more complete timing, not an equal-output acoustic
+benchmark. The repeat's preceding short import took 4.978 seconds (11.481 from
+process launch), consistent with the earlier 5.044-second baseline import.
+No hardware caches were flushed. All measured native/baseline root, service and
+model processes were reaped through actual UI Quit, including the repeat in
+`baseline-long-closeout/shutdown.json`. Evidence:
 `/private/tmp/speakerdesk-application-cold.ryyiBjrt/`.
 
 ## Additional performance candidates (bounded changes joined)
@@ -329,8 +351,9 @@ alignment reuse and publication guards, fresh saved-accuracy decoding, valid
 lengths, cancellation, model/session ownership and existing latency/memory gates.
 Concurrent heavy inference remains a later evidence-dependent experiment. The
 2.570-second native Stop versus 1.952–1.959-second baseline remains a distinct
-interaction limitation, qualified by baseline's absent final-passage timing.
-Faster Start-to-Ready does not close that gate. The measurements below do not
+interaction cost, qualified by baseline's absent final-passage timing. The owner
+explicitly accepted that cost for this PR; faster Start-to-Ready does not erase
+it. The measurements below do not
 establish a performance gain from this additional batch.
 
 Candidate decisions:
@@ -426,9 +449,9 @@ the cut-off final “last.” fragment remains unassigned with null reading-turn
 times. Complete supplied-text alignment does not establish full speaker/time
 attribution or full-fixture transcription accuracy for this interrupted capture.
 
-The full replacement remains active and unfinished. Stop-to-Ready parity,
-equivalent-quality long-import comparison, and comparative cancellation/recovery
-performance remain open, alongside the format/profile limits above; no additional cache, scheduler, concurrent preparation
+The full replacement remains active while the final format and lifecycle checks
+are joined. The known Stop cost is accepted, and the long-import timing and
+output differences are recorded above. No additional cache, scheduler, concurrent preparation
 or heavyweight GPU-overlap experiment is justified by the current measurements.
 
 ## Push closeout and format compatibility check
@@ -460,6 +483,77 @@ service after restart, without another upload. Every owned host exited normally.
 The synthetic Ogg encoder attempt failed before producing a qualifying fixture;
 only the valid public sample supports the decoder finding. The legacy result is
 a direct normalization-function test, not a new full baseline desktop run.
+
+## Final compatibility and lifecycle corrections
+
+The Opus repair uses the existing macOS system decoder only when Symphonia's
+probe or decoder construction reports `Unsupported`. Recognized decoding errors,
+nonfinite samples and duration errors retain their existing failure path. The
+fixed `/usr/bin/afconvert` command receives absolute input/output paths, a cleared
+environment, null standard streams and a private sibling directory. Its inherited
+three-minute conversion deadline and two-hour PCM limit are retained; the output
+ceiling permits bounded WAV header overhead and is checked both during conversion
+and after exit. Full canonical WAV validation precedes atomic publication.
+Ordinary success, errors and timeouts reap the child and remove staging. No codec,
+process framework, Python runtime or Cargo dependency was added.
+
+An authored 8,680-byte Ogg/Opus tone fixture, with a partial final frame, reproduces
+the native decode error before the change and yields the independently checked
+16,006 mono PCM16 frames afterward. Negative cases preserve the prior destination
+for malformed input and nonfinite known-codec samples. Real disposable child
+tests cover conversion timeout and both running/completed oversized output.
+Independent review caught and corrected the completed-child size-check gap.
+
+The same review traced the desktop's 45-second forced-Quit path. The shell
+plugin's default killed only the host, which could leave a longer-running native
+converter alive. The existing `set_process_group(true)` API now makes forced
+termination cover the owned host group and descendants. A real fake-host/sleep
+regression through `RuntimeSettings.command` fails before that change and passes
+afterward. Forced SIGKILL can still leave private per-job staging on disk because
+destructors cannot run; deleting that native job removes its complete media
+directory. Normal conversion failures clean staging immediately. This does not
+affect legacy-owned rollback recordings.
+
+The joined source passes 180 core and 27 desktop tests, strict all-target
+core/host/desktop Clippy and the source-boundary check. Logs and the original
+public-file reproduction remain in
+`/private/tmp/speakerdesk-opus-import-wbllqn5f/`.
+
+Canonical optimized packaging, strict Developer ID verification and bundle
+inspection pass. The relocated executable is SHA-256
+`7b8ddc1c51107df501184d226359ca47b277c83b457c004f8a3228b7e58a4918`.
+With sanitized environment and disposable storage, the original failing public
+Opus file now reaches persisted `uploaded` state at 228.1066875 seconds. All
+3,649,707 normalized PCM samples exactly match the retained legacy result; no
+model inference was needed for this boundary test. Actual process observations
+show the native host and model child in the host's owned process group, with no
+Python application process. The cloned incompatible voice profile, including
+centroid, version and enrollment payload, and all saved names remain unchanged.
+The People API exposes saved/incompatible status and re-enrollment guidance.
+The final editor check is pending because the UI tool reports the Mac locked;
+earlier actual editor proof remains scoped to its recorded package. Receipts:
+`/private/tmp/speakerdesk-import-closeout-0ckgcmrz/`.
+
+One short real-model service pair uses the unchanged 288,647-sample synthetic
+tail (18.040 seconds). After Stop and observable dispatched refinement, native
+Pause acknowledged in 2.124 ms and reached terminal ownership release in
+6.945 ms. Current words and exact saved PCM survived; a subsequent protected
+edit survived accepted Resume. Baseline acknowledged Pause but retained
+`finishing` and inference ownership throughout the 30-second observation window.
+Its eventual drain time was not measured. This is a censored observation, not
+a numeric speedup or a claim about interrupting an active GPU kernel. Both owned
+process trees were reaped. A preceding driver attempt used the wrong capture
+packet encoding and was excluded; float32 conversion was independently checked
+before the recorded pair. Evidence:
+`/private/tmp/speakerdesk-cancel-closeout-yi7lo2c_/comparison.json`.
+
+There is no baseline generic import-cancellation endpoint or automatic live-child
+rebuild to compare with native's added behavior. Existing deterministic held-model
+tests establish acknowledgement-before-release and stale-publication boundaries;
+the retained actual native recovery exercise establishes preserved edits/audio,
+restart/export and a 4,105 ms worker rebuild on that fixture. It does not establish
+an unavailable baseline recovery speedup. Completed baseline/native refinement
+checkpoints were not deleted merely to manufacture a cancellation benchmark.
 
 ## Earlier foundation proof
 

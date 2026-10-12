@@ -546,7 +546,7 @@ async fn config(State(app): State<AppState>) -> Response {
             "languages": language_choices(),
             "default_language": default_language,
             "readiness": readiness_json(&issues, app.automatic_language_ready(), app.alignment_ready()),
-            "decoder": "Symphonia",
+            "decoder": if cfg!(target_os = "macos") { "Symphonia and macOS AudioToolbox" } else { "Symphonia" },
         }))
         .into_response()
     })
