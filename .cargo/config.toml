@@ -2,4 +2,4 @@
 xtask = "run -p xtask --"
 
 [env]
-MLX_PREBUILT_ROOT = { value = "target/native/mlx-0.32.2", relative = true }
+MLX_PREBUILT_ROOT = { value = ".cache/native/mlx-0.32.2", relative = true }

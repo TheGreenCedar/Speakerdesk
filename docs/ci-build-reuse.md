@@ -35,8 +35,11 @@ and documentation edits preserve unchanged dependency outputs. Native contract
 or tool changes block dependency fallback. The sccache contract separately
 binds workflow/build scripts, Tauri configuration and embedded web/model
 metadata as before.
-The pinned MLX 0.32.2 runtime is still prepared and checked by its existing
-script. Echo output reuse requires an exact identity and payload digest; misses
+The pinned MLX 0.32.2 runtime is prepared and checked by its existing script at
+`.cache/native/mlx-0.32.2`, outside Cargo's pruned `target` tree. This prepared
+dependency is reused intact locally and is not included in the persisted cache
+paths. Cargo configuration, native notices and bundle inputs use this same
+location. Echo output reuse requires an exact identity and payload digest; misses
 still fetch and verify the pinned source through the guarded build. Native
 runtime downloads and echo source/build trees are not persisted. Notice
 generation fetches verified echo source notices even when the library is a hit.
@@ -103,7 +106,7 @@ artifact for signing instead of rebuilding it merely for release.
 The implementation follows [CodeStory's pinned sccache and explicit trusted
 save pattern](https://github.com/TheGreenCedar/CodeStory/blob/424d56b1b5452555460d528f40d08a231ac72a92/.github/workflows/rust-ci.yml).
 [BatCave's maintained Rust-cache action](https://github.com/TheGreenCedar/BatCave/blob/2355d82b08a097259a67ccd789da032945768027/.github/workflows/validation.yml)
-is another local reference; Speakerdesk retains its existing mechanism to avoid
-persisting Cargo targets alongside bundle output. Neither reference's timings
-establish Speakerdesk's performance. Superseded main jobs can also occupy macOS
+is another local reference; Speakerdesk keeps prepared native runtime inputs
+separate from Cargo dependency outputs and fresh bundle output. Neither
+reference's timings establish Speakerdesk's performance. Superseded main jobs can also occupy macOS
 runner capacity; that scheduling issue is separate from cache effectiveness.

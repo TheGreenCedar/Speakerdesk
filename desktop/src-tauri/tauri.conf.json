@@ -33,7 +33,7 @@
       "minimumSystemVersion": "15.0",
       "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist",
-      "frameworks": ["../../target/native/mlx-0.32.2/lib/libmlx.dylib"]
+      "frameworks": ["../../.cache/native/mlx-0.32.2/lib/libmlx.dylib"]
     },
     "shortDescription": "Private transcription and speaker labeling",
     "category": "Productivity",
@@ -45,7 +45,7 @@
       "../capture/speakerdesk-capture": "speakerdesk-capture",
       "../capture/speakerdesk-capture.capability.json": "speakerdesk-capture.capability.json",
       "../capture/echo/libspeakerdesk_echo.dylib": "libspeakerdesk_echo.dylib",
-      "../../target/native/mlx-0.32.2/lib/mlx.metallib": "mlx/mlx.metallib",
+      "../../.cache/native/mlx-0.32.2/lib/mlx.metallib": "mlx/mlx.metallib",
       "../../target/native/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
     }
   }
