@@ -27,6 +27,17 @@ JSON included the edits. A stale PUT returned 409. Original source bytes matched
 the imported fixture. Generated playback controls were exercised; this does not
 substitute for a listening study.
 
+The same signed candidate also captured Mac audio with the microphone disabled,
+using two playbacks of the fixed public mixture. The 102.377-second recording
+included idle silence; its two detected overlap passages became four editable
+rows automatically after capture stopped. No separation ran while recording.
+The observed saved-accuracy completion preceded separation completion by 8.345 s;
+the existing words stayed available during that interval. This is a workflow
+check, not a paired Stop-latency benchmark. Peak sampled owned physical footprint
+was 4.332 GB. A whole-app quit and reopen retained the exact document and revision
+37, including both generated pairs. The capture helper, inference child, host and
+desktop were all reaped after their respective shutdowns.
+
 The real resident child completed repeated requests, cancelled an active maximum
 window and successfully processed the following request. Cancellation preserved
 the document and left no generated assets for the cancelled operation. Sampled
