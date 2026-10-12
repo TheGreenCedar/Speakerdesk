@@ -1,9 +1,7 @@
-"""Supported release promotion: exact acoustics AND native export gates.
+"""Retained signer/updater verification; native release promotion is unsupported.
 
-Local core/native validation runs before any network call. Default preparation
-verifies signing provenance read-only, then prints a reviewable plan. --publish
-executes an already-authorized release; it is never CI-driven.
-An existing release/draft is preserved, not overwritten or auto-resumed.
+The retired Python replay gate cannot qualify a native package. Preparation fails
+before any network call until a native promotion gate is implemented.
 """
 import argparse
 import base64
@@ -17,10 +15,19 @@ import selectors
 import signal
 import time
 import zipfile
-from core_acceptance import ROOT, artifact, digest_file, require, validate
 
 REPOSITORY='TheGreenCedar/Speakerdesk'
 REPOSITORY_ID=1406057260
+
+
+def require(value,message):
+    if not value:raise ValueError(message)
+
+def digest_file(path):
+    digest=hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        while block:=stream.read(1024**2):digest.update(block)
+    return digest.hexdigest()
 
 def payload_names(manifest):
     """Exact signed payload contract; legacy candidates retain two payloads."""
@@ -59,40 +66,7 @@ def verify_updater_files(manifest,directory,config):
     require(signature.read_text().strip()==update['signature'].strip(),'Updater signature metadata differs from final signer bytes')
 
 def prepare(report, manifest_path, qa_path, notes, signer_archive=None):
-    require(manifest_path.name=='artifact-manifest.json','Validate the exact manifest that will be uploaded')
-    core=validate(report,manifest_path)
-    manifest=json.loads(manifest_path.read_text());qa=json.loads(qa_path.read_text())
-    require(manifest.get('source_repository')==REPOSITORY,'Signer source repository differs')
-    require(all(n.get('status')=='Accepted' for n in manifest.get('notarization',[])) and
-            {n.get('kind') for n in manifest.get('notarization',[])}=={'app','dmg'},'App and DMG notarization required')
-    require(manifest.get('signer_run_id') and manifest.get('producer_run_id') and manifest.get('input_artifact_sha256'),'Trusted signing provenance missing')
-    config=json.loads((ROOT/'desktop/src-tauri/tauri.conf.json').read_text())
-    version=manifest['version'];require(version==config['version'] and re.fullmatch(r'\d+\.\d+\.\d+',version),'Candidate version differs')
-    require(qa.get('passed') is True and qa.get('source_commit')==manifest['source_commit'] and qa.get('version')==version,'Exact native export QA required')
-    require(qa.get('candidate_cdhash')==core['app_cdhash'],'Native and acoustic QA executed different apps')
-    for key in ('all_four_native_output_formats_match_expected_bytes','root_independently_rehashed_saved_exports','staging_clean','native_UI_responsive'):
-        require(qa.get(key) is True,'Native export regression incomplete: '+key)
-    require(qa.get('native_UI_save_cancel_retry')=='passed' and qa.get('native_UI_save_cancel_retry_replacement')=='passed','Native Save/Cancel/retry/replacement incomplete')
-    require(digest_file(Path(qa['verification']))==qa.get('verification_sha256'),'Native verification changed')
-    exports=qa.get('rehashed_exports',[])
-    require({x['kind'] for x in exports}=={'txt','srt','vtt','json'},'Native format coverage missing')
-    for item in exports:artifact(Path(item['path']),item)
-    files={}
-    for item in manifest['files']:
-        filename=item['filename'];require(Path(filename).name==filename,'Unsafe artifact filename')
-        path=manifest_path.parent/filename;artifact(path,item);files[filename]=dict(item,path=str(path))
-    require(set(files)==payload_names(manifest) and len(manifest['files'])==len(files),'Unexpected package payload inventory')
-    verify_updater_files(manifest,manifest_path.parent,config)
-    for name in ('artifact-manifest.json','SHA256SUMS'):
-        path=manifest_path.parent/name;require(path.is_file() and not path.is_symlink(),'Release metadata missing')
-        files[name]={'filename':name,'bytes':path.stat().st_size,'sha256':digest_file(path),'path':str(path)}
-    sums=''.join(f'{x["sha256"]}  {x["filename"]}\n' for x in manifest['files'])
-    require((manifest_path.parent/'SHA256SUMS').read_text()==sums,'Signed checksum inventory differs')
-    body=notes.read_text();require(manifest['source_commit'] in body,'Notes must identify exact source')
-    require(signer_archive is not None,'Authenticated original signer artifact archive required')
-    verify_signing(manifest,signer_archive)
-    return {'repository':REPOSITORY,'tag':'v'+version,'source_commit':manifest['source_commit'],'version':version,
-            'files':files,'notes_file':str(notes),'notes':body,'core_report_sha256':digest_file(report),'native_gate_sha256':digest_file(qa_path)}
+    raise ValueError('Python acceptance reports are retired; native release promotion is not implemented')
 
 def api(endpoint,body=None):
     command=['gh','api',endpoint]

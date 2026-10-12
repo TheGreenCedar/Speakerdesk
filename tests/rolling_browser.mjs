@@ -1,3 +1,4 @@
+// Historical fixture regression: use the external Python fixture checkout described in docs/rust-port/python-source-removal.md.
 // CPU/browser fixture check, using an existing Chromium executable. No npm install.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';

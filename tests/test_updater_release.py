@@ -15,6 +15,11 @@ import promote_release as promotion
 
 
 class UpdaterReleaseTests(unittest.TestCase):
+    def test_retired_python_acceptance_cannot_prepare_or_publish_a_native_release(self):
+        with patch.object(promotion, 'api', side_effect=AssertionError('No network before acceptance')):
+            with self.assertRaisesRegex(ValueError, 'native release promotion is not implemented'):
+                promotion.prepare(None, None, None, None)
+
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory();self.root=Path(self.temporary.name)
         self.stem='Speakerdesk_0.6.2_AppleSilicon'

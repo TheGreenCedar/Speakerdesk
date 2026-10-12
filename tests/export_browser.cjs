@@ -1,3 +1,4 @@
+// Historical fixture regression: use the external Python fixture checkout described in docs/rust-port/python-source-removal.md.
 // Export staged-download browser regression; native status/dialog peers are mocked. Uses installed Chromium;
 // starts no devices or model workers and downloads no browser dependencies.
 const assert = require('node:assert/strict');

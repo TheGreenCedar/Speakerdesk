@@ -11,7 +11,33 @@ Starting PR head: `01e757cd5f3db3f8fccfcfa34e94e91cadc0fe26`.
 Starting base: `59e7b0c860f72ca94c24e6eab18ac820b144ee24`.
 Local implementation branch: `codex/python-free-mac`.
 
-## Delivery status after migration testing
+## Delivery status after the fresh review
+
+The replacement is **not ready to ship**. Independent reviews of
+`7d94c8011a9501bd2357e07c73d61964c55a3886` found two confirmed product defects
+after the local workflow qualification below. These findings supersede the
+earlier completion decision; the passing tests remain evidence only for their
+recorded paths.
+
+- Production native startup calls `AppState::open` without a legacy database
+  path. The importer is implemented but never reached on upgrade. A signed-host
+  reproduction with two synthetic legacy layouts returned empty jobs and People
+  and created an empty native store; both legacy databases remained byte-identical.
+  Discover and import the legacy database before creating the native destination,
+  then test actual startup and restart through HTTP.
+- A background no-match voice check advances the job revision without changing
+  its transcript. Dirty editor polling skips that document, and ordinary import
+  autosave does not rebase on HTTP 409. A frontend DOM/mocked-HTTP reproduction
+  repeatedly submitted revision 1 against revision 2 and retained the correction
+  only in memory. Reuse the existing unchanged-document conflict comparison for
+  this metadata-only case; keep genuine text/name/boundary conflicts.
+
+The current cleanup removes the legacy Python application, sidecar, obsolete
+tests and filename ledger while preserving native runtime code, shared editor
+assets, model metadata and independent golden bytes. See
+[source-removal scope](python-source-removal.md). It does not fix either runtime
+defect. Python remains build/test tooling, and native release promotion automation
+explicitly remains unsupported.
 
 The main native Mac workflows are implemented and have passed the retained actual-app
 tests: import and live capture, editing and revision conflicts, save/reopen and
@@ -20,11 +46,9 @@ disposable updater replacement. The canonical signed package runs without a
 Python application runtime. The optimization work did not replace these broader
 migration acceptance criteria.
 
-The accepted Mac implementation and local qualification are complete at code
-revision `0201c8063c0a56bd597f721ddedce3946bcbeafe`, including the repaired
-Ogg/Opus editor path and forced-shutdown process cleanup. This is a local
-qualification decision within the recorded fixtures and hardware, not a release
-or installation. The bounded long-import comparison and
+Code revision `0201c8063c0a56bd597f721ddedce3946bcbeafe` passed the recorded
+Ogg/Opus editor path and forced-shutdown process checks. Those local checks did
+not exercise upgrade discovery or concurrent voice-metadata autosave. The bounded long-import comparison and
 dispatched-accuracy cancellation check below establish no observed regression on
 those fixtures; baseline lacks an automatic child-recovery comparator. Existing legacy voice profiles are preserved
 but incompatible model identities do not participate in native recognition;
@@ -43,17 +67,16 @@ execution/overlap for the speech models is separate follow-up work, not part of
 this rewrite. Existing ReDimNet compute policy stays measured CPU_AND_GPU.
 
 Code revision `0201c8063c0a56bd597f721ddedce3946bcbeafe` passed all three GitHub
-CI jobs: source, Linux Rust and Mac Rust (run `38277886287`). The final status
-update changes documentation only; results below remain scoped to their recorded
-artifacts. Earlier entries are a historical work log, not the current gate list.
+CI jobs: source, Linux Rust and Mac Rust (run `38277886287`). The later docs-only
+head `7d94c801` passed source, Linux and Mac crate tests, but its Mac job failed
+with HTTP 503 while fetching the echo dependency (run `38281636327`). Results
+below remain scoped to their recorded artifacts. Earlier entries are a historical
+work log, not the current gate list.
 
-Legacy Python application sources remain test/oracle references, not package
-inputs. Current CI, reference generators and source-boundary checks still depend
-on them; removal requires a separate coherent cleanup of those callers. The
-`speakerdesk` directory also contains the editor assets and model metadata that
-the Rust build still embeds. No legacy implementation or shared assets are
-deleted in this delivery. Existing build-time Python scripts are distinct from
-the application's runtime-free requirement.
+Historical Python reference generation remains reproducible from its recorded
+commits in a separate checkout. The current `speakerdesk` directory contains the
+editor assets and model metadata embedded by Rust, with no Python application
+source. Existing build-time Python scripts are distinct from application runtime.
 
 ## Sequence and current state
 

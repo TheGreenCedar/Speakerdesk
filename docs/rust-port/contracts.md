@@ -13,7 +13,7 @@ Rust **1.99.0** (`rust-toolchain.toml`), edition 2024. This is the stable 1.99 r
 - `speakerdesk-echo` — Rust buffering and reference clock with the pinned native
   WebRTC ABI 3 DSP. Mac packaging includes the dylib; other platforms are unqualified.
 - `speakerdesk-host` — axum process. `speakerdesk-dev` is behind the `fixtures` feature.
-- `xtask` — `cargo xtask ledger --check` and `cargo xtask ownership --check`.
+- `xtask` — `cargo xtask ownership --check`.
 
 ## Models and IPC
 
@@ -121,7 +121,7 @@ User-facing strings live in `speakerdesk_core::messages` and are copied from v0.
 
 ## Ledger
 
-`xtask/port-ledger.toml` lists every `tests/test_*.py`. Dropped rows carry a `D`-reference. `pending` rows are allowed until the owning agent lands tests. `cargo xtask ledger --check` fails if a test file is missing from the ledger.
+The legacy Python filename ledger and its command were removed with the Python application. Native tests own behavioral regression protection; see [source-removal scope](python-source-removal.md).
 
 Native model installation is owned by the parent, with one fs4 installer lock and
 an exclusive setup admission lease. The child receives only `PrepareAlignment`

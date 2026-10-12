@@ -119,3 +119,12 @@ compute policy, then uses that file's unchanged threshold and margin on 72 clips
 in 36 groups. Enrollment, calibration and held-out groups remain separate; all
 28 non-enrollment decisions must match. No threshold fitting occurs. The corpus
 uses macOS synthetic voices and does not establish human recognition accuracy.
+
+## Historical source inputs
+
+The alignment/CTC and RedimNet reference generators take an explicit `source`
+directory. Their Python application definitions were removed from the current
+tree; provide `speakerdesk/` from a separate checkout of the recorded baseline
+`59e7b0c860f72ca94c24e6eab18ac820b144ee24`. The generator still verifies its
+recorded source/artifact hashes. These are independent reference tools, not
+application runtime dependencies. Existing JSON references remain unchanged.

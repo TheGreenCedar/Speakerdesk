@@ -1,9 +1,11 @@
-"""Installer integrity/rollback and measurement report ownership, without network or inference."""
+"""Installer integrity and rollback without network or inference."""
 import hashlib
+from contextlib import redirect_stdout
 from io import BytesIO
+from io import StringIO
 import json
+import math
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -11,10 +13,39 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 import download_voice_model as installer
-import measure_voice as measurement
+import generate_voice_fixtures as generator
 
 
 class VoiceToolTests(unittest.TestCase):
+    def test_generated_corpus_keeps_native_manifest_bounds_without_the_python_app(self):
+        voices = [dict(key=k, say_name=n, voice_id=k, role=r) for k, n, _, _, r in generator.VOICES]
+        count = 0
+        def audio_utility(budget, command):
+            nonlocal count
+            if command[0] == '/usr/bin/say':
+                Path(command[command.index('-o') + 1]).write_bytes(b'fabricated AIFF')
+            else:
+                count += 1
+                pcm = [round((4000 + count) * math.sin(2 * math.pi * (300 + count) * i / 16000)) for i in range(40000)]
+                generator.write_pcm(Path(command[2]), pcm)
+        is_file = Path.is_file
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'corpus'
+            with (patch.object(generator.platform, 'system', return_value='Darwin'),
+                  patch.object(Path, 'is_file', lambda p: str(p) in ('/usr/bin/say', '/usr/bin/afconvert', '/usr/bin/osascript') or is_file(p)),
+                  patch.object(generator, 'installed_voices', return_value=('fabricated inventory', voices)),
+                  patch.object(generator.Budget, 'run', audio_utility),
+                  patch.object(generator.shutil, 'disk_usage', return_value=SimpleNamespace(free=50_000_000_000)),
+                  redirect_stdout(StringIO())):
+                generator.generate(output)
+            report = json.loads((output / 'generation-report.json').read_text())
+            manifest = json.loads((output / 'manifest.json').read_text())
+            self.assertEqual(report['session_groups'], 36)
+            self.assertEqual(report['embedding_clips'], 72)
+            self.assertEqual(report['unique_audio_sha256'], 36)
+            self.assertEqual(sum(len(g['clips']) for g in manifest['groups']), 72)
+            self.assertTrue(all(c['clean'] is True for g in manifest['groups'] for c in g['clips']))
+
     def test_pinned_download_is_bounded_validated_and_failed_staging_is_removed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); pin = root/'pin.json'; body = b'small test model'
@@ -35,30 +66,6 @@ class VoiceToolTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, '40 GB'): installer.download(root/'no-space')
                     fetch.assert_not_called()
 
-    def test_existing_report_is_preserved_on_cli_refusal(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary); report = root/'report.json'; report.write_text('existing report')
-            script = Path(__file__).resolve().parents[1]/'scripts/measure_voice.py'
-            result = subprocess.run([sys.executable, str(script), '--model-dir', str(root/'missing'),
-                                     '--fixtures', str(root/'missing.json'), '--output', str(report), '--smoke'],
-                                    capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 1); self.assertIn('new measurement report', result.stderr)
-            self.assertEqual(report.read_text(), 'existing report')
-
-    def test_native_supervisor_terminates_worker_on_wall_time_or_memory_breach(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            args = SimpleNamespace(output=Path(temporary)/'new.json', timeout_seconds=60, maximum_rss_mib=1024)
-            for times, rss, message in [([0, 61], '1', 'wall-time'), ([0, 1], str(1024*1024+1), 'resident-memory'),
-                                        ([0, 1], '', 'monitoring is unavailable')]:
-                child = SimpleNamespace(pid=123, poll=unittest.mock.Mock(return_value=None),
-                                        kill=unittest.mock.Mock(), wait=unittest.mock.Mock())
-                with (self.subTest(message=message),
-                      patch.object(measurement.subprocess, 'Popen', return_value=child),
-                      patch.object(measurement.time, 'monotonic', side_effect=times),
-                      patch.object(measurement.shutil, 'disk_usage', return_value=SimpleNamespace(free=50_000_000_000)),
-                      patch.object(measurement.subprocess, 'run', return_value=SimpleNamespace(stdout=rss, returncode=0))):
-                    with self.assertRaisesRegex(ValueError, message): measurement.bounded_worker(args)
-                    child.kill.assert_called_once(); child.wait.assert_called_once()
 
 
 if __name__ == '__main__': unittest.main()

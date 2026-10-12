@@ -65,7 +65,7 @@ jobs:
         with:
           path: ~/.cache/pip
           key: ${{ steps.pip.outputs.cache-primary-key }}
-  # Native runtime checks; Python source tests retain legacy compatibility references and build tooling.
+  # Native runtime checks; Python tests cover build tooling and native/JS boundaries.
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -76,9 +76,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.99.0
-      - name: Ledger and crate tests
+      - name: Native crate tests
         run: |
-          cargo xtask ledger --check
           cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p xtask
   rust-macos:
     runs-on: macos-15

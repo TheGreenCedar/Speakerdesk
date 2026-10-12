@@ -14,11 +14,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Fail if a Python test file is missing from the port ledger.
-    Ledger {
-        #[arg(long)]
-        check: bool,
-    },
     /// Fail if agent ownership paths overlap, or if a diff leaves an agent's set.
     Ownership {
         #[arg(long)]
@@ -51,7 +46,6 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Ledger { check } => commands::ledger::run(check),
         Command::Ownership { check, agent, base } => commands::ownership::run(check, agent, base),
         Command::FakeCapture => commands::fake_capture::run(),
         Command::Parity => commands::pending::run("parity"),

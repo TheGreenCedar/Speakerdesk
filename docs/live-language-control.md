@@ -48,7 +48,9 @@ Committed screenshots show synthetic fixture text, not actual capture or model o
 
 ![Compact paused fixture with earlier English and subsequent French passages](screenshots/live-language-paused-compact.png)
 
-To reproduce with an existing environment and browser installation:
+For historical reproduction, use the external checkout described in
+[source-removal scope](rust-port/python-source-removal.md), with its existing
+environment and browser installation. Run these commands in that checkout:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 <existing-python> -m unittest discover -s tests -v

@@ -164,6 +164,7 @@ Reproduce in an authorized Apple Silicon checkout:
 ```sh
 python scripts/setup_echo.py
 python -m unittest discover -s tests -p test_capture_echo.py -v
+# Historical checkout only; see docs/rust-port/python-source-removal.md
 python scripts/echo_fixture.py /private/tmp/new-local-evidence --assert-clean
 ```
 
