@@ -1,5 +1,7 @@
-//! Saved canonical accuracy work shares the existing serial worker and operation lease.
+//! Canonical accuracy publication shared by saved work and the owned live worker.
+mod rolling;
 use super::*;
+pub(crate) use rolling::{Rolling, Runner};
 use speakerdesk_core::{document::Segment, live};
 
 const RETAINED: &str = "Accuracy pass paused. Saved words and audio are retained.";
@@ -18,6 +20,9 @@ pub(crate) async fn action(
     State(app): State<AppState>,
     AxumPath((jid, action)): AxumPath<(String, String)>,
 ) -> Response {
+    if let Some(response) = crate::meeting::refinement_action(&app, &jid, &action).await {
+        return response;
+    }
     blocking(move || {
         let result = match action.as_str() {
             "resume" => begin(&app, &jid),
@@ -79,16 +84,14 @@ fn begin(app: &AppState, jid: &str) -> Result<Job, ApiError> {
             "Accuracy work currently requires a saved Ready recording with canonical passages.",
         ));
     }
-    if job
-        .extra
-        .get("rolling_refinement")
-        .is_none_or(|p| p["mode"] != "saved")
-    {
+    if !job.extra.contains_key("rolling_refinement") {
         job.extra.insert(
             "rolling_refinement".into(),
             json!({"version":1,"mode":"saved","completed":{}}),
         );
     }
+    job.extra.get_mut("rolling_refinement").expect("plan")["mode"] = json!("saved");
+    job.extra.get_mut("rolling_refinement").expect("plan")["failed"] = json!({});
     job.extra
         .insert("refinement_status".into(), json!("waiting"));
     job.extra.remove("refinement_error");
@@ -110,10 +113,7 @@ fn begin(app: &AppState, jid: &str) -> Result<Job, ApiError> {
 }
 
 pub(super) fn interrupt(job: &mut Job) {
-    if job
-        .extra
-        .get("rolling_refinement")
-        .is_some_and(|p| p["mode"] == "saved")
+    if job.extra.get("rolling_refinement").is_some()
         && job
             .extra
             .get("refinement_status")
@@ -194,7 +194,29 @@ fn checkpoint(job: &Job, segment: &Segment) -> bool {
 }
 
 fn fresh(current: &Job, original: &Job, prior: &Segment) -> bool {
-    current.extra.get("language_history") == original.extra.get("language_history")
+    let epoch = prior.rest.get("language_epoch");
+    fn captured<'a>(job: &'a Job, epoch: Option<&Value>) -> Option<&'a Value> {
+        job.extra
+            .get("language_history")
+            .and_then(Value::as_array)
+            .and_then(|history| history.iter().find(|entry| Some(&entry["epoch"]) == epoch))
+    }
+    let covered = |job: &Job| {
+        job.extra
+            .get("language_history")
+            .and_then(Value::as_array)
+            .is_none_or(|history| {
+                history
+                    .iter()
+                    .filter(|entry| entry["epoch"].as_i64() > epoch.and_then(Value::as_i64))
+                    .all(|entry| {
+                        entry["start_sample"].as_i64().unwrap_or(0)
+                            >= prior.rest["end_sample"].as_i64().unwrap_or(0)
+                    })
+            })
+    };
+    captured(current, epoch) == captured(original, epoch)
+        && covered(current)
         && current
             .document
             .as_ref()
@@ -203,6 +225,38 @@ fn fresh(current: &Job, original: &Job, prior: &Segment) -> bool {
                 crate::native::passage_audio_unchanged(current, original, s, prior)
                     && live::segment_version(s) == live::segment_version(prior)
             })
+}
+
+fn publish_candidate(
+    current: &mut Job,
+    original: &Job,
+    prior: &Segment,
+    candidate: &Segment,
+) -> Result<bool, live::LiveError> {
+    if !fresh(current, original, prior) {
+        return Ok(false);
+    }
+    let document = current.document.as_mut().expect("fresh document");
+    if !live::publish_saved_passage(document, prior, candidate)? {
+        return Ok(false);
+    }
+    let version = live::segment_version(
+        document
+            .segments
+            .iter()
+            .find(|s| s.id == prior.id)
+            .expect("accepted canonical row"),
+    );
+    current.extra.get_mut("rolling_refinement").expect("plan")["completed"][&prior.id] =
+        json!(version);
+    let history = current
+        .extra
+        .entry("refinement_history")
+        .or_insert_with(|| json!({}));
+    history[&prior.id] = json!({"window_id":prior.id,"created":unix_now(),"segments":[{
+        "id":prior.id,"start":prior.start,"end":prior.end,"speaker":prior.speaker,"text":prior.text
+    }]});
+    Ok(true)
 }
 
 fn execute(
@@ -294,39 +348,16 @@ fn execute(
                 return Ok(());
             }
             match &result {
-                Ok(candidate) => {
-                    let document = current.document.as_mut().expect("fresh document");
-                    match live::publish_saved_passage(document, &prior, candidate) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            unresolved = true;
-                            return Ok(());
-                        }
-                        Err(error) => {
-                            unresolved = true;
-                            current.extra.insert("refinement_error".into(), json!(error.to_string()));
-                            return Ok(());
-                        }
+                Ok(candidate) => match publish_candidate(current, &original, &prior, candidate) {
+                    Ok(true) => {}
+                    Ok(false) => unresolved = true,
+                    Err(error) => {
+                        unresolved = true;
+                        current
+                            .extra
+                            .insert("refinement_error".into(), json!(error.to_string()));
                     }
-                    let version = live::segment_version(
-                        document
-                            .segments
-                            .iter()
-                            .find(|s| s.id == prior.id)
-                            .expect("accepted canonical row"),
-                    );
-                    current
-                        .extra
-                        .get_mut("rolling_refinement")
-                        .expect("saved plan")["completed"][&prior.id] = json!(version);
-                    let history = current
-                        .extra
-                        .entry("refinement_history")
-                        .or_insert_with(|| json!({}));
-                    history[&prior.id] = json!({"window_id":prior.id,"created":unix_now(),"segments":[{
-                        "id":prior.id,"start":prior.start,"end":prior.end,"speaker":prior.speaker,"text":prior.text
-                    }]});
-                }
+                },
                 Err(message) => {
                     unresolved = true;
                     current

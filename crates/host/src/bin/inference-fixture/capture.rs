@@ -17,9 +17,18 @@ fn audio(start: u32, end: u32, sources: &[&str]) {
     for position in (start..end).step_by(4000) {
         let stop = (position + 4000).min(end);
         for source in sources {
+            let scale = if *source == "system"
+                && std::path::Path::new(&std::env::args().nth(2).unwrap())
+                    .join("distinct-system")
+                    .exists()
+            {
+                0.35
+            } else {
+                0.2
+            };
             let bytes: Vec<u8> = (position..stop)
                 .flat_map(|i| {
-                    let v = 0.2 * (i as f32 * 0.071).sin();
+                    let v = scale * (i as f32 * 0.071).sin();
                     v.to_le_bytes()
                 })
                 .collect();

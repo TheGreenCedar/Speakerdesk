@@ -55,12 +55,14 @@ const WARN_TIMING_MANUAL: &str = "Retained audio split into ≤25-second crops; 
 #[error("{message}")]
 pub struct ImportError {
     pub message: String,
+    pub(crate) child: Option<ChildError>,
 }
 
 impl ImportError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            child: None,
         }
     }
 }
@@ -243,7 +245,7 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
     let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
     let work = plan_work(&ledger, pcm, &chunks, &spans)?;
     let mut transcriber = if work.iter().any(|item| item.blocked.is_none()) {
-        Some(open_transcriber(models, language, ledger)?)
+        Some(open_transcriber(models, language, ledger, None)?)
     } else {
         None
     };
@@ -408,22 +410,32 @@ fn decode_passage_source<M: Models + ?Sized + 'static>(
         let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
         examine_range(&ledger, slice, &spans, 0, slice.len() as i64)?
     };
+    let child_failure = std::sync::Arc::new(std::sync::Mutex::new(None));
     let mut transcriber = if windows.iter().any(|item| item.blocked.is_none()) {
-        Some(open_transcriber(models, language, ledger)?)
+        Some(open_transcriber(
+            models,
+            language,
+            ledger,
+            Some(child_failure.clone()),
+        )?)
     } else {
         None
     };
     let speakers = vec!["saved_passage".to_string()];
     let mut parts = Vec::new();
     for item in &windows {
-        parts.extend(decode_window(
+        let decoded = decode_window(
             transcriber.as_mut(),
             slice,
             language,
             &speakers,
             item,
             context_padding,
-        )?);
+        );
+        if let Some(error) = child_failure.lock().expect("child failure").take() {
+            return Err(child_err(error));
+        }
+        parts.extend(decoded?);
     }
     Ok(parts)
 }
@@ -473,13 +485,15 @@ pub(crate) fn refine_context_source<M: Models + ?Sized + 'static>(
     };
     if parts.is_empty()
         || parts.iter().any(|part| {
-            part.review
-                || part.transcription_review.is_some()
-                || (part.text.trim().is_empty()
-                    && !matches!(
-                        part.audio_state.as_deref(),
-                        Some("model_non_speech" | "digital_silence" | "constant_signal")
-                    ))
+            let empty = part.text.trim().is_empty();
+            // Blocked rows retain their editor review marker even when admission
+            // positively establishes that this span contains no words to recover.
+            let verified_non_speech = empty
+                && matches!(
+                    part.audio_state.as_deref(),
+                    Some("model_non_speech" | "digital_silence" | "constant_signal")
+                );
+            part.transcription_review.is_some() || (!verified_non_speech && (part.review || empty))
         })
     {
         return Err(incomplete());
@@ -1393,16 +1407,38 @@ fn admit_source<M: Models + ?Sized + 'static>(
 struct BorrowedModels<M: Models + ?Sized> {
     models: *const M,
     _marker: PhantomData<*const M>,
+    failure: Option<std::sync::Arc<std::sync::Mutex<Option<ChildError>>>>,
 }
 
 impl<M: Models + ?Sized> BorrowedModels<M> {
-    fn new(models: &M) -> Self {
+    fn new(
+        models: &M,
+        failure: Option<std::sync::Arc<std::sync::Mutex<Option<ChildError>>>>,
+    ) -> Self {
         Self {
             models: std::ptr::from_ref(models),
             _marker: PhantomData,
+            failure,
         }
     }
 
+    fn retain_lifecycle(&self, error: &ChildError) {
+        if matches!(
+            error,
+            ChildError::ProcessLost { .. } | ChildError::Timeout | ChildError::Cancelled
+        ) && let Some(failure) = &self.failure
+        {
+            failure
+                .lock()
+                .expect("child failure")
+                .get_or_insert_with(|| error.clone());
+        }
+    }
+    fn stopped(&self) -> bool {
+        self.failure
+            .as_ref()
+            .is_some_and(|failure| failure.lock().expect("child failure").is_some())
+    }
     fn models(&self) -> &M {
         // SAFETY: the pointer is the caller's `&M`, and every transcriber that
         // holds it returns before `import_recording` / `retry_passage` returns.
@@ -1412,13 +1448,16 @@ impl<M: Models + ?Sized> BorrowedModels<M> {
 
 impl<M: Models + ?Sized> Recognizer for BorrowedModels<M> {
     fn transcribe(&mut self, pcm: &[f32], language: &str) -> Result<AsrOutput, RouteError> {
-        if audio::pcm16_bytes(pcm).is_err() {
+        if self.stopped() || audio::pcm16_bytes(pcm).is_err() {
             return Err(RouteError::Recognition);
         }
         let decoded = self
             .models()
             .transcribe(pcm, language, (0, 0))
-            .map_err(|_| RouteError::Recognition)?;
+            .map_err(|error| {
+                self.retain_lifecycle(&error);
+                RouteError::Recognition
+            })?;
         let text = if decoded.raw_text.is_empty() && !decoded.text.is_empty() {
             decoded.text
         } else {
@@ -1431,10 +1470,13 @@ impl<M: Models + ?Sized> Recognizer for BorrowedModels<M> {
 
 impl<M: Models + ?Sized> LanguageDetector for BorrowedModels<M> {
     fn detect(&mut self, pcm: &[f32]) -> Result<Vec<(String, f64)>, RouteError> {
-        let probe = self
-            .models()
-            .language_probe(pcm)
-            .map_err(|_| RouteError::Detector)?;
+        if self.stopped() {
+            return Err(RouteError::Detector);
+        }
+        let probe = self.models().language_probe(pcm).map_err(|error| {
+            self.retain_lifecycle(&error);
+            RouteError::Detector
+        })?;
         if probe.codes.len() != probe.probabilities.len() || probe.codes.is_empty() {
             return Err(RouteError::Detector);
         }
@@ -1450,9 +1492,10 @@ fn open_transcriber<M: Models + ?Sized + 'static>(
     models: &M,
     language: &str,
     ledger: SpeechLedger,
+    failure: Option<std::sync::Arc<std::sync::Mutex<Option<ChildError>>>>,
 ) -> Result<SpeechTranscriber, ImportError> {
     let detector = if language == languages::AUTOMATIC {
-        Some(Box::new(BorrowedModels::new(models)) as Box<dyn LanguageDetector>)
+        Some(Box::new(BorrowedModels::new(models, failure.clone())) as Box<dyn LanguageDetector>)
     } else {
         None
     };
@@ -1460,7 +1503,7 @@ fn open_transcriber<M: Models + ?Sized + 'static>(
         language,
         Box::new(ledger),
         detector,
-        Box::new(BorrowedModels::new(models)),
+        Box::new(BorrowedModels::new(models, failure.clone())),
         None,
     )
     .map_err(language_err)
@@ -1475,9 +1518,13 @@ fn speech_err(error: speech::SpeechError) -> ImportError {
 }
 
 fn child_err(error: ChildError) -> ImportError {
-    match error {
-        ChildError::Failed { message, .. } => ImportError::new(message),
-        _ => ImportError::new(messages::PROCESSING_FAILED),
+    let message = match &error {
+        ChildError::Failed { message, .. } => message.clone(),
+        _ => messages::PROCESSING_FAILED.into(),
+    };
+    ImportError {
+        message,
+        child: Some(error),
     }
 }
 
@@ -1525,6 +1572,8 @@ pub(crate) mod tests {
         cursor: Mutex<usize>,
         events: Mutex<Vec<Event>>,
         pub(crate) alignment: Option<(String, ipc::CtcScoresOut)>,
+        failure: Option<(&'static str, crate::error::ChildError)>,
+        observed_limit: Option<usize>,
     }
 
     impl Scripted {
@@ -1537,6 +1586,8 @@ pub(crate) mod tests {
                 cursor: Mutex::new(0),
                 events: Mutex::new(Vec::new()),
                 alignment: None,
+                failure: None,
+                observed_limit: None,
             }
         }
 
@@ -1595,17 +1646,22 @@ pub(crate) mod tests {
                 .iter()
                 .any(|(region_start, region_end)| start < *region_end && end > *region_start);
             let probability = if speech { 0.9 } else { 0.01 };
+            let observed = self.observed_limit.map_or(end, |limit| end.min(limit));
             Ok(VadFeedOut {
-                frames: vec![VadFrame {
-                    start: start as u64,
-                    end: end as u64,
-                    raw_p: probability,
-                    norm_p: probability,
-                    gain: 1.0,
-                    constant: false,
-                }],
+                frames: if start < observed {
+                    vec![VadFrame {
+                        start: start as u64,
+                        end: observed as u64,
+                        raw_p: probability,
+                        norm_p: probability,
+                        gain: 1.0,
+                        constant: false,
+                    }]
+                } else {
+                    Vec::new()
+                },
                 received: end as u64,
-                observed: end as u64,
+                observed: observed as u64,
             })
         }
         fn vad_close(&self, _handle: Handle) -> Result<(), crate::error::ChildError> {
@@ -1634,6 +1690,9 @@ pub(crate) mod tests {
             _pcm: &[f32],
         ) -> Result<LanguageProbeOut, crate::error::ChildError> {
             self.events.lock().unwrap().push(Event::Probe);
+            if let Some(("probe", error)) = &self.failure {
+                return Err(error.clone());
+            }
             Ok(LanguageProbeOut {
                 codes: vec!["en".to_string(), "fr".to_string()],
                 probabilities: self
@@ -1655,6 +1714,9 @@ pub(crate) mod tests {
                 language: language.to_string(),
                 padding,
             }));
+            if let Some(("asr", error)) = &self.failure {
+                return Err(error.clone());
+            }
             Ok(AsrText {
                 text: self
                     .alignment
@@ -1773,6 +1835,113 @@ pub(crate) mod tests {
         );
         assert!(near(actual.end, expected.end), "{actual:?} {expected:?}");
         assert_eq!(actual.speakers, expected.speakers);
+    }
+
+    #[test]
+    fn bounded_saved_routing_preserves_first_lifecycle_error_and_stops_model_calls() {
+        use crate::error::ChildError;
+        let pcm = (0..9 * 16000)
+            .map(|i| 0.2 * (i as f32 * 0.017).sin())
+            .collect::<Vec<_>>();
+        for stage in ["probe", "asr"] {
+            for failure in [
+                ChildError::ProcessLost {
+                    message: "first child loss".into(),
+                },
+                ChildError::Timeout,
+                ChildError::Cancelled,
+                ChildError::failed("ordinary acoustic failure", false),
+            ] {
+                let mut models = Scripted::new(Vec::new(), vec![(0, pcm.len())]);
+                models.failure = Some((stage, failure.clone()));
+                // Confident language switches keep the three routed crops separate,
+                // so an ordinary ASR failure can reach a later model window.
+                models.probe_scores.lock().unwrap().extend([
+                    vec![0.99, 0.01],
+                    vec![0.01, 0.99],
+                    vec![0.99, 0.01],
+                ]);
+                let result =
+                    super::decode_passage_source(&models, &pcm, 0., 9., "auto", None, None);
+                let calls = models
+                    .events()
+                    .iter()
+                    .filter(|call| {
+                        if stage == "probe" {
+                            call.as_str() == "probe"
+                        } else {
+                            call.starts_with("asr:")
+                        }
+                    })
+                    .count();
+                if matches!(failure, ChildError::Failed { .. }) {
+                    let parts = result.expect("ordinary failures retain routing review behavior");
+                    assert!(parts.iter().any(|part| part.review));
+                    assert!(calls > 1, "multiple ordinary windows may still be examined");
+                } else {
+                    assert_eq!(
+                        result.err().expect("lifecycle failure").child,
+                        Some(failure)
+                    );
+                    assert_eq!(
+                        calls, 1,
+                        "the first lifecycle loss prevents later routing attempts"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn saved_refinement_accepts_verified_non_speech_but_rejects_unknown_audio() {
+        const BLOCK: usize = 32768;
+        let speech = vec![(BLOCK, 2 * BLOCK), (3 * BLOCK, 4 * BLOCK)];
+        for case in [
+            "model-negative",
+            "silence",
+            "constant",
+            "uncertain",
+            "unobserved",
+        ] {
+            let mut pcm = tone(5 * BLOCK);
+            if matches!(case, "silence" | "constant") {
+                for (start, end) in [(0, BLOCK), (2 * BLOCK, 3 * BLOCK), (4 * BLOCK, 5 * BLOCK)] {
+                    pcm[start..end].fill(if case == "silence" { 0. } else { 0.125 });
+                }
+            }
+            let mut models = Scripted::new(Vec::new(), speech.clone());
+            if case == "uncertain" {
+                models
+                    .probe_scores
+                    .lock()
+                    .unwrap()
+                    .extend([vec![0.51, 0.49], vec![0.51, 0.49]]);
+            }
+            if case == "unobserved" {
+                models.observed_limit = Some(4 * BLOCK);
+            }
+            let result = super::refine_passage_source(&models, &pcm, "auto", 7 * 16000 + 137, None);
+            if matches!(case, "uncertain" | "unobserved") {
+                assert!(
+                    result.is_err(),
+                    "{case} must retain prior words rather than claim complete coverage"
+                );
+            } else {
+                let (text, language, detection) =
+                    result.unwrap_or_else(|error| panic!("{case}: {error}"));
+                assert_eq!(
+                    text.split_whitespace().collect::<Vec<_>>(),
+                    ["en:Hello", "en:Hello"]
+                );
+                assert_eq!(language, "en");
+                assert_eq!(detection["mode"], "auto");
+                assert_eq!(
+                    models.calls().len(),
+                    2,
+                    "only the two admitted speech islands reach ASR"
+                );
+            }
+        }
     }
 
     #[test]

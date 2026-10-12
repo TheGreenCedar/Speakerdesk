@@ -43,15 +43,41 @@ fn main() {
     let mut context_index = 0usize;
     let mut held_live_feed = false;
     let mut held_live_asr = false;
+    let mut held_context: Option<usize> = None;
     while let Ok(envelope) = read_envelope(&mut std::io::stdin()) {
         let id = envelope.request_id;
         let EnvelopeBody::Request(request) = envelope.body else {
             std::process::exit(2);
         };
+        let script: Option<serde_json::Value> = std::fs::read(root.join("context-replay.json"))
+            .ok()
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap());
+        let context_asr = match &request {
+            Request::Transcribe { pcm, .. } => script.as_ref().is_some_and(|script| {
+                script.get(context_index).is_some_and(|context| {
+                    context["request_samples"]
+                        .as_u64()
+                        .is_none_or(|samples| samples == pcm.len() as u64)
+                })
+            }),
+            _ => false,
+        };
+        let prior_calls = std::fs::read_to_string(root.join("transcribe-languages"))
+            .unwrap_or_default()
+            .lines()
+            .count();
         let hold_asr = matches!(request, Request::Transcribe { .. })
+            && (script
+                .as_ref()
+                .is_none_or(|script| script[0]["request_samples"].is_null())
+                || context_asr)
+            && std::fs::read_to_string(root.join("hold-asr-call"))
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .is_none_or(|n| n == prior_calls)
             && root.join("fixture-live").exists()
             && root.join("hold-live-asr").exists()
-            && !held_live_asr
+            && (!held_live_asr || (context_asr && held_context != Some(context_index)))
             && std::fs::read_to_string(root.join("hold-context-index"))
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
@@ -327,6 +353,21 @@ fn main() {
                 Ok(Response::Probe(scores))
             }
             Request::Transcribe { language, pcm, .. } => {
+                use sha2::{Digest, Sha256};
+                let digest = format!(
+                    "{:x}",
+                    Sha256::digest(pcm.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>())
+                );
+                writeln!(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(root.join("transcribe-crops"))
+                        .unwrap(),
+                    "{}",
+                    serde_json::json!({"samples":pcm.len(),"sha256":digest,"language":language})
+                )
+                .unwrap();
                 writeln!(
                     std::fs::OpenOptions::new()
                         .create(true)
@@ -336,8 +377,8 @@ fn main() {
                     "{language}"
                 )
                 .unwrap();
-                let text = if let Ok(bytes) = std::fs::read(root.join("context-replay.json")) {
-                    let contexts: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let text = if context_asr {
+                    let contexts = script.as_ref().expect("scripted context");
                     let context = &contexts[context_index];
                     context_index += 1;
                     writeln!(
@@ -366,7 +407,19 @@ fn main() {
                     token_count: 2,
                 }))
             }
-            Request::CtcScores { pcm, token_ids } if root.join("context-replay.json").exists() => {
+            Request::CtcScores { pcm, token_ids }
+                if script.as_ref().is_some_and(|script| {
+                    script[0]["request_samples"].is_null()
+                        || context_index
+                            .checked_sub(1)
+                            .and_then(|index| script.get(index))
+                            .is_some_and(|context| {
+                                context["end_sample"].as_i64().unwrap()
+                                    - context["start_sample"].as_i64().unwrap()
+                                    == pcm.len() as i64
+                            })
+                }) =>
+            {
                 // Explicit synthetic score replay: word onsets are authored independently
                 // of the native context planner/assembler. No acoustic quality claim.
                 let contexts: serde_json::Value = serde_json::from_slice(
@@ -463,8 +516,14 @@ fn main() {
             _ => Err(ChildError::Unimplemented),
         };
         if hold_live || hold_eof || hold_asr || hold_voice {
+            let context_hold = if hold_asr && context_asr {
+                Some(context_index - 1)
+            } else {
+                None
+            };
             if hold_asr {
                 held_live_asr = true;
+                held_context = context_hold;
             } else {
                 held_live_feed = true;
             }
@@ -483,7 +542,15 @@ fn main() {
                     ("recovery-feed-started", "hold-live-feed")
                 };
                 std::fs::write(root.join(marker), b"started").unwrap();
-                while root.join(hold).exists() && !flag.load(Ordering::Acquire) {
+                if let Some(index) = context_hold {
+                    std::fs::write(root.join(format!("context-started-{index}")), b"started")
+                        .unwrap();
+                }
+                while root.join(hold).exists()
+                    && !flag.load(Ordering::Acquire)
+                    && context_hold
+                        .is_none_or(|index| !root.join(format!("release-context-{index}")).exists())
+                {
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 if hold_asr

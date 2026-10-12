@@ -151,6 +151,14 @@ impl Running {
             .await
             .unwrap()
     }
+    async fn start_live_only(&self, sources: Value) -> String {
+        let id = self.start(sources).await;
+        let response = self
+            .post(&format!("api/jobs/{id}/refinement/pause"), json!({}))
+            .await;
+        assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+        id
+    }
     async fn start(&self, sources: Value) -> String {
         let response = self
             .post(
@@ -237,7 +245,7 @@ async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_o
         let host = Running::open(root, dual).await;
         trigger(root, 1);
         let id = host
-            .start(if dual {
+            .start_live_only(if dual {
                 json!(["microphone", "system"])
             } else {
                 json!(["microphone"])
@@ -525,7 +533,7 @@ async fn recovery_covers_asr_and_final_eof_child_loss() {
         let root = temp.path();
         let host = Running::open(root, false).await;
         trigger(root, 1);
-        let id = host.start(json!(["microphone"])).await;
+        let id = host.start_live_only(json!(["microphone"])).await;
         let path = format!("api/jobs/{id}");
         host.wait(&path, |v| {
             v["document"]["segments"]
@@ -590,7 +598,7 @@ async fn editing_open_live_words_preserves_the_edit_and_publishes_continued_spee
         }
         let host = Running::open(root, false).await;
         trigger(root, 1);
-        let id = host.start(json!(["microphone"])).await;
+        let id = host.start_live_only(json!(["microphone"])).await;
         let path = format!("api/jobs/{id}");
         host.wait(&path, |v| {
             v["document"]["segments"].as_array().is_some_and(|rows| {
@@ -783,7 +791,7 @@ async fn live_saved_audio_candidates_preserve_edits_language_eof_and_reopen() {
     let root = temp.path();
     let host = Running::open(root, false).await;
     trigger(root, 1);
-    let id = host.start(json!(["microphone"])).await;
+    let id = host.start_live_only(json!(["microphone"])).await;
     let path = format!("api/jobs/{id}");
     let first = host
         .wait(&path, |v| {
@@ -793,7 +801,8 @@ async fn live_saved_audio_candidates_preserve_edits_language_eof_and_reopen() {
         })
         .await;
     assert!(first.get("operation_generation").is_none());
-    assert!(first.get("rolling_refinement").is_none());
+    assert_eq!(first["rolling_refinement"]["mode"], "live");
+    assert_eq!(first["refinement_status"], "paused");
     assert_eq!(
         host.post(
             "api/meetings",
@@ -1130,7 +1139,7 @@ async fn qualified_live_resume_keeps_sources_and_owns_pending_shutdown() {
         let root = temp.path();
         let host = Running::open(root, true).await;
         trigger(root, 1);
-        let id = host.start(json!(["microphone", "system"])).await;
+        let id = host.start_live_only(json!(["microphone", "system"])).await;
         let path = format!("api/jobs/{id}");
         host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 6.5)
             .await;
@@ -1298,7 +1307,7 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
         let host = Running::open(root, dual).await;
         trigger(root, 1);
         let id = host
-            .start(if dual {
+            .start_live_only(if dual {
                 json!(["microphone", "system"])
             } else {
                 json!(["system"])
@@ -1436,7 +1445,7 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
         let host = Running::open(root, false).await;
         trigger(root, 1);
         trigger(root, 2);
-        let first = host.start(json!(["microphone"])).await;
+        let first = host.start_live_only(json!(["microphone"])).await;
         host.wait(&format!("api/jobs/{first}"), |v| {
             v["duration"].as_f64().unwrap_or(0.) >= 13.5
         })
@@ -1496,7 +1505,7 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
             )
             .unwrap();
         }
-        let second = host.start(json!(["microphone"])).await;
+        let second = host.start_live_only(json!(["microphone"])).await;
         let path = format!("api/jobs/{second}");
         host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 13.5)
             .await;
@@ -1606,6 +1615,12 @@ async fn ordinary_live_language_evidence_survives_routing_edits_and_restart() {
             .unwrap()
             .to_owned();
         let path = format!("api/jobs/{id}");
+        assert_eq!(
+            host.post(&format!("{path}/refinement/pause"), json!({}))
+                .await
+                .status(),
+            200
+        );
         let stages = if matches!(case, "long" | "mixed") {
             4
         } else {
@@ -1820,7 +1835,7 @@ async fn saved_long_accuracy_reaches_bounded_context_models_and_retains_missing_
     let root = temp.path();
     let host = Running::open(root, false).await;
     trigger(root, 1);
-    let id = host.start(json!(["microphone"])).await;
+    let id = host.start_live_only(json!(["microphone"])).await;
     let path = format!("api/jobs/{id}");
     for stage in 1..=4 {
         if stage > 1 {
@@ -1899,6 +1914,12 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
             .unwrap()
             .to_owned();
         let path = format!("api/jobs/{id}");
+        assert_eq!(
+            host.post(&format!("{path}/refinement/pause"), json!({}))
+                .await
+                .status(),
+            200
+        );
         for stage in 1..=4 {
             if stage > 1 {
                 trigger(root, stage);
@@ -2146,6 +2167,12 @@ async fn saved_auto_accuracy_uses_fresh_probe_and_keeps_captured_mode_after_rest
         .unwrap()
         .to_owned();
     let path = format!("api/jobs/{id}");
+    assert_eq!(
+        host.post(&format!("{path}/refinement/pause"), json!({}))
+            .await
+            .status(),
+        200
+    );
     host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 6.5)
         .await;
     let before = host.stop(&id).await;
@@ -2236,12 +2263,581 @@ async fn saved_auto_accuracy_uses_fresh_probe_and_keeps_captured_mode_after_rest
 }
 
 #[tokio::test]
+async fn rolling_accuracy_keeps_capture_running_and_owns_cancel_until_terminal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    // Language changes seal jointly observed audio: lcm(VAD 512, diarization 160).
+    let first_samples = 44 * 2560;
+    fs::write(root.join("first-stage-samples"), first_samples.to_string()).unwrap();
+    let host = Running::open(root, false).await;
+    let id = host.start(json!(["microphone"])).await;
+    let path = format!("api/jobs/{id}");
+    // Disable automatic dispatch before producing the first sealed anchor.
+    let paused = host
+        .post(&format!("{path}/refinement/pause"), json!({}))
+        .await;
+    assert_eq!(
+        paused.status(),
+        200,
+        "live accuracy must have working controls: {}",
+        paused.text().await.unwrap()
+    );
+    trigger(root, 1);
+    host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
+        .await;
+    assert_eq!(
+        host.post(&format!("api/meetings/{id}/pause"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    host.wait(&path, |job| job["pause_flush"]["status"] == "complete")
+        .await;
+    let boundary = host
+        .client
+        .patch(format!("{}api/meetings/{id}/language", host.url))
+        .header("X-Speakerdesk-Token", &host.token)
+        .json(&json!({"language":"fr","language_revision":0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(boundary.status(), 200, "{}", boundary.text().await.unwrap());
+    let before = host
+        .wait(&path, |job| {
+            job["language_acknowledged_revision"] == 1
+                && job["document"]["segments"].as_array().is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row["canonical_state"] == "sealed" && row["text"] == "Replay transcript"
+                    })
+                })
+        })
+        .await;
+    let prior = before["document"]["segments"][0].clone();
+    let sid = prior["id"].as_str().unwrap();
+    fs::write(
+        root.join("replay-transcript"),
+        "Accuracy candidate for the sealed prefix.",
+    )
+    .unwrap();
+    fs::write(
+        root.join("hold-live-asr"),
+        b"hold rolling accuracy response",
+    )
+    .unwrap();
+    fs::write(root.join("hold-cancel-terminal"), b"ack is not terminal").unwrap();
+    let resumed = host
+        .post(&format!("{path}/refinement/resume"), json!({}))
+        .await;
+    assert_eq!(resumed.status(), 202, "{}", resumed.text().await.unwrap());
+    wait_file(&root.join("edit-asr-started")).await;
+    assert_eq!(
+        host.post(&format!("api/meetings/{id}/resume"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    trigger(root, 2);
+    let recording = host
+        .wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 13.5)
+        .await;
+    assert_eq!(recording["status"], "recording");
+    assert_eq!(recording["document"]["segments"][0]["text"], prior["text"]);
+    assert!(
+        fs::metadata(root.join("data").join(&id).join("audio.wav"))
+            .unwrap()
+            .len()
+            >= 44 + 216000 * 2,
+        "capture must commit new saved PCM while accuracy is held"
+    );
+    let edited = host.client.patch(format!("{}{path}/segments/{sid}", host.url))
+        .header("X-Speakerdesk-Token", &host.token)
+        .json(&json!({"segment_revision":prior["machine_revision"],"changes":{"text":"Protected rolling words"}})).send().await.unwrap();
+    assert_eq!(edited.status(), 200, "{}", edited.text().await.unwrap());
+    assert_eq!(
+        host.post(&format!("{path}/refinement/pause"), json!({}))
+            .await
+            .status(),
+        200
+    );
+    wait_file(&root.join("asr-cancelled")).await;
+    assert_eq!(host.get(&path).await["inference_owned"], true);
+    assert_eq!(
+        host.post(&format!("{path}/refinement/resume"), json!({}))
+            .await
+            .status(),
+        409,
+        "the active accuracy generation remains owned through its terminal response"
+    );
+    fs::remove_file(root.join("hold-cancel-terminal")).unwrap();
+    fs::remove_file(root.join("hold-live-asr")).unwrap();
+    host.wait("api/meeting", |meeting| {
+        meeting["processed_seconds"].as_f64().unwrap_or(0.) >= 13.
+    })
+    .await;
+    let final_job = host.stop(&id).await;
+    assert_eq!(final_job["status"], "ready");
+    assert_eq!(final_job["refinement_status"], "paused");
+    let retained = final_job["document"]["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == prior["id"])
+        .unwrap();
+    assert_eq!(
+        retained["text"], "Protected rolling words",
+        "late cancelled accuracy cannot overwrite edits"
+    );
+    assert_eq!(
+        final_job["canonical_observed_sample"],
+        first_samples + 112000 + 513
+    );
+    host.close(root).await;
+    let reopened = Running::open(root, false).await;
+    assert_eq!(reopened.get(&path).await["document"], final_job["document"]);
+    reopened.close(root).await;
+}
+
+#[tokio::test]
+async fn rolling_accuracy_default_sources_language_recovery_and_shutdown_matrix() {
+    for case in ["default", "dual", "epoch", "loss", "shutdown"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("first-stage-samples"), (44 * 2560).to_string()).unwrap();
+        let dual = case == "dual";
+        if dual {
+            fs::write(root.join("distinct-system"), b"independent source samples").unwrap();
+        }
+        let host = Running::open(root, dual).await;
+        let sources = if dual {
+            json!(["microphone", "system"])
+        } else {
+            json!(["microphone"])
+        };
+        let id = if case == "default" {
+            host.start(sources).await
+        } else {
+            host.start_live_only(sources).await
+        };
+        let path = format!("api/jobs/{id}");
+        if case == "default" {
+            assert_eq!(host.get(&path).await["refinement_status"], "waiting");
+        }
+        trigger(root, 1);
+        host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
+            .await;
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        host.wait(&path, |job| job["pause_flush"]["status"] == "complete")
+            .await;
+        let changed = host
+            .client
+            .patch(format!("{}api/meetings/{id}/language", host.url))
+            .header("X-Speakerdesk-Token", &host.token)
+            .json(&json!({"language":"fr","language_revision":0}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(changed.status(), 200, "{}", changed.text().await.unwrap());
+        let before = host
+            .wait(&path, |job| {
+                job["language_acknowledged_revision"] == 1
+                    && job["document"]["segments"].as_array().is_some_and(|rows| {
+                        !rows.is_empty()
+                            && rows.iter().all(|row| row["canonical_state"] == "sealed")
+                    })
+            })
+            .await;
+        let priors = before["document"]["segments"].as_array().unwrap().clone();
+        if case != "default" {
+            fs::write(root.join("transcribe-crops"), b"").unwrap();
+            fs::write(
+                root.join("replay-transcript"),
+                "Fresh rolling accuracy words.",
+            )
+            .unwrap();
+            fs::write(root.join("hold-live-asr"), b"owned rolling request").unwrap();
+            assert_eq!(
+                host.post(&format!("{path}/refinement/resume"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            wait_file(&root.join("edit-asr-started")).await;
+            if case == "shutdown" {
+                host.close(root).await;
+                fs::remove_file(root.join("hold-live-asr")).unwrap();
+                let reopened = Running::open(root, false).await;
+                let interrupted = reopened.get(&path).await;
+                assert_eq!(interrupted["refinement_status"], "paused");
+                assert_eq!(interrupted["document"], before["document"]);
+                reopened.close(root).await;
+                continue;
+            }
+            if case == "epoch" {
+                use speakerdesk_core::{
+                    ids::JobId,
+                    store::{JobStore, SqliteJobStore},
+                };
+                let mut store = SqliteJobStore::open(root.join("data/speakerdesk.sqlite")).unwrap();
+                let mut job = store
+                    .get(&JobId::parse(&id).unwrap(), false)
+                    .unwrap()
+                    .unwrap();
+                job.extra.get_mut("language_history").unwrap()[0]["language"] = json!("de");
+                store.put(&job, None).unwrap();
+            }
+            if case == "loss" {
+                let pid = fs::read_to_string(root.join("fixture-child-pid"))
+                    .unwrap()
+                    .parse::<i32>()
+                    .unwrap();
+                assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+                fs::remove_file(root.join("hold-live-asr")).unwrap();
+                host.wait(&path, |job| job["live_recovery"]["status"] == "recovered")
+                    .await;
+            } else {
+                let current = host.get(&path).await;
+                let name=host.post(&format!("{path}/speakers/{}/identity",priors[0]["speaker"].as_str().unwrap()),
+                    json!({"revision":current["revision"],"name":"Rolling speaker","person_id":null})).await;
+                assert_eq!(name.status(), 200, "{}", name.text().await.unwrap());
+                // A future captured epoch does not invalidate the sealed English anchor.
+                let changed = host
+                    .client
+                    .patch(format!("{}api/meetings/{id}/language", host.url))
+                    .header("X-Speakerdesk-Token", &host.token)
+                    .json(&json!({"language":"de","language_revision":1}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(changed.status(), 200, "{}", changed.text().await.unwrap());
+                fs::remove_file(root.join("hold-live-asr")).unwrap();
+            }
+        }
+        let accepted = host
+            .wait(&path, |job| {
+                if case == "epoch" {
+                    job["refinement_status"] == "unresolved"
+                } else {
+                    priors.iter().all(|prior| {
+                        job["document"]["segments"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|row| {
+                                row["id"] == prior["id"] && row["refinement_state"] == "refined"
+                            })
+                    })
+                }
+            })
+            .await;
+        for prior in &priors {
+            let row = accepted["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == prior["id"])
+                .unwrap();
+            assert_eq!(row["capture_source"], prior["capture_source"]);
+            assert_eq!(row["language_epoch"], prior["language_epoch"]);
+            assert_eq!(row["language_mode"], "en");
+            if case == "epoch" {
+                assert_eq!(row, prior, "changed captured epoch rejects late accuracy");
+            } else {
+                assert!(
+                    row["machine_revision"].as_i64().unwrap()
+                        > prior["machine_revision"].as_i64().unwrap()
+                        || case == "default"
+                );
+            }
+        }
+        if dual {
+            let calls = fs::read_to_string(root.join("transcribe-crops"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            let mut digests = Vec::new();
+            for prior in &priors {
+                let source = prior["capture_source"]["source_id"].as_str().unwrap();
+                let samples = hound::WavReader::open(
+                    root.join("data").join(&id).join(format!("{source}.wav")),
+                )
+                .unwrap()
+                .into_samples::<i16>()
+                .map(Result::unwrap)
+                .skip(prior["start_sample"].as_u64().unwrap() as usize)
+                .take(
+                    (prior["end_sample"].as_u64().unwrap()
+                        - prior["start_sample"].as_u64().unwrap()) as usize,
+                )
+                .map(|sample| f32::from(sample) / 32768.)
+                .collect::<Vec<_>>();
+                let digest = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        samples
+                            .iter()
+                            .flat_map(|sample| sample.to_le_bytes())
+                            .collect::<Vec<_>>()
+                    )
+                );
+                assert!(
+                    calls
+                        .iter()
+                        .any(|call| call["samples"] == samples.len() && call["sha256"] == digest),
+                    "accuracy must use {source}"
+                );
+                digests.push(digest);
+            }
+            assert_ne!(
+                digests[0], digests[1],
+                "distinct sources make mixed-audio mistakes observable"
+            );
+        }
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        trigger(root, 2);
+        host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 13.5)
+            .await;
+        let final_job = host.stop(&id).await;
+        assert_eq!(final_job["status"], "ready", "{case}: {final_job}");
+        for prior in &priors {
+            let row = final_job["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == prior["id"])
+                .unwrap();
+            let refined = accepted["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == prior["id"])
+                .unwrap();
+            assert_eq!(
+                row, refined,
+                "subsequent live/final output must preserve accepted anchor"
+            );
+        }
+        host.close(root).await;
+        let calls = fs::read_to_string(root.join("transcribe-languages")).unwrap();
+        let reopened = Running::open(root, dual).await;
+        assert_eq!(reopened.get(&path).await["document"], final_job["document"]);
+        if case != "epoch" {
+            assert_eq!(
+                reopened
+                    .post(&format!("{path}/refinement/resume"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            reopened
+                .wait(&path, |job| {
+                    job["refinement_status"] == "complete" && job["inference_owned"] == false
+                })
+                .await;
+            assert_eq!(
+                fs::read_to_string(root.join("transcribe-languages")).unwrap(),
+                calls,
+                "completed anchors survive restart without repeated model work"
+            );
+        }
+        reopened.close(root).await;
+    }
+}
+
+#[tokio::test]
+async fn rolling_long_context_yields_to_live_audio_before_its_last_crop() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::write(root.join("fixture-ctc"), b"synthetic overlap ownership").unwrap();
+    fs::create_dir(root.join("coarse-alignment")).unwrap();
+    fs::write(
+        root.join("coarse-alignment/tokens.txt"),
+        include_str!("testdata/ctc-tokens.txt"),
+    )
+    .unwrap();
+    let host = Running::open(root, false).await;
+    let id = host.start_live_only(json!(["microphone"])).await;
+    let path = format!("api/jobs/{id}");
+    for stage in 1..=4 {
+        trigger(root, stage);
+        host.wait(&path, |job| {
+            job["duration"].as_f64().unwrap_or(0.) >= f64::from(stage * 7) - 0.5
+        })
+        .await;
+    }
+    assert_eq!(
+        host.post(&format!("api/meetings/{id}/pause"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    host.wait(&path, |job| job["pause_flush"]["status"] == "complete")
+        .await;
+    let response = host
+        .client
+        .patch(format!("{}api/meetings/{id}/language", host.url))
+        .header("X-Speakerdesk-Token", &host.token)
+        .json(&json!({"language":"fr","language_revision":0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    let before = host
+        .wait(&path, |job| job["language_acknowledged_revision"] == 1)
+        .await;
+    let old = before["document"]["segments"][0].clone();
+    assert_eq!(old["end_sample"], 448000);
+    fs::write(root.join("context-replay.json"),json!([
+        {"text":"start repeat bridge extra","request_samples":275200,"start_sample":0,"end_sample":272000,
+         "words":[["start",16000],["repeat",192000],["bridge",208000],["extra",256000]]},
+        {"text":"repeat bridge finish repeat","request_samples":275200,"start_sample":176000,"end_sample":448000,
+         "words":[["repeat",192000],["bridge",208000],["finish",352000],["repeat",416000]]}
+    ]).to_string()).unwrap();
+    fs::write(root.join("hold-live-asr"), b"hold each scripted context").unwrap();
+    assert_eq!(
+        host.post(&format!("{path}/refinement/resume"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    wait_file(&root.join("context-started-0")).await;
+    assert_eq!(
+        host.post(&format!("api/meetings/{id}/resume"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    trigger(root, 5);
+    host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 34.5)
+        .await;
+    fs::write(
+        root.join("release-context-0"),
+        b"finish first physical context",
+    )
+    .unwrap();
+    wait_file(&root.join("context-started-1")).await;
+    let progress = host.get("api/meeting").await;
+    assert!(
+        progress["processed_seconds"].as_f64().unwrap() > 28.,
+        "live saved-audio observations must advance before the next accuracy context: {progress}"
+    );
+    let held = host.get(&path).await;
+    assert_eq!(
+        held["document"]["segments"][0]["text"], old["text"],
+        "only a complete anchor may replace published words"
+    );
+    fs::write(root.join("release-context-1"), b"finish final context").unwrap();
+    let accepted = host
+        .wait(&path, |job| {
+            job["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == old["id"] && row["refinement_state"] == "refined")
+        })
+        .await;
+    let row = accepted["document"]["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == old["id"])
+        .unwrap()
+        .clone();
+    assert_eq!(row["text"], "start repeat bridge finish repeat");
+    assert!(row["reading_turns"].is_array());
+    assert_eq!(
+        fs::read_to_string(root.join("context-crops"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    fs::remove_file(root.join("hold-live-asr")).unwrap();
+    let final_job = host.stop(&id).await;
+    assert_eq!(final_job["status"], "ready", "{final_job}");
+    assert_eq!(
+        final_job["document"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == old["id"])
+            .unwrap(),
+        &row
+    );
+    assert_eq!(final_job["canonical_observed_sample"], 560513);
+    host.close(root).await;
+}
+
+#[tokio::test]
+async fn rolling_accuracy_pause_is_serviced_while_final_models_drain() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let host = Running::open(root, false).await;
+    let id = host.start(json!(["microphone"])).await;
+    let path = format!("api/jobs/{id}");
+    trigger(root, 1);
+    host.wait("api/meeting", |job| {
+        job["processed_seconds"].as_f64().unwrap_or(0.) >= 6.4
+    })
+    .await;
+    let calls = fs::read_to_string(root.join("transcribe-languages"))
+        .unwrap()
+        .lines()
+        .count();
+    fs::write(root.join("hold-asr-call"), (calls + 1).to_string()).unwrap();
+    fs::write(
+        root.join("hold-live-asr"),
+        b"hold final accuracy after final live ASR",
+    )
+    .unwrap();
+    fs::write(root.join("hold-cancel-terminal"), b"terminal ownership").unwrap();
+    assert_eq!(
+        host.post(&format!("api/meetings/{id}/stop"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    wait_file(&root.join("edit-asr-started")).await;
+    let response = host
+        .post(&format!("{path}/refinement/pause"), json!({}))
+        .await;
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    wait_file(&root.join("asr-cancelled")).await;
+    assert_eq!(host.get(&path).await["status"], "finishing");
+    assert_eq!(host.get(&path).await["inference_owned"], true);
+    fs::remove_file(root.join("hold-cancel-terminal")).unwrap();
+    fs::remove_file(root.join("hold-live-asr")).unwrap();
+    let finished = host
+        .wait(&path, |job| {
+            job["status"] == "ready" && job["inference_owned"] == false
+        })
+        .await;
+    assert_eq!(finished["refinement_status"], "paused");
+    assert_eq!(finished["canonical_observed_sample"], 112513);
+    assert_eq!(
+        finished["document"]["segments"][0]["text"],
+        "Replay transcript"
+    );
+    host.close(root).await;
+}
+
+#[tokio::test]
 async fn saved_accuracy_pass_publishes_child_candidate_and_keeps_history_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let host = Running::open(root, false).await;
     trigger(root, 1);
-    let id = host.start(json!(["microphone"])).await;
+    let id = host.start_live_only(json!(["microphone"])).await;
     let path = format!("api/jobs/{id}");
     host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
         .await;
@@ -2324,7 +2920,7 @@ async fn saved_accuracy_pause_failure_and_late_candidate_matrix() {
         let host = Running::open(root, matches!(case, "source" | "unrelated")).await;
         trigger(root, 1);
         let id = host
-            .start(if matches!(case, "source" | "unrelated") {
+            .start_live_only(if matches!(case, "source" | "unrelated") {
                 json!(["microphone", "system"])
             } else {
                 json!(["microphone"])

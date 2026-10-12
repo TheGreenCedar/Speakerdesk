@@ -219,6 +219,9 @@ pub(super) struct Worker {
     task: tokio::task::JoinHandle<()>,
 }
 impl Worker {
+    pub fn wake(&self) {
+        let _ = self.wake.try_send(());
+    }
     pub fn push(&self, command: LiveCommand) -> Result<(), LiveError> {
         self.inbox.lock().expect("inbox").push(command)?;
         let _ = self.wake.try_send(());
@@ -271,6 +274,7 @@ fn publish(
     generation: u32,
     progress: &watch::Sender<Progress>,
     events: Vec<EngineEvent>,
+    rolling: &crate::routes::refinement::Rolling,
 ) -> Result<bool, LiveError> {
     let mut finished = false;
     let mut events = VecDeque::from(events);
@@ -326,6 +330,27 @@ fn publish(
                             *label = format!("Speaker {next}");
                             next += 1;
                         }
+                    }
+                    if candidate
+                        .rest
+                        .get("canonical_state")
+                        .and_then(Value::as_str)
+                        == Some("sealed")
+                        && document
+                            .segments
+                            .iter()
+                            .find(|row| row.id == candidate.id)
+                            .is_none_or(|prior| {
+                                prior.rest.get("canonical_state").and_then(Value::as_str)
+                                    != Some("sealed")
+                                    || prior.audio_revision != candidate.audio_revision
+                            })
+                        && let Some(index) = merged
+                            .segments
+                            .iter()
+                            .position(|row| row.id == candidate.id)
+                    {
+                        rolling.changed(index);
                     }
                     job.document = Some(merged);
                     Ok(())
@@ -405,6 +430,7 @@ pub(super) async fn worker(
     operation: Arc<OperationGuard>,
     progress: watch::Sender<Progress>,
     recovery: Option<RecoveryPlan>,
+    rolling: crate::routes::refinement::Rolling,
 ) -> Result<Worker, LiveError> {
     let models = app
         .models()
@@ -481,6 +507,7 @@ pub(super) async fn worker(
                             generation,
                             &progress,
                             events,
+                            &rolling,
                         )?;
                         continue;
                     }
@@ -507,6 +534,7 @@ pub(super) async fn worker(
                         generation,
                         &progress,
                         events,
+                        &rolling,
                     )?;
                     cursor = next;
                 }
@@ -522,6 +550,7 @@ pub(super) async fn worker(
                     generation,
                     &progress,
                     events,
+                    &rolling,
                 )?;
                 stream_update(&app, &id, &operation, generation, |job| {
                     job.extra["live_recovery"]["status"] = json!("recovered");
@@ -535,11 +564,15 @@ pub(super) async fn worker(
                     p.error = None;
                 });
             }
-            while receiver.blocking_recv().is_some() {
+            let mut accuracy = crate::routes::refinement::Runner::new(rolling.clone());
+            let inbox = engine.inbox();
+            loop {
                 if operation.cancellation.is_cancelled() {
                     return Err(LiveError::Child(ChildError::Cancelled));
                 }
-                while let Some(events) = engine.poll()? {
+                let mut progressed = false;
+                if let Some(events) = engine.poll()? {
+                    progressed = true;
                     if publish(
                         &mut engine,
                         &app,
@@ -548,9 +581,19 @@ pub(super) async fn worker(
                         generation,
                         &progress,
                         events,
+                        &rolling,
                     )? {
+                        // Live EOF is fully published before the remaining saved work. The
+                        // same recording lease owns cancellation and every final model call.
+                        while accuracy.step(&app, &operation)? {}
                         return Ok(());
                     }
+                }
+                if !inbox.lock().expect("inbox").has_pending_control() {
+                    progressed |= accuracy.step(&app, &operation)?;
+                }
+                if !progressed && receiver.blocking_recv().is_none() {
+                    break;
                 }
             }
             Err("Live command owner disappeared".into())

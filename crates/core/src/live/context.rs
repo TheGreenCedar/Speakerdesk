@@ -314,48 +314,77 @@ impl Composer {
 
 /// Saved long work never holds a whole recording or a live model handle. Every
 /// physical crop is bounded, with independent admission and language routing.
-pub(super) fn refine<M: Models + ?Sized + 'static>(
-    models: &M,
-    original: &Segment,
-    reader: &RecordingReader,
-    vocabulary: Option<&crate::alignment::Vocabulary>,
-) -> Result<Segment, LiveError> {
-    let (start, end) = saved_bounds(original)?;
-    let committed =
-        u32::try_from(end).map_err(|_| LiveError::Message("Saved audio range is too large."))?;
-    reader
-        .require_samples(committed)
-        .map_err(|e| LiveError::Detail(e.to_string()))?;
-    let read = |a: i64, b: i64| {
-        reader
-            .read_samples(a as u32, b as u32, committed)
-            .map_err(|e| LiveError::Detail(e.to_string()))
-    };
-    if end - start <= MAX_DECODE_SAMPLES {
-        return refine_saved_passage(models, original, &read(start, end)?, vocabulary);
+/// Incremental complete-anchor recognition. Each step consumes one bounded physical
+/// context; callers can drain live audio and ordered controls between steps.
+pub struct Refinement {
+    original: Segment,
+    start: i64,
+    end: i64,
+    requests: std::vec::IntoIter<DecodeRequest>,
+    composer: Composer,
+    detection: Option<Value>,
+    selected_language: Option<String>,
+    english_calibrated: bool,
+    probes: Vec<Value>,
+    audio_hash: Sha256,
+}
+impl Refinement {
+    pub fn new(original: &Segment) -> Result<Self, LiveError> {
+        let (start, end) = saved_bounds(original)?;
+        let requests = if end - start <= MAX_DECODE_SAMPLES {
+            Vec::new()
+        } else {
+            authoritative_requests(&AnchorRow {
+                id: original
+                    .canonical_utterance_id
+                    .clone()
+                    .expect("checked canonical"),
+                start_sample: start,
+                end_sample: end,
+                machine_revision: original.machine_revision.unwrap_or(0),
+                audio_revision: original.audio_revision.unwrap_or(0),
+                language_epoch: original.rest["language_epoch"].as_i64().unwrap_or(0),
+            })?
+        };
+        Ok(Self {
+            original: original.clone(),
+            start,
+            end,
+            requests: requests.into_iter(),
+            composer: Composer::default(),
+            detection: None,
+            selected_language: None,
+            english_calibrated: true,
+            probes: Vec::new(),
+            audio_hash: Sha256::new(),
+        })
     }
-    let anchor = AnchorRow {
-        id: original
-            .canonical_utterance_id
-            .clone()
-            .expect("checked canonical"),
-        start_sample: start,
-        end_sample: end,
-        machine_revision: original.machine_revision.unwrap_or(0),
-        audio_revision: original.audio_revision.unwrap_or(0),
-        language_epoch: original.rest["language_epoch"].as_i64().unwrap_or(0),
-    };
-    let mode = original.rest["language_mode"]
-        .as_str()
-        .expect("checked mode");
-    let processed = processed_catalog(original);
-    let mut composer = Composer::default();
-    let mut detection: Option<Value> = None;
-    let mut selected_language: Option<String> = None;
-    let mut english_calibrated = true;
-    let mut probes = Vec::new();
-    let mut audio_hash = Sha256::new();
-    for request in authoritative_requests(&anchor)? {
+    pub fn step<M: Models + ?Sized + 'static>(
+        &mut self,
+        models: &M,
+        reader: &RecordingReader,
+        vocabulary: Option<&crate::alignment::Vocabulary>,
+    ) -> Result<Option<Segment>, LiveError> {
+        let (start, end) = (self.start, self.end);
+        let original = &self.original;
+        let committed = u32::try_from(end)
+            .map_err(|_| LiveError::Message("Saved audio range is too large."))?;
+        let read = |a: i64, b: i64| {
+            reader
+                .read_samples(a as u32, b as u32, committed)
+                .map_err(|e| LiveError::Detail(e.to_string()))
+        };
+        if end - start <= MAX_DECODE_SAMPLES {
+            return refine_saved_passage(models, original, &read(start, end)?, vocabulary)
+                .map(Some);
+        }
+        let mode = original.rest["language_mode"]
+            .as_str()
+            .expect("checked mode");
+        let processed = processed_catalog(original);
+        let request = self.requests.next().ok_or(LiveError::Message(
+            "Accuracy context was already completed.",
+        ))?;
         let pcm = read(request.start_sample, request.end_sample)?;
         let padding = (
             if request.start_sample > start {
@@ -373,8 +402,9 @@ pub(super) fn refine<M: Models + ?Sized + 'static>(
             processed,
             Some(padding),
         )
-        .map_err(|e| LiveError::Detail(e.to_string()))?;
-        if selected_language
+        .map_err(LiveError::from)?;
+        if self
+            .selected_language
             .as_ref()
             .is_some_and(|prior| prior != &language)
         {
@@ -382,26 +412,27 @@ pub(super) fn refine<M: Models + ?Sized + 'static>(
                 "Long context accuracy requires one confidently routed language throughout; previous words and audio are retained.",
             ));
         }
-        selected_language.get_or_insert_with(|| language.clone());
+        self.selected_language
+            .get_or_insert_with(|| language.clone());
         if let Some(events) = decision["probes"].as_array() {
-            probes.extend(events.iter().cloned());
+            self.probes.extend(events.iter().cloned());
         }
-        if detection.as_ref().is_none_or(|prior| {
+        if self.detection.as_ref().is_none_or(|prior| {
             decision["probability"].as_f64().unwrap_or(1.)
                 < prior["probability"].as_f64().unwrap_or(1.)
         }) {
-            detection = Some(decision);
+            self.detection = Some(decision);
         }
         let vocabulary=vocabulary.ok_or(LiveError::Message("Long context accuracy needs supplied-text timing; previous words and audio are retained."))?;
         let alignment = vocabulary.align(models, &pcm, &text, request.start_sample, &language)?;
-        english_calibrated &=
+        self.english_calibrated &=
             alignment["qualified_scope"] == "bounded_ami_english_coarse_envelopes";
         for sample in &pcm[(request.core_start_sample - request.start_sample) as usize
             ..(request.core_end_sample - request.start_sample) as usize]
         {
-            audio_hash.update(sample.to_le_bytes());
+            self.audio_hash.update(sample.to_le_bytes());
         }
-        composer
+        self.composer
             .push(TailPart {
                 request,
                 text,
@@ -409,50 +440,73 @@ pub(super) fn refine<M: Models + ?Sized + 'static>(
                 alignment: Some(alignment),
             })
             .map_err(LiveError::Message)?;
-    }
-    let assembly = composer.finish().map_err(LiveError::Message)?;
-    let language = selected_language.expect("nonempty context plan");
-    let mut detection = detection.expect("nonempty context plan");
-    if mode == languages::AUTOMATIC {
-        detection["probes"] = json!(probes);
-    }
-    let mut candidate = saved_candidate(
-        original,
-        assembly.text.expect("complete assembly"),
-        language.clone(),
-        detection,
-        end,
-    )?;
-    let units = timing::raw_units(&candidate.text, TIMING_UNIT_POLICY_ID)
-        .expect("known timing unit policy");
-    if units.len() != assembly.words.len()
-        || units.iter().zip(&assembly.words).any(|(u, w)| {
-            u.text != w.text || u.start_char != w.start_char || u.end_char != w.end_char
-        })
-    {
-        return Err(LiveError::Message(
-            "Selected context timing differs from its raw text units.",
-        ));
-    }
-    let words:Vec<Value>=assembly.words.iter().zip(&units).map(|(w,u)|json!({"text":w.text,"start_char":w.start_char,"end_char":w.end_char,
+
+        if self.requests.len() != 0 {
+            return Ok(None);
+        }
+        let assembly = std::mem::take(&mut self.composer)
+            .finish()
+            .map_err(LiveError::Message)?;
+        let language = self
+            .selected_language
+            .take()
+            .expect("nonempty context plan");
+        let mut detection = self.detection.take().expect("nonempty context plan");
+        if mode == languages::AUTOMATIC {
+            detection["probes"] = json!(std::mem::take(&mut self.probes));
+        }
+        let mut candidate = saved_candidate(
+            original,
+            assembly.text.expect("complete assembly"),
+            language.clone(),
+            detection,
+            end,
+        )?;
+        let units = timing::raw_units(&candidate.text, TIMING_UNIT_POLICY_ID)
+            .expect("known timing unit policy");
+        if units.len() != assembly.words.len()
+            || units.iter().zip(&assembly.words).any(|(u, w)| {
+                u.text != w.text || u.start_char != w.start_char || u.end_char != w.end_char
+            })
+        {
+            return Err(LiveError::Message(
+                "Selected context timing differs from its raw text units.",
+            ));
+        }
+        let words:Vec<Value>=assembly.words.iter().zip(&units).map(|(w,u)|json!({"text":w.text,"start_char":w.start_char,"end_char":w.end_char,
         "start_utf16":u.start_utf16,"end_utf16":u.end_utf16,"start_sample":w.start_sample,"end_sample":w.end_sample,
         "unit_kind":u.unit_kind.as_str(),
         "status":if w.start_sample.is_some(){"aligned"}else{"unresolved"}})).collect();
-    let complete = assembly.words.iter().all(|w| w.start_sample.is_some());
-    let calibration = crate::alignment::calibration_for_language(&language);
-    let alignment = json!({"raw_text":candidate.text,"text_sha256":sha256_hex(candidate.text.as_bytes()),
-        "audio_anchor":{"start_sample":start,"end_sample":end},"audio_float32_sha256":hex::encode(audio_hash.finalize()),
+        let complete = assembly.words.iter().all(|w| w.start_sample.is_some());
+        let calibration = crate::alignment::calibration_for_language(&language);
+        let alignment = json!({"raw_text":candidate.text,"text_sha256":sha256_hex(candidate.text.as_bytes()),
+        "audio_anchor":{"start_sample":start,"end_sample":end},"audio_float32_sha256":hex::encode(std::mem::take(&mut self.audio_hash).finalize()),
         "schema_version":1,"text_source":"cohere","offset_unit":"unicode_codepoint","timing_kind":"ctc_emission_cell_envelope",
         "model_sha256":timing::MODEL,"provider_id":PROVIDER_ID,"provider_identity_sha256":crate::alignment::NATIVE_PROVIDER,
         "language":language,"normalization_policy_id":NORMALIZATION_POLICY_ID,"timing_unit_policy_id":TIMING_UNIT_POLICY_ID,
         "upstream_normalization_revision":UPSTREAM_NORMALIZATION_REVISION,"linguistic_word_claim":false,
         "frame_calibration_id":calibration,"score_calibration_id":calibration,
-        "qualified_scope":if english_calibrated{"bounded_ami_english_coarse_envelopes"}else{"multilingual_functional_ctc_units"},
-        "timing_accuracy_calibrated_languages":if english_calibrated{vec!["en"]}else{vec![]},
+        "qualified_scope":if self.english_calibrated{"bounded_ami_english_coarse_envelopes"}else{"multilingual_functional_ctc_units"},
+        "timing_accuracy_calibrated_languages":if self.english_calibrated{vec!["en"]}else{vec![]},
         "status":if complete{"aligned"}else{"partial"},"complete":complete,"words":words,
         "alignment_backend":"speakerdesk-rust-selected-context-ctc","assembly_policy":AUTHORITATIVE_POLICY});
-    crate::alignment::attach(&mut candidate, alignment);
-    Ok(candidate)
+        crate::alignment::attach(&mut candidate, alignment);
+        Ok(Some(candidate))
+    }
+}
+
+pub(super) fn refine<M: Models + ?Sized + 'static>(
+    models: &M,
+    original: &Segment,
+    reader: &RecordingReader,
+    vocabulary: Option<&crate::alignment::Vocabulary>,
+) -> Result<Segment, LiveError> {
+    let mut refinement = Refinement::new(original)?;
+    loop {
+        if let Some(candidate) = refinement.step(models, reader, vocabulary)? {
+            return Ok(candidate);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -30,6 +30,7 @@ struct Recording {
     stopping: bool,
     recovery_attempted: bool,
     cleanup_error: Option<String>,
+    rolling: crate::routes::refinement::Rolling,
 }
 impl Recording {
     async fn mutate(
@@ -93,6 +94,12 @@ impl Recording {
             return Ok(());
         }
         self.recovery_attempted = true;
+        let rolling = self.rolling.clone();
+        let app = self.app.clone();
+        let op = self.operation.clone();
+        tokio::task::spawn_blocking(move || rolling.interrupt(&app, &op))
+            .await
+            .map_err(|e| ApiError::new(500, e.to_string()))??;
         if let Some(worker) = self.worker.take()
             && let Err(error) = worker.join().await
         {
@@ -138,6 +145,7 @@ impl Recording {
             self.operation.clone(),
             self.progress.clone(),
             Some(plan),
+            self.rolling.clone(),
         )
         .await
         {
@@ -185,6 +193,7 @@ impl Recording {
                 self.operation.clone(),
                 self.progress.clone(),
                 None,
+                self.rolling.clone(),
             )
             .await
             {
@@ -248,20 +257,49 @@ impl Recording {
         }
         Ok(())
     }
+    async fn accuracy(&self, resume: bool) -> Result<Value, ApiError> {
+        if resume && (self.stopping || self.failure.is_some() || self.progress.borrow().recovering)
+        {
+            return Err(conflict(
+                "Wait for live transcription to finish before resuming accuracy.",
+            ));
+        }
+        let app = self.app.clone();
+        let op = self.operation.clone();
+        let rolling = self.rolling.clone();
+        let job = tokio::task::spawn_blocking(move || rolling.action(&app, &op, resume))
+            .await
+            .map_err(|e| ApiError::new(500, e.to_string()))??;
+        if let Some(worker) = &self.worker {
+            worker.wake();
+        }
+        Ok(stored_job_json(&job))
+    }
     async fn control(
         &mut self,
         action: Action,
         capture: &crate::capture::CaptureSession,
     ) -> Result<Value, ApiError> {
+        if let Action::Accuracy { resume } = &action {
+            return self.accuracy(*resume).await;
+        }
         if self.stopping {
             return Err(conflict("This meeting is finishing."));
         }
         match action {
+            Action::Accuracy { .. } => unreachable!("handled before capture controls"),
             Action::Stop => {
+                let app = self.app.clone();
+                let op = self.operation.clone();
+                let rolling = self.rolling.clone();
+                let interrupted = tokio::task::spawn_blocking(move || rolling.interrupt(&app, &op))
+                    .await
+                    .map_err(|e| ApiError::new(500, e.to_string()));
                 capture
                     .command(Command::Stop)
                     .map_err(|e| conflict(e.to_string()))?;
                 self.stopping = true;
+                interrupted??;
                 self.mutate(|job| {
                     job.status = "finishing".into();
                     job.message = "Finishing saved audio…".into();
@@ -393,6 +431,7 @@ pub(super) async fn record(
         stopping: false,
         recovery_attempted: false,
         cleanup_error: None,
+        rolling: crate::routes::refinement::Rolling::new(),
     };
     let config = CaptureConfig {
         job_id: id.as_str().into(),
@@ -493,6 +532,21 @@ pub(super) async fn record(
     if state.worker.is_none() && result.is_ok() && state.failure.is_none() {
         state.failure = Some("Capture ended before live inference could initialize".into());
     }
+    {
+        let app = app.clone();
+        let operation = operation.clone();
+        let rolling = state.rolling.clone();
+        match tokio::task::spawn_blocking(move || rolling.interrupt(&app, &operation)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                cleanup = Err(StoreError::message(e.message));
+            }
+            Err(e) => {
+                cleanup = Err(StoreError::message(e.to_string()));
+            }
+        }
+    }
+    state.stopping = true;
     while let Some(worker) = state.worker.take() {
         if worker.result.borrow().is_none() {
             let command = if operation.cancellation.is_cancelled() {
@@ -504,7 +558,23 @@ pub(super) async fn record(
                 state.failure.get_or_insert(e.to_string());
             }
         }
-        match worker.join().await {
+        let joining = worker.join();
+        tokio::pin!(joining);
+        let joined = loop {
+            tokio::select! {
+                result = &mut joining => break result,
+                request = controls.recv(), if !controls.is_closed() => {
+                    if let Some(request) = request {
+                        let response = match request.action {
+                            Action::Accuracy { resume } => state.accuracy(resume).await,
+                            _ => Err(conflict("This meeting is finishing.")),
+                        };
+                        let _ = request.reply.send(response);
+                    }
+                }
+            }
+        };
+        match joined {
             Ok(Err(error)) => {
                 if state.failure.is_none()
                     && let Some(snapshot) = &retained_snapshot
@@ -522,6 +592,12 @@ pub(super) async fn record(
             Ok(Ok(())) => {}
         }
     }
+    controls.close();
+    while let Ok(request) = controls.try_recv() {
+        let _ = request
+            .reply
+            .send(Err(conflict("This meeting has finished.")));
+    }
     if let Err(e) = result {
         state.failure.get_or_insert(e);
     }
@@ -535,7 +611,7 @@ pub(super) async fn record(
     }
     if !operation.cancellation.is_cancelled() {
         let failure = state.failure.clone();
-        if let Err(e)=state.mutate(move|job|{job.status=if failure.is_some(){"failed"}else{"ready"}.into();job.message=failure.map_or_else(||"Recording saved. Phrase text is editable; available supplied-text timing marks supported sealed passages. Accuracy refinement is unavailable.".into(),|e|format!("{e}. Saved audio and edits are retained."));Ok(())}).await {cleanup=Err(StoreError::message(e.message));}
+        if let Err(e)=state.mutate(move|job|{job.status=if failure.is_some(){"failed"}else{"ready"}.into();job.message=failure.map_or_else(||"Recording saved. Phrase text is editable; available supplied-text timing marks supported sealed passages. Sealed-passage accuracy work and your saved corrections are retained.".into(),|e|format!("{e}. Saved audio and edits are retained."));Ok(())}).await {cleanup=Err(StoreError::message(e.message));}
     }
     if cleanup.is_ok() && state.failure.is_none() && !operation.cancellation.is_cancelled() {
         // Ready is already published. This optional work keeps the existing lease/operation,

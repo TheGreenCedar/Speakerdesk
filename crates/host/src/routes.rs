@@ -63,6 +63,7 @@ const ACTIVE: &[&str] = &[
 const PRIVATE_FIELDS: &[&str] = &[
     "legacy_media_root",
     "operation_generation",
+    "refinement_generation",
     "rolling_sources",
     "refinement_history",
     "fast_history",

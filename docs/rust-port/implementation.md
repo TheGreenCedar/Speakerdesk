@@ -43,8 +43,9 @@ Local implementation branch: `codex/python-free-mac`.
    Qualified Pause/Resume passes native controls and mounted process replays.
    Raw dual-source echo passes independent baseline DSP and mounted failure
    replays. Saved long non-English accuracy passes functional timing/publication
-   tests and a real-model German recording. Rolling live refinement, physical
-   capture and long-session gates remain.
+   tests and a real-model German recording. Rolling live refinement passes mounted
+   lifecycle replays and real-model retained-audio checks. Physical capture,
+   the pending Tauri workflows and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
 All validation uses disposable storage and synthetic/public audio. No installed
@@ -1214,6 +1215,70 @@ the pending Tauri live/setup/long-import workflow, default native startup and ac
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
+
+## Rolling accuracy during capture
+
+The existing serial live worker now advances one bounded accuracy context between
+live polls. Capture and its single writer continue saving audio. Saved and rolling
+accuracy share the same context composition and publication rules; rolling work
+uses fresh VAD sessions and never feeds a live model handle. Discovery coalesces
+changed sealed rows into a cursor instead of repeatedly loading every job on each
+audio notice. Pending work retains the audio/epoch snapshot, not a second document
+history. The existing frontend accuracy controls now work during recording.
+
+Pause persists a generation before cancellation, and Resume waits for the terminal
+result. Stop invalidates active accuracy, drains live EOF, then handles remaining
+eligible anchors under the same lease. Accuracy Pause remains available during
+final draining. Child loss retains typed lifecycle errors and reconstructs from
+saved audio through the existing bounded recovery path. Protected edits, source
+changes, language epochs and earlier accepted accuracy results survive later live
+publication. Unrelated future language switches do not invalidate an earlier
+anchor. Completed and failed versions are checkpointed through restart.
+
+The real-model run exposed an existing saved-refinement bug: positively classified
+non-speech rows carry an editor review marker, which rejected otherwise complete
+speech separated by silence. Refinement now accepts only empty spans explicitly
+classified as model non-speech, digital silence or a constant signal. Unknown or
+unobserved coverage, uncertain language, short acoustic context and incomplete
+decodes still reject publication. Import/retry review behavior is unchanged. A
+test-only red reproduced the failure. An older test was passing because of its
+silent gap: the alleged short tail actually had 3,744 physical context samples.
+Its assertions now distinguish complete speech plus silence, a truncated second
+decode, and a genuine 160-sample speech crop.
+
+Final M5 checks: 176 core, 64 host, 18 mounted live, one native-service lifecycle
+and nine process tests pass; strict all-target core/host Clippy passes. The earlier
+unchanged frontend candidate passed 32 Node assertions with one existing long
+performance skip. The native raw-dual mounted gate also passed; other unchanged
+native/model proofs are reused. Logs are
+`/tmp/speakerdesk-rolling-accuracy-{final-tests,final-clippy,frontend-all,raw-mounted}.log`
+and `/tmp/speakerdesk-rolling-silence-red.log`. A first invocation used a nonexistent
+`test-fixtures` feature and ran no tests; the corrected `fixtures` run is the result
+reported here. The optimized build took 27.15 seconds with the two known upstream
+mlx-sys warnings; executable SHA-256:
+`0dafb7e6aedf3cceab5dacc96f71693c2754b088b0da8666fd4a4346b679b23c`.
+
+Real MLX/CTC qualification used 54.4563125 seconds of synthetic Samantha speech,
+a pause and a 37-sample final tail: 871,301 samples, WAV SHA-256
+`54c4f45c915fa8d5517f6487abc021449ee743ee86cf4fb46a5f4b05b3dcae59`.
+Job `9247280953bf40ae9ec7d81eedd89055` published the first 114-word accuracy result
+while recording continued. Its edited words, start boundary and speaker name
+survived Stop and full-host restart. The silence correction then successfully
+retried only the retained failed tail; the protected first row stayed identical.
+The final result passes whole-transcript save, stale-save 409, full-host restart,
+all four exports, unchanged people and exact PCM comparison. No recapture was
+needed. All qualification hosts and children exited. Inputs, scripts, rejected and
+accepted documents are retained in `/private/tmp/speakerdesk-rolling-accuracy.62j29J/`,
+especially `after-corrected/result.json` and `tail-result.json`.
+
+The first external driver incorrectly waited for the writer's final buffered tile
+before sending Stop; the corrected driver sends Stop and verifies draining. A
+second driver asserted perfect reference wording although its one article change
+also occurred before this implementation. Those failed assertions are retained;
+neither is represented as a successful complete workflow. The final continuation
+and tail retry above verify the accepted behavior. This is real inference through
+the mounted native service with an external saved-PCM helper, not physical capture,
+Tauri interaction, a packaged artifact or an equivalent performance measurement.
 
 ## Saved long multilingual accuracy
 

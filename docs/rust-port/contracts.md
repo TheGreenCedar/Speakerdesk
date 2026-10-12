@@ -64,8 +64,20 @@ routed supported language and bidirectionally unique CTC cells select raw-text
 boundaries; ambiguous seams retain the previous transcript. Selection preserves
 raw Unicode and the chosen context's separator, including adjacent CJK units.
 Non-English timing keeps its functional policy and makes no English calibration
-claim. Selected word timing uses the normal publication validator. Scheduling
-accuracy work during capture remains unfinished.
+claim. Selected word timing uses the normal publication validator.
+
+Live accuracy uses that same composition on the existing serial recording worker.
+It advances one physical context before servicing saved-audio notices and ordered
+controls. Capture writing proceeds independently. Discovery follows changed sealed
+rows; completed and failed versions prevent repeated work on every audio tick.
+No live VAD or diarization handle is passed to accuracy work. Pause persists a
+separate refinement generation before cancellation and keeps the active slot until
+the terminal result. Stop drains live EOF before remaining eligible accuracy work;
+accuracy Pause remains available during that drain. Child loss preserves its typed
+cause, reconstructs live sessions once from saved audio, and permits unfinished
+accuracy to retry under the new generation. Publication checks the captured epoch
+and original passage version; unrelated later language changes and names survive.
+Accepted accuracy revisions survive subsequent live snapshots and full restart.
 
 Ordinary live rows retain the language decisions already produced by routing.
 Captured mode and epoch are separate from the selected language. Auto probe and

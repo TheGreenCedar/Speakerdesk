@@ -6,6 +6,7 @@
 //! reads bounded crops from the retained WAV; it does not load MLX.
 
 mod context;
+pub use context::Refinement as SavedRefinement;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
@@ -88,6 +89,12 @@ impl From<&str> for LiveError {
 impl From<ChildError> for LiveError {
     fn from(error: ChildError) -> Self {
         Self::Child(error)
+    }
+}
+
+impl From<crate::import::ImportError> for LiveError {
+    fn from(error: crate::import::ImportError) -> Self {
+        error.child.map_or(Self::Detail(error.message), Self::Child)
     }
 }
 
@@ -247,6 +254,14 @@ impl Inbox {
             )),
             _ => None,
         })
+    }
+    /// Controls are ordered with audio but take priority over background accuracy work.
+    pub fn has_pending_control(&self) -> bool {
+        self.shutdown
+            || self
+                .messages
+                .iter()
+                .any(|message| !matches!(message, LiveCommand::Audio(_)))
     }
     /// Non-blocking take. `None` means the queue is idle.
     pub fn take(&mut self) -> Result<Option<LiveCommand>, LiveError> {
@@ -1121,7 +1136,7 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
     let processed = processed_catalog(original);
     let (text, detected_language, detection) =
         crate::import::refine_passage_source(models, pcm, language, start, processed)
-            .map_err(|e| LiveError::Detail(e.to_string()))?;
+            .map_err(LiveError::from)?;
     let mut candidate = saved_candidate(original, text, detected_language.clone(), detection, end)?;
     if let Some(vocabulary) = vocabulary {
         match vocabulary.align(models, pcm, &candidate.text, start, &detected_language) {
@@ -1342,6 +1357,16 @@ pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Do
         .find(|segment| segment.id == candidate.id)
         .cloned()
     {
+        // A completed saved-anchor revision outranks later draft snapshots of that same
+        // audio. Refinement never changes the live book's acoustic/identity ownership.
+        if prior.refinement_state.as_deref() == Some("refined")
+            && prior.canonical_utterance_id == candidate.canonical_utterance_id
+            && prior.audio_revision == candidate.audio_revision
+            && prior.rest.get("start_sample") == candidate.rest.get("start_sample")
+            && prior.rest.get("end_sample") == candidate.rest.get("end_sample")
+        {
+            return document;
+        }
         // Catalog/source identity is server-owned and cannot change under a passage.
         if prior.capture_source != candidate.capture_source {
             return document;
@@ -1629,7 +1654,6 @@ pub struct Engine<M: Models> {
     vad: Option<Handle>,
     diar: Option<Handle>,
     ledger: Arc<Mutex<SpeechLedger>>,
-    timing_apis: bool,
     word_alignment: Option<Arc<crate::alignment::Vocabulary>>,
     events: Vec<EngineEvent>,
 }
@@ -1652,9 +1676,6 @@ impl<M: Models + 'static> Engine<M> {
         inbox: Arc<Mutex<Inbox>>,
         recording: RecordingReader,
     ) -> Result<Self, LiveError> {
-        // English authoritative-tail/refinement algorithms remain unavailable.
-        // Supplied-text projection on sealed rows is independent of those algorithms.
-        let timing_apis = false;
         let namespace = if let Some(recovery) = &config.recovery {
             recovery.validate()?;
             format!("{}:stream:{}", config.job_id, recovery.generation)
@@ -1720,7 +1741,6 @@ impl<M: Models + 'static> Engine<M> {
             vad: None,
             diar: None,
             ledger: Arc::new(Mutex::new(ledger)),
-            timing_apis,
             word_alignment: None,
             events: Vec::new(),
         })
@@ -1750,10 +1770,6 @@ impl<M: Models + 'static> Engine<M> {
     /// The host installs the already-validated vocabulary once per worker.
     pub fn set_word_alignment(&mut self, vocabulary: Arc<crate::alignment::Vocabulary>) {
         self.word_alignment = Some(vocabulary);
-    }
-
-    pub fn timing_apis(&self) -> bool {
-        self.timing_apis
     }
 
     pub fn push(&self, command: LiveCommand) -> Result<(), LiveError> {
@@ -2197,10 +2213,6 @@ impl<M: Models + 'static> Engine<M> {
             .clone()
     }
 
-    fn english_timing(&self, mode: &str, detected: Option<&str>) -> bool {
-        self.timing_apis && (mode == "en" || (mode == "auto" && detected == Some("en")))
-    }
-
     fn commit(&mut self, final_pass: bool, decode_open: bool) -> Result<(), LiveError> {
         let available = {
             let ledger = self.ledger.lock().expect("speech ledger");
@@ -2256,20 +2268,13 @@ impl<M: Models + 'static> Engine<M> {
             let last = self.last_decoded.get(&identity);
             let changed = last.is_none_or(|last| last.audio_revision != row.audio_revision);
             let length = row.end_sample - row.start_sample;
-            let stamp = self.language_at(row.start_sample);
-            let authoritative = self.english_timing(&stamp.language, row.language.as_deref());
-            let limit = if authoritative {
-                PHYSICAL_MAX
-            } else {
-                MAX_DECODE_SAMPLES
-            };
             let mut due = final_pass
                 || row.state == UtteranceState::Sealed
                 || (length >= 6 * RATE
                     && (last.is_none()
                         || (decode_open
                             && row.end_sample - last.expect("decoded").end_sample >= 3 * RATE)));
-            let long_unaligned = length > limit && !authoritative;
+            let long_unaligned = length > MAX_DECODE_SAMPLES;
             if long_unaligned && row.state == UtteranceState::Open && !final_pass {
                 due = last.is_none()
                     || (decode_open
@@ -2328,17 +2333,9 @@ impl<M: Models + 'static> Engine<M> {
         let row = self.book.rows.get(identity).expect("row").clone();
         let stamp = self.language_at(row.start_sample);
         let length = row.end_sample - row.start_sample;
-        let authoritative = self.english_timing(&stamp.language, row.language.as_deref());
-        let limit = if authoritative {
-            PHYSICAL_MAX
-        } else {
-            MAX_DECODE_SAMPLES
-        };
         let mut progress = self.last_decoded.remove(identity).unwrap_or_default();
-        if length <= limit {
+        if length <= MAX_DECODE_SAMPLES {
             self.decode_short(&row, &stamp.language)?;
-        } else if authoritative {
-            self.decode_authoritative(&row, &stamp.language)?;
         } else {
             self.decode_cores(&row, &stamp.language, &mut progress)?;
         }
@@ -2398,59 +2395,6 @@ impl<M: Models + 'static> Engine<M> {
             stored.canonical_unresolved = Some("incomplete_cohere_revision".to_string());
         } else {
             stored.canonical_unresolved = None;
-        }
-        Ok(())
-    }
-
-    fn decode_authoritative(&mut self, row: &Utterance, language: &str) -> Result<(), LiveError> {
-        let anchor = anchor_from(row);
-        let requests = authoritative_requests(&anchor)?;
-        let mut parts = Vec::new();
-        for request in &requests {
-            let left = if request.start_sample > row.start_sample {
-                crate::language::CANONICAL_PAD_SAMPLES
-            } else {
-                0
-            };
-            let right = if request.end_sample < row.end_sample {
-                crate::language::CANONICAL_PAD_SAMPLES
-            } else {
-                0
-            };
-            let passages = self.transcribe_span(
-                request.start_sample,
-                request.end_sample,
-                language,
-                &row.speaker_candidates,
-                (left, right),
-            )?;
-            let part = tail_part(request, &passages, true);
-            parts.push(part);
-        }
-        let assembled = assemble_authoritative(&anchor, &requests, &parts)?;
-        let stored = self.book.rows.get_mut(&row.id).expect("row");
-        if assembled.complete {
-            if let Some(text) = assembled.text
-                && stored.protected_fields.iter().all(|field| field != "text")
-            {
-                stored.text = text;
-                stored.machine_revision += 1;
-                stored.text_end_sample = Some(stored.end_sample);
-                stored.text_audio_anchor = Some(timing::AudioAnchor {
-                    start_sample: stored.start_sample,
-                    end_sample: stored.end_sample,
-                });
-                stored.refinement_state = "provisional".to_string();
-                stored.canonical_unresolved = None;
-            }
-        } else {
-            stored.canonical_unresolved = Some(
-                assembled
-                    .reason
-                    .unwrap_or("incomplete_cohere_revision")
-                    .to_string(),
-            );
-            stored.refinement_state = "unresolved".to_string();
         }
         Ok(())
     }
@@ -2524,7 +2468,7 @@ impl<M: Models + 'static> Engine<M> {
                 request.start_sample,
             );
             review |= passages.iter().any(|passage| passage.review);
-            let tail = tail_part(&request, &passages, false);
+            let tail = tail_part(&request, &passages);
             if !tail.complete {
                 // The first unowned core stays retryable. Never freeze an
                 // incomplete prefix or publish later words across this hole.
@@ -2724,7 +2668,7 @@ fn anchor_from(row: &Utterance) -> AnchorRow {
     }
 }
 
-fn tail_part(request: &DecodeRequest, passages: &[Passage], aligned: bool) -> TailPart {
+fn tail_part(request: &DecodeRequest, passages: &[Passage]) -> TailPart {
     let span = request.end_sample - request.start_sample;
     let mut cursor = 0i64;
     let mut complete = !passages.is_empty();
@@ -2745,7 +2689,7 @@ fn tail_part(request: &DecodeRequest, passages: &[Passage], aligned: bool) -> Ta
         cursor = end;
         texts.push(text);
     }
-    complete = complete && cursor == span && (!aligned || passages.len() == 1);
+    complete = complete && cursor == span;
     TailPart {
         request: request.clone(),
         text: texts.join(" "),
@@ -5215,7 +5159,6 @@ mod tests {
     fn canonical_engine_publishes_a_provisional_revision_then_flush_language_and_stop() {
         let mut engine =
             TestEngine::new(EngineConfig::new("job-1", "en"), FakeModels::english()).unwrap();
-        assert!(!engine.timing_apis());
         drive(&mut engine, &loud(RATE as usize), "en");
         let mut seen = Vec::new();
         while let Some(events) = engine.poll().unwrap() {
@@ -5488,9 +5431,42 @@ mod tests {
         let mut partial = old;
         let pcm = [loud(2 * RATE as usize), vec![0.; RATE as usize], loud(160)].concat();
         partial.end = partial.start + pcm.len() as f64 / RATE as f64;
+        let complete = FakeModels::english();
+        let candidate = refine_saved_passage(&complete, &partial, &pcm, None).unwrap();
+        assert_eq!(candidate.text, "hello hello");
+        assert_eq!(
+            complete
+                .transcription_crops
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .1,
+            3744,
+            "the 160 speech samples have 3200 canonical context plus their preceding VAD frame tail"
+        );
+        assert!(candidate.transcription_review.is_none());
+        let incomplete = FakeModels::english();
+        incomplete.transcription_results.lock().unwrap().extend([
+            AsrText {
+                text: "hello".into(),
+                raw_text: "hello".into(),
+                token_count: 1,
+            },
+            AsrText {
+                text: "unfinished tail".into(),
+                raw_text: "unfinished tail".into(),
+                token_count: 448,
+            },
+        ]);
         assert!(
-            refine_saved_passage(&FakeModels::english(), &partial, &pcm, None).is_err(),
-            "a small blocked tail cannot replace whole-anchor words"
+            refine_saved_passage(&incomplete, &partial, &pcm, None).is_err(),
+            "an incomplete second decode cannot replace whole-anchor words"
+        );
+        partial.end = partial.start + 160. / RATE as f64;
+        assert!(
+            refine_saved_passage(&FakeModels::english(), &partial, &loud(160), None).is_err(),
+            "admitted speech without sufficient physical context remains unresolved"
         );
     }
 
@@ -5602,7 +5578,6 @@ mod tests {
     fn unwired_live_timing_never_probes_or_calls_the_acoustic_model() {
         let mut english =
             TestEngine::new(EngineConfig::new("job-en", "en"), FakeModels::english()).unwrap();
-        assert!(!english.timing_apis());
         drive(&mut english, &loud((21 * RATE) as usize), "en");
         let mut events = Vec::new();
         while let Some(batch) = english.poll().unwrap() {

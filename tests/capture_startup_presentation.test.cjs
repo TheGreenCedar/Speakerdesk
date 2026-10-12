@@ -56,3 +56,19 @@ test('saved accuracy controls start, pause and retry through the existing routes
     assert.equal(f.document.getElementById('refinement-toggle').disabled,false);
   }
 });
+
+
+test('live accuracy controls preserve recording and target the accuracy routes',async()=>{
+  const f=frontend(root);f.seed(1,'recording');
+  f.run("selected.kind='meeting';selected.rolling_refinement={mode:'live'};window.calls=[];api=async(path,options)=>{calls.push({path,method:options.method});return {};};poll=async()=>{};");
+  for(const [status,action] of [['waiting','pause'],['refining','pause'],['paused','resume']]) {
+    f.context.nextStatus=status;f.run('selected.refinement_status=nextStatus;renderRefinementStatus()');
+    assert.equal(f.document.getElementById('refinement-controls').hidden,false);
+    assert.equal(f.document.getElementById('refinement-toggle').hidden,false);
+    assert.match(f.document.getElementById('refinement-status').title,/while recording continues/);
+    if(status==='refining')assert.equal(f.document.getElementById('refinement-status').textContent,'Rechecking sealed passages…');
+    await f.run('toggleRefinement()');
+    assert.equal(f.run('calls.at(-1).path'),`/api/jobs/${'d'.repeat(32)}/refinement/${action}`);
+    assert.equal(f.run('selected.status'),'recording');
+  }
+});

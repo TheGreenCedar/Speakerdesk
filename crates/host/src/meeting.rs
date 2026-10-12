@@ -62,6 +62,7 @@ enum Action {
     Pause,
     Resume,
     Stop,
+    Accuracy { resume: bool },
     Language { language: String, revision: i64 },
 }
 
@@ -154,6 +155,50 @@ fn number(job: &Job, key: &str) -> i64 {
     job.extra.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
+pub(crate) async fn refinement_action(app: &AppState, jid: &str, action: &str) -> Option<Response> {
+    let commands = {
+        let manager = app.meeting_manager();
+        let manager = manager.lock().expect("meeting");
+        manager
+            .active
+            .as_ref()
+            .filter(|active| {
+                active.id.as_str() == jid
+                    && active.task.as_ref().is_some_and(|task| !task.is_finished())
+            })
+            .map(|active| active.commands.clone())
+    }?;
+    if !["resume", "pause"].contains(&action) {
+        return Some(error(ApiError::new(404, "Not found.")));
+    }
+    let (reply, response) = oneshot::channel();
+    if commands
+        .send(Control {
+            action: Action::Accuracy {
+                resume: action == "resume",
+            },
+            reply,
+        })
+        .await
+        .is_err()
+    {
+        return Some(error(conflict("This meeting is finishing.")));
+    }
+    Some(match response.await {
+        Ok(Ok(job)) => (
+            if action == "resume" {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            },
+            Json(job),
+        )
+            .into_response(),
+        Ok(Err(e)) => error(e),
+        Err(_) => error(conflict("This meeting is finishing.")),
+    })
+}
+
 async fn status(State(app): State<AppState>) -> Response {
     blocking(move || {
         let (id, progress, available, helper_error) = {
@@ -171,7 +216,7 @@ async fn status(State(app): State<AppState>) -> Response {
             "language_revision":job.as_ref().map_or(0,|j|number(j,"language_revision")),
             "language_acknowledged_revision":job.as_ref().map_or(0,|j|number(j,"language_acknowledged_revision")),
             "language_from_sample":job.as_ref().and_then(|j|j.extra.get("language_history")).and_then(Value::as_array).and_then(|h|h.last()).and_then(|e|e.get("start_sample")).cloned().unwrap_or(json!(0)),
-            "pause_flush":job.as_ref().and_then(|j|j.extra.get("pause_flush")), "refinement_status":"unavailable"})).into_response()
+            "pause_flush":job.as_ref().and_then(|j|j.extra.get("pause_flush")), "refinement_status":job.as_ref().and_then(|j|j.extra.get("refinement_status"))})).into_response()
     }).await
 }
 
@@ -376,8 +421,8 @@ fn meeting_job(id: JobId, name: &str, language: &str, sources: &[String]) -> Job
         .unwrap_or_default()
         .as_secs_f64();
     Job {id,name:name.into(),kind:JobKind::Meeting,status:"starting".into(),message:"Starting meeting…".into(),language:language.into(),source_file:Some("audio.wav".into()),duration:Some(0.0),revision:0,created:now,updated:now,
-        document:Some(Document{schema_version:1,speakers:BTreeMap::new(),segments:Vec::new(),provenance:Some(json!({"kind":"local_inference","mode":"live_phrase_windows","language":language,"language_history":history,"timing":"Speech crop boundaries; supported sealed passages use supplied-text word timing. Uncertain or overlapping speech needs review. Accuracy refinement is unavailable."})),warnings:vec!["Phrase boundaries and overlapping speech need review.".into()],diarization:Vec::new(),edited_at:None,rest:Map::new()}),
-        extra:serde_json::from_value(json!({"sources":sources,"language_revision":0,"language_acknowledged_revision":0,"language_epoch":0,"language_history":history,"refinement_status":"unavailable"})).expect("object")}
+        document:Some(Document{schema_version:1,speakers:BTreeMap::new(),segments:Vec::new(),provenance:Some(json!({"kind":"local_inference","mode":"live_phrase_windows","language":language,"language_history":history,"timing":"Speech crop boundaries; supported sealed passages use supplied-text word timing. Uncertain or overlapping speech needs review. Sealed passages are rechecked with fresh bounded context; saved corrections are protected."})),warnings:vec!["Phrase boundaries and overlapping speech need review.".into()],diarization:Vec::new(),edited_at:None,rest:Map::new()}),
+        extra:serde_json::from_value(json!({"sources":sources,"language_revision":0,"language_acknowledged_revision":0,"language_epoch":0,"language_history":history,"refinement_status":"waiting","refinement_generation":0,"rolling_refinement":{"version":1,"mode":"live","completed":{},"failed":{}}})).expect("object")}
 }
 fn update(
     app: &AppState,
