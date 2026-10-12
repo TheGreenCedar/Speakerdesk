@@ -1217,6 +1217,62 @@ Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
 
+## Joint live progress and the first equivalent live diagnostic
+
+The first equivalent saved-PCM service comparison exposed a progress defect:
+native audio updates reported the Silero endpoint while publication also waited
+for diarization. Pause/Stop reported all received samples. The unchanged editor
+uses this value for its behind/caught-up display, so it could hide pending speaker
+observations. All three progress events now report the minimum of received,
+Silero-observed and diarization-observed samples. Received and canonical EOF
+endpoints, model calls, publication and accuracy work are unchanged.
+
+The existing delayed-diarization test was extended before the fix. It failed with
+4.992 seconds processed although diarization had observed zero. The repaired
+audio and Pause events retain zero processed while receiving 80037 samples;
+Stop reports 80000 jointly observed samples, and canonical publication still
+preserves all 80037 samples. Coordinator verification passes 177 core tests,
+18 mounted live tests (one ordinary-run native-echo exclusion) and strict
+core/host all-target Clippy. Logs are `/tmp/speakerdesk-joint-progress-{red,core,live,clippy}.log`.
+
+The pre-fix optimized candidate `e995d34` was measured against the copied 0.6.6
+runtime with the same 54.4563125-second fixture, pinned model files, explicit
+English, microphone-only source and enabled accuracy pass. Each run starts with
+a fresh disposable store. The external helper emits synthetic PCM on its audio
+clock; Stop follows a producer EOF marker. Tauri rendering and physical capture
+are excluded. The first order was baseline/native/native on October 11; after an
+interruption the second baseline ran on October 12. No app/build workload from
+this task overlapped these measurements.
+
+| Diagnostic | Native, two runs | 0.6.6, two runs |
+| --- | --- | --- |
+| Start to first persisted words | 7.850 / 8.452 s | 10.008 / 10.081 s |
+| Start to Ready | 57.199 / 58.065 s | 58.291 / 58.583 s |
+| Stop to Ready | 2.890 / 3.750 s | 1.952 / 1.959 s |
+| Sampled peak owned physical footprint | 3.562 / 3.541 GB | 4.698 / 4.689 GB |
+| Sampled process CPU lower bound | 19.968 / 20.794 s | 16.870 / 16.496 s |
+
+Every run completed refinement, preserved all 871301 PCM samples and returned the
+same 170-word sequence (one article differs from the source text). Native has
+complete aligned timing with current text, audio anchor and revision on both
+passages. Baseline has reading-turn evidence only on the first passage and no
+reading alignment field; its final passage has no reading turns. These outputs
+are not equivalent timing work. The native Stop/CPU increase remains visible;
+neither it nor the improved first-text/memory values qualify the full performance
+gate. Pre-fix native pending-seconds values are invalid for backlog comparison.
+Post-fix backlog, sustained long sessions, package/UI latency, cold/warm loads,
+physical capture, cancellation and recovery performance remain to qualify.
+
+Inputs, logs, process samples, final documents and `comparison.json` are retained
+in `/private/tmp/speakerdesk-live-comparison.tBmzLh/`. The process sampler includes
+the helper and all observed application descendants; every owned process was
+reaped. Peak memory is sampled and CPU a lower bound; maximum observed sampling
+intervals reached 0.653 seconds. An initial derived producer-to-ready number used
+two Python 3.9 monotonic clocks, which are not comparable across Mac processes.
+It was removed from interpreted measurements and the harness, with an explicit
+note beside retained raw stdout. Driver-local latencies and the marker-existence
+Stop trigger are unaffected. No expensive rerun was used to repair that metric.
+
 ## Incremental activity and the live/long desktop workflows
 
 The growing-utterance activity path previously rebuilt its complete history on

@@ -1968,12 +1968,17 @@ impl<M: Models + 'static> Engine<M> {
             cursor = next;
         }
         self.events.push(EngineEvent::Progress {
-            processed_seconds: self.ledger.lock().expect("speech ledger").end_sample() as f64
-                / RATE as f64,
+            processed_seconds: self.processed_sample() as f64 / RATE as f64,
             received_seconds: self.received as f64 / RATE as f64,
             flush: false,
         });
         Ok(())
+    }
+
+    fn processed_sample(&self) -> i64 {
+        self.received
+            .min(self.ledger.lock().expect("speech ledger").end_sample())
+            .min(self.diar_observed)
     }
 
     fn feed_range(&mut self, start: i64, end: i64) -> Result<(), LiveError> {
@@ -2065,7 +2070,7 @@ impl<M: Models + 'static> Engine<M> {
         }
         self.commit(true, true)?;
         self.events.push(EngineEvent::Progress {
-            processed_seconds: self.received as f64 / RATE as f64,
+            processed_seconds: self.processed_sample() as f64 / RATE as f64,
             received_seconds: self.received as f64 / RATE as f64,
             flush: true,
         });
@@ -2112,7 +2117,7 @@ impl<M: Models + 'static> Engine<M> {
         self.capture_finished = true;
         self.commit(true, true)?;
         self.events.push(EngineEvent::Progress {
-            processed_seconds: self.received as f64 / RATE as f64,
+            processed_seconds: self.processed_sample() as f64 / RATE as f64,
             received_seconds: self.received as f64 / RATE as f64,
             flush: true,
         });
@@ -5234,7 +5239,19 @@ mod tests {
         engine.models.delayed_diar.store(true, Ordering::Relaxed);
         let pcm = [loud(48_000), vec![0.; 16_000], loud(16_037)].concat();
         engine.append_pcm(&pcm);
-        engine.handle(notice(0, pcm.len() as i64, 0)).unwrap();
+        let audio = engine.handle(notice(0, pcm.len() as i64, 0)).unwrap();
+        assert!(engine.ledger.lock().unwrap().end_sample() > 0);
+        assert_eq!(engine.diar_observed, 0);
+        let pause = engine
+            .handle(LiveCommand::Flush {
+                request_id: Some("delayed-pause".into()),
+                through_sample: Some(pcm.len() as i64),
+            })
+            .unwrap();
+        assert!(pause.iter().any(
+            |event| matches!(event, EngineEvent::FlushAck {received_sample, available_sample, ..}
+            if *received_sample == 80_037 && *available_sample == 0)
+        ));
         assert_eq!(
             engine.book.cursor(),
             0,
@@ -5261,6 +5278,28 @@ mod tests {
             );
         }
         assert!(engine.book.closed());
+        for (phase, batch, processed, flush) in [
+            ("audio", audio, 0., false),
+            ("pause", pause, 0., true),
+            ("stop", events, 80_000. / RATE as f64, true),
+        ] {
+            let progress = batch
+                .iter()
+                .filter_map(|event| match event {
+                    EngineEvent::Progress {
+                        processed_seconds,
+                        received_seconds,
+                        flush,
+                    } => Some((*processed_seconds, *received_seconds, *flush)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                progress,
+                vec![(processed, 80_037. / RATE as f64, flush)],
+                "{phase} progress follows jointly observed audio; the received EOF tail remains distinct"
+            );
+        }
     }
 
     #[test]
