@@ -8,6 +8,11 @@ Run `Apple package` (`.github/workflows/apple-build.yml`) by manual dispatch on 
 
 To build locally, run `APPLE_SIGNING_IDENTITY="<Developer ID identity>" ./scripts/build_macos.sh` (or `-` for ad-hoc). Local signing is fine for disposable checks. It does not count as notarization or release provenance.
 
+DMG creation retries only `hdiutil`'s `Resource busy` failure, up to three attempts
+with 2- and 4-second delays, using the same verified staged app. Other errors
+and exhausted retries stop the build before the DMG is signed or an artifact
+manifest is produced.
+
 ## 2. Sign and notarize (AppleRelease)
 
 The [`TheGreenCedar/AppleRelease`](https://github.com/TheGreenCedar/AppleRelease/blob/main/.github/workflows/sign.yml) signer checks the exact producer run, source commit, artifact ID and archive digest against its central policy. It then signs the native code, refreshes the capture-helper receipt, and notarizes and staples the app and the DMG. It also signs a version-bound Tauri updater archive. It uses its existing Developer ID, notarization and updater-signing credentials, and needs no new grants. Private keys stay in AppleRelease and must never appear in logs, chat or source.

@@ -41,7 +41,23 @@ codesign "${sign_args[@]}" "$resources/speakerdesk-capture"
 codesign "${sign_args[@]}" "$package_stage/Speakerdesk.app"
 codesign --verify --deep --strict "$package_stage/Speakerdesk.app"
 cargo xtask verify-bundle "$package_stage/Speakerdesk.app"
-hdiutil create -volname Speakerdesk -srcfolder "$package_stage" -format UDZO -fs HFS+ -ov "release/Speakerdesk_${package_version}_AppleSilicon.dmg"
+# Keep hdiutil's log outside the image source and off a pipe while it creates the DMG.
+dmg_log="$(mktemp "$native_root/speakerdesk-dmg.XXXXXX")"
+trap 'rm -rf "$package_stage" "$dmg_log"' EXIT
+for attempt in 1 2 3; do
+    if hdiutil create -volname Speakerdesk -srcfolder "$package_stage" -format UDZO -fs HFS+ -ov "release/Speakerdesk_${package_version}_AppleSilicon.dmg" >"$dmg_log" 2>&1; then
+        cat "$dmg_log"
+        break
+    else
+        status=$?
+        cat "$dmg_log" >&2
+        if [[ "$attempt" == 3 ]] || ! grep -Fxq 'hdiutil: create failed - Resource busy' "$dmg_log"; then
+            exit "$status"
+        fi
+        echo "DMG creation reported Resource busy; retrying in $((attempt * 2))s." >&2
+        sleep "$((attempt * 2))"
+    fi
+done
 dmg_sign_args=(--force --sign "$APPLE_SIGNING_IDENTITY")
 if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then dmg_sign_args+=(--timestamp); fi
 codesign "${dmg_sign_args[@]}" "release/Speakerdesk_${package_version}_AppleSilicon.dmg"
