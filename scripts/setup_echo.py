@@ -13,6 +13,7 @@ import platform
 import resource
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -116,6 +117,15 @@ def sources():
     return receipt
 
 
+def output_bytes():
+    total=0
+    for path in BUILD.rglob('*'):
+        try:entry=path.stat()
+        except FileNotFoundError:continue  # Ninja renames temporary archives during the scan.
+        if stat.S_ISREG(entry.st_mode):total+=entry.st_size
+    return total
+
+
 def build():
     if (platform.system(),platform.machine())!=('Darwin','arm64'):
         raise RuntimeError('The capture echo component requires Apple Silicon macOS.')
@@ -137,7 +147,7 @@ def build():
         try:
             while child.poll() is None:
                 if time.monotonic()-start>600:reason='Native build wall budget';break
-                if sum(p.stat().st_size for p in BUILD.rglob('*') if p.is_file())>512*1024**2:reason='Native build output budget';break
+                if output_bytes()>512*1024**2:reason='Native build output budget';break
                 time.sleep(.25)
         finally:
             if child.poll() is None:
@@ -147,7 +157,7 @@ def build():
             (BUILD/'ACTIVE-BUILD.json').write_text(json.dumps({'owned_pid':child.pid,'phase':'joined','exit_code':child.returncode})+'\n')
     receipt.update(exit_code=child.returncode,stop_reason=reason,elapsed_seconds=time.monotonic()-start,
                    peak_child_rss_bytes=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
-                   parallel_compilers=2,output_bytes=sum(p.stat().st_size for p in BUILD.rglob('*') if p.is_file()))
+                   parallel_compilers=2,output_bytes=output_bytes())
     if child.returncode or reason:
         print('\n'.join((BUILD/'BUILD.log').read_text().splitlines()[-30:]),file=sys.stderr)
         raise RuntimeError(f'Echo component build failed: {reason or child.returncode}')
