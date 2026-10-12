@@ -145,6 +145,42 @@ class IdentityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             keys(self.root, self.paths, self.tools)
 
+    def test_echo_component_key_binds_source_guard_and_toolchain_without_rust_edits(self):
+        baseline = keys(self.root, self.paths, self.tools)['echo-key']
+        for name in ['desktop/capture/echo/source-lock.json',
+                     'desktop/capture/echo/speakerdesk_echo.cc',
+                     'scripts/setup_echo.py', 'scripts/echo_compile_guard.py']:
+            with self.subTest(input=name):
+                path = self.root / name
+                path.write_text('changed')
+                self.assertNotEqual(baseline, keys(self.root, self.paths, self.tools)['echo-key'])
+                path.write_text('original')
+        (self.root / 'crates/core/src/live.rs').write_text('changed')
+        self.assertEqual(baseline, keys(self.root, self.paths, self.tools)['echo-key'])
+        self.assertNotEqual(baseline, keys(self.root, self.paths, dict(self.tools, cc='other clang'))['echo-key'])
+
+    def test_dependency_outputs_survive_application_ci_and_docs_edits(self):
+        baseline = keys(self.root, self.paths, self.tools)['dependency-key']
+        for name in ['crates/core/src/live.rs', 'speakerdesk/static/app.js',
+                     'desktop/src-tauri/src/main.rs', 'scripts/build_macos.sh',
+                     'scripts/ci_cache.py', '.github/workflows/ci.yml', 'docs/ci-build-reuse.md']:
+            with self.subTest(input=name):
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('changed')
+                self.assertEqual(baseline, keys(self.root, self.paths + [name], self.tools)['dependency-key'])
+                path.write_text('original')
+        for name in ['vendor/mlx-sys/build.rs', 'scripts/fetch_mlx_runtime.sh',
+                     'desktop/capture/echo/source-lock.json', 'scripts/echo_compile_guard.py']:
+            with self.subTest(native=name):
+                path = self.root / name
+                path.write_text('changed')
+                self.assertNotEqual(baseline, keys(self.root, self.paths, self.tools)['dependency-key'])
+                path.write_text('original')
+        for tool in ['cc', 'sdk', 'target', 'rust', 'image', 'deployment']:
+            with self.subTest(tool=tool):
+                self.assertNotEqual(baseline, keys(self.root, self.paths, dict(self.tools, **{tool: 'changed'}))['dependency-key'])
+
     def test_docs_filter_preserves_all_unknown_source_changes(self):
         self.assertFalse(source_changed(['README.md', 'docs/guide.md']))
         for path in ['.github/workflows/ci.yml', 'requirements-ci.lock.txt',

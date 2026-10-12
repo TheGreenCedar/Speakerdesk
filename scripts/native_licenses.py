@@ -81,6 +81,8 @@ def collect(metadata, destination, pins=None, extra=None):
 
 
 if __name__ == '__main__':
+    from setup_echo import sources
+    sources()
     metadata = json.loads(subprocess.check_output(
         ['cargo', 'metadata', '--locked', '--format-version', '1', '--filter-platform', 'aarch64-apple-darwin'], cwd=ROOT))
     pins = json.loads((ROOT / 'packaging/native-license-sources.json').read_text())

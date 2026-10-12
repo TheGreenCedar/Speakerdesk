@@ -37,7 +37,11 @@ def keys(root, tracked, tools):
     # Version/lock/manifest changes must not discard unchanged dependency objects.
     compiler_tools = {name: value for name, value in tools.items() if name not in {'python', 'node', 'profile'}}
     compiler_prefix = f"speakerdesk-compiler-v3-{fingerprint(root, rust_contract, compiler_tools)}-"
+    dependency_contract = files('vendor/mlx-sys/', 'scripts/fetch_mlx_runtime.sh',
+                                'desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/echo_compile_guard.py')
+    dependency_tools = {name: value for name, value in tools.items() if name not in {'python', 'node'}}
     return {
+        'dependency-key': f"speakerdesk-dependencies-v1-{fingerprint(root, dependency_contract, dependency_tools)}",
         'cargo-key': f"{prefix}-cargo-{fingerprint(root, files('Cargo.lock'), {})}",
         'cargo-prefix': f"{prefix}-cargo-",
         'npm-key': f"{prefix}-npm-{fingerprint(root, files('desktop/package-lock.json'), {})}",
@@ -46,6 +50,7 @@ def keys(root, tracked, tools):
         'compiler-key': compiler_prefix + fingerprint(root, rust_inputs, {'profile': tools.get('profile', '')}),
         # Whole components use exact inputs only. No prefix restore for executable outputs.
         'capture-key': f"{prefix}-capture-{fingerprint(root, files('desktop/capture/', 'desktop/src-tauri/Entitlements.plist', 'scripts/build_macos.sh', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
+        'echo-key': f"{prefix}-echo-{fingerprint(root, files('desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/echo_compile_guard.py', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
     }
 
 
@@ -98,7 +103,7 @@ if __name__ == '__main__':
         emit({'cache-bytes': total, 'within-limit': str(total <= 2 * 1024**3).lower()})
         if os.getenv('GITHUB_STEP_SUMMARY'):
             with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-                summary.write(f'- Total cache bytes: {total}; save limit: {2 * 1024**3}\n')
+                summary.write(f'- Compiler and component cache bytes: {total}; save limit: {2 * 1024**3}; pruned Cargo archive bytes in action log\n')
     elif sys.argv[1:] == ['changes']:
         base = os.getenv('BASE_SHA', '')
         if not base or set(base) == {'0'}:

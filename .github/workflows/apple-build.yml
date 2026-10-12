@@ -24,6 +24,8 @@ jobs:
     env:
       APPLE_SIGNING_IDENTITY: '-'
       CI: 'true'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      SPEAKERDESK_NATIVE_TARGET_DIR: ${{ github.workspace }}/target
       npm_config_cache: ${{ github.workspace }}/.cache/npm
       SCCACHE_CACHE_SIZE: 512M
       SCCACHE_GHA_ENABLED: 'false'
@@ -54,16 +56,15 @@ jobs:
       - name: Capture cache compatibility and exact component identities
         id: identity
         run: python scripts/ci_cache.py
-      - name: Restore cargo cache
+      - name: Restore Cargo dependencies and build outputs
         if: github.event.inputs.cache != 'false'
         id: cargo
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ steps.identity.outputs.cargo-key }}
-          restore-keys: ${{ steps.identity.outputs.cargo-prefix }}
+          shared-key: ${{ steps.identity.outputs.dependency-key }}
+          cache-bin: false
+          cache-workspace-crates: false
+          save-if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.cache != 'false' }}
       - name: Restore npm cache
         if: github.event.inputs.cache != 'false'
         id: npm
@@ -90,10 +91,16 @@ jobs:
           path: |
             .cache/components/capture
           key: ${{ steps.identity.outputs.capture-key }}
+      - name: Restore exact echo component
+        if: github.event.inputs.cache != 'false'
+        id: echo
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .cache/components/echo
+          key: ${{ steps.identity.outputs.echo-key }}
       - name: Report cache hit types
         env:
           CARGO_HIT: ${{ steps.cargo.outputs.cache-hit }}
-          CARGO_MATCHED: ${{ steps.cargo.outputs.cache-matched-key }}
           NPM_HIT: ${{ steps.npm.outputs.cache-hit }}
           NPM_MATCHED: ${{ steps.npm.outputs.cache-matched-key }}
           COMPILER_MATCHED: ${{ steps.compiler.outputs.cache-matched-key }}
@@ -102,8 +109,7 @@ jobs:
         run: |
           {
             echo "### Cache restore"
-            echo "- Cargo dependency exact hit: ${CARGO_HIT:-false}"
-            echo "- Cargo dependency matched: ${CARGO_MATCHED:-miss}"
+            echo "- Cargo dependency/build output exact hit: ${CARGO_HIT:-false}; matched key in action log"
             echo "- npm exact hit: ${NPM_HIT:-false}"
             echo "- npm matched: ${NPM_MATCHED:-miss}"
             echo "- compiler requested: $COMPILER_REQUESTED"
@@ -112,6 +118,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Build candidate without model weights
         env:
+          SPEAKERDESK_ECHO_KEY: ${{ github.event.inputs.cache != 'false' && steps.identity.outputs.echo-key || '' }}
           SPEAKERDESK_CAPTURE_KEY: ${{ github.event.inputs.cache != 'false' && steps.identity.outputs.capture-key || '' }}
         run: |
           started=$SECONDS
@@ -126,14 +133,6 @@ jobs:
       - name: Check cache byte budget
         id: budget
         run: python scripts/ci_cache.py size
-      - name: Save trusted cargo cache
-        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.cache != 'false' && steps.budget.outputs.within-limit == 'true' && steps.cargo.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ steps.cargo.outputs.cache-primary-key }}
       - name: Save trusted npm cache
         if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.cache != 'false' && steps.budget.outputs.within-limit == 'true' && steps.npm.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -155,6 +154,12 @@ jobs:
           path: |
             .cache/components/capture
           key: ${{ steps.capture.outputs.cache-primary-key }}
+      - name: Save trusted echo component
+        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.cache != 'false' && steps.budget.outputs.within-limit == 'true' && steps.echo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .cache/components/echo
+          key: ${{ steps.echo.outputs.cache-primary-key }}
       - name: Produce exact-source artifact manifest
         run: python scripts/artifact_manifest.py
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

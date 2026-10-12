@@ -96,16 +96,15 @@ jobs:
       - name: Capture Rust cache identities
         id: identity
         run: python3 scripts/ci_cache.py rust
-      - name: Restore cargo cache
+      - name: Restore Cargo dependencies and build outputs
         if: github.event.inputs.cache != 'false'
         id: cargo
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ steps.identity.outputs.cargo-key }}
-          restore-keys: ${{ steps.identity.outputs.cargo-prefix }}
+          shared-key: ${{ steps.identity.outputs.dependency-key }}
+          cache-bin: false
+          cache-workspace-crates: false
+          save-if: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.event.inputs.cache != 'false' }}
       - name: Restore compiler cache
         if: github.event.inputs.cache != 'false'
         id: compiler
@@ -117,12 +116,12 @@ jobs:
           restore-keys: ${{ steps.identity.outputs.compiler-prefix }}
       - name: Report cache hit types
         env:
-          CARGO_MATCHED: ${{ steps.cargo.outputs.cache-matched-key }}
+          CARGO_HIT: ${{ steps.cargo.outputs.cache-hit }}
           COMPILER_MATCHED: ${{ steps.compiler.outputs.cache-matched-key }}
           COMPILER_REQUESTED: ${{ steps.identity.outputs.compiler-key }}
         run: |
           {
-            echo "- Cargo dependency matched: ${CARGO_MATCHED:-miss}"
+            echo "- Cargo dependency/build output exact hit: ${CARGO_HIT:-false}; matched key in action log"
             echo "- Compiler requested: $COMPILER_REQUESTED"
             echo "- Compiler matched: ${COMPILER_MATCHED:-miss}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -140,14 +139,6 @@ jobs:
       - name: Check cache byte budget
         id: budget
         run: python3 scripts/ci_cache.py size
-      - name: Save trusted cargo cache
-        if: success() && github.ref == 'refs/heads/main' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.event.inputs.cache != 'false' && steps.budget.outputs.within-limit == 'true' && steps.cargo.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ steps.cargo.outputs.cache-primary-key }}
       - name: Save trusted compiler cache
         if: success() && github.ref == 'refs/heads/main' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.event.inputs.cache != 'false' && steps.budget.outputs.within-limit == 'true' && steps.compiler.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -180,16 +171,15 @@ jobs:
       - name: Capture Rust cache identities
         id: identity
         run: python3 scripts/ci_cache.py rust
-      - name: Restore cargo cache
+      - name: Restore Cargo dependencies and build outputs
         if: github.event.inputs.cache != 'false'
         id: cargo
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ steps.identity.outputs.cargo-key }}
-          restore-keys: ${{ steps.identity.outputs.cargo-prefix }}
+          shared-key: ${{ steps.identity.outputs.dependency-key }}
+          cache-bin: false
+          cache-workspace-crates: false
+          save-if: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.event.inputs.cache != 'false' }}
       - name: Restore compiler cache
         if: github.event.inputs.cache != 'false'
         id: compiler
@@ -201,12 +191,12 @@ jobs:
           restore-keys: ${{ steps.identity.outputs.compiler-prefix }}
       - name: Report cache hit types
         env:
-          CARGO_MATCHED: ${{ steps.cargo.outputs.cache-matched-key }}
+          CARGO_HIT: ${{ steps.cargo.outputs.cache-hit }}
           COMPILER_MATCHED: ${{ steps.compiler.outputs.cache-matched-key }}
           COMPILER_REQUESTED: ${{ steps.identity.outputs.compiler-key }}
         run: |
           {
-            echo "- Cargo dependency matched: ${CARGO_MATCHED:-miss}"
+            echo "- Cargo dependency/build output exact hit: ${CARGO_HIT:-false}; matched key in action log"
             echo "- Compiler requested: $COMPILER_REQUESTED"
             echo "- Compiler matched: ${COMPILER_MATCHED:-miss}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -219,8 +209,18 @@ jobs:
           started=$SECONDS
           cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p speakerdesk-models -p speakerdesk-echo -p xtask
           echo "- Native crate tests: $((SECONDS - started))s" >> "$GITHUB_STEP_SUMMARY"
+      - name: Restore exact echo component
+        if: github.event.inputs.cache != 'false'
+        id: echo
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .cache/components/echo
+          key: ${{ steps.identity.outputs.echo-key }}
       - name: Build pinned native echo component
-        run: python3 scripts/setup_echo.py
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+          SPEAKERDESK_ECHO_KEY: ${{ github.event.inputs.cache != 'false' && steps.identity.outputs.echo-key || '' }}
+        run: python3 scripts/component_cache.py .cache/components/echo "$SPEAKERDESK_ECHO_KEY" desktop/capture/echo/libspeakerdesk_echo.dylib -- python3 scripts/setup_echo.py
       - name: Test native raw capture DSP boundary
         run: |
           cargo test --locked -p speakerdesk-host raw_dual_capture_opens_and_preserves_partial_pause_tail -- --ignored
@@ -244,14 +244,6 @@ jobs:
       - name: Check cache byte budget
         id: budget
         run: python3 scripts/ci_cache.py size
-      - name: Save trusted cargo cache
-        if: success() && github.ref == 'refs/heads/main' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.event.inputs.cache != 'false' && steps.budget.outputs.within-limit == 'true' && steps.cargo.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ steps.cargo.outputs.cache-primary-key }}
       - name: Save trusted compiler cache
         if: success() && github.ref == 'refs/heads/main' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.event.inputs.cache != 'false' && steps.budget.outputs.within-limit == 'true' && steps.compiler.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -259,3 +251,9 @@ jobs:
           path: |
             ${{ runner.temp }}/speakerdesk-sccache
           key: ${{ steps.compiler.outputs.cache-primary-key }}
+      - name: Save trusted echo component
+        if: success() && github.ref == 'refs/heads/main' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.event.inputs.cache != 'false' && steps.budget.outputs.within-limit == 'true' && steps.echo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: .cache/components/echo
+          key: ${{ steps.echo.outputs.cache-primary-key }}
