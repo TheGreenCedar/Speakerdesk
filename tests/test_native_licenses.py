@@ -25,7 +25,7 @@ class NativeLicenseTests(unittest.TestCase):
             script.parent.mkdir()
             script.write_bytes((Path(__file__).resolve().parents[1] / 'scripts/native_licenses.py').read_bytes())
             for relative in ['LICENSE', 'packaging/THIRD_PARTY_NOTICES.md',
-                             'target/native/mlx-0.32.2/LICENSE', 'vendor/mlx-sys/src/mlx-c/LICENSE']:
+                             '.cache/native/mlx-0.32.2/LICENSE', 'vendor/mlx-sys/src/mlx-c/LICENSE']:
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('Independent native license text')

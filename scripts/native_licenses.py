@@ -92,7 +92,7 @@ if __name__ == '__main__':
     for title, pin in pins['sources'].items():
         extra[f"{title} / {pin['url']} / SHA-256: {pin['sha256']}"] = fetch_text(pin, destination.parent / 'license-sources')
     for title, relative in {
-        'Apple MLX 0.32.2': 'target/native/mlx-0.32.2/LICENSE',
+        'Apple MLX 0.32.2': '.cache/native/mlx-0.32.2/LICENSE',
         'Apple MLX C binding': 'vendor/mlx-sys/src/mlx-c/LICENSE',
         'WebRTC echo component': '.cache/echo-source/src/LICENSE',
         'WebRTC patent grant': '.cache/echo-source/src/PATENTS',
