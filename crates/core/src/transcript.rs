@@ -172,14 +172,29 @@ fn validated_segments(
         seen.insert(sid.clone());
         built.push(segment_from_map(object.clone(), sid, start, end));
     }
-    built.sort_by(|left, right| {
+    sort_segments(&mut built);
+    Ok(built)
+}
+
+pub(crate) fn sort_segments(segments: &mut [Segment]) {
+    segments.sort_by(|left, right| {
         left.start
             .total_cmp(&right.start)
             .then(left.end.total_cmp(&right.end))
             .then_with(|| capture_source_rank(left).cmp(&capture_source_rank(right)))
             .then_with(|| source_id_tie(left).cmp(source_id_tie(right)))
+            .then_with(|| {
+                left.separation
+                    .as_ref()
+                    .map(|v| (&v.episode_id, v.channel))
+                    .cmp(
+                        &right
+                            .separation
+                            .as_ref()
+                            .map(|v| (&v.episode_id, v.channel)),
+                    )
+            })
     });
-    Ok(built)
 }
 
 fn finish_document(
@@ -253,6 +268,12 @@ fn segment_from_map(mut fields: Map<String, Value>, id: String, start: f64, end:
         audio_revision,
         review,
         capture_source,
+        separation_candidate: fields
+            .remove("separation_candidate")
+            .and_then(|v| serde_json::from_value(v).ok()),
+        separation: fields
+            .remove("separation")
+            .and_then(|v| serde_json::from_value(v).ok()),
         rest: fields,
     }
 }
@@ -411,6 +432,8 @@ pub(crate) fn bare_segment(id: &str, start: f64, end: f64, speaker: &str, text: 
         audio_revision: None,
         review: None,
         capture_source: None,
+        separation_candidate: None,
+        separation: None,
         rest: Map::new(),
     }
 }

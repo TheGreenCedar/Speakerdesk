@@ -1110,6 +1110,7 @@ pub fn segment_version(segment: &Segment) -> String {
         "speaker": segment.speaker,
         "start": segment.start,
         "text": segment.text,
+        "separation": segment.separation,
         "audio_revision": segment.audio_revision,
         "capture_source": segment.capture_source,
         "canonical_utterance_id": segment.canonical_utterance_id,
@@ -2929,6 +2930,8 @@ fn project_segment(row: &Utterance, stamp: &LanguageStamp) -> Segment {
         audio_revision: Some(row.audio_revision),
         review: Some(!single || row.review || row.canonical_unresolved.is_some() || row.transcription_review),
         capture_source: None,
+        separation_candidate: None,
+        separation: None,
         rest,
     }
 }
@@ -3835,6 +3838,8 @@ mod tests {
             audio_revision: Some(0),
             review: Some(false),
             capture_source: None,
+            separation_candidate: None,
+            separation: None,
             rest: Map::new(),
         }
     }

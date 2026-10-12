@@ -14,6 +14,7 @@ pub struct Runtime {
     whisper: Option<whisper_lid::network::Network>,
     ctc: Option<ctc::network::Network>,
     voice: Option<redimnet::coreml::Network>,
+    separation: Option<crate::mossformer2::network::Network>,
     vad_sessions: std::collections::HashMap<u64, crate::silero::session::Session>,
     diar_sessions: std::collections::HashMap<u64, sortformer::session::Session>,
     next_session: u64,
@@ -33,6 +34,7 @@ impl Runtime {
             whisper: None,
             ctc: None,
             voice: None,
+            separation: None,
             vad_sessions: Default::default(),
             diar_sessions: Default::default(),
             next_session: 1,
@@ -105,6 +107,14 @@ impl Runtime {
                             .identity()
                             .revision
                     }
+                    "mossformer2-16k" => {
+                        if self.separation.is_none() {
+                            self.separation = Some(crate::mossformer2::network::Network::load(
+                                &self.model_root.join(model),
+                            )?);
+                        }
+                        speakerdesk_core::separation::MODEL.into()
+                    }
                     _ => return Err(ChildError::Unimplemented),
                 };
                 if cancel.load(Ordering::Acquire) {
@@ -119,21 +129,30 @@ impl Runtime {
             return Ok(Response::Setup(reports));
         }
         match request {
-            Request::PrepareAlignment => {
-                let directory = self.model_root.join(".staging/coarse-alignment");
+            Request::PrepareAlignment | Request::PrepareSeparation => {
+                let separation = matches!(request, Request::PrepareSeparation);
+                let directory = self.model_root.join(if separation {
+                    ".staging/mossformer2-16k"
+                } else {
+                    ".staging/coarse-alignment"
+                });
                 // The parent owns this private staging directory; never follow an old partial link.
                 let output = directory.join("model.safetensors.part");
                 match std::fs::symlink_metadata(&output) {
                     Ok(meta) if !meta.is_file() || meta.is_symlink() => {
                         return Err(crate::weights::error(
-                            "CTC staging output is not a regular file",
+                            "Model staging output is not a regular file",
                         ));
                     }
                     Ok(_) => std::fs::remove_file(&output).map_err(crate::weights::error)?,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(crate::weights::error(error)),
                 }
-                ctc::prepare::convert_cancellable(&directory, &output, cancel)?;
+                if separation {
+                    crate::mossformer2::prepare::convert_cancellable(&directory, &output, cancel)?;
+                } else {
+                    ctc::prepare::convert_cancellable(&directory, &output, cancel)?;
+                }
                 if cancel.load(Ordering::Acquire) {
                     return Err(ChildError::Cancelled);
                 }
@@ -161,6 +180,9 @@ impl Runtime {
                     self.voice
                         .as_ref()
                         .map(|network| network.identity().revision),
+                    self.separation
+                        .as_ref()
+                        .map(|_| speakerdesk_core::separation::MODEL.into()),
                 ]
                 .into_iter()
                 .flatten()
@@ -303,6 +325,22 @@ impl Runtime {
                     clip: network.embed(&pcm, cancel)?,
                 }))
             }
+            Request::Separate { pcm } => {
+                if self.separation.is_none() {
+                    self.separation = Some(crate::mossformer2::network::Network::load(
+                        &self.model_root.join("mossformer2-16k"),
+                    )?);
+                }
+                let channels = self
+                    .separation
+                    .as_mut()
+                    .expect("loaded above")
+                    .separate(&pcm, cancel)?;
+                Ok(Response::Separated(speakerdesk_core::ipc::SeparatedAudio {
+                    model: speakerdesk_core::separation::MODEL.into(),
+                    channels,
+                }))
+            }
             other => dispatch(other, cancel),
         }
     }
@@ -346,7 +384,10 @@ pub fn dispatch(request: Request, cancel: &AtomicBool) -> Result<Response, Child
             ctc::ctc_scores(&pcm, &token_ids).map(Response::Ctc)
         }
         Request::EmbedVoice { pcm } => redimnet::embed_voice(&pcm).map(Response::Embedding),
-        Request::SetupCheck { .. } | Request::PrepareAlignment => Err(ChildError::Unimplemented),
+        Request::SetupCheck { .. }
+        | Request::PrepareAlignment
+        | Request::PrepareSeparation
+        | Request::Separate { .. } => Err(ChildError::Unimplemented),
         Request::Metrics => memory::metrics().map(Response::Metrics),
         Request::Cancel { .. } | Request::Shutdown => Ok(Response::Ack),
     }

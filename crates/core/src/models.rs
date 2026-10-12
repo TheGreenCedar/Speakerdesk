@@ -51,6 +51,9 @@ pub trait Models: Send + Sync {
     fn ctc_scores(&self, pcm: &[f32], token_ids: &[i32]) -> Result<CtcScoresOut, ChildError>;
     fn embed_voice(&self, pcm: &[f32]) -> Result<crate::ipc::VoiceEmbedding, ChildError>;
     fn setup_check(&self, models: &[String]) -> Result<Vec<SetupModelReport>, ChildError>;
+    fn separate(&self, _pcm: &[f32]) -> Result<crate::ipc::SeparatedAudio, ChildError> {
+        Err(ChildError::Unimplemented)
+    }
     fn metrics(&self) -> Result<MetricsOut, ChildError>;
 }
 

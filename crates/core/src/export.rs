@@ -18,7 +18,11 @@ pub struct Export {
 /// Export current product text. Reading projections must still match their source.
 pub fn export(document: &Document, kind: &str) -> Result<Export, ExportTooLarge> {
     if kind == "json" {
-        let value = serde_json::to_value(document).expect("transcript document serializes");
+        let mut active = document.clone();
+        for segment in &mut active.segments {
+            segment.separation_candidate = None;
+        }
+        let value = serde_json::to_value(active).expect("transcript document serializes");
         let json = to_pretty_json(&value);
         let body = bounded_text([json.as_str(), "\n"])?;
         return Ok(Export {
@@ -106,7 +110,15 @@ fn push_passage(
     passage: &Segment,
     cue: &mut usize,
 ) {
-    let label = speaker_label(&document.speakers, &passage.speaker);
+    let label = if matches!(passage.speaker.as_str(), "unknown" | "unassigned") {
+        passage
+            .separation
+            .as_ref()
+            .map(|v| v.label().to_owned())
+            .unwrap_or_else(|| speaker_label(&document.speakers, &passage.speaker))
+    } else {
+        speaker_label(&document.speakers, &passage.speaker)
+    };
     let passage_text = export_text(passage);
     if kind == "txt" {
         let timing = timing_prefix(passage);

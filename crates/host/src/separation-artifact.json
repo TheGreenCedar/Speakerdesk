@@ -1,0 +1,18 @@
+{
+  "id": "mossformer2-16k",
+  "name": "Overlapping voice separation",
+  "repo": "alibabasglab/MossFormer2_SS_16K",
+  "revision": "407cb030cd66340918ebb6c8cc63b18f8592cdbe",
+  "files": {
+    "last_best_checkpoint.pt": {
+      "size": 670353271,
+      "sha256": "00a3a48bda492db1e829b85dd443f8f43a43039a3e90f1a24962ea9caf14a11a"
+    }
+  },
+  "prepared": {
+    "model.safetensors": {
+      "size": 223094560,
+      "sha256": "f7fc8ec3cdb3200c17c3bf52fa5f836b8d6ec203bd58897f16ffe25e71e74473"
+    }
+  }
+}

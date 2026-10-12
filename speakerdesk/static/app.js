@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="speakerdesk-token"]').content;
 let config, jobs = [], selected = null, doc = null, dirty = false, polling = false, saving = false, editGeneration = 0, selectionGeneration = 0;
-let meeting = null, followingLive = true, passageEnd = null, retrying = false, startingJob = null;
+let meeting = null, followingLive = true, passageEnd = null, passageStart = null, retrying = false, startingJob = null;
 let changingLiveLanguage = false, changingDefaultLanguage = false, defaultLanguageGeneration = 0;
 let pendingExport = null, autosaveTimer = null, setupState = null, undoRemoval = null;
 let updateState = {id: 0, state: 'unavailable'}, updateFrozen = false, updatePolling = false;
@@ -189,7 +189,7 @@ function setStatus() {
   $('recording-name').textContent = selected.name; $('recording-name').title = selected.name;
   $('meeting-date').textContent = new Date(selected.created*1000).toLocaleString(undefined,{weekday:'long',month:'long',day:'numeric',hour:'numeric',minute:'2-digit'});
   const starting=startingJob===selected.id;
-  $('job-message').textContent = retrying || selected.passage_retry ? 'Retrying passage locally…' : starting ? 'Starting transcription…' : selected.message;
+  $('job-message').textContent = selected.passage_separation?.phase || (retrying || selected.passage_retry ? 'Working on passage locally…' : starting ? 'Starting transcription…' : selected.message);
   const live=isLive(), busy=live || starting || ['preparing','processing','queued'].includes(selected.status);
   $('job-progress').hidden=selected.kind==='meeting' || !(busy || retrying || selected.passage_retry);
   $('editor').inert=updateFrozen || retrying || (busy && !live);
@@ -229,7 +229,7 @@ async function select(jid) {
   } finally { if (!identityBusy) $('editor').inert = false; }
   if (generation !== selectionGeneration) return;
   selected = result; doc = selected.document ? structuredClone(selected.document) : null; dirty = false;
-  passageEnd=null;
+  passageEnd=null;passageStart=null;
   $('empty').hidden = true; $('workspace').hidden = false;
   if(!isLive() && selected.duration) $('player').src = `/api/jobs/${jid}/audio`;
   else {$('player').pause();$('player').removeAttribute('src');}
@@ -337,6 +337,7 @@ function validReadingTurns(segment) {
   return joined===segment.text && cursor===Array.from(segment.text).length ? turns : null;
 }
 function hasOverlappingSpeakers(segment) {
+  if(segment.separation)return false;
   const turns=validReadingTurns(segment);
   if(turns)return turns.some(turn=>turn.attribution==='overlap');
   if(segment.canonical_utterance_id) {
@@ -458,7 +459,7 @@ function refreshReadingTurnView(card,segment) {
 }
 function savedPassageSignature(segment) {
   return JSON.stringify([segment,doc.speakers,doc.provenance,selected.speaker_assignments?.[segment.speaker],
-    ['preparing','processing','queued'].includes(selected.status),!!selected.passage_retry]);
+    ['preparing','processing','queued'].includes(selected.status),!!selected.passage_retry,!!selected.passage_separation]);
 }
 function savedCard(segment) {
   const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;card.dataset.speaker=segment.speaker;
@@ -467,13 +468,20 @@ function savedCard(segment) {
   const body=node('div',undefined,'segment-body');
   const top = node('div', undefined, 'segment-top');
   const seek = node('button', undefined, 'seek'); seek.append(icon('play'),node('span',time(segment.start))); seek.setAttribute('aria-label', `Play passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);seek.title=`Play passage ${passageTime(segment.start)}–${passageTime(segment.end)}`;
-  seek.addEventListener('click', () => { passageEnd=segment.end; $('player').currentTime = segment.start; $('player').play().catch(e => notice(e.message, true)); });
+  seek.addEventListener('click', () => {
+    if(segment.separation)playSeparatedPassage(card,segment);
+    else playOriginalPassage(segment);
+  });
   const speaker = node('select'); speakerOptions(speaker, segment.speaker); speaker.setAttribute('aria-label', 'Segment speaker');
   speaker.disabled=!!isLive();
   seek.disabled=!!isLive();
   speaker.title='Change who spoke this passage';
   speaker.addEventListener('change', () => { segment.speaker = speaker.value; segment.review = true; changed(); renderSegments(); });
   body.append(seek);top.append(speaker);
+  if(segment.separation) {
+    card.dataset.separationEpisode=segment.separation.episode_id;
+    seek.setAttribute('aria-label',`Play separated passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);
+  }
   if(selected.speaker_assignments?.[segment.speaker]?.source==='automatic_voice') {
     const recognized=node('span','Recognized','review-tag routine-state');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';top.append(recognized);
   }
@@ -494,6 +502,7 @@ function savedCard(segment) {
   body.append(top,text);
   const reason=passageReviewReason(segment);
   appendPassageRepair(body,segment,reason);
+  appendPassageSeparation(body,segment);
   const repair=body.querySelector(':scope > .passage-repair');
   if(repair){repair.classList.add('inline-repair');
     repairToggle.addEventListener('click',()=>{repair.open=!repair.open;if(repair.open)repair.querySelector('select')?.focus();});
@@ -536,6 +545,7 @@ function renderSegments() {
     }
     retained.add(card);if(card!==cursor)host.insertBefore(card,cursor);cursor=card.nextSibling;
     refreshReadingTurnView(card,segment);
+    refreshPassageSeparation(card,segment);
     setPassageClass(card,'active',segment.id===inspected);
   }
   for(const child of Array.from(host.children))if(!retained.has(child))child.remove();
@@ -558,7 +568,7 @@ function appendPassageRepair(body,segment,reason) {
     }
     language.value=segment.language || '';
     const retry=node('button','Retry passage locally');
-    const busy=['preparing','processing','queued'].includes(selected.status),retryPending=!!selected.passage_retry;
+    const busy=['preparing','processing','queued'].includes(selected.status),retryPending=!!selected.passage_retry || !!selected.passage_separation;
     const tooLong=segment.end-segment.start>24.5;
     retry.disabled=busy || retryPending || tooLong;language.disabled=busy || retryPending;
     if(tooLong)retry.title='Choose a passage of at most 24.5 seconds before retrying.';
@@ -622,6 +632,148 @@ function appendPassageRepair(body,segment,reason) {
 }
 
 const reviewReasons={insufficient_acoustic_context:'Too little acoustic context to decode; audio retained',short_acoustic_context:'Unconfirmed words from a short audio fragment; review the recording',possible_non_speech:'Audio may contain no speech; model words need review',uncertain:'Language uncertain; audio retained',change_pending:'Language change uncertain; audio retained',unsupported:'Detected language unsupported; audio retained',insufficient_speech:'Too little usable speech; audio retained',overlapping_speech:'Overlapping speakers; voices are not separated',refinement_incomplete:'Larger-context result was incomplete; previous words and audio retained',empty_result:'No transcript text returned; audio retained',transcription_failed:'Transcription failed for this passage; audio retained',token_limit:'Transcript may be incomplete; audio retained',unassigned_audio:'Audio outside detected speech; may be silence or missed speech'};
+function voiceEstimateLabel(channel) { return channel===0?'Voice A':'Voice B'; }
+function separationSample(seconds) {
+  const value=seconds*16000,lower=Math.floor(value);
+  return value-lower===.5?lower+lower%2:Math.round(value);
+}
+function separationUnavailable(segment) {
+  if(selected.status!=='ready' || segment.separation)return 'Separate an original passage after the recording is ready.';
+  if(!Number.isFinite(segment.start) || !Number.isFinite(segment.end) || segment.start<0 || segment.end<=segment.start || segment.end-segment.start>24.5)return 'Choose a passage of at most 24.5 seconds.';
+  const start=separationSample(segment.start),end=separationSample(segment.end),activity=segment.speaker_activity;
+  if(activity?.audio_revision!==segment.audio_revision || !Number.isSafeInteger(activity?.observed_end_sample) || activity.observed_end_sample<end || !Array.isArray(activity.regions))return 'This passage has no current two-voice overlap observation.';
+  const tracks=new Set();let overlap=false;
+  for(const region of activity.regions) {
+    if(!Number.isSafeInteger(region?.start_sample) || !Number.isSafeInteger(region?.end_sample) || region.start_sample<0 || region.end_sample<=region.start_sample || !Array.isArray(region.speakers) || region.speakers.some(s=>typeof s!=='string'))return 'This passage has invalid audio observations.';
+    if(region.end_sample<=start || region.start_sample>=end)continue;
+    const voices=new Set(region.speakers);overlap ||= voices.size===2;for(const voice of voices)tracks.add(voice);
+  }
+  if(tracks.size!==2 || !overlap)return 'Separation needs an observed overlap between exactly two voices.';
+  if(Array.isArray(selected.language_history) && selected.language_history.some(epoch=>epoch.start_sample>start && epoch.start_sample<end))return 'Choose a passage inside one language setting.';
+  return '';
+}
+async function separationRequest(path,body) {
+  const jid=selected.id,generation=selectionGeneration,cancelling=path==='/cancel';
+  if(!cancelling) {
+    if(hasPassageDrafts() || hasPendingPassageSaves())throw new Error('Save or discard passage drafts before separating or replacing a passage.');
+    await flushSave();
+  }
+  if(selected?.id!==jid || generation!==selectionGeneration)throw new Error('The selected recording changed. Try again on its current passage.');
+  retrying=true;const requestGeneration=++selectionGeneration;setStatus();
+  try {
+    const next=await api(`/api/jobs/${jid}${path}`,{method:'POST',...(body?{body:JSON.stringify(body())}:{})});
+    if(selected?.id!==jid || requestGeneration!==selectionGeneration || next.revision<selected.revision)return;
+    selected=next;
+    if(!cancelling || (!dirty && !hasPassageDrafts() && !hasPendingPassageSaves()))doc=structuredClone(next.document);
+    setStatus();renderEditor();
+  }finally{retrying=false;if(selected)setStatus();}
+}
+function playOriginalPassage(segment,episode=null) {
+  const audio=$('player');
+  for(const other of document.querySelectorAll('audio'))if(other!==audio)other.pause();
+  passageStart=segment.start;passageEnd=segment.end;
+  const path=episode?`/api/jobs/${selected.id}/separation/${episode}/original/audio`:`/api/jobs/${selected.id}/passages/${encodeURIComponent(segment.id)}/audio`;
+  if(audio.getAttribute('src')!==path)audio.setAttribute('src',path);
+  audio.currentTime=segment.start;audio.play().catch(e=>notice(e.message,true));
+}
+function playSeparatedPassage(card,segment) {
+  const audio=card.querySelector('.separated-player');
+  audio.currentTime=Math.max(0,segment.start-segment.separation.origin_sample/16000);
+  audio.play().catch(error=>notice(error.message,true));
+}
+function separationAudio(path,start,end,label) {
+  const audio=node('audio');audio.controls=true;audio.preload='none';audio.src=path;
+  audio.setAttribute('aria-label',label);
+  audio.addEventListener('loadedmetadata',()=>{audio.currentTime=start;});
+  audio.addEventListener('timeupdate',()=>{if(audio.currentTime>=end)audio.pause();});
+  audio.addEventListener('play',()=>{for(const other of document.querySelectorAll('audio'))if(other!==audio)other.pause();});
+  audio.addEventListener('error',()=>notice(`${label} unavailable. The original passage is retained.`,true));
+  return audio;
+}
+function appendPassageSeparation(body,segment) {
+  if(isLive())return;
+  const panel=node('div',undefined,'passage-separation');body.append(panel);
+  renderPassageSeparation(panel,segment);
+}
+function refreshPassageSeparation(card,segment) {
+  const panel=card.querySelector('.passage-separation');
+  if(panel && !panel.contains(document.activeElement))renderPassageSeparation(panel,segment);
+}
+function renderPassageSeparation(panel,segment) {
+  const signature=JSON.stringify([segment,selected.status,selected.passage_separation,selected.passage_retry,selected.separation_error,setupState?.separation]);
+  if(panel.dataset.signature===signature)return;
+  panel.dataset.signature=signature;panel.replaceChildren();
+  if(segment.separation) {
+    const voice=segment.separation,origin=voice.origin_sample/16000;
+    const audio=separationAudio(`/api/jobs/${selected.id}/separation/${voice.episode_id}/${voice.channel}/audio`,Math.max(0,segment.start-origin),segment.end-origin,`${voiceEstimateLabel(voice.channel)} separated audio`);
+    audio.className='separated-player';audio.controls=false;audio.hidden=true;panel.append(audio);
+    if(segment.review_resolution!=='words_reviewed')panel.append(node('p','Check separated voices','separation-hint'));
+    const historyPanel=node('details',undefined,'separation-history');historyPanel.append(node('summary','Original recording'));
+    const original=node('button','Play original recording','text-button');
+    original.addEventListener('click',()=>playOriginalPassage({start:origin,end:origin+voice.length_samples/16000},voice.episode_id));historyPanel.append(original);panel.append(historyPanel);
+    if(voice.channel===0) {
+      const prior=node('button','Show original passage','text-button');
+      prior.addEventListener('click',async()=>{
+        prior.disabled=true;
+        try {
+          const jid=selected.id,generation=selectionGeneration;
+          const history=await api(`/api/jobs/${jid}/separation/${voice.episode_id}/history`);
+          if(selected?.id!==jid || generation!==selectionGeneration || !panel.isConnected)return;
+          const saved=node('div',undefined,'separation-original'),text=node('textarea');text.readOnly=true;text.value=history.original.text;text.setAttribute('aria-label','Original passage for copying');
+          saved.append(node('strong','Original passage'),text);
+          const unchanged=history.accepted.every(prior=>{
+            const current=doc.segments.find(row=>row.id===prior.id);
+            return current && ['text','speaker','start','end','machine_revision','protected_fields','language','language_detection'].every(key=>JSON.stringify(current[key]??(key==='protected_fields'?[]:null))===JSON.stringify(prior[key]??(key==='protected_fields'?[]:null)));
+          });
+          if(unchanged) {
+            const restore=node('button','Restore original');restore.addEventListener('click',async()=>{try{await separationRequest(`/separation/${voice.episode_id}/restore`);}catch(error){notice(error.message,true);}});saved.append(restore);
+          }else saved.append(node('p','A separated passage was edited. Copy the original words above to keep those edits.','passage-review'));
+          historyPanel.append(saved);prior.remove();fitPassageText(text);
+        }catch(error){prior.disabled=false;notice(error.message,true);}
+      });historyPanel.append(prior);
+    }
+    return;
+  }
+  const candidate=segment.separation_candidate;
+  if(candidate) {
+    const result=node('details',undefined,'separation-comparison');result.append(node('summary','Review saved separation result'));panel.append(result);
+    result.append(node('strong','Separated voice estimates · check both'));
+    result.append(node('p','A saved separation result is available. The original passage is retained until you choose this result.','passage-review'));
+    const original=node('div',undefined,'separation-original'),text=node('textarea');text.readOnly=true;text.value=candidate.original.text;text.setAttribute('aria-label','Original passage words');
+    original.append(node('strong','Original passage'),text,separationAudio(`/api/jobs/${selected.id}/passages/${encodeURIComponent(segment.id)}/audio`,candidate.original.start,candidate.original.end,'Original recording'));result.append(original);
+    candidate.voices.forEach((voice,channel)=>{
+      const row=node('div',undefined,'separation-estimate');row.append(node('strong',voiceEstimateLabel(channel)));
+      row.append(node('p',voice.text || 'No supported words returned. Keep the original and review this audio.','segment-text'));
+      row.append(node('small',config.languages[voice.language] || 'Language needs review'));
+      if(voice.review || voice.transcription_review)row.append(node('p',voice.transcription_review?.reason==='overlapping_speech'?'Speech may still overlap in this estimate.':reviewReasons[voice.transcription_review?.reason] || 'Words need review.','passage-review'));
+      row.append(separationAudio(`/api/jobs/${selected.id}/separation/${candidate.id}/${channel}/audio`,0,candidate.original.end-candidate.original.start,`${voiceEstimateLabel(channel)} separated audio`));result.append(row);
+    });
+    const actions=node('div',undefined,'separation-actions'),keep=node('button','Keep original'),use=node('button','Use both voices','primary');
+    const current=['text','speaker','start','end','language'].every(key=>JSON.stringify(segment[key]??null)===JSON.stringify(candidate.original[key]??null));
+    use.disabled=!current || candidate.voices.some(voice=>!voice.text?.trim() || !Object.hasOwn(config.languages,voice.language) || voice.language==='auto');
+    if(!current)result.append(node('p','This passage changed. Keep the original and separate its current words and audio again.','passage-review'));
+    for(const [button,action] of [[keep,'discard'],[use,'accept']])button.addEventListener('click',async()=>{try{await separationRequest(`/separation/${candidate.id}/${action}`);}catch(error){notice(error.message,true);}});
+    actions.append(keep,use);result.append(actions);return;
+  }
+  if(selected.passage_separation?.segment_id===segment.id) {
+    const status=node('p',selected.passage_separation.phase || 'Separating voices…','passage-review');status.setAttribute('role','status');
+    const cancel=node('button','Cancel separation');cancel.addEventListener('click',async()=>{try{await separationRequest('/cancel');}catch(error){notice(error.message,true);}});panel.append(status,cancel);return;
+  }
+  const start=separationSample(segment.start),end=separationSample(segment.end);
+  const regions=segment.speaker_activity?.regions;
+  if(!Array.isArray(regions) || !regions.some(region=>region?.end_sample>start && region.start_sample<end && Array.isArray(region.speakers) && new Set(region.speakers).size>1))return;
+  const reason=separationUnavailable(segment),action=node('button','Retry voice separation');
+  action.disabled=!!reason || !!selected.passage_retry || !!selected.passage_separation || setupState?.separation?.active===true;
+  action.title=reason;action.addEventListener('click',async()=>{
+    try {
+      if(!setupState?.separation?.installed){openSettings('models');throw new Error('Download the optional voice separation model in Settings → Models first.');}
+      await separationRequest('/separation',()=>({revision:selected.revision,segment_id:segment.id}));
+    }catch(error){notice(error.message,true);}
+  });
+  const recovery=node('details');recovery.append(node('summary','Voice separation'));
+  if(reason || selected.separation_error)recovery.append(node('p',reason || selected.separation_error,'passage-review'));
+  recovery.append(action);panel.append(recovery);
+}
 function reviewSampleTime(sample) {
   const units=Math.round(sample*10000/16000),minutes=Math.floor(units/600000),rest=units%600000;
   return `${String(minutes).padStart(2,'0')}:${String(Math.floor(rest/10000)).padStart(2,'0')}.${String(rest%10000).padStart(4,'0')}`;
@@ -633,6 +785,7 @@ function appendUncoveredAudio(body,segment) {
   body.append(node('p',`Audio to review: ${ranges.join('; ')}. Current words and original audio retained.`,'review-audio-ranges'));
 }
 function passageReviewReason(segment) {
+  if(segment.separation)return segment.review_resolution==='words_reviewed'?'':'Check separated voices';
   if(segment.review_resolution==='words_reviewed' && segment.text.trim())return hasOverlappingSpeakers(segment) ? reviewReasons.overlapping_speech : segment.speaker==='unassigned' ? 'Speaker uncertain' : '';
   if(segment.transcription_review?.reason==='refinement_conflict')return 'Previous words retained because the new passage also covers another passage needing review.';
   if(['transcription_failed','empty_result','token_limit'].includes(segment.transcription_review?.reason))return reviewReasons[segment.transcription_review.reason];
@@ -660,7 +813,7 @@ function appendPassageEvidence(host,segment) {
   evidence.append(text);host.append(evidence);
 }
 function showTranscriptPassage(segment) {
-  return !!segment.text.trim() || passageDrafts.has(segment.id) || !!recoverablePassageDrafts.get(segment.id)?.text.trim() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
+  return !!segment.text.trim() || !!segment.separation_candidate || selected?.passage_separation?.segment_id===segment.id || passageDrafts.has(segment.id) || !!recoverablePassageDrafts.get(segment.id)?.text.trim() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
 }
 function isEmptyNonSpeechPlaceholder(segment) {
   // Presentation only: legacy no-word hints do not establish verified silence
@@ -693,7 +846,7 @@ function renderRetainedAudioReview() {
     if(!isLive()) {
       const play=node('button','Play retained audio','text-button');
       play.addEventListener('click',()=>{passageEnd=segment.end;$('player').currentTime=segment.start;$('player').play().catch(e=>notice(e.message,true));});
-      row.append(play);appendPassageRepair(row,segment,passageReviewReason(segment));
+      row.append(play);appendPassageRepair(row,segment,passageReviewReason(segment));appendPassageSeparation(row,segment);
     }
     list.append(row);
   }
@@ -706,7 +859,7 @@ function groupConsecutivePassages(host,pending=0) {
   const divided=pending>0 || !!host.querySelector('.rolling-segment[data-transcript-section="live"],.rolling-segment[data-transcript-section="corrections"]');
   for(const card of host.children) {
     const section=card.dataset.transcriptSection || 'processed',start=section!==previousSection;
-    const continuation=!start && previous && card.dataset.speaker!=='unassigned' && previous.dataset.speaker===card.dataset.speaker;
+    const continuation=!start && previous && !card.dataset.separationEpisode && !previous.dataset.separationEpisode && card.dataset.speaker!=='unassigned' && previous.dataset.speaker===card.dataset.speaker;
     setPassageClass(card,'speaker-continuation',!!continuation);
     setPassageClass(card,'passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
     const live=section==='live';
@@ -816,9 +969,9 @@ async function save({quiet = false} = {}) {
     catch(error) {
       if(error.status!==409)throw error;
       const latest=await api(`/api/jobs/${jid}`);
-      // Metadata and retry candidates may advance revision; authoritative edits still conflict.
+      // Server candidates may advance revision; authoritative edits still conflict.
       const withoutCandidates=document=>{
-        const copy=structuredClone(document);for(const segment of copy?.segments || [])delete segment.retry_candidate;
+        const copy=structuredClone(document);for(const segment of copy?.segments || []){delete segment.retry_candidate;delete segment.separation_candidate;}
         return JSON.stringify(copy);
       };
       if(selected?.id!==jid || latest.status!==base.status || latest.duration!==base.duration ||
@@ -833,6 +986,8 @@ async function save({quiet = false} = {}) {
       if(saved && saved.start===segment.start && saved.end===segment.end && saved.speaker===segment.speaker) {
         if(saved.retry_candidate)segment.retry_candidate=structuredClone(saved.retry_candidate);
         else delete segment.retry_candidate;
+        if(saved.separation_candidate)segment.separation_candidate=structuredClone(saved.separation_candidate);
+        else delete segment.separation_candidate;
       }
     }
     if (generation === editGeneration) {
@@ -841,7 +996,7 @@ async function save({quiet = false} = {}) {
       // passage handlers stay attached; adopt the saved copy otherwise.
       if (!$('editor').contains(document.activeElement)) { doc = structuredClone(result.document); renderEditor(); }
     }
-    if(base.passage_retry && $('editor').contains(document.activeElement))renderSegments();
+    if((base.passage_retry || base.passage_separation) && $('editor').contains(document.activeElement))renderSegments();
     setStatus();
     if (!quiet) notice('Saved on this Mac.');
   } finally { saving = false; renderSaveState(); if (dirty) scheduleAutosave(); }
@@ -1089,6 +1244,8 @@ function wire() {
     } catch (e) { notice(e.message, true); if (dirty) scheduleAutosave(); }
   });
   window.addEventListener('beforeunload', e => { if (dirty || hasPassageDrafts()) { e.preventDefault(); e.returnValue = ''; } });
+  $('player').addEventListener('loadedmetadata',()=>{if(passageStart!==null)$('player').currentTime=passageStart;});
+  $('player').addEventListener('error',()=>notice('Passage audio unavailable. Your words are retained.',true));
 }
 async function poll() {
   if(updateFrozen)return;
@@ -1198,6 +1355,7 @@ async function refreshSetup() {
   try {
     const state=await api('/api/setup');
     if(generation!==alignmentGeneration || alignmentChanging)return;
+    const priorSeparation=setupState?.separation;
     setupState=state;
     const downloading=state.status==='downloading', loading=state.status==='loading', busy=downloading || loading;
     const list=$('model-list');list.replaceChildren();
@@ -1207,6 +1365,13 @@ async function refreshSetup() {
       const alignment=model.id===state.alignment?.id?state.alignment:null;
       const label=loading?'Loading…':model.name==='Voice recognition' && state.voice?.released===false && !state.voice?.available?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':model.optional?`Optional · ${size}`:size;
       item.append(node('strong',model.name),node('span',label));list.append(item);
+      if(model.id==='mossformer2-16k' && state.separation) {
+        item.classList.add('separation-model');
+        item.append(node('p','Once enabled, automatically separates saved passages where two voices overlap.','separation-model-note'));
+        const install=node('button',state.separation.active?'Setting up separation…':state.separation.installed?'Check / repair separation model':`Download separation · ${formatBytes(state.separation.bytes)}`,'quiet');
+        install.disabled=state.separation.active || state.separation.can_download===false || busy;
+        install.addEventListener('click',async()=>{install.disabled=true;try{await api('/api/setup/separation',{method:'POST'});await refreshSetup();}catch(error){install.disabled=false;notice(error.message,true);}});item.append(install);
+      }
     });
     renderAlignment(state);
     if(state.required_free_bytes)$('setup-disk-note').textContent=`First setup needs an internet connection and about ${formatBytes(state.required_free_bytes)} of free disk space including prepared timing weights.`;
@@ -1228,6 +1393,7 @@ async function refreshSetup() {
       await refreshConfig();renderLanguageDefault();if(selected)setStatus();
     }
     renderStartState();
+    if(doc && JSON.stringify(priorSeparation)!==JSON.stringify(state.separation))renderSegments();
   } catch(error) {
     $('model-error').textContent=error.message;$('model-error-details').hidden=false;
     $('model-status').textContent='Could not check model setup. Open Details and try again.';

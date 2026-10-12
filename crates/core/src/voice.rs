@@ -307,6 +307,7 @@ pub struct AudioSegment {
     pub audio_revision: Option<i64>,
     pub speaker_activity: Option<SpeakerActivity>,
     pub decode_context: Option<ImportAudioAnchor>,
+    pub separation: Option<crate::separation::Voice>,
 }
 
 impl AudioSegment {
@@ -332,6 +333,7 @@ impl AudioSegment {
             audio_revision: None,
             speaker_activity: None,
             decode_context: None,
+            separation: None,
         }
     }
 }
@@ -403,6 +405,9 @@ pub struct VoiceCheck {
 }
 
 pub fn speaker_audio_reason(segment: &AudioSegment, track_id: &str) -> Option<AudioReason> {
+    if segment.separation.is_some() {
+        return Some(AudioReason::UnverifiedAudio);
+    }
     if segment.speaker != track_id {
         return Some(AudioReason::DifferentSpeaker);
     }
@@ -432,6 +437,9 @@ pub fn eligible_segment(segment: &AudioSegment, track_id: &str) -> bool {
 }
 
 pub fn speaker_audio_ranges(segment: &AudioSegment, track_id: &str) -> Vec<(f64, f64)> {
+    if segment.separation.is_some() {
+        return Vec::new();
+    }
     if segment.canonical_utterance_id.is_none() && speaker_audio_reason(segment, track_id).is_none()
     {
         return vec![(segment.start, segment.end)];

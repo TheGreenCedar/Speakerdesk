@@ -53,7 +53,11 @@ function liveCard(segment) {
   avatar.dataset.color=segment.speaker==='unassigned'?-1:Object.keys(doc.speakers).indexOf(segment.speaker)%8;avatar.setAttribute('aria-hidden','true');
   const body=node('div',undefined,'segment-body'),top=node('div',undefined,'segment-top');
   const identity=speakerNameControl(segment.speaker);
-  const timing=node('span',time(segment.start),'rolling-time');
+  const timing=node(segment.separation?'button':'span',undefined,segment.separation?'seek':'rolling-time');
+  if(segment.separation) {
+    timing.append(icon('play'),node('span',time(segment.start)));
+    timing.addEventListener('click',()=>playSeparatedPassage(card,segment));
+  }else timing.textContent=time(segment.start);
   timing.title=`${passageTime(segment.start)}–${passageTime(segment.end)}`;
   timing.setAttribute('aria-label',`Passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);
   const state=segment.refinement_state || 'provisional';
@@ -62,6 +66,10 @@ function liveCard(segment) {
   badge.classList.toggle('routine-state',!reviewed && ['provisional','refined'].includes(state));
   badge.title=state==='provisional'?'Words may change with more context.':passageReviewReason(segment);
   body.append(timing);top.append(identity);if(['edited'].includes(state) || reviewed)top.append(badge);body.append(top);
+  if(segment.separation) {
+    card.dataset.separationEpisode=segment.separation.episode_id;
+    timing.setAttribute('aria-label',`Play separated passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);
+  }
   const draft=passageDrafts.get(segment.id),text=node('textarea');
   text.rows=1;text.value=draft?.text ?? segment.text;
   if(!text.value.trim() && recoverablePassageDrafts.has(segment.id))text.placeholder='Latest words are empty. Your correction is available to recover.';
@@ -144,6 +152,7 @@ function liveCard(segment) {
     });details.append(prior);
   }
   body.append(details);
+  appendPassageSeparation(body,segment);
   card.append(avatar,body);refreshReadingTurnView(card,segment);renderPassageSaveState(card);return card;
 }
 // Canonical IDs own machine words. A replaced local correction remains available
@@ -191,13 +200,14 @@ function renderLiveSegments() {
     const draft=passageDrafts.get(segment.id);
     const uiSignature=JSON.stringify([signature,draft?.text,draft?.revision,recoverablePassageDrafts.has(segment.id),isPassageSaving(segment.id)]);
     refreshReadingTurnView(card,segment);
+    refreshPassageSeparation(card,segment);
     if(card.dataset.uiSignature===uiSignature)continue;
     card.dataset.uiSignature=uiSignature;
     if(card.dataset.speaker!==segment.speaker)card.dataset.speaker=segment.speaker;
     let name=card.querySelector('.name-speaker');
-    if(name.dataset.speaker!==segment.speaker){const next=speakerNameControl(segment.speaker);name.replaceWith(next);name=next;}
+    if(name && name.dataset.speaker!==segment.speaker){const next=speakerNameControl(segment.speaker);name.replaceWith(next);name=next;}
     const label=speakerLabel(segment.speaker);
-    if(name.textContent!==label){name.textContent=label;name.setAttribute('aria-label',segment.speaker==='unassigned'?label:`Name or remember voice for ${label}`);}
+    if(name && name.textContent!==label){name.textContent=label;name.setAttribute('aria-label',segment.speaker==='unassigned'?label:`Name or remember voice for ${label}`);}
     const avatar=card.querySelector('.speaker-avatar'),index=Object.keys(doc.speakers).indexOf(segment.speaker);
     const avatarText=segment.speaker==='unassigned'?'?':`S${index+1}`,color=String(segment.speaker==='unassigned'?-1:index%8);
     if(avatar.textContent!==avatarText)avatar.textContent=avatarText;

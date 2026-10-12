@@ -44,9 +44,13 @@ impl ModelArtifact {
 pub(crate) fn artifacts() -> Vec<ModelArtifact> {
     serde_json::from_str(include_str!("model-artifacts.json")).expect("bundled model pins")
 }
+pub(crate) fn separation_artifact() -> ModelArtifact {
+    serde_json::from_str(include_str!("separation-artifact.json")).expect("bundled separation pins")
+}
 
 #[derive(Clone, Default, Serialize)]
 pub(crate) struct Progress {
+    pub models: Vec<String>,
     pub status: &'static str,
     pub phase: String,
     pub downloaded_bytes: u64,
@@ -64,6 +68,7 @@ impl SetupService {
     }
     pub fn begin(&self, models: &[ModelArtifact], download: bool) {
         *self.progress.lock().expect("setup progress") = Progress {
+            models: models.iter().map(|m| m.id.clone()).collect(),
             status: if download { "downloading" } else { "loading" },
             phase: if download {
                 "Checking installed models"

@@ -199,7 +199,8 @@ impl Runner {
                             .enumerate()
                             .skip(start)
                             .find(|(_, row)| {
-                                row.canonical_utterance_id.is_some()
+                                row.separation.is_none()
+                                    && row.canonical_utterance_id.is_some()
                                     && row.rest["canonical_state"] == "sealed"
                                     && row.protected_fields.as_ref().is_none_or(Vec::is_empty)
                                     && !checkpoint(&job, row)

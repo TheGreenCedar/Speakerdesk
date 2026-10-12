@@ -10,7 +10,8 @@ pub(crate) fn available(job: &Job) -> bool {
     job.status == "ready"
         && job.document.as_ref().is_some_and(|doc| {
             doc.segments.iter().any(|s| {
-                s.canonical_utterance_id.is_some()
+                s.separation.is_none()
+                    && s.canonical_utterance_id.is_some()
                     && s.rest.get("canonical_state").and_then(Value::as_str) == Some("sealed")
             })
         })
@@ -233,7 +234,7 @@ fn publish_candidate(
     prior: &Segment,
     candidate: &Segment,
 ) -> Result<bool, live::LiveError> {
-    if !fresh(current, original, prior) {
+    if prior.separation.is_some() || !fresh(current, original, prior) {
         return Ok(false);
     }
     let document = current.document.as_mut().expect("fresh document");
@@ -317,10 +318,11 @@ fn execute(
             else {
                 continue;
             };
-            if segment
-                .protected_fields
-                .as_ref()
-                .is_some_and(|f| !f.is_empty())
+            if segment.separation.is_some()
+                || segment
+                    .protected_fields
+                    .as_ref()
+                    .is_some_and(|f| !f.is_empty())
                 || checkpoint(&job, segment)
             {
                 continue;

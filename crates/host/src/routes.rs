@@ -42,6 +42,7 @@ use crate::worker::JobWorker;
 
 pub(crate) mod refinement;
 mod retry;
+pub(crate) mod separation;
 
 const NOT_FOUND: &str = "The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.";
 const PREPARING_AUDIO: &str = "Preparing local audio…";
@@ -66,6 +67,7 @@ const PRIVATE_FIELDS: &[&str] = &[
     "refinement_generation",
     "rolling_sources",
     "refinement_history",
+    "separation_history",
     "fast_history",
     "fast_previous_revision",
     "boundary_candidate",
@@ -101,6 +103,20 @@ pub trait ApplicationModels: Send + Sync {
         _cancellation: &CancellationToken,
     ) -> Result<speakerdesk_core::import::PassageCandidate, String> {
         Err("Passage retry is unavailable in this build.".into())
+    }
+    fn separate_passage(
+        &self,
+        _pcm: &[f32],
+        _language: &str,
+        _cancellation: &CancellationToken,
+    ) -> Result<
+        (
+            speakerdesk_core::ipc::SeparatedAudio,
+            [speakerdesk_core::separation::CandidateVoice; 2],
+        ),
+        String,
+    > {
+        Err("Separation model setup is required.".into())
     }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
         None
@@ -234,6 +250,7 @@ impl AppState {
         }
         let mut store = SqliteJobStore::open(database)?;
         store.recover(ACTIVE)?;
+        separation::cleanup(&data_dir, &store)?;
         Ok(Self {
             native: Arc::new(std::sync::OnceLock::new()),
             token: Arc::from(random_hex(32)),
@@ -439,6 +456,7 @@ impl AppState {
                         job.extra
                             .insert("operation_generation".into(), json!(generation + 1));
                         refinement::interrupt(job);
+                        separation::interrupt(job);
                         if job
                             .extra
                             .remove("passage_retry")
@@ -512,6 +530,35 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{jid}/export/{kind}", get(export_job))
         .route("/api/jobs/{jid}/run", post(run_job))
         .route("/api/jobs/{jid}/retry", post(retry::retry_passage))
+        .route("/api/jobs/{jid}/separation", post(separation::begin))
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/accept",
+            post(separation::accept),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/discard",
+            post(separation::discard),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/restore",
+            post(separation::restore),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/history",
+            get(separation::history),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/original/audio",
+            get(separation::original_audio),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/{channel}/audio",
+            get(separation::playback),
+        )
+        .route(
+            "/api/jobs/{jid}/passages/{pid}/audio",
+            get(separation::passage_audio),
+        )
         .route("/api/jobs/{jid}/cancel", post(cancel_job))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
@@ -988,6 +1035,7 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
             job.extra
                 .insert("operation_generation".into(), json!(generation + 1));
             refinement::interrupt(job);
+            separation::interrupt(job);
             if job
                 .extra
                 .remove("passage_retry")
@@ -1748,6 +1796,8 @@ mod tests {
             audio_revision: None,
             review: None,
             capture_source: None,
+            separation_candidate: None,
+            separation: None,
             rest: Map::new(),
         }
     }

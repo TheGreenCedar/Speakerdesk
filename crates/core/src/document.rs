@@ -69,6 +69,10 @@ pub struct Segment {
     pub review: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_source: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separation_candidate: Option<Box<crate::separation::Candidate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separation: Option<crate::separation::Voice>,
     #[serde(default, flatten)]
     pub rest: Map<String, Value>,
 }
@@ -202,6 +206,8 @@ mod tests {
                     audio_revision: Some(0),
                     review: Some(false),
                     capture_source: None,
+                    separation_candidate: None,
+                    separation: None,
                     rest: serde_json::Map::new(),
                 }],
                 provenance: None,

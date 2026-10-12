@@ -93,6 +93,10 @@ impl InferenceSupervisor {
         ack(self.call(None, cancellation.clone())?)
     }
 
+    pub fn prepare_separation(&self, cancellation: &CancellationToken) -> Result<(), ChildError> {
+        ack(self.call(Some(Request::PrepareSeparation), cancellation.clone())?)
+    }
+
     pub fn prepare_alignment(&self, cancellation: &CancellationToken) -> Result<(), ChildError> {
         ack(self.call(Some(Request::PrepareAlignment), cancellation.clone())?)
     }
@@ -246,6 +250,16 @@ impl Models for ChildModels {
             models: models.to_vec(),
         })? {
             Response::Setup(reports) => Ok(reports),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    fn separate(&self, pcm: &[f32]) -> Result<speakerdesk_core::ipc::SeparatedAudio, ChildError> {
+        match self.exchange(Request::Separate { pcm: pcm.to_vec() })? {
+            Response::Separated(audio) => {
+                audio.validate(pcm.len())?;
+                Ok(audio)
+            }
             other => Err(unexpected(&other)),
         }
     }

@@ -120,12 +120,19 @@ fn execute(
                 return Err(messages::RETRY_STALE.to_string());
             }
         }
-        let pcm =
-            audio::read_pcm16_range(path, segment.start, segment.end).map_err(|e| e.to_string())?;
+        let (start, end) = if let Some(voice) = &segment.separation {
+            (
+                ((segment.start * 16000.).round_ties_even() - voice.origin_sample as f64) / 16000.,
+                ((segment.end * 16000.).round_ties_even() - voice.origin_sample as f64) / 16000.,
+            )
+        } else {
+            (segment.start, segment.end)
+        };
+        let pcm = audio::read_pcm16_range(path, start, end).map_err(|e| e.to_string())?;
         let processed = segment
             .capture_source
             .as_ref()
-            .filter(|s| s["source_id"] == "microphone_clean")
+            .filter(|s| segment.separation.is_none() && s["source_id"] == "microphone_clean")
             .and_then(|s| s["catalog_sha256"].as_str());
         models.retry_passage(&pcm, language, processed, &operation.cancellation)
     })();

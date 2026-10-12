@@ -76,6 +76,10 @@
       "url": "https://raw.githubusercontent.com/madsmtm/objc2/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md",
       "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54"
     },
+    "pulp-wasm-simd-flag-0.1.1": {
+      "url": "https://raw.githubusercontent.com/sarah-quinones/pulp/5eb07fd7b68edf0a5e19f71737d315f72a510295/LICENSE",
+      "sha256": "d64f878c89bd5f1e5ada7e4aad57690b122727cf5229b7b87ea1980c188da1d9"
+    },
     "realfft-3.5.0": {
       "url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
       "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
@@ -96,6 +100,10 @@
     }
   },
   "sources": {
+    "MossFormer2 ClearerVoice reference source": {
+      "url": "https://raw.githubusercontent.com/modelscope/ClearerVoice-Studio/6b3774dc79c46ae8bed2a4fa5f706f0ac8c75c61/LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
     "MLX Audio reference source": {
       "url": "https://raw.githubusercontent.com/Blaizzy/mlx-audio/feb25a37b07923bae556e59111995071d66afa0d/LICENSE",
       "sha256": "11d27e0259dec3a323fa6c04c330621d0950ab96c6760d5aac3e2e97229e6f22"
