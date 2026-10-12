@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -158,6 +159,96 @@ class UpdaterReleaseTests(unittest.TestCase):
         config=copy.deepcopy(self.config);config['plugins']['updater']['allowDowngrades']=True
         with self.assertRaisesRegex(ValueError,'version policy'):
             promotion.verify_updater_files(self.manifest,self.root,config)
+
+    def publication_fixture(self):
+        args=self.native_candidate()
+        with patch.object(promotion,'ROOT',self.root),patch.object(promotion,'verify_signing'):
+            plan=promotion.prepare(*args)
+        release={'id':41,'tag_name':plan['tag'],'target_commitish':plan['source_commit'],
+                 'prerelease':False,'draft':True,'body':plan['notes'],'published_at':None,
+                 'html_url':'https://github.com/'+promotion.REPOSITORY+'/releases/tag/'+plan['tag'],
+                 'assets':[{'id':index,'name':name,'state':'uploaded','size':item['bytes'],
+                            'digest':'sha256:'+item['sha256']} for index,(name,item) in enumerate(plan['files'].items(),1)]}
+        state={'created':False,'published':False,'before':[],'listed':[copy.deepcopy(release)],
+               'release':release,'refs':[],'created_sha':plan['source_commit'],'mutations':[]}
+        base='repos/'+promotion.REPOSITORY
+        def command(arguments,**kwargs):
+            if arguments[:3]==['gh','release','create']:
+                self.assertIn('--draft',arguments);state['created']=True;state['mutations'].append('draft')
+                return subprocess.CompletedProcess(arguments,0,release['html_url']+'\n','')
+            self.assertEqual(arguments[:2],['gh','api'])
+            endpoint=arguments[2]
+            method=arguments[arguments.index('--method')+1] if '--method' in arguments else 'GET'
+            body=json.loads(kwargs['input']) if kwargs.get('input') else None
+            if method=='GET':
+                if endpoint==base:reply={'id':promotion.REPOSITORY_ID,'full_name':promotion.REPOSITORY}
+                elif endpoint==base+'/commits/main':reply={'sha':plan['source_commit']}
+                elif endpoint==base+'/git/matching-refs/tags/'+plan['tag']:reply=state['refs']
+                elif endpoint==base+'/releases?per_page=100':reply=state['listed'] if state['created'] else state['before']
+                elif endpoint==base+'/releases/'+str(release['id']):reply=state['release']
+                elif endpoint==base+'/releases/tags/'+plan['tag']:
+                    return subprocess.CompletedProcess(arguments,1,'{"message":"Not Found","status":"404"}','gh: Not Found (HTTP 404)')
+                else:raise AssertionError('Unexpected read: '+endpoint)
+            elif method=='POST' and endpoint==base+'/git/refs':
+                self.assertEqual(body,{'ref':'refs/tags/'+plan['tag'],'sha':plan['source_commit']})
+                state['mutations'].append('tag')
+                state['refs']=[{'ref':body['ref'],'object':{'type':'commit','sha':state['created_sha']}}]
+                reply=state['refs'][0]
+            elif method=='PATCH' and endpoint==base+'/releases/'+str(release['id']):
+                self.assertEqual(body,{'draft':False,'prerelease':False,'make_latest':'true'})
+                self.assertEqual(state['refs'],[{'ref':'refs/tags/'+plan['tag'],'object':{'type':'commit','sha':plan['source_commit']}}])
+                state['mutations'].append('publish');state['published']=True
+                reply=dict(state['release'],draft=False,published_at='2026-10-12T00:00:00Z')
+            else:raise AssertionError('Unexpected mutation: '+method+' '+endpoint)
+            return subprocess.CompletedProcess(arguments,0,json.dumps(reply),'')
+        def download(asset_id):
+            item=plan['files'][release['assets'][asset_id-1]['name']]
+            return item['bytes'],item['sha256']
+        return plan,state,command,download
+
+    def test_publish_finds_created_draft_by_id_and_creates_verified_tag_before_publication(self):
+        plan,state,command,download=self.publication_fixture()
+        with patch.object(promotion.subprocess,'run',side_effect=command),patch.object(promotion,'downloaded_digest',side_effect=download) as downloads:
+            result=promotion.publish(plan)
+        self.assertTrue(result['downloads_verified'])
+        self.assertEqual(state['mutations'],['draft','tag','publish'])
+        self.assertEqual(downloads.call_count,6)
+
+    def test_publish_preserves_an_existing_exact_source_tag(self):
+        plan,state,command,download=self.publication_fixture()
+        state['refs']=[{'ref':'refs/tags/'+plan['tag'],'object':{'type':'commit','sha':plan['source_commit']}}]
+        with patch.object(promotion.subprocess,'run',side_effect=command),patch.object(promotion,'downloaded_digest',side_effect=download):
+            promotion.publish(plan)
+        self.assertEqual(state['mutations'],['draft','publish'])
+
+    def test_draft_identity_metadata_and_tag_fail_closed_before_publication(self):
+        plan,state,command,download=self.publication_fixture()
+        original=copy.deepcopy(state)
+        cases={'existing draft':'Existing release/draft','missing draft':'Created draft identity',
+               'ambiguous draft':'Created draft identity','reused identity':'Created draft identity',
+               'invalid listed id':'Created draft identity','wrong existing tag':'Existing release tag points',
+               'wrong fetched id':'Created draft identity','wrong fetched tag':'Release metadata',
+               'wrong uploaded digest':'Uploaded release bytes','already published':'Unexpected release visibility',
+               'wrong created tag':'Existing release tag points'}
+        for case,message in cases.items():
+            with self.subTest(case=case):
+                state.clear();state.update(copy.deepcopy(original))
+                if case=='existing draft':state['before']=[state['release']]
+                elif case=='missing draft':state['listed']=[]
+                elif case=='ambiguous draft':state['listed'].append(dict(state['release'],id=42))
+                elif case=='reused identity':state['before']=[dict(state['release'],tag_name='v0.6.1')]
+                elif case=='invalid listed id':state['listed'][0]['id']='41'
+                elif case=='wrong existing tag':state['refs']=[{'ref':'refs/tags/'+plan['tag'],'object':{'type':'commit','sha':'b'*40}}]
+                elif case=='wrong fetched id':state['release']['id']=42
+                elif case=='wrong fetched tag':state['release']['tag_name']='v0.6.1'
+                elif case=='wrong uploaded digest':state['release']['assets'][0]['digest']='sha256:'+'f'*64
+                elif case=='already published':state['release']['draft']=False
+                elif case=='wrong created tag':state['created_sha']='b'*40
+                with patch.object(promotion.subprocess,'run',side_effect=command),patch.object(promotion,'downloaded_digest',side_effect=download) as downloads:
+                    with self.assertRaisesRegex(ValueError,message):promotion.publish(plan)
+                self.assertFalse(state['published']);downloads.assert_not_called()
+                if case!='wrong created tag':self.assertNotIn('tag',state['mutations'])
+                if case in ('existing draft','wrong existing tag'):self.assertFalse(state['created'])
 
 
 if __name__=='__main__':unittest.main()
