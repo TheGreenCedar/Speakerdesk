@@ -1867,7 +1867,15 @@ async fn saved_long_accuracy_reaches_bounded_context_models_and_retains_missing_
 
 #[tokio::test]
 async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
-    for case in ["complete", "edit", "pause"] {
+    for case in [
+        "german",
+        "chinese",
+        "mixed",
+        "uncertain",
+        "complete",
+        "edit",
+        "pause",
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         fs::write(
@@ -1883,7 +1891,8 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
         .unwrap();
         let host = Running::open(root, false).await;
         trigger(root, 1);
-        let response=host.post("api/meetings",json!({"name":"Long context ownership replay","language":"auto","sources":["microphone"]})).await;
+        let captured_mode = if case == "chinese" { "zh" } else { "auto" };
+        let response=host.post("api/meetings",json!({"name":"Long context ownership replay","language":captured_mode,"sources":["microphone"]})).await;
         assert_eq!(response.status(), 202, "{}", response.text().await.unwrap());
         let id = host.wait("api/meeting", |v| v["id"].is_string()).await["id"]
             .as_str()
@@ -1901,7 +1910,7 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
         }
         let before = host.stop(&id).await;
         let old = &before["document"]["segments"][0];
-        assert_eq!(old["language_mode"], "auto");
+        assert_eq!(old["language_mode"], captured_mode);
         assert_eq!(old["end"], 28. + 513. / 16000.);
         // Authored raw contexts and absolute CTC event positions. The duplicate
         // bridge is the same event; the two repeats are distinct events.
@@ -1912,7 +1921,43 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
              "words":[["repeat",192000],["bridge",208000],["finish",352000],["repeat",416000]]},
             {"text":"repeat","start_sample":400000,"end_sample":448513,"words":[["repeat",416000]]}
         ]).to_string()).unwrap();
-        if case != "complete" {
+        let german = matches!(case, "german" | "mixed" | "uncertain" | "edit" | "pause");
+        if german {
+            fs::write(
+                root.join("replay-probe.json"),
+                json!({"probabilities":[0.99,0.01],"codes":["de","en"]}).to_string(),
+            )
+            .unwrap();
+            fs::write(root.join("context-replay.json"),json!([
+                {"text":"anfang wieder brücke extra","start_sample":0,"end_sample":272000,
+                 "words":[["anfang",16000],["wieder",192000],["brücke",208000],["extra",256000]]},
+                {"text":"wieder brücke ende wieder","start_sample":176000,"end_sample":448513,
+                 "words":[["wieder",192000],["brücke",208000],["ende",352000],["wieder",416000]]},
+                {"text":"wieder","start_sample":400000,"end_sample":448513,"words":[["wieder",416000]]}
+            ]).to_string()).unwrap();
+        }
+        if case == "chinese" {
+            fs::write(root.join("context-replay.json"),json!([
+                {"text":"开始重复桥梁额外","separator":"","start_sample":0,"end_sample":272000,
+                 "words":[["开始",16000],["重复",192000],["桥梁",208000],["额外",256000]]},
+                {"text":"重复桥梁结束重复","separator":"","start_sample":176000,"end_sample":448513,
+                 "words":[["重复",192000],["桥梁",208000],["结束",352000],["重复",416000]]},
+                {"text":"重复","separator":"","start_sample":400000,"end_sample":448513,"words":[["重复",416000]]}
+            ]).to_string()).unwrap();
+        }
+        if matches!(case, "mixed" | "uncertain") {
+            let file = root.join("context-replay.json");
+            let mut contexts: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+            contexts[1]["probe"] = if case == "mixed" {
+                json!({"probabilities":[0.99,0.01],"codes":["fr","de"]})
+            } else {
+                json!({"probabilities":[0.55,0.45],"codes":["de","fr"]})
+            };
+            fs::write(file, contexts.to_string()).unwrap();
+        }
+        let completes = matches!(case, "complete" | "german" | "chinese");
+        let held = matches!(case, "edit" | "pause");
+        if held {
             fs::write(root.join("hold-live-asr"), b"hold final context").unwrap();
             fs::write(root.join("hold-context-index"), b"2").unwrap();
         }
@@ -1920,7 +1965,7 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
             .post(&format!("{path}/refinement/resume"), json!({}))
             .await;
         assert_eq!(begin.status(), 202, "{}", begin.text().await.unwrap());
-        if case != "complete" {
+        if held {
             wait_file(&root.join("edit-asr-started")).await;
             assert_eq!(
                 host.get(&path).await["document"],
@@ -1943,9 +1988,48 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
         }
         let after = host.wait(&path, |v| v["inference_owned"] == false).await;
         let row = &after["document"]["segments"][0];
-        if case == "complete" {
+        if completes {
             assert_eq!(after["refinement_status"], "complete", "{after}");
-            assert_eq!(row["text"], "start repeat bridge finish repeat");
+            let expected = if case == "chinese" {
+                "开始重复桥梁结束重复"
+            } else if german {
+                "anfang wieder brücke ende wieder"
+            } else {
+                "start repeat bridge finish repeat"
+            };
+            assert_eq!(row["text"], expected);
+            let language = if case == "chinese" {
+                "zh"
+            } else if german {
+                "de"
+            } else {
+                "en"
+            };
+            assert_eq!(row["language"], language);
+            assert_eq!(row["language_mode"], captured_mode);
+            assert_eq!(row["reading_alignment"]["language"], language);
+            assert_eq!(
+                row["reading_alignment"]["score_calibration_id"],
+                if language != "en" {
+                    speakerdesk_core::timing_policy::FUNCTIONAL_POLICY_ID
+                } else {
+                    speakerdesk_core::timing::CALIBRATION
+                }
+            );
+            if language != "en" {
+                assert_eq!(
+                    row["reading_alignment"]["qualified_scope"],
+                    "multilingual_functional_ctc_units"
+                );
+                assert_eq!(
+                    row["reading_alignment"]["timing_accuracy_calibrated_languages"],
+                    json!([])
+                );
+                assert_eq!(
+                    row["reading_turn_provenance"]["calibration_id"],
+                    speakerdesk_core::timing_policy::FUNCTIONAL_POLICY_ID
+                );
+            }
             assert_eq!(row["id"], old["id"]);
             assert_eq!(row["speaker"], old["speaker"]);
             assert_eq!(row["language_epoch"], old["language_epoch"]);
@@ -1960,8 +2044,24 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
             );
             assert_eq!(
                 row["reading_alignment"]["words"].as_array().unwrap().len(),
-                5
+                if case == "chinese" { 10 } else { 5 }
             );
+            for word in row["reading_alignment"]["words"].as_array().unwrap() {
+                let a = word["start_char"].as_u64().unwrap() as usize;
+                let b = word["end_char"].as_u64().unwrap() as usize;
+                assert_eq!(
+                    expected.chars().skip(a).take(b - a).collect::<String>(),
+                    word["text"].as_str().unwrap()
+                );
+                assert_eq!(
+                    word["start_utf16"].as_u64().unwrap() as usize,
+                    expected.chars().take(a).map(char::len_utf16).sum::<usize>()
+                );
+                assert_eq!(
+                    word["end_utf16"].as_u64().unwrap() as usize,
+                    expected.chars().take(b).map(char::len_utf16).sum::<usize>()
+                );
+            }
             assert_eq!(
                 fs::read_to_string(root.join("context-crops"))
                     .unwrap()
@@ -1976,6 +2076,8 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
                 vec![275200, 275713, 51713]
             );
             let evidence = serde_json::to_value(&after["document"]).unwrap();
+            let crops = fs::read(root.join("context-crops")).unwrap();
+            let probes = fs::read(root.join("language-probe-calls")).ok();
             host.close(root).await;
             let reopened = Running::open(root, false).await;
             assert_eq!(reopened.get(&path).await["document"], evidence);
@@ -1990,6 +2092,8 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
                 .wait(&path, |v| v["inference_owned"] == false)
                 .await;
             assert_eq!(repeated["document"], evidence);
+            assert_eq!(fs::read(root.join("context-crops")).unwrap(), crops);
+            assert_eq!(fs::read(root.join("language-probe-calls")).ok(), probes);
             let exported = reopened
                 .client
                 .get(format!("{}{path}/export/txt", reopened.url))
@@ -2001,15 +2105,21 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
                 .text()
                 .await
                 .unwrap();
-            assert!(exported.contains("start repeat bridge finish repeat"));
+            assert!(exported.contains(expected));
             reopened.close(root).await;
         } else {
             if case == "edit" {
                 assert_eq!(row["text"], "Kept while the final context was running");
                 assert_eq!(row["start"], 0.1);
-            } else {
+            } else if case == "pause" {
                 assert_eq!(after["document"], before["document"]);
                 assert_eq!(after["refinement_status"], "paused");
+            } else {
+                assert_eq!(
+                    after["document"], before["document"],
+                    "{case} must retain previous legible words"
+                );
+                assert_eq!(after["refinement_status"], "unresolved", "{case}");
             }
             host.close(root).await;
         }

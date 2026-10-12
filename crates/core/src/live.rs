@@ -3418,10 +3418,12 @@ mod tests {
     fn overlap_part(request: &DecodeRequest, text: &str, onsets: &[i64]) -> TailPart {
         let mut words = Vec::new();
         let mut characters = Vec::new();
-        let mut offset = 0;
-        for (word, onset) in text.split_whitespace().zip(onsets) {
-            let first = offset;
-            for (index, character) in word.chars().enumerate() {
+        let raw: Vec<_> = text.chars().collect();
+        let units = timing::raw_units(text, crate::timing_policy::TIMING_UNIT_POLICY_ID).unwrap();
+        assert_eq!(units.len(), onsets.len());
+        for (unit_index, (unit, onset)) in units.iter().zip(onsets).enumerate() {
+            let mut offset = unit.start_char;
+            for (index, character) in unit.text.chars().enumerate() {
                 let sample = onset + index as i64 * 320;
                 characters.push(serde_json::json!({"text":character.to_string(),"raw_text":character.to_string(),
                     "token_id":character as u32,"start_char":offset,"end_char":offset+1,
@@ -3430,12 +3432,16 @@ mod tests {
                 offset += 1;
             }
             words.push(
-                serde_json::json!({"text":word,"start_char":first,"end_char":offset,
-                "start_sample":onset,"end_sample":onset+word.chars().count() as i64*320,"status":"aligned"}),
+                serde_json::json!({"text":unit.text,"start_char":unit.start_char,"end_char":offset,
+                "start_sample":onset,"end_sample":onset+unit.text.chars().count() as i64*320,"status":"aligned"}),
             );
-            if offset < text.chars().count() {
-                let sample = onset + word.chars().count() as i64 * 320;
-                characters.push(serde_json::json!({"text":" ","raw_text":" ","token_id":32,
+            let next = units
+                .get(unit_index + 1)
+                .map_or(raw.len(), |u| u.start_char);
+            while offset < next {
+                assert!(raw[offset].is_whitespace());
+                let sample = onset + (offset - unit.start_char) as i64 * 320;
+                characters.push(serde_json::json!({"text":" ","raw_text":raw[offset].to_string(),"token_id":32,
                     "start_char":offset,"end_char":offset+1,"frame":(sample-request.start_sample)/320,
                     "start_sample":sample,"end_sample":sample+320,"log_probability":-0.01,"status":"aligned"}));
                 offset += 1;
@@ -3449,9 +3455,140 @@ mod tests {
                 "raw_text":text,"text_sha256":sha256_hex(text.as_bytes()),
                 "audio_anchor":{"start_sample":request.start_sample,"end_sample":request.end_sample},
                 "provider_identity_sha256":crate::alignment::NATIVE_PROVIDER,"model_sha256":timing::MODEL,
+                "language":"en","provider_id":crate::timing_policy::PROVIDER_ID,
+                "normalization_policy_id":crate::timing_policy::NORMALIZATION_POLICY_ID,
+                "timing_unit_policy_id":crate::timing_policy::TIMING_UNIT_POLICY_ID,
                 "frame_calibration_id":timing::CALIBRATION,"score_calibration_id":timing::CALIBRATION,
                 "status":"aligned","complete":true,"characters":characters,"words":words
             })),
+        }
+    }
+
+    #[test]
+    fn authoritative_context_accepts_functional_non_english_envelopes() {
+        let mut row = anchor(26 * RATE + 513);
+        row.start_sample = 7 * RATE + 137;
+        row.end_sample += row.start_sample;
+        let requests = authoritative_requests(&row).unwrap();
+        let mut parts = vec![
+            overlap_part(
+                &requests[0],
+                "Anfang wieder Brücke Kontext",
+                &[
+                    8 * RATE + 137,
+                    20 * RATE + 137,
+                    21 * RATE + 137,
+                    23 * RATE + 137,
+                ],
+            ),
+            overlap_part(
+                &requests[1],
+                "wieder Brücke Ende wieder",
+                &[
+                    20 * RATE + 137,
+                    21 * RATE + 137,
+                    27 * RATE + 137,
+                    32 * RATE + 137,
+                ],
+            ),
+        ];
+        for part in &mut parts {
+            let alignment = part.alignment.as_mut().unwrap();
+            alignment["language"] = serde_json::json!("de");
+            alignment["frame_calibration_id"] =
+                serde_json::json!(crate::timing_policy::FUNCTIONAL_POLICY_ID);
+            alignment["score_calibration_id"] =
+                serde_json::json!(crate::timing_policy::FUNCTIONAL_POLICY_ID);
+        }
+        let assembled = assemble_authoritative(&row, &requests, &parts).unwrap();
+        assert!(
+            assembled.complete,
+            "functional multilingual CTC must support the same bounded seam: {:?}",
+            assembled.reason
+        );
+        assert_eq!(
+            assembled.text.as_deref(),
+            Some("Anfang wieder Brücke Ende wieder")
+        );
+        let mut spaced = parts.clone();
+        spaced[1] = overlap_part(
+            &requests[1],
+            "wieder Brücke\u{a0}\n  Ende wieder",
+            &[
+                20 * RATE + 137,
+                21 * RATE + 137,
+                27 * RATE + 137,
+                32 * RATE + 137,
+            ],
+        );
+        for key in ["language", "frame_calibration_id", "score_calibration_id"] {
+            spaced[1].alignment.as_mut().unwrap()[key] =
+                parts[1].alignment.as_ref().unwrap()[key].clone();
+        }
+        let selected = assemble_authoritative(&row, &requests, &spaced).unwrap();
+        assert!(selected.complete, "{:?}", selected.reason);
+        assert_eq!(
+            selected.text.as_deref(),
+            Some("Anfang wieder Brücke\u{a0}\n  Ende wieder")
+        );
+        for (field, wrong) in [
+            ("provider_identity_sha256", "wrong-provider"),
+            ("frame_calibration_id", timing::CALIBRATION),
+            ("score_calibration_id", timing::CALIBRATION),
+            ("normalization_policy_id", "wrong-normalization"),
+            ("timing_unit_policy_id", "wrong-units"),
+            ("language", "fr"),
+        ] {
+            let mut changed = parts.clone();
+            changed[1].alignment.as_mut().unwrap()[field] = Value::from(wrong);
+            let rejected = assemble_authoritative(&row, &requests, &changed).unwrap();
+            assert!(!rejected.complete && rejected.text.is_none(), "{field}");
+        }
+
+        let mut cjk = vec![
+            overlap_part(
+                &requests[0],
+                "「𠮷本橋」、外",
+                &[
+                    8 * RATE + 137,
+                    20 * RATE + 137,
+                    21 * RATE + 137,
+                    23 * RATE + 137,
+                ],
+            ),
+            overlap_part(
+                &requests[1],
+                "本橋」、明日",
+                &[
+                    20 * RATE + 137,
+                    21 * RATE + 137,
+                    27 * RATE + 137,
+                    32 * RATE + 137,
+                ],
+            ),
+        ];
+        for part in &mut cjk {
+            let alignment = part.alignment.as_mut().unwrap();
+            alignment["language"] = Value::from("ja");
+            alignment["frame_calibration_id"] =
+                Value::from(crate::timing_policy::FUNCTIONAL_POLICY_ID);
+            alignment["score_calibration_id"] =
+                Value::from(crate::timing_policy::FUNCTIONAL_POLICY_ID);
+        }
+        let selected = assemble_authoritative(&row, &requests, &cjk).unwrap();
+        assert!(selected.complete, "{:?}", selected.reason);
+        assert_eq!(selected.text.as_deref(), Some("「𠮷本橋」、明日"));
+        let units = timing::raw_units(
+            selected.text.as_deref().unwrap(),
+            crate::timing_policy::TIMING_UNIT_POLICY_ID,
+        )
+        .unwrap();
+        assert_eq!(selected.words.len(), units.len());
+        for (word, unit) in selected.words.iter().zip(units) {
+            assert_eq!(
+                (&word.text, word.start_char, word.end_char),
+                (&unit.text, unit.start_char, unit.end_char)
+            );
         }
     }
 

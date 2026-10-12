@@ -42,8 +42,9 @@ Local implementation branch: `codex/python-free-mac`.
    growing rows retain accepted cores instead of re-decoding completed audio.
    Qualified Pause/Resume passes native controls and mounted process replays.
    Raw dual-source echo passes independent baseline DSP and mounted failure
-   replays. Non-English accuracy, rolling live refinement, physical capture and
-   long-session gates remain.
+   replays. Saved long non-English accuracy passes functional timing/publication
+   tests and a real-model German recording. Rolling live refinement, physical
+   capture and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
 All validation uses disposable storage and synthetic/public audio. No installed
@@ -1213,6 +1214,60 @@ the pending Tauri live/setup/long-import workflow, default native startup and ac
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
+
+## Saved long multilingual accuracy
+
+Long saved passages now use the same bounded adjacent-context selection for every
+supported language. Each context must resolve confidently to the same language;
+uncertain or mixed routing retains the prior transcript. Native CTC results keep
+their language's existing calibration identity. Non-English results explicitly
+retain functional timing scope and an empty calibrated-language list, with no
+English accuracy claim. Raw Unicode and the selected right-context separator are
+preserved, including adjoining CJK units and non-ASCII whitespace. Existing
+ambiguous acoustic-boundary rejection remains unchanged. The adapter's Japanese
+separator aliases are validated but never become independent boundary anchors.
+
+Independent red controls reproduced both the Composer's English calibration
+assumption and the mounted saved route's English-only guard. Tests now cover
+German Auto, Chinese explicit selection, cross-context language changes,
+uncertainty, wrong provider/calibration/policies, protected late edits, pause,
+reopen and idempotent resume without more model calls. Retained independent
+Japanese/Arabic normalization scores are replayed through the context parser.
+Exports and code-point/UTF16 offsets match the selected raw text. The existing
+raw-unit helper supplies UTF16 offsets; no duplicate whole-text offset buffer or
+new scheduling/cache layer was added. Setup and editor wording match this scope.
+
+All 174 core, 64 host, 14 mounted live, one service and nine process tests pass,
+with the existing explicit native/network ignores. The retained raw AEC proof
+is reused. Eight relevant Node checks and strict all-target core/host Clippy
+pass. Logs are `/tmp/speakerdesk-long-multilingual-{core-red,mounted-red,core-tests,host-tests,frontend,clippy}.log`.
+The locked optimized desktop build passes in 27.00 seconds with the two unchanged
+upstream mlx-sys warnings. Binary SHA256:
+`5a09574ad6805b0b6b10de4b914c86d245f213ca98252b7dd8c805d9bc6b8727`.
+
+The independent real-model input is 54.953 seconds of generated German speech,
+879,248 samples including a partial tail, with 136 authored expected words. Its
+WAV SHA256 is `f06c41ff8831a1311d5a3f3c70192c6875cca5b2b7d5ee00a4c3fcce048af85a`.
+The pre-change binary produced a canonical passage through paced saved-PCM capture
+but rejected saved refinement and preserved its words. The corrected binary
+refines that same store and audio: all 136 expected words remain in order, and
+functional German timing reaches reading turns. Speaker-name, word and boundary
+edits, whole-transcript save, history, stale-save HTTP 409, full service restart,
+protected resume and all four exports pass. PCM and voice profiles stay unchanged.
+The external harness initially retried refinement before model readiness after
+restart and correctly received 409. Fixing only that harness race completed the
+restart checks without repeating inference. Evidence is under
+`/private/tmp/speakerdesk-long-german.jtRhdA/`; job
+`92799e77ff984d5680b21f623f8a313f`. Qualification hosts and children exited.
+
+This is real MLX/CTC through the mounted service using synthetic saved audio,
+not physical capture, UI proof, non-English population accuracy or an equivalent
+performance comparison. The complete replacement remains active and unfinished:
+rolling accuracy, long-session and physical capture gates, actual Tauri live/setup
+workflows, default native startup and packaging, disposable updater/security
+qualification and equivalent 0.6.6 performance remain. The Mac UI tool continues
+to report a locked screen. No installed app, production data, existing model cache
+or GitHub state was changed. Windows and issue #25 stay deferred.
 
 ## Raw dual-source echo and recoverable capture failures
 

@@ -59,10 +59,13 @@ language detection from the saved source audio, preserves captured mode and epoc
 and aligns with the newly selected language. Incomplete, uncertain or mixed-language
 replacements retain the previous words. Longer anchors use bounded physical
 contexts from the saved recording, with original coordinates and internal-edge
-ASR padding. Only adjacent decoded contexts remain resident. Confident English
-and bidirectionally unique CTC cells select raw-text boundaries; ambiguous seams
-retain the previous transcript. Selected word timing uses the normal publication
-validator. Long non-English accuracy and scheduling during capture remain unfinished.
+ASR padding. Only adjacent decoded contexts remain resident. One confidently
+routed supported language and bidirectionally unique CTC cells select raw-text
+boundaries; ambiguous seams retain the previous transcript. Selection preserves
+raw Unicode and the chosen context's separator, including adjacent CJK units.
+Non-English timing keeps its functional policy and makes no English calibration
+claim. Selected word timing uses the normal publication validator. Scheduling
+accuracy work during capture remains unfinished.
 
 Ordinary live rows retain the language decisions already produced by routing.
 Captured mode and epoch are separate from the selected language. Auto probe and

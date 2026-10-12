@@ -554,12 +554,16 @@ fn kana(c: char) -> bool {
     c != 'ー' && matches!(c as u32,0x3041..=0x3096|0x30a1..=0x30fa|0xff66..=0xff9d)
 }
 
-fn base(p: &Prepared, start: i64, samples: usize, language: &str) -> Value {
-    let calibration = if language == "en" {
+pub(crate) fn calibration_for_language(language: &str) -> &'static str {
+    if language == "en" {
         timing::CALIBRATION
     } else {
         FUNCTIONAL_POLICY_ID
-    };
+    }
+}
+
+fn base(p: &Prepared, start: i64, samples: usize, language: &str) -> Value {
+    let calibration = calibration_for_language(language);
     let words:Vec<_> = timing::raw_units(&p.text,TIMING_UNIT_POLICY_ID).expect("known policy").iter().map(|u| json!({"text":u.text,"start_char":u.start_char,"end_char":u.end_char,"start_utf16":u.start_utf16,"end_utf16":u.end_utf16,"unit_kind":u.unit_kind.as_str(),"status":"unresolved","start_sample":null,"end_sample":null})).collect();
     let spans: Vec<_> = p
         .aliases
@@ -638,6 +642,19 @@ pub(crate) mod tests {
     }
     fn cases() -> Value {
         serde_json::from_str(include_str!("../tests/testdata/alignment-reference.json")).unwrap()
+    }
+    pub(crate) fn functional_fixture(language: &str) -> Value {
+        let cases = cases();
+        let case = cases["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["language"] == language)
+            .unwrap();
+        let (vocabulary, prepared, scores, mut result) = replay(case);
+        vocabulary.materialize(&prepared, &scores, &mut result);
+        assert_eq!(result["complete"], true);
+        result
     }
 
     #[test]

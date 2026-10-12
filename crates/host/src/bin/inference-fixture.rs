@@ -310,11 +310,19 @@ fn main() {
                     pcm.len()
                 )
                 .unwrap();
-                let scores = std::fs::read(root.join("replay-probe.json"))
-                    .map(|bytes| serde_json::from_slice(&bytes).unwrap())
-                    .unwrap_or_else(|_| speakerdesk_core::ipc::LanguageProbeOut {
-                        probabilities: vec![0.99, 0.01],
-                        codes: vec!["en".into(), "de".into()],
+                let context_probe = std::fs::read(root.join("context-replay.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|contexts| contexts.get(context_index)?.get("probe").cloned());
+                let scores = context_probe
+                    .map(|probe| serde_json::from_value(probe).unwrap())
+                    .unwrap_or_else(|| {
+                        std::fs::read(root.join("replay-probe.json"))
+                            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+                            .unwrap_or_else(|_| speakerdesk_core::ipc::LanguageProbeOut {
+                                probabilities: vec![0.99, 0.01],
+                                codes: vec!["en".into(), "de".into()],
+                            })
                     });
                 Ok(Response::Probe(scores))
             }
@@ -392,7 +400,7 @@ fn main() {
                     let onset = word[1].as_i64().unwrap();
                     let mut text = word[0].as_str().unwrap().to_owned();
                     if index + 1 < words.len() {
-                        text.push(' ');
+                        text.push_str(context["separator"].as_str().unwrap_or(" "));
                     }
                     for (offset, c) in text.chars().enumerate() {
                         let sample = onset + offset as i64 * 640;

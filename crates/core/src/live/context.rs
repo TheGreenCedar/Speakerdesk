@@ -3,6 +3,9 @@
 //! model columns and raw-text normalization. Parse each result once; matching
 //! uses acoustic cell identity and never writes normalized or matched spelling.
 use super::*;
+use crate::timing_policy::{
+    NORMALIZATION_POLICY_ID, PROVIDER_ID, TIMING_UNIT_POLICY_ID, UPSTREAM_NORMALIZATION_REVISION,
+};
 use serde_json::json;
 use std::ops::Range;
 
@@ -21,6 +24,7 @@ struct Word {
 }
 struct Context {
     request: DecodeRequest,
+    language: String,
     raw: Vec<char>,
     cells: Vec<Cell>,
     words: Vec<Word>,
@@ -29,15 +33,21 @@ impl Context {
     fn parse(part: TailPart) -> Option<Self> {
         let result = part.alignment?;
         let request = part.request;
+        let language = result["language"].as_str()?;
+        let calibration = crate::alignment::calibration_for_language(language);
         if !part.complete
+            || !languages::is_supported(language)
             || result["raw_text"] != part.text
             || result["text_sha256"] != sha256_hex(part.text.as_bytes())
             || result["audio_anchor"]
                 != json!({"start_sample":request.start_sample,"end_sample":request.end_sample})
             || result["provider_identity_sha256"] != crate::alignment::NATIVE_PROVIDER
+            || result["provider_id"] != PROVIDER_ID
             || result["model_sha256"] != timing::MODEL
-            || result["frame_calibration_id"] != timing::CALIBRATION
-            || result["score_calibration_id"] != timing::CALIBRATION
+            || result["normalization_policy_id"] != NORMALIZATION_POLICY_ID
+            || result["timing_unit_policy_id"] != TIMING_UNIT_POLICY_ID
+            || result["frame_calibration_id"] != calibration
+            || result["score_calibration_id"] != calibration
             || result["complete"] != true
             || result["status"] != "aligned"
         {
@@ -53,8 +63,24 @@ impl Context {
             let b = usize::try_from(c["end_char"].as_u64()?).ok()?;
             let frame = c["frame"].as_i64()?;
             let score = c["log_probability"].as_f64()?;
-            let start = c["start_sample"].as_i64()?;
-            let end = c["end_sample"].as_i64()?;
+            let independent = c["independent_acoustic_timestamp"] != false;
+            let (status, start, end) = if independent {
+                (
+                    c["status"].as_str()?,
+                    c["start_sample"].as_i64()?,
+                    c["end_sample"].as_i64()?,
+                )
+            } else if c["text"] == " " && c["status"] == "not_independently_timed" {
+                // The adapter's Japanese prolonged-mark alias occupies a CTC
+                // separator cell, but cannot supply a word boundary by itself.
+                (
+                    c["acoustic_target_status"].as_str()?,
+                    c["target_cell_start_sample"].as_i64()?,
+                    c["target_cell_end_sample"].as_i64()?,
+                )
+            } else {
+                return None;
+            };
             if a < previous_start
                 || b < previous_end
                 || b <= a
@@ -62,7 +88,7 @@ impl Context {
                 || frame <= previous_frame
                 || !score.is_finite()
                 || !(-20. ..=0.).contains(&score)
-                || c["status"] != "aligned"
+                || status != "aligned"
                 || c["raw_text"] != raw[a..b].iter().collect::<String>()
                 || start != request.start_sample.checked_add(frame.checked_mul(320)?)?
                 || end != start.checked_add(320)?
@@ -74,7 +100,7 @@ impl Context {
             previous_frame = frame;
             previous_start = a;
             previous_end = b;
-            if c["text"] != " " {
+            if independent && c["text"] != " " {
                 cells.push(Cell {
                     token: c["token_id"].as_i64()?,
                     start,
@@ -123,6 +149,7 @@ impl Context {
         }
         Some(Self {
             request,
+            language: language.into(),
             raw,
             cells,
             words,
@@ -212,6 +239,9 @@ impl Composer {
     pub(super) fn push(&mut self, part: TailPart) -> Result<(), &'static str> {
         let next = Context::parse(part).ok_or("unavailable_boundary_timing")?;
         if let Some(previous) = self.previous.take() {
+            if previous.language != next.language {
+                return Err("context_language_mismatch");
+            }
             let (left_end, right_start) = boundary(&previous, &next)?;
             self.append(&previous, self.from, left_end)?;
             self.from = right_start;
@@ -223,6 +253,7 @@ impl Composer {
         if b < a || b > part.raw.len() {
             return Err("nonmonotonic_raw_boundary");
         }
+        let boundary = a;
         while a < b && part.raw[a].is_whitespace() {
             a += 1;
         }
@@ -232,9 +263,11 @@ impl Composer {
         if a == b {
             return Ok(());
         }
-        if !self.text.is_empty() {
-            self.text.push(' ');
-            self.characters += 1;
+        // The right context owns the separator after the corroborated unit.
+        // CJK character units can be adjacent without an intervening space.
+        if !self.text.is_empty() && a > boundary {
+            self.text.extend(&part.raw[boundary..a]);
+            self.characters += a - boundary;
         }
         let offset = self.characters;
         self.text.extend(&part.raw[a..b]);
@@ -318,6 +351,8 @@ pub(super) fn refine<M: Models + ?Sized + 'static>(
     let processed = processed_catalog(original);
     let mut composer = Composer::default();
     let mut detection: Option<Value> = None;
+    let mut selected_language: Option<String> = None;
+    let mut english_calibrated = true;
     let mut probes = Vec::new();
     let mut audio_hash = Sha256::new();
     for request in authoritative_requests(&anchor)? {
@@ -339,11 +374,15 @@ pub(super) fn refine<M: Models + ?Sized + 'static>(
             Some(padding),
         )
         .map_err(|e| LiveError::Detail(e.to_string()))?;
-        if language != "en" {
+        if selected_language
+            .as_ref()
+            .is_some_and(|prior| prior != &language)
+        {
             return Err(LiveError::Message(
-                "Long context accuracy currently requires confident English in every crop; previous words and audio are retained.",
+                "Long context accuracy requires one confidently routed language throughout; previous words and audio are retained.",
             ));
         }
+        selected_language.get_or_insert_with(|| language.clone());
         if let Some(events) = decision["probes"].as_array() {
             probes.extend(events.iter().cloned());
         }
@@ -355,6 +394,8 @@ pub(super) fn refine<M: Models + ?Sized + 'static>(
         }
         let vocabulary=vocabulary.ok_or(LiveError::Message("Long context accuracy needs supplied-text timing; previous words and audio are retained."))?;
         let alignment = vocabulary.align(models, &pcm, &text, request.start_sample, &language)?;
+        english_calibrated &=
+            alignment["qualified_scope"] == "bounded_ami_english_coarse_envelopes";
         for sample in &pcm[(request.core_start_sample - request.start_sample) as usize
             ..(request.core_end_sample - request.start_sample) as usize]
         {
@@ -370,6 +411,7 @@ pub(super) fn refine<M: Models + ?Sized + 'static>(
             .map_err(LiveError::Message)?;
     }
     let assembly = composer.finish().map_err(LiveError::Message)?;
+    let language = selected_language.expect("nonempty context plan");
     let mut detection = detection.expect("nonempty context plan");
     if mode == languages::AUTOMATIC {
         detection["probes"] = json!(probes);
@@ -377,24 +419,78 @@ pub(super) fn refine<M: Models + ?Sized + 'static>(
     let mut candidate = saved_candidate(
         original,
         assembly.text.expect("complete assembly"),
-        "en".into(),
+        language.clone(),
         detection,
         end,
     )?;
-    let mut utf16 = vec![0];
-    for c in candidate.text.chars() {
-        utf16.push(utf16.last().unwrap() + c.len_utf16());
+    let units = timing::raw_units(&candidate.text, TIMING_UNIT_POLICY_ID)
+        .expect("known timing unit policy");
+    if units.len() != assembly.words.len()
+        || units.iter().zip(&assembly.words).any(|(u, w)| {
+            u.text != w.text || u.start_char != w.start_char || u.end_char != w.end_char
+        })
+    {
+        return Err(LiveError::Message(
+            "Selected context timing differs from its raw text units.",
+        ));
     }
-    let words:Vec<Value>=assembly.words.iter().map(|w|json!({"text":w.text,"start_char":w.start_char,"end_char":w.end_char,
-        "start_utf16":utf16[w.start_char],"end_utf16":utf16[w.end_char],"start_sample":w.start_sample,"end_sample":w.end_sample,
+    let words:Vec<Value>=assembly.words.iter().zip(&units).map(|(w,u)|json!({"text":w.text,"start_char":w.start_char,"end_char":w.end_char,
+        "start_utf16":u.start_utf16,"end_utf16":u.end_utf16,"start_sample":w.start_sample,"end_sample":w.end_sample,
+        "unit_kind":u.unit_kind.as_str(),
         "status":if w.start_sample.is_some(){"aligned"}else{"unresolved"}})).collect();
     let complete = assembly.words.iter().all(|w| w.start_sample.is_some());
+    let calibration = crate::alignment::calibration_for_language(&language);
     let alignment = json!({"raw_text":candidate.text,"text_sha256":sha256_hex(candidate.text.as_bytes()),
         "audio_anchor":{"start_sample":start,"end_sample":end},"audio_float32_sha256":hex::encode(audio_hash.finalize()),
-        "model_sha256":timing::MODEL,"provider_identity_sha256":crate::alignment::NATIVE_PROVIDER,
-        "frame_calibration_id":timing::CALIBRATION,"score_calibration_id":timing::CALIBRATION,
+        "schema_version":1,"text_source":"cohere","offset_unit":"unicode_codepoint","timing_kind":"ctc_emission_cell_envelope",
+        "model_sha256":timing::MODEL,"provider_id":PROVIDER_ID,"provider_identity_sha256":crate::alignment::NATIVE_PROVIDER,
+        "language":language,"normalization_policy_id":NORMALIZATION_POLICY_ID,"timing_unit_policy_id":TIMING_UNIT_POLICY_ID,
+        "upstream_normalization_revision":UPSTREAM_NORMALIZATION_REVISION,"linguistic_word_claim":false,
+        "frame_calibration_id":calibration,"score_calibration_id":calibration,
+        "qualified_scope":if english_calibrated{"bounded_ami_english_coarse_envelopes"}else{"multilingual_functional_ctc_units"},
+        "timing_accuracy_calibrated_languages":if english_calibrated{vec!["en"]}else{vec![]},
         "status":if complete{"aligned"}else{"partial"},"complete":complete,"words":words,
         "alignment_backend":"speakerdesk-rust-selected-context-ctc","assembly_policy":AUTHORITATIVE_POLICY});
     crate::alignment::attach(&mut candidate, alignment);
     Ok(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn functional_context_accepts_retained_normalization_replays() {
+        for language in ["ja", "ar"] {
+            let alignment = crate::alignment::tests::functional_fixture(language);
+            let start = alignment["audio_anchor"]["start_sample"].as_i64().unwrap();
+            let end = alignment["audio_anchor"]["end_sample"].as_i64().unwrap();
+            let part = TailPart {
+                request: DecodeRequest {
+                    utterance_id: "functional-replay".into(),
+                    start_sample: start,
+                    end_sample: end,
+                    core_start_sample: start,
+                    core_end_sample: end,
+                    machine_revision: 2,
+                    audio_revision: 3,
+                    language_epoch: 4,
+                },
+                text: alignment["raw_text"].as_str().unwrap().into(),
+                complete: true,
+                alignment: Some(alignment),
+            };
+            let parsed = Context::parse(part)
+                .expect("the existing adapter's complete aliases are valid context evidence");
+            let mut composer = Composer::default();
+            composer.append(&parsed, 0, parsed.raw.len()).unwrap();
+            assert_eq!(composer.text, parsed.raw.iter().collect::<String>());
+            assert!(
+                composer
+                    .words
+                    .iter()
+                    .all(|word| word.start_sample.is_some())
+            );
+        }
+    }
 }
