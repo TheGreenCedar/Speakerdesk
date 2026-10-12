@@ -1,124 +1,93 @@
 # CI build reuse
 
-Speakerdesk builds unsigned, exact-source candidates in `apple-build.yml`.
-AppleRelease remains the trusted signer and publisher: approve an existing
-successful main/dispatch producer run, artifact ID, source commit, archive digest
-and payload hashes in its central policy, then sign that artifact. Do not build
-the same commit again merely to notarize or release it. PR artifacts cannot be
-promoted by that policy. This change does not edit AppleRelease or its active
-release approvals.
+The Linux/macOS native checks and the manual Apple producer reuse Cargo
+downloads and compiler objects through the existing pinned sccache 0.16.0
+action. Cargo target directories stay fresh. Every candidate still runs the
+locked build, native dependency preparation, bundle checks and exact-source
+artifact manifest generation.
 
-## Baseline and expected savings
+AppleRelease signs and notarizes an authenticated producer artifact selected by
+its immutable run, artifact, source and payload identities. Speakerdesk's
+promotion tooling verifies the signed package and native QA before publishing.
+A cache hit supplies build inputs; it does not authorize a release or replace
+package verification.
 
-Read-only observations from actual hosted macOS runs on 2026-10-05:
+## Persisted paths and invalidation
 
-| Run | Source | Complete build step | PyInstaller | npm cache observation |
-| --- | --- | --- | --- | --- |
-| [37363635410](https://github.com/TheGreenCedar/Speakerdesk/actions/runs/37363635410) | `8201f195` | 345 seconds | 49.7 seconds | Hit restored only 1,793 bytes |
-| [37386407723](https://github.com/TheGreenCedar/Speakerdesk/actions/runs/37386407723) | `05abcc3d` | 391 seconds | 80.9 seconds | Miss |
-
-These different source heads are baseline observations, not a cold/warm
-comparison. Both rebuilt Python dependencies, PyInstaller analysis/archive and
-Rust dependencies. The npm action restored `~/.npm`; the script actually used
-`.cache/npm`. Rust had no persisted objects and explicitly cleared its compiler
-wrapper. Swift module state stayed on the ephemeral runner. PyInstaller used
-`--clean` with no persisted component output.
-
-The new workflow is expected to avoid Python downloads, reuse compatible Rust
-compiler objects, and skip the complete PyInstaller/Swift component compilation
-when exact inputs are unchanged. Bundle creation, source tests and archive
-hashing still run. No new native build has been run for this draft, and no
-percentage or end-to-end speedup has been measured. The observed 49.7–80.9
-seconds of PyInstaller work identifies a potential avoidable cost, not a promised
-net saving after cache transfer. A cold cache will still compile.
-
-## Cache boundaries
-
-Every native key binds macOS version, runner image, architecture, deployment
-target, exact Python/uv/Rust/Node/sccache versions, Swift/Xcode and SDK identity.
-This conservatively invalidates all caches on toolchain drift.
-
-| Cache | Inputs and reuse rule | Persisted paths |
+| Cache | Reuse rule | Persisted paths |
 | --- | --- | --- |
-| uv dependencies | All requirements lock files; compatible download fallback | `.cache/uv` |
-| Cargo downloads | Cargo.lock; compatible download fallback | Cargo registry and git downloads |
-| npm downloads | package-lock.json; compatible download fallback | `.cache/npm` via npm configuration |
-| Rust compiler | Compatible toolchain/build contract prefix; immutable source key | Bounded local sccache objects |
-| Python component | All tracked app, packaging, requirements and builder inputs; exact key only | Built ad-hoc sidecar and SHA-256 receipt |
-| Swift component | Swift source, plist, entitlements and builder inputs; exact key only | Capture binary before signing and SHA-256 receipt |
+| Cargo downloads | Exact Cargo.lock key, compatible tool/environment fallback | `~/.cargo/registry`, `~/.cargo/git` |
+| Rust compiler objects | Exact source/profile key, compatible native contract fallback; sccache validates each compilation | `$RUNNER_TEMP/speakerdesk-sccache` |
+| npm downloads (producer) | Exact package-lock.json key, compatible tool/environment fallback | `.cache/npm` |
+| Swift capture helper (producer) | Exact source/tool/environment key and verified receipt; no fallback | `.cache/components/capture` |
+| Source-check Python downloads | Exact CI requirements key | `~/.cache/pip` |
 
-Whole components reject mismatched receipts and changed bytes before copying.
-Download fallbacks only supply dependency caches; locked resolution and integrity
-checks still select the installed dependencies. A release version bump changes
-the exact compiler cache key but preserves its compatible toolchain prefix.
-sccache hashes each actual rustc invocation and its source, dependencies and
-environment; Cargo.toml version changes cannot force unchanged objects cold.
-PyInstaller pickle analysis state is never persisted; `--clean` still applies
-when a component misses. Rust source edits preserve Python and Swift reuse.
-Developer ID local builds bypass component caching entirely. The total save
-budget is 2 GiB and sccache itself is bounded to 512 MiB. Oversized caches are
-reported and not uploaded; build/artifact production still completes.
+Compiler compatibility binds OS, runner image, architecture/host target, Rust,
+sccache, native C compiler, CMake/Ninja and Rust flags. On macOS it also binds
+Xcode, Swift, SDK and deployment target (15.0 in the producer; Rust's default in
+native CI unless explicitly set). The tracked contract covers
+Cargo configuration/toolchain, workflow/build scripts, vendored MLX adapter,
+MLX runtime fetch pins, echo source lock/build guard, Tauri configuration and
+embedded web/model metadata. Changing these inputs blocks compiler fallback.
+The pinned MLX 0.32.2 runtime and echo sources are still prepared and checked by
+their existing scripts; their downloads and build trees are not persisted.
 
-Only successful `main` runs save dependency/compiler/component caches. Branch
-and PR jobs can restore caches within GitHub's branch scope but never save
-trusted caches. The producer has read-only permissions, no signing credentials,
-and no automatic PR/tag build trigger. Cache paths never include keychains,
-credentials, user recordings, model downloads or whole home/temp directories.
-Pin action implementations, separate cache restore/save, and never use a cached
-executable or a successful PR job as release authorization.
+Rust source, Cargo manifest/lock/version and job profile changes select a new
+exact compiler key. If the native contract is unchanged, the compatible prefix
+can retain unchanged dependency objects;
+sccache checks the actual rustc flags, source, dependencies and environment.
+The two native CI jobs identify their test profiles separately from the Apple
+producer's release profile. Python/Node versions do not split the Rust object
+store. A different Rust version, target or native toolchain does.
 
-## Source routing and measurement
+Rust incremental compilation is disabled. sccache does not cache Rust crates
+that invoke the linker, so final executables, linking and packaging remain real
+work on every run. See the [pinned sccache Rust documentation](https://github.com/mozilla/sccache/blob/v0.16.0/docs/Rust.md).
+No Cargo target directory, model weights, recording, credential, keychain,
+whole home/temp directory or signed artifact is saved. The existing limits are
+512 MiB for sccache and 2 GiB for total native cache uploads; an oversized cache
+skips upload without invalidating an otherwise successful build.
 
-Feature pushes do not run CI; pull requests do. Only superseded PR source checks
-cancel automatically. Main pushes and manual producer/signing runs are never
-cancelled by PR concurrency. Documentation-only changes skip dependency installs
-and application tests while retaining workflow validation, cache tests and the
-tracked-payload guard, keeping the required Source checks job present.
+The exact Swift cache remains confined to the ad-hoc producer. Its receipt must
+match both identity and payload digest before restoration. Developer ID builds
+bypass component caching, and the trusted signer signs the freshly staged
+package after authenticating its producer provenance.
 
-Each manual candidate run reports requested/matched cache keys, exact component
-hits, component elapsed time, complete build elapsed time, compiler statistics
-and cache bytes in its summary/log. After this draft is reviewed and the current
-release owner clears the lane, use the next already-needed trusted main build
-as the cold population run. A later already-needed same-toolchain build supplies
-warm evidence; compare changed inputs and component hit types before reporting
-savings. Reuse an existing exact-source candidate for release instead of
-dispatching a timing-only rebuild. No paid runner or repeated experiment is
-required.
+## Trust and uncached builds
 
-PR #3 merged at `c9efddd70c6c0eb4e81b833f374e64a687e1da2a`; its native path
-has not yet produced a measured warm run. The 0.4 candidate run
-[37396189760](https://github.com/TheGreenCedar/Speakerdesk/actions/runs/37396189760)
-used PR #4's older producer workflow and does not measure the merged caches.
-The PR #4 integration must retain the main workflow's cache/trust controls and
-add `live_editor.js` to its conditional JavaScript syntax step. New 0.4 modules
-and hidden imports are already covered by the `speakerdesk/` and `packaging/`
-runtime input sets; the capture plist version change correctly invalidates the
-Swift component.
+Restore/save use separate pinned Actions. Only successful `main` push or manual
+runs save native CI caches, and only successful `main` manual runs save producer
+caches. The job byte budget must pass before native saves. PR and branch runs
+can restore within GitHub's cache scope but cannot write trusted main caches.
+The sccache GitHub backend is disabled, so explicit guarded save steps own
+persistence. All source/producer jobs retain read-only permissions and no
+signing credentials.
 
-The next normally required main candidate build can populate the trusted caches.
-A later normally required main build on the same toolchain/runner image measures
-download and compiler fallback reuse even if the app version or lock files
-change. Record restored keys, cache bytes, sccache compile requests/hits/misses,
-component hit types and times, build duration, and restore/save transfer time
-from the job steps. For a component comparison, its exact input key must match;
-a Python feature change or embedded capture plist version change correctly
-makes that component cold. No timing-only dispatch is needed. Cross-commit
-results measure observed reuse and elapsed costs, not a controlled speedup;
-releasing an existing exact-source artifact still avoids a second compilation.
+Both workflows accept the boolean manual input `cache`, defaulting to `true`.
+Dispatch with `cache=false` for an uncached comparison: all cache restores/saves
+are skipped, `RUSTC_WRAPPER` is empty, and the producer passes no Swift component
+key. Locked commands, integrity checks, packaging and provenance remain the
+same. The expression checks the raw event input against the string `'false'`;
+absent inputs on push/PR keep normal caching enabled.
 
-## Applying this pattern to future repositories
+## Measurements
 
-Use [CodeStory's cache contract](https://github.com/TheGreenCedar/CodeStory/blob/424d56b1b5452555460d528f40d08a231ac72a92/.github/scripts/cargo-cache-contract.mjs)
-as the reference for compatible compiler objects, exact-source evidence and
-hit/miss reporting. Its Rust/native workspace cache cannot simply replace
-Speakerdesk's Python/MLX and Tauri component inputs. For each future repository:
+Job summaries/logs report requested and restored keys, native test/desktop or
+complete producer build time, sccache requests/hits/misses, and cache bytes.
+Restore/save step durations are available in the Actions run. Compatible-prefix
+restores and exact-key hits are distinguishable from the matched key.
 
-1. Measure current job/step cost and prove cache directories match actual writes.
-2. Separate downloads, compiler objects, exact component outputs and release artifacts.
-3. Key actual toolchains, OS/architecture, locks and all component inputs; bound bytes.
-4. Save trusted caches only, keep PR privileges read-only, and filter unaffected work.
-5. Promote a verified artifact of the exact commit through the trusted signer.
-6. Validate workflow syntax and hostile identity/privilege cases before enabling it.
-7. Report expected savings separately until actual compatible cold/warm runs exist.
+No cold/warm speedup is claimed by this source change. Record comparable hosted
+runs of the same revision, runner image, toolchain, target and profile with
+`cache=false` and with a populated cache; report transfer costs as well as build
+time. A new version/contract key may be cold, and sccache's library-only coverage
+limits the possible gain. Reuse an already required exact-source producer
+artifact for signing instead of rebuilding it merely for release.
 
-This is a reusable review pattern; it does not install workflows in other repos.
+The implementation follows [CodeStory's pinned sccache and explicit trusted
+save pattern](https://github.com/TheGreenCedar/CodeStory/blob/424d56b1b5452555460d528f40d08a231ac72a92/.github/workflows/rust-ci.yml).
+[BatCave's maintained Rust-cache action](https://github.com/TheGreenCedar/BatCave/blob/2355d82b08a097259a67ccd789da032945768027/.github/workflows/validation.yml)
+is another local reference; Speakerdesk retains its existing mechanism to avoid
+persisting Cargo targets alongside bundle output. Neither reference's timings
+establish Speakerdesk's performance. Superseded main jobs can also occupy macOS
+runner capacity; that scheduling issue is separate from cache effectiveness.
