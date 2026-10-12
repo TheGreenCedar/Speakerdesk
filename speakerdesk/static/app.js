@@ -714,11 +714,17 @@ function groupConsecutivePassages(host,pending=0) {
     setPassageClass(card,'transcript-section-start',divided && start);
     const className=`${section}-section-label`;
     for(const label of card.querySelectorAll('.live-section-label,.processed-section-label,.corrections-section-label'))if(!start || !divided || !label.classList.contains(className))label.remove();
-    if(start && divided && !card.querySelector(`.${className}`)) {
-      const label=node('span',({processed:'Processed',corrections:'Your corrections · replaced passages',live:'Live'})[section],`transcript-section-label ${className}`);
+    let label=card.querySelector(`.${className}`);
+    if(start && divided && !label) {
+      label=node('span',({processed:'Processed',corrections:'Your corrections · replaced passages',live:'Live'})[section],`transcript-section-label ${className}`);
       label.setAttribute('role','heading');label.setAttribute('aria-level','2');
-      if(live){label.title='These words are awaiting refinement and may change with more context.';label.setAttribute('aria-label','Live words awaiting refinement');}
       card.insertBefore(label,card.firstChild);
+    }
+    if(live && label) {
+      const active=isLive(),text=active?'Live':'Needs review';
+      if(label.textContent!==text)label.textContent=text;
+      label.title=active?'These words are awaiting refinement and may change with more context.':'These words are provisional. Review them against the saved audio.';
+      label.setAttribute('aria-label',active?'Live words awaiting refinement':'Provisional words need review');
     }
     previous=card;previousSection=section;
   }

@@ -32,7 +32,8 @@ Local implementation branch: `codex/python-free-mac`.
 4. In progress: automatic language, supplied-text CTC and native Core ML ReDimNet
    extraction work. Manual voice enrollment/checking now passes the actual editor
    and full restart (below). Automatic import recognition and native model setup
-   pass service/model tests; setup UI remains pending. Live recognition also passes
+   pass service/model tests; actual setup cancel/resume and post-setup import now
+   pass in Tauri. Live recognition also passes
    a real-model saved-PCM test, described below.
 5. In progress: native capture coordination, streaming tails, child-loss recovery
    and live-edit continuation pass mounted replays and saved-PCM real-model tests.
@@ -46,7 +47,9 @@ Local implementation branch: `codex/python-free-mac`.
    tests and a real-model German recording. Rolling live refinement passes mounted
    lifecycle replays and real-model retained-audio checks. Actual Tauri live
    controls, editing, playback, four exports and restart pass with a synthetic
-   PCM helper. Physical capture, setup UI and long-session gates remain.
+   PCM helper. Real microphone/Mac-audio Start/Pause/Resume/Stop also reaches the
+   editor on the current Mac route. Capture recovery, acoustic calibration and
+   long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
 All validation uses disposable storage and synthetic/public audio. No installed
@@ -1217,6 +1220,73 @@ Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
 
+## Actual setup and physical capture on October 12
+
+The native Tauri setup flow now passes with an independent disposable SQLite
+store and APFS clones of this task's installed test models. Silero was absent at
+startup, so Start meeting was disabled. Resume download entered verification;
+Cancel setup reached its terminal cancelled state. Resuming downloaded the
+pinned Silero files (1247300 bytes total), activated them and initialized all six
+capabilities. The settings UI showed Installed/Ready. Importing `two-voice.wav`
+through the native Open dialog and Transcribe recording produced both expected
+passages, two speakers and timed reading turns in the editor. People stayed
+unchanged. The complete app and its model child exited on Cmd-Q.
+
+Evidence is in
+`/var/folders/8s/9n6rxkrx6dv46zhjfnhg69rw0000gn/T/speakerdesk-setup-ui.fvat1u4i/`:
+`cancelled.json`, `ready.json`, `transcript.json`, `people-before.json` and
+`result.json`. This uses the pre-progress-fix `e995d34` executable. Only Silero
+was freshly downloaded; the other five models were cloned and reverified.
+
+The joint-progress release build completed in 27.38 seconds with the two existing
+upstream mlx-sys warnings, SHA-256
+`2f7cf4b6cd27c2ac75135d6408c2eeb4ae4ec30bd7268afe793d57acd7522e30`.
+The isolated preview was refreshed with that executable, the already-qualified
+Swift capture helper, the WebRTC echo library and microphone/audio privacy
+descriptions. The signed preview executable SHA-256 is
+`32e09eef9f2ee80e5ba4fd29d3bb2c0969c3b948e184101fa04531561ff9a42f`;
+signed helper SHA-256 is
+`3cca87f83380d6b186711861de09dc0e3bb3c8562b75aedac2d3bdb554c89ef2`.
+The capability receipt is bound to those helper bytes.
+
+After Albert confirmed a quiet room and no unrelated app audio, the actual
+Tauri Start meeting used both microphone and Mac audio. The Swift helper reports
+active Apple voice processing, AGC disabled, a 48 kHz nine-discrete-channel input
+with exact replicas, and a 48 kHz stereo output route. The model pipeline produced
+the two expected phrases from synthetic playback. Pause acknowledged 560176
+received samples, 560128 speech-observed samples and 552960 jointly available
+samples. Resume retained the qualified graph and captured the repeated fixture;
+Stop drained all five WAV files to exactly 1022452 samples (63.90325 seconds).
+The four expected system passages reached the editor. A correction to the first
+passage saved through the actual passage editor.
+
+One additional 464 ms microphone fragment produced `you`, with `review=true`
+and unresolved refinement. Its evidence is retained; this is not a perfect
+recognition claim. The stopped editor incorrectly labelled this provisional row
+Live/awaiting more context. Shared passage grouping now refreshes the existing
+heading to Needs review, with saved-audio review help and matching accessibility
+text, when capture is no longer active. Active capture wording is unchanged.
+The regression failed before the fix and now preserves the focused card, words,
+caret, document and Retry control across the stopped-state transition. Root ran
+the full frontend suite: 105 passed, one existing optional performance fixture
+skipped. Logs are `/tmp/speakerdesk-stopped-review-{frontend,release}.log`.
+No real-device acoustic-quality, echo calibration, long-session or performance
+parity claim follows from this functional check.
+
+The device job is `0ad018d9920545b2b581388502d392bc`. Original PCM, processing
+receipt, Pause snapshot, stopped/saved documents, uncertainty evidence and
+candidate hashes are in `/private/tmp/speakerdesk-device-capture.vhdapugw/`.
+The capture helper exited after Stop; Cmd-Q then reaped shell/host/model PIDs
+23305/23310/23311. The updated preview then reopened this exact job: the saved
+correction was visible and the uncertain fragment appeared under Needs review.
+The canonical document, people catalog and every WAV hash were unchanged.
+The renderer-only release build completed in 18.98 seconds, SHA-256
+`def12c199385c501cf18f707d250120ad68b36a943aded342fbb0ef16e8d1fc1`;
+its signed preview executable is
+`24e4f1b1c32c218603e1bf1fda83faea3b4b9c85acf851caa73c87f83a553ba4`.
+All audio and data belong to the disposable test store; the installed app and
+its data/model cache remain untouched.
+
 ## Joint live progress and the first equivalent live diagnostic
 
 The first equivalent saved-PCM service comparison exposed a progress defect:
@@ -1262,6 +1332,14 @@ neither it nor the improved first-text/memory values qualify the full performanc
 gate. Pre-fix native pending-seconds values are invalid for backlog comparison.
 Post-fix backlog, sustained long sessions, package/UI latency, cold/warm loads,
 physical capture, cancellation and recovery performance remain to qualify.
+
+One post-fix native run (`native-1791805861056236000`) verifies the actual joint
+progress path: median pending 0.840 seconds, maximum 2.500 seconds, versus
+baseline medians around 0.890 seconds in the earlier retained sample. It retained
+identical PCM and words, completed both timing results and reaped all owned
+processes. First text was 7.889 seconds, Stop-to-Ready 2.894 seconds and sampled
+peak physical footprint 3.528 GB. This reuses the same short diagnostic; it does
+not establish sustained long-session or package performance acceptance.
 
 Inputs, logs, process samples, final documents and `comparison.json` are retained
 in `/private/tmp/speakerdesk-live-comparison.tBmzLh/`. The process sampler includes

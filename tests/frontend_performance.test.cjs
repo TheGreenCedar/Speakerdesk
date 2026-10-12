@@ -48,6 +48,24 @@ test('unchanged live rows avoid rewriting names; provisional heading and focused
   assert.equal(card.querySelector('.latest-machine-words').textContent,'New machine words');
 });
 
+test('stopped provisional words need review without promising more live context',()=>{
+  const f=frontend(root);f.seed(1,'recording');
+  f.run("selected.rolling_refinement={mode:'live'};selected.refinement_status='waiting';doc.segments[0].text='you';doc.segments[0].review=true;doc.segments[0].refinement_state='provisional';renderSegments()");
+  const host=f.document.getElementById('segments'),card=host.children[0],text=card.querySelector('textarea'),label=card.querySelector('.live-section-label');
+  assert.equal(label.textContent,'Live');assert.equal(label.getAttribute('aria-label'),'Live words awaiting refinement');
+  assert.match(label.title,/may change with more context/);
+  text.focus();text.setSelectionRange(1,1);
+  f.run("selected.status='ready';selected.refinement_status='unresolved';selected.inference_owned=false;window.before=JSON.stringify(doc);renderSegments()");
+  assert.equal(card.querySelector('.live-section-label'),label,'Stop updates the existing heading, including a focused passage');
+  assert.equal(label.textContent,'Needs review');assert.equal(label.getAttribute('aria-label'),'Provisional words need review');
+  assert.match(label.title,/saved audio/);assert.doesNotMatch(label.title,/awaiting|more context/);
+  assert.equal(host.children[0],card);assert.equal(card.querySelector('textarea'),text);assert.equal(text.value,'you');
+  assert.equal(f.document.activeElement,text);assert.equal(text.selectionStart,1);assert.notEqual(text.readOnly,true);
+  assert.equal(f.run('JSON.stringify(doc)===before'),true,'Stop presentation does not rewrite or remove uncertain words');
+  assert.equal(f.document.getElementById('refinement-status').textContent,'Accuracy pass stopped');
+  assert.equal(f.document.getElementById('refinement-toggle').textContent,'Retry unresolved phrases');
+});
+
 test('canonical chronology survives mixed processing states, language epochs and duplicate revisions',()=>{
   const f=frontend(root);f.seed(6,'recording');
   f.run(`doc.segments.forEach((s,i)=>{s.refinement_state=i%2?'provisional':'refined';s.language_epoch=Math.floor(i/2);s.text='Repeated words';});
