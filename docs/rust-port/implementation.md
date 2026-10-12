@@ -30,7 +30,9 @@ No model graph, decoder scheduling or performance policy changed.
 The legacy Python application, sidecar, obsolete tests and filename ledger are
 removed; shared editor assets, model metadata and independent golden bytes remain.
 See [source-removal scope](python-source-removal.md). Python remains build/test
-tooling. Native release promotion automation explicitly remains unsupported.
+tooling. The 0.7 release preparation now binds recorded native-package QA to the
+authenticated final signer artifact; [release acceptance](../core-acceptance.md)
+describes that boundary.
 
 Duplicated checked-in license dumps are removed. The existing build collector
 produces one packaged notice from locked dependency sources and pinned upstream
@@ -44,7 +46,17 @@ The startup setup card now distinguishes missing models, active loading and fail
 setup. Raw errors appear once under collapsed Technical details in Settings. The
 actual signed app passed the same-window layout check: the heading, setup card and
 Start controls remain fully visible without compression. This work is a local
-candidate, not a notarized or published release.
+candidate until the separately authorized 0.7 signing and publication finish.
+
+On October 12 the owner authorized version 0.7.0, merging PR #27 and publishing
+the release. The current runtime head `92bac44662832468cdc38b67f8137c1547536f9e`
+passed all three CI jobs (run `38290094522`). Release preparation changes version
+metadata and promotion tooling, retaining that runtime proof. The central signer
+needs a native runtime path instead of its PyInstaller archive transformation.
+Issue #25 starts independently at that head in the attached
+`speakerdesk-separation-25` worktree; none of its work belongs to 0.7.0. The root
+agent owns Mac builds, signing, integration and publication. The working installed
+app and production data remain outside the release tests.
 
 The main native Mac workflows are implemented and have passed the retained actual-app
 tests: import and live capture, editing and revision conflicts, save/reopen and

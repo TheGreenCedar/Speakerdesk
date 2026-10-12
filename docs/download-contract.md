@@ -1,23 +1,33 @@
-# Future rootandruntime download handoff
+# Public download and updater delivery
 
-Keep application source private. A private GitHub release asset needs authentication, so it cannot serve as the anonymous website download link.
+The existing website at `rootandruntime.com` serves approved Speakerdesk releases:
 
-Suggested stable page: `https://rootandruntime.com/software/speakerdesk/`.
-Suggested stable download redirect: `/downloads/speakerdesk/latest/macos-arm64`.
-Suggested metadata endpoint: `/downloads/speakerdesk/latest.json`.
-These are proposed routes, not deployed endpoints.
+- `/downloads/speakerdesk/latest.json`: current installer metadata.
+- `/downloads/speakerdesk/latest/macos-arm64`: redirect to the immutable installer.
+- `/downloads/speakerdesk/updater/latest.json`: Tauri updater metadata and signature.
+- `/downloads/speakerdesk/releases/<version>/<filename>`: immutable DMG and updater archive.
 
-The private Apple workflow produces:
+The website source is `TheGreenCedar/the-green-cedar`. Its
+`src/data/speakerdesk-latest.json` owns the current release and
+`src/data/speakerdesk-previous-releases.json` preserves approved older releases.
+The route implementation and
+[operations document](https://github.com/TheGreenCedar/the-green-cedar/blob/main/docs/operations/speakerdesk-release.md)
+own storage and deployment details. Historical provisioning instructions are not
+new release prerequisites.
 
-- `Speakerdesk_<version>_AppleSilicon.dmg` as the primary installer.
-- `Speakerdesk_<version>_AppleSilicon.app.zip` as a secondary app archive.
-- `SHA256SUMS`, calculated after any DMG stapling.
-- `artifact-manifest.json`, containing source commit, version, architecture, minimum macOS version, file sizes, SHA-256 digests and actual signing/notarization state.
+After authenticating and qualifying the exact AppleRelease package, publish its
+GitHub release, upload only the final DMG and signed updater archive to new
+versioned keys in the existing storage, and read them back to verify exact hashes.
+Uploads must not overwrite an existing object. Preserve content types, attachment
+filenames, SHA-256 metadata and the existing private/no-store storage policy.
 
-The manifest always says `channel: candidate`, `public_ready: false` and `native_meeting_qa: pending`. A successful signing job does not automatically promote a candidate to stable. Model weights and recordings are excluded from the repository and installer.
+Only then advance the website catalog through its normal deployment, retaining
+the previous catalog entry and objects. Verify anonymous installer/archive bytes,
+latest metadata, updater version/signature and the previous version's routes.
+The app ZIP, signature file, authenticated signer manifest and SHA256SUMS remain
+available in the GitHub release. No new storage, credentials, visibility changes,
+CMS post or newsletter is required for an ordinary release.
 
-Before website publication, verify the exact downloaded artifact's checksum, Developer ID signature and notarization ticket, normal first launch, model setup/resumption and native microphone/system-audio meeting capture. The public manifest must refer to the tested bytes and explicitly record that readiness decision. Do not relabel the current unnotarized candidate as stable.
-
-After readiness, publish only approved binaries, checksums, release notes and a public manifest. Choose an existing website/static storage destination if it supports roughly 100 MB downloads; otherwise use an existing approved object store/CDN or a separate public binary-only release destination. Creating new paid storage, credentials or changing source-repository visibility is not part of this workflow. No website or public asset has been published by this source preparation.
-
-The public metadata should contain `version`, `source_commit`, `released_at`, `platform`, `architecture`, `minimum_os`, `download_url`, `bytes`, `sha256`, `signing`, `notarized` and `release_notes_url`. Public URLs should resolve anonymously. Publish immutable versioned files first, verify their hashes, then atomically update the stable metadata and redirect. Preserve previous approved versions for rollback. The software page can read this metadata to display the latest version, macOS requirement, size and download link.
+Producer and signer manifests describe immutable candidate bytes; qualification
+and public catalog promotion do not rewrite those provenance artifacts. Model
+weights and recordings are excluded from installers.

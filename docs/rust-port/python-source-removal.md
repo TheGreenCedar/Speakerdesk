@@ -29,8 +29,8 @@ equivalence or complete native acceptance.
 rollback and preservation checks. Its two `measure_voice.py` report/supervisor
 tests retire with that obsolete Python model runner. Signer/updater trust tests,
 artifact metadata, cache identities, workflow privilege checks and every
-`*.test.cjs` frontend assertion remain. A preparation regression requires the
-retired release report path to fail before any network call.
+`*.test.cjs` frontend assertion remain. Native preparation regressions reject
+mismatched QA and modified candidate bytes before any network call.
 
 ## Independent fixtures and retained Python
 
@@ -68,11 +68,12 @@ against the shared frontend without the old application.
 
 ## Release boundary
 
-`promote_release.py` retains independent signer/updater verification helpers and
-tests, but preparation explicitly fails because the old gate admitted only
-Python bundles. Candidate metadata remains `public_ready: false` and marks
-native promotion automation unsupported. This deletion neither qualifies nor
-publishes a native release, and does not change application behavior.
+The deletion initially left `promote_release.py` failing closed because the old
+gate admitted only Python bundles. The 0.7 release preparation subsequently
+replaces that gate with final native-package QA and the retained authenticated
+signer/updater checks; see [release acceptance](../core-acceptance.md). Candidate
+metadata stays `public_ready: false` until the separate publication decision.
+Deleting Python source alone neither qualifies nor publishes a native release.
 
 ## Cleanup verification
 

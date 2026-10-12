@@ -44,7 +44,9 @@ versions = [json.loads((root/p).read_text())['version'] for p in
 capture_info = plistlib.loads((root/'desktop/capture/Info.plist').read_bytes())
 versions.append(capture_info['CFBundleVersion'])
 versions.append(re.search(r'^version = "([^"]+)"', (root/'desktop/src-tauri/Cargo.toml').read_text(), re.M)[1])
+versions.append(re.search(r'^version = "([^"]+)"', (root/'Cargo.toml').read_text(), re.M)[1])
 assert len(set(versions)) == 1, f'Version mismatch: {versions}'
 lock = (root/'Cargo.lock').read_text()
-assert f'name = "speakerdesk"\nversion = "{versions[0]}"' in lock
+for name in ('speakerdesk','speakerdesk-core','speakerdesk-echo','speakerdesk-host','speakerdesk-models','xtask'):
+    assert f'name = "{name}"\nversion = "{versions[0]}"' in lock, f'Lockfile version mismatch: {name}'
 print(f'Checked {len(list(filter(None, tracked)))} tracked files; version {versions[0]}; no excluded payload.')

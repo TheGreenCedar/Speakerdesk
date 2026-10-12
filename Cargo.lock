@@ -4633,7 +4633,7 @@ dependencies = [
 
 [[package]]
 name = "speakerdesk"
-version = "0.6.6"
+version = "0.7.0"
 dependencies = [
  "libc",
  "serde",
@@ -4650,7 +4650,7 @@ dependencies = [
 
 [[package]]
 name = "speakerdesk-core"
-version = "0.6.6"
+version = "0.7.0"
 dependencies = [
  "base64 0.23.1",
  "fs4",
@@ -4675,7 +4675,7 @@ dependencies = [
 
 [[package]]
 name = "speakerdesk-echo"
-version = "0.6.6"
+version = "0.7.0"
 dependencies = [
  "libc",
  "libloading 0.8.9",
@@ -4685,7 +4685,7 @@ dependencies = [
 
 [[package]]
 name = "speakerdesk-host"
-version = "0.6.6"
+version = "0.7.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -4713,7 +4713,7 @@ dependencies = [
 
 [[package]]
 name = "speakerdesk-models"
-version = "0.6.6"
+version = "0.7.0"
 dependencies = [
  "block2",
  "hound",
@@ -6925,7 +6925,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.6.6"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",

@@ -23,7 +23,9 @@ final refinement. Other performance requirements remain in force.
 Legacy Python application sources and their dedicated tests/packaging paths are
 removed. Shared editor/model assets and independent numerical fixtures remain;
 [source-removal scope](python-source-removal.md) records the retained test owners.
-Python remains build/test tooling. Native release promotion automation is still
-unsupported. Windows, Neural Engine scheduling and issue #25's separation/episode
-work remain follow-ups. No app installation, merge, notarization or publication
-is part of this work.
+Python remains build/test tooling. The owner subsequently authorized 0.7.0,
+PR #27 merge and publication. Native promotion now binds operator QA to the final
+authenticated signer package; the central signer is being adapted to native
+bundles. Issue #25 starts in a separate worktree and is excluded from this release.
+Windows and Neural Engine scheduling remain follow-ups. Release tests do not
+install over the working app or migrate production data.

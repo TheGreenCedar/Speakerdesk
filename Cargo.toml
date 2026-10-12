@@ -14,7 +14,7 @@ exclude = ["vendor/mlx-sys"]
 mlx-sys = { path = "vendor/mlx-sys" }
 
 [workspace.package]
-version = "0.6.6"
+version = "0.7.0"
 edition = "2024"
 license = "MIT"
 publish = false
