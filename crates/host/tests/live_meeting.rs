@@ -1108,6 +1108,210 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
 }
 
 #[tokio::test]
+async fn saved_long_accuracy_reaches_bounded_context_models_and_retains_missing_timing() {
+    // Native helper/model protocol replay. Missing CTC must retain prior words,
+    // but the long route must actually attempt bounded decoding rather than reject duration.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let host = Running::open(root, false).await;
+    trigger(root, 1);
+    let id = host.start(json!(["microphone"])).await;
+    let path = format!("api/jobs/{id}");
+    for stage in 1..=4 {
+        if stage > 1 {
+            trigger(root, stage);
+        }
+        host.wait(&path, |v| {
+            v["duration"].as_f64().unwrap_or(0.) >= f64::from(stage * 7) - 0.5
+        })
+        .await;
+    }
+    let before = host.stop(&id).await;
+    assert_eq!(before["status"], "ready");
+    assert!(
+        before["document"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["end"].as_f64().unwrap() - row["start"].as_f64().unwrap() > 24.5)
+    );
+    let calls = fs::read_to_string(root.join("transcribe-languages"))
+        .unwrap_or_default()
+        .lines()
+        .count();
+    let response = host
+        .post(&format!("{path}/refinement/resume"), json!({}))
+        .await;
+    assert_eq!(response.status(), 202, "{}", response.text().await.unwrap());
+    let after = host.wait(&path, |v| v["inference_owned"] == false).await;
+    assert!(
+        fs::read_to_string(root.join("transcribe-languages"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+            > calls,
+        "long saved accuracy work must reach bounded model crops"
+    );
+    assert_eq!(after["refinement_status"], "unresolved");
+    assert_eq!(
+        after["document"], before["document"],
+        "unqualified boundaries keep prior words and timing"
+    );
+    host.close(root).await;
+}
+
+#[tokio::test]
+async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
+    for case in ["complete", "edit", "pause"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(
+            root.join("fixture-ctc"),
+            b"synthetic overlap ownership scores",
+        )
+        .unwrap();
+        fs::create_dir(root.join("coarse-alignment")).unwrap();
+        fs::write(
+            root.join("coarse-alignment/tokens.txt"),
+            include_str!("testdata/ctc-tokens.txt"),
+        )
+        .unwrap();
+        let host = Running::open(root, false).await;
+        trigger(root, 1);
+        let response=host.post("api/meetings",json!({"name":"Long context ownership replay","language":"auto","sources":["microphone"]})).await;
+        assert_eq!(response.status(), 202, "{}", response.text().await.unwrap());
+        let id = host.wait("api/meeting", |v| v["id"].is_string()).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let path = format!("api/jobs/{id}");
+        for stage in 1..=4 {
+            if stage > 1 {
+                trigger(root, stage);
+            }
+            host.wait(&path, |v| {
+                v["duration"].as_f64().unwrap_or(0.) >= f64::from(stage * 7) - 0.5
+            })
+            .await;
+        }
+        let before = host.stop(&id).await;
+        let old = &before["document"]["segments"][0];
+        assert_eq!(old["language_mode"], "auto");
+        assert_eq!(old["end"], 28. + 513. / 16000.);
+        // Authored raw contexts and absolute CTC event positions. The duplicate
+        // bridge is the same event; the two repeats are distinct events.
+        fs::write(root.join("context-replay.json"),json!([
+            {"text":"start repeat bridge extra","start_sample":0,"end_sample":272000,
+             "words":[["start",16000],["repeat",192000],["bridge",208000],["extra",256000]]},
+            {"text":"repeat bridge finish repeat","start_sample":176000,"end_sample":448513,
+             "words":[["repeat",192000],["bridge",208000],["finish",352000],["repeat",416000]]},
+            {"text":"repeat","start_sample":400000,"end_sample":448513,"words":[["repeat",416000]]}
+        ]).to_string()).unwrap();
+        if case != "complete" {
+            fs::write(root.join("hold-live-asr"), b"hold final context").unwrap();
+            fs::write(root.join("hold-context-index"), b"2").unwrap();
+        }
+        let begin = host
+            .post(&format!("{path}/refinement/resume"), json!({}))
+            .await;
+        assert_eq!(begin.status(), 202, "{}", begin.text().await.unwrap());
+        if case != "complete" {
+            wait_file(&root.join("edit-asr-started")).await;
+            assert_eq!(
+                host.get(&path).await["document"],
+                before["document"],
+                "no partial anchor publications"
+            );
+            if case == "edit" {
+                let edited=host.client.patch(format!("{}{path}/segments/{}",host.url,old["id"].as_str().unwrap()))
+                    .header("X-Speakerdesk-Token",&host.token).json(&json!({"segment_revision":old["machine_revision"],"changes":{"text":"Kept while the final context was running","start":0.1}})).send().await.unwrap();
+                assert_eq!(edited.status(), 200, "{}", edited.text().await.unwrap());
+            } else {
+                assert_eq!(
+                    host.post(&format!("{path}/refinement/pause"), json!({}))
+                        .await
+                        .status(),
+                    200
+                );
+            }
+            fs::remove_file(root.join("hold-live-asr")).unwrap();
+        }
+        let after = host.wait(&path, |v| v["inference_owned"] == false).await;
+        let row = &after["document"]["segments"][0];
+        if case == "complete" {
+            assert_eq!(after["refinement_status"], "complete", "{after}");
+            assert_eq!(row["text"], "start repeat bridge finish repeat");
+            assert_eq!(row["id"], old["id"]);
+            assert_eq!(row["speaker"], old["speaker"]);
+            assert_eq!(row["language_epoch"], old["language_epoch"]);
+            assert_eq!(
+                row["machine_revision"].as_i64(),
+                old["machine_revision"].as_i64().map(|v| v + 1)
+            );
+            assert!(!row["reading_turns"].as_array().unwrap().is_empty());
+            assert_eq!(
+                row["reading_turn_provenance"]["machine_revision"],
+                row["machine_revision"]
+            );
+            assert_eq!(
+                row["reading_alignment"]["words"].as_array().unwrap().len(),
+                5
+            );
+            assert_eq!(
+                fs::read_to_string(root.join("context-crops"))
+                    .unwrap()
+                    .lines()
+                    .map(|line| line
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap())
+                    .collect::<Vec<_>>(),
+                vec![275200, 275713, 51713]
+            );
+            let evidence = serde_json::to_value(&after["document"]).unwrap();
+            host.close(root).await;
+            let reopened = Running::open(root, false).await;
+            assert_eq!(reopened.get(&path).await["document"], evidence);
+            assert_eq!(
+                reopened
+                    .post(&format!("{path}/refinement/resume"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            let repeated = reopened
+                .wait(&path, |v| v["inference_owned"] == false)
+                .await;
+            assert_eq!(repeated["document"], evidence);
+            let exported = reopened
+                .client
+                .get(format!("{}{path}/export/txt", reopened.url))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(exported.contains("start repeat bridge finish repeat"));
+            reopened.close(root).await;
+        } else {
+            if case == "edit" {
+                assert_eq!(row["text"], "Kept while the final context was running");
+                assert_eq!(row["start"], 0.1);
+            } else {
+                assert_eq!(after["document"], before["document"]);
+                assert_eq!(after["refinement_status"], "paused");
+            }
+            host.close(root).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn saved_auto_accuracy_uses_fresh_probe_and_keeps_captured_mode_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

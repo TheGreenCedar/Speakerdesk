@@ -37,8 +37,9 @@ Local implementation branch: `codex/python-free-mac`.
 5. In progress: native capture coordination, streaming tails, child-loss recovery
    and live-edit continuation pass mounted replays and saved-PCM real-model tests.
    Sealed live timing, identity and saved Auto/explicit-language accuracy passes pass
-   real-model saved-PCM checks. Long-passage and rolling live refinement, qualified
-   Pause/Resume, raw dual-source echo, physical capture and long-session gates remain.
+   real-model saved-PCM checks, including long English context assembly. Long
+   non-English accuracy, rolling live refinement, qualified Pause/Resume, raw
+   dual-source echo, physical capture and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
 All validation uses disposable storage and synthetic/public audio. No installed
@@ -1208,6 +1209,66 @@ the pending Tauri live/setup/long-import workflow, default native startup and ac
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
+
+## Saved long-context accuracy
+
+Saved English canonical anchors now pass through bounded physical contexts rather
+than the former 24.5-second rejection. The existing recording reader supplies at
+most 20 seconds per crop; Cohere receives the baseline's 3,200-sample padding only
+at internal physical edges. VAD, language probes and supplied-text CTC retain the
+original unpadded coordinates. One composer keeps adjacent parsed contexts and
+the selected output. It does not retain PCM history, recursively validate earlier
+packets or add an authority store. Bidirectionally unique acoustic cells select
+raw-text boundaries without deduplicating words by spelling. Final word evidence
+uses the existing timing attachment under the final passage identity/revision.
+
+The retained red checks reproduced both the unavailable overlap assembler and
+the real route's duration rejection. The actual live path uses disjoint decode
+cores: its dormant authoritative assembler was unfinished integration, not proof
+of lost live words. The initial unpaced qualification helper overflowed its
+bounded capture queue; a paced replay then retained all 558,617 samples. That
+harness failure is not a demonstrated sustained-capture regression.
+
+Independent source review caught valid NFC targets sharing raw character spans;
+the final normalization regression uses the real alignment materializer. Focused
+checks cover punctuation, a non-grid audio origin, a partial final frame, distinct
+repetitions, missing and genuinely ambiguous timing. Mounted child replays cover
+complete publication, an edit during the last context, cancellation, bounded
+crops, timing, export and idempotent restart. Final validation: 167 core, 61 host,
+12 mounted live-service, one service-lifecycle and nine process tests pass, plus
+strict all-target core/host Clippy and four capture-presentation Node tests. The
+four existing explicit ignores remain unchanged. Logs are
+`/tmp/speakerdesk-long-refinement-{core-red,host-red,core-green,normalization,host-green,tests,clippy,controls,release}.log`.
+
+The locked optimized build completed in 24.39 seconds with the existing upstream
+mlx-sys warnings. Executable SHA-256:
+`ba961b39a6e00a7cebf43a2e3c9b7080286f50b7b629ca6e0b32bad3684d58e3`.
+Real MLX and CTC execution on the retained 34.9135625-second synthetic recording
+produces all 114 independently authored expected words in order. Selected timing
+reaches the saved document. Naming, editing words and bounds, whole-document save,
+whole-host restart, protected Resume, TXT/SRT/VTT/JSON exports and stale-save HTTP
+409 pass. PCM and saved people remain unchanged. The 4.163-second observation is
+diagnostic, not an equivalent 0.6.6 comparison or general accuracy claim. Evidence
+and the external test harness are in
+`/private/tmp/speakerdesk-long-refinement.USlLQY/`; the tested native host and model
+child exited. The paced helper is external Python test code, not artifact proof.
+
+The isolated Tauri preview was refreshed after its previous idle parent and both
+children exited. It serves initialized models at `http://127.0.0.1:57677/` and
+describes the English context limit. Signed executable SHA-256:
+`5c452742a8200dbca686ac83bf1013640a51bdb9726f0f1e7063a6dc1d715712`.
+`long-refinement-preview.json` and `app-long-refinement.log` are retained under
+`/private/tmp/speakerdesk-native-desktop.WJKAde/`. CUA still reports the Mac locked,
+so this adds no actual editor, physical capture or distributable-package claim.
+
+PR #27 remains open at `db9da655b3eeeeef598ba21a21cb54505e6bce21`, base
+`59e7b0c860f72ca94c24e6eab18ac820b144ee24`. The accepted full replacement remains
+active and unfinished: long non-English and rolling live accuracy, ordinary live
+language-decision metadata, qualified Pause/Resume and raw dual-source echo,
+physical capture and long-session gates, pending Tauri workflows, native default
+startup and packaging, disposable updater/security checks and equivalent 0.6.6
+performance. Windows and issue #25 remain deferred. Installed app, production
+data, existing model cache and GitHub state remain untouched.
 
 ## Saved Auto-language accuracy and stable restart checkpoints
 

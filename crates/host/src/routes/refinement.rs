@@ -274,28 +274,14 @@ fn execute(
             (job.clone(), segment.clone())
         };
         let result = (|| {
-            let start = (prior.start * 16000.).round() as i64;
-            let end = (prior.end * 16000.).round() as i64;
-            if !prior.start.is_finite()
-                || !prior.end.is_finite()
-                || start < 0
-                || end <= start
-                || end - start > live::MAX_DECODE_SAMPLES
-            {
-                return Err(
-                    "Passage needs bounded long-audio refinement, which is not available yet."
-                        .to_string(),
-                );
-            }
             let path = crate::native::passage_recording_path(
                 &operation.shared.data_dir,
                 &original,
                 &prior,
             )
             .map_err(|e| e.to_string())?;
-            let pcm =
-                audio::read_pcm16_range(path, prior.start, prior.end).map_err(|e| e.to_string())?;
-            live::refine_saved_passage(&models, &prior, &pcm, vocabulary.as_deref())
+            let reader = audio::RecordingReader::open(path).map_err(|e| e.to_string())?;
+            live::refine_saved_recording(&models, &prior, &reader, vocabulary.as_deref())
                 .map_err(|e| e.to_string())
         })();
         let mut store = operation.shared.store.lock().expect("store");

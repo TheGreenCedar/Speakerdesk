@@ -40,6 +40,7 @@ fn main() {
     let mut race: Option<PathBuf> = None;
     let mut race_error = false;
     let root = PathBuf::from(std::env::args_os().nth(2).unwrap());
+    let mut context_index = 0usize;
     let mut held_live_feed = false;
     let mut held_live_asr = false;
     while let Ok(envelope) = read_envelope(&mut std::io::stdin()) {
@@ -50,7 +51,11 @@ fn main() {
         let hold_asr = matches!(request, Request::Transcribe { .. })
             && root.join("fixture-live").exists()
             && root.join("hold-live-asr").exists()
-            && !held_live_asr;
+            && !held_live_asr
+            && std::fs::read_to_string(root.join("hold-context-index"))
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .is_none_or(|index| index == context_index);
         let hold_eof = matches!(request, Request::VadFeed { last: true, .. })
             && root.join("fixture-live").exists()
             && root.join("hold-live-eof").exists();
@@ -113,6 +118,7 @@ fn main() {
                                 "silero-speech" => "mlx-community/silero-vad-v6@2ebf4a5".into(),
                                 "nemotron" => "mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f".into(),
                                 "cohere-speech" => "spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12".into(),
+                                "coarse-alignment" if root.join("fixture-ctc").exists() => speakerdesk_core::alignment::CHECKPOINT.into(),
                                 "whisper-language" => speakerdesk_core::languages::LID_CHECKPOINT.into(),
                                 "redimnet2-b6" if root.join("fixture-voice").exists() => "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU".into(),
                                 _ => format!("replay:{model}"),
@@ -312,7 +318,7 @@ fn main() {
                     });
                 Ok(Response::Probe(scores))
             }
-            Request::Transcribe { language, .. } => {
+            Request::Transcribe { language, pcm, .. } => {
                 writeln!(
                     std::fs::OpenOptions::new()
                         .create(true)
@@ -322,12 +328,90 @@ fn main() {
                     "{language}"
                 )
                 .unwrap();
-                let text = std::fs::read_to_string(root.join("replay-transcript"))
-                    .unwrap_or_else(|_| "Replay transcript".into());
+                let text = if let Ok(bytes) = std::fs::read(root.join("context-replay.json")) {
+                    let contexts: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let context = &contexts[context_index];
+                    context_index += 1;
+                    writeln!(
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(root.join("context-crops"))
+                            .unwrap(),
+                        "{} {} {}",
+                        pcm.len(),
+                        pcm.iter().take_while(|v| **v == 0.).count(),
+                        pcm.iter().rev().take_while(|v| **v == 0.).count()
+                    )
+                    .unwrap();
+                    context["text"]
+                        .as_str()
+                        .expect("scripted bounded context")
+                        .to_owned()
+                } else {
+                    std::fs::read_to_string(root.join("replay-transcript"))
+                        .unwrap_or_else(|_| "Replay transcript".into())
+                };
                 Ok(Response::Text(AsrText {
                     text: text.clone(),
                     raw_text: text,
                     token_count: 2,
+                }))
+            }
+            Request::CtcScores { pcm, token_ids } if root.join("context-replay.json").exists() => {
+                // Explicit synthetic score replay: word onsets are authored independently
+                // of the native context planner/assembler. No acoustic quality claim.
+                let contexts: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(root.join("context-replay.json")).unwrap(),
+                )
+                .unwrap();
+                let context = &contexts[context_index - 1];
+                let start = context["start_sample"].as_i64().unwrap();
+                assert_eq!(
+                    pcm.len() as i64,
+                    context["end_sample"].as_i64().unwrap() - start
+                );
+                let vocabulary =
+                    std::fs::read_to_string(root.join("coarse-alignment/tokens.txt")).unwrap();
+                let lookup: std::collections::HashMap<String, i32> = vocabulary
+                    .lines()
+                    .map(|line| {
+                        let (text, id) = line.rsplit_once(' ').unwrap();
+                        (text.into(), id.parse().unwrap())
+                    })
+                    .collect();
+                let frames = (pcm.len() - 400) / 320 + 1;
+                let width = token_ids.len();
+                let blank = token_ids.iter().position(|id| *id == 0).unwrap();
+                let mut gathered = vec![-40.; frames * width];
+                for row in gathered.chunks_mut(width) {
+                    row[blank] = 0.;
+                }
+                let words = context["words"].as_array().unwrap();
+                for (index, word) in words.iter().enumerate() {
+                    let onset = word[1].as_i64().unwrap();
+                    let mut text = word[0].as_str().unwrap().to_owned();
+                    if index + 1 < words.len() {
+                        text.push(' ');
+                    }
+                    for (offset, c) in text.chars().enumerate() {
+                        let sample = onset + offset as i64 * 640;
+                        let frame = ((sample - start) / 320) as usize;
+                        let id = lookup[&c.to_string()];
+                        let column = token_ids.iter().position(|v| *v == id).unwrap();
+                        gathered[frame * width..(frame + 1) * width].fill(-40.);
+                        gathered[frame * width + column] = 0.;
+                    }
+                }
+                Ok(Response::Ctc(speakerdesk_core::ipc::CtcScoresOut {
+                    valid_frames: frames as u32,
+                    audio_num_samples: pcm.len() as u32,
+                    frame_hop_samples: 320,
+                    frame_origin_samples: 0,
+                    token_ids,
+                    model: speakerdesk_core::timing::MODEL.into(),
+                    vocabulary_sha256: speakerdesk_core::alignment::TOKENS_SHA256.into(),
+                    gathered,
                 }))
             }
             Request::EmbedVoice { pcm } if root.join("fixture-voice").exists() => {

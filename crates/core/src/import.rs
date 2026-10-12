@@ -251,7 +251,14 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
     let mut segments = Vec::new();
     for item in work {
         let chunk = &chunks[item.chunk];
-        let decoded = decode_window(transcriber.as_mut(), pcm, language, &chunk.speakers, &item)?;
+        let decoded = decode_window(
+            transcriber.as_mut(),
+            pcm,
+            language,
+            &chunk.speakers,
+            &item,
+            None,
+        )?;
         for row in decoded {
             let Some((start, end)) = clip_span(row.start, row.end, chunk.start, chunk.end) else {
                 continue;
@@ -354,6 +361,7 @@ pub fn retry_passage_source<M: Models + ?Sized + 'static>(
         end,
         language,
         processed_microphone_catalog,
+        None,
     )?;
     Ok(candidate_from_parts(start, end, language, &parts))
 }
@@ -367,6 +375,7 @@ fn decode_passage_source<M: Models + ?Sized + 'static>(
     end: f64,
     language: &str,
     processed_microphone_catalog: Option<&str>,
+    context_padding: Option<(u32, u32)>,
 ) -> Result<Vec<Decoded>, ImportError> {
     let duration = require_pcm(pcm)?;
     if !start.is_finite()
@@ -385,9 +394,20 @@ fn decode_passage_source<M: Models + ?Sized + 'static>(
     }
     let slice = &pcm[origin as usize..stop as usize];
     let ledger = admit_source(models, slice, processed_microphone_catalog)?;
-    let book = canonical_utterances(&ledger, slice.len() as i64)?;
-    let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
-    let windows = examine_range(&ledger, slice, &spans, 0, slice.len() as i64)?;
+    let windows = if context_padding.is_some() {
+        vec![examine(
+            &ledger,
+            slice,
+            Window {
+                start: 0,
+                end: slice.len() as i64,
+            },
+        )?]
+    } else {
+        let book = canonical_utterances(&ledger, slice.len() as i64)?;
+        let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
+        examine_range(&ledger, slice, &spans, 0, slice.len() as i64)?
+    };
     let mut transcriber = if windows.iter().any(|item| item.blocked.is_none()) {
         Some(open_transcriber(models, language, ledger)?)
     } else {
@@ -402,6 +422,7 @@ fn decode_passage_source<M: Models + ?Sized + 'static>(
             language,
             &speakers,
             item,
+            context_padding,
         )?);
     }
     Ok(parts)
@@ -416,6 +437,26 @@ pub(crate) fn refine_passage_source<M: Models + ?Sized + 'static>(
     start_sample: i64,
     processed_microphone_catalog: Option<&str>,
 ) -> Result<(String, String, Value), ImportError> {
+    refine_context_source(
+        models,
+        pcm,
+        language_mode,
+        start_sample,
+        processed_microphone_catalog,
+        None,
+    )
+}
+
+/// A physical context crop is one recognition request (up to 20 seconds). Only
+/// Cohere sees edge padding; VAD, language probes and CTC retain physical coordinates.
+pub(crate) fn refine_context_source<M: Models + ?Sized + 'static>(
+    models: &M,
+    pcm: &[f32],
+    language_mode: &str,
+    start_sample: i64,
+    processed_microphone_catalog: Option<&str>,
+    context_padding: Option<(u32, u32)>,
+) -> Result<(String, String, Value), ImportError> {
     let parts = decode_passage_source(
         models,
         pcm,
@@ -423,6 +464,7 @@ pub(crate) fn refine_passage_source<M: Models + ?Sized + 'static>(
         samples_to_seconds(pcm.len() as i64),
         language_mode,
         processed_microphone_catalog,
+        context_padding,
     )?;
     let incomplete = || {
         ImportError::new(
@@ -906,6 +948,7 @@ fn decode_window(
     language: &str,
     speakers: &[String],
     item: &Examined,
+    context_padding: Option<(u32, u32)>,
 ) -> Result<Vec<Decoded>, ImportError> {
     if let Some(blocked) = &item.blocked {
         return Ok(vec![blocked_row(language, item, blocked)]);
@@ -920,9 +963,13 @@ fn decode_window(
             limits::SAMPLE_RATE,
             speakers,
             TranscribeOptions {
-                max_asr_seconds: IMPORT_MAX_SECONDS,
+                max_asr_seconds: if context_padding.is_some() {
+                    limits::PASSAGE_RETRY_MAX_SECONDS
+                } else {
+                    IMPORT_MAX_SECONDS
+                },
                 start_sample: item.start,
-                asr_padding: (0, 0),
+                asr_padding: context_padding.unwrap_or((0, 0)),
             },
         )
         .map_err(language_err)?;

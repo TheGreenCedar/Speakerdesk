@@ -52,12 +52,16 @@ publication compares that passage with its current stored version and replaces
 its slot without changing names, neighboring passages or source order. Pause
 invalidates publication before cancellation, and admission remains held until
 the worker exits. Completed passage versions survive restart; history retains
-only the previous words, bounds, identity and speaker. This first saved path
+only the previous words, bounds, identity and speaker. The saved path
 supports Auto and explicit-language anchors up to 24.5 seconds. Auto reruns
 language detection from the saved source audio, preserves captured mode and epoch,
 and aligns with the newly selected language. Incomplete, uncertain or mixed-language
-replacements retain the previous words. Longer anchors and scheduling during
-capture remain unfinished.
+replacements retain the previous words. Longer anchors use bounded physical
+contexts from the saved recording, with original coordinates and internal-edge
+ASR padding. Only adjacent decoded contexts remain resident. Confident English
+and bidirectionally unique CTC cells select raw-text boundaries; ambiguous seams
+retain the previous transcript. Selected word timing uses the normal publication
+validator. Long non-English accuracy and scheduling during capture remain unfinished.
 
 ## Messages and security
 

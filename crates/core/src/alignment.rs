@@ -769,6 +769,73 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn context_ownership_accepts_normalized_targets_sharing_raw_character_spans() {
+        // Real normalization/materialization, synthetic CTC emissions. Reordered
+        // NFC marks share the original raw span; they are not malformed offsets.
+        let vocabulary =
+            Vocabulary::parse_tokens("<s> 0\n<pad> 1\n</s> 2\n<unk> 3\n  4\nà 5\n\u{315} 6\n")
+                .unwrap();
+        let text = "a\u{315}\u{300}";
+        let prepared = vocabulary.prepare(text, "en").unwrap();
+        assert_eq!(prepared.targets.len(), 2);
+        assert_eq!(
+            (prepared.targets[0].a, prepared.targets[0].b),
+            (prepared.targets[1].a, prepared.targets[1].b)
+        );
+        let anchor = crate::live::AnchorRow {
+            id: "normalized-context".into(),
+            start_sample: 137,
+            end_sample: 26 * 16000 + 137,
+            machine_revision: 3,
+            audio_revision: 4,
+            language_epoch: 2,
+        };
+        let requests = crate::live::authoritative_requests(&anchor).unwrap();
+        let parts = requests
+            .iter()
+            .map(|request| {
+                let samples = (request.end_sample - request.start_sample) as usize;
+                let frames = (samples - 400) / 320 + 1;
+                let mut gathered = vec![-40.; frames * 3];
+                for row in gathered.chunks_mut(3) {
+                    row[0] = 0.;
+                }
+                for (index, cell) in [13 * 16000 + 137, 13 * 16000 + 137 + 640]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let frame = ((cell - request.start_sample) / 320) as usize;
+                    gathered[frame * 3..frame * 3 + 3].fill(-40.);
+                    gathered[frame * 3 + index + 1] = 0.;
+                }
+                let scores = CtcScoresOut {
+                    valid_frames: frames as u32,
+                    audio_num_samples: samples as u32,
+                    frame_hop_samples: 320,
+                    frame_origin_samples: 0,
+                    token_ids: vec![0, 5, 6],
+                    model: timing::MODEL.into(),
+                    vocabulary_sha256: TOKENS_SHA256.into(),
+                    gathered,
+                };
+                let mut result = base(&prepared, request.start_sample, samples, "en");
+                vocabulary.materialize(&prepared, &scores, &mut result);
+                assert_eq!(result["complete"], true, "{result}");
+                crate::live::TailPart {
+                    request: request.clone(),
+                    text: text.into(),
+                    complete: true,
+                    alignment: Some(result),
+                }
+            })
+            .collect::<Vec<_>>();
+        let selected = crate::live::assemble_authoritative(&anchor, &requests, &parts).unwrap();
+        assert!(selected.complete, "{:?}", selected.reason);
+        assert_eq!(selected.text.as_deref(), Some(text));
+        assert_eq!(selected.words[0].end_char, 3);
+    }
+
+    #[test]
     fn ordinary_import_publishes_usable_timing_from_independent_ctc_replay() {
         let all = cases();
         let case = &all["cases"][0];

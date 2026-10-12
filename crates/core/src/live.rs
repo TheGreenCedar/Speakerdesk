@@ -5,6 +5,8 @@
 //! reconciliation. Model calls go through [`crate::models::Models`]. This module
 //! reads bounded crops from the retained WAV; it does not load MLX.
 
+mod context;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -788,6 +790,7 @@ pub struct TailPart {
     pub request: DecodeRequest,
     pub text: String,
     pub complete: bool,
+    pub alignment: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -862,7 +865,16 @@ pub fn assemble_authoritative(
             Some(parts.last().expect("part").text.clone()),
         ));
     }
-    Ok(base(Some("unavailable_boundary_timing"), false, None))
+    let mut composer = context::Composer::default();
+    for part in parts {
+        if let Err(reason) = composer.push(part.clone()) {
+            return Ok(base(Some(reason), false, None));
+        }
+    }
+    match composer.finish() {
+        Ok(assembly) => Ok(assembly),
+        Err(reason) => Ok(base(Some(reason), false, None)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1095,6 +1107,50 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
     pcm: &[f32],
     vocabulary: Option<&crate::alignment::Vocabulary>,
 ) -> Result<Segment, LiveError> {
+    let (start, end) = saved_bounds(original)?;
+    if end - start > MAX_DECODE_SAMPLES || end - start != pcm.len() as i64 {
+        return Err(LiveError::Message(
+            "Saved crop exceeds the bounded single-decode limit.",
+        ));
+    }
+    let language = original.rest["language_mode"]
+        .as_str()
+        .expect("checked mode");
+    let processed = processed_catalog(original);
+    let (text, detected_language, detection) =
+        crate::import::refine_passage_source(models, pcm, language, start, processed)
+            .map_err(|e| LiveError::Detail(e.to_string()))?;
+    let mut candidate = saved_candidate(original, text, detected_language.clone(), detection, end)?;
+    if let Some(vocabulary) = vocabulary {
+        match vocabulary.align(models, pcm, &candidate.text, start, &detected_language) {
+            Ok(alignment) => crate::alignment::attach(&mut candidate, alignment),
+            Err(
+                error @ (ChildError::ProcessLost { .. }
+                | ChildError::Timeout
+                | ChildError::Cancelled),
+            ) => return Err(error.into()),
+            Err(_) => {
+                candidate.rest.insert(
+                    "reading_alignment".into(),
+                    serde_json::json!({"status":"unavailable","reason":"model_error"}),
+                );
+            }
+        }
+    }
+    Ok(candidate)
+}
+
+/// Read the saved source in bounded crops, including long canonical anchors.
+pub fn refine_saved_recording<M: Models + ?Sized + 'static>(
+    models: &M,
+    original: &Segment,
+    reader: &RecordingReader,
+    vocabulary: Option<&crate::alignment::Vocabulary>,
+) -> Result<Segment, LiveError> {
+    context::refine(models, original, reader, vocabulary)
+}
+
+fn saved_bounds(original: &Segment) -> Result<(i64, i64), LiveError> {
     let (start, end) = segment_bounds(original)?;
     let language = original
         .rest
@@ -1105,26 +1161,34 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
         || original.rest.get("canonical_state").and_then(Value::as_str) != Some("sealed")
         || protected_segment(original)
         || end <= start
-        || end - start > MAX_DECODE_SAMPLES
-        || end - start != pcm.len() as i64
         || (language != languages::AUTOMATIC && !languages::is_supported(language))
     {
         return Err(LiveError::Message(
-            "This saved passage needs a longer accuracy pass or its captured language setting.",
+            "This saved passage needs its captured language setting and an unedited sealed anchor.",
         ));
     }
-    let processed = original
+    Ok((start, end))
+}
+
+fn processed_catalog(original: &Segment) -> Option<&str> {
+    original
         .capture_source
         .as_ref()
         .filter(|s| s["source_id"] == "microphone_clean")
-        .and_then(|s| s["catalog_sha256"].as_str());
-    let (text, detected_language, detection) =
-        crate::import::refine_passage_source(models, pcm, language, start, processed)
-            .map_err(|e| LiveError::Detail(e.to_string()))?;
+        .and_then(|s| s["catalog_sha256"].as_str())
+}
+
+fn saved_candidate(
+    original: &Segment,
+    text: String,
+    detected_language: String,
+    detection: Value,
+    end: i64,
+) -> Result<Segment, LiveError> {
     let mut candidate = original.clone();
     crate::edit::clear_alignment_bundle(&mut candidate);
     candidate.text = text;
-    candidate.language = Some(detected_language.clone());
+    candidate.language = Some(detected_language);
     candidate.language_detection = Some(detection);
     candidate.machine_revision = Some(
         original
@@ -1153,22 +1217,6 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
     candidate.review_resolution = None;
     candidate.rest.remove("text_audio_anchor");
     candidate.rest.remove("audio_float32_sha256");
-    if let Some(vocabulary) = vocabulary {
-        match vocabulary.align(models, pcm, &candidate.text, start, &detected_language) {
-            Ok(alignment) => crate::alignment::attach(&mut candidate, alignment),
-            Err(
-                error @ (ChildError::ProcessLost { .. }
-                | ChildError::Timeout
-                | ChildError::Cancelled),
-            ) => return Err(error.into()),
-            Err(_) => {
-                candidate.rest.insert(
-                    "reading_alignment".into(),
-                    serde_json::json!({"status":"unavailable","reason":"model_error"}),
-                );
-            }
-        }
-    }
     Ok(candidate)
 }
 
@@ -1207,7 +1255,6 @@ pub fn publish_saved_passage(
         .checked_add(1);
     if start < 0
         || end <= start
-        || end - start > MAX_DECODE_SAMPLES
         || original.canonical_utterance_id.is_none()
         || original.rest.get("canonical_state").and_then(Value::as_str) != Some("sealed")
         || candidate.id != original.id
@@ -2637,6 +2684,7 @@ fn tail_part(request: &DecodeRequest, passages: &[Passage], aligned: bool) -> Ta
         request: request.clone(),
         text: texts.join(" "),
         complete,
+        alignment: None,
     }
 }
 
@@ -3274,6 +3322,7 @@ mod tests {
             request: requests[0].clone(),
             text: "hello there".into(),
             complete: true,
+            alignment: None,
         }];
         let whole = assemble_authoritative(&row, &requests, &parts).unwrap();
         assert!(whole.complete);
@@ -3289,6 +3338,7 @@ mod tests {
                 request: request.clone(),
                 text: format!("part-{index}"),
                 complete: true,
+                alignment: None,
             })
             .collect();
         let seam = assemble_authoritative(&long, &requests, &parts).unwrap();
@@ -3296,6 +3346,168 @@ mod tests {
         assert!(seam.recognition_complete);
         assert_eq!(seam.reason, Some("unavailable_boundary_timing"));
         assert!(seam.text.is_none());
+    }
+
+    // Supplied CTC-cell overlap-ownership replay, not acoustic quality evidence.
+    fn overlap_part(request: &DecodeRequest, text: &str, onsets: &[i64]) -> TailPart {
+        let mut words = Vec::new();
+        let mut characters = Vec::new();
+        let mut offset = 0;
+        for (word, onset) in text.split_whitespace().zip(onsets) {
+            let first = offset;
+            for (index, character) in word.chars().enumerate() {
+                let sample = onset + index as i64 * 320;
+                characters.push(serde_json::json!({"text":character.to_string(),"raw_text":character.to_string(),
+                    "token_id":character as u32,"start_char":offset,"end_char":offset+1,
+                    "frame":(sample-request.start_sample)/320,"start_sample":sample,"end_sample":sample+320,
+                    "log_probability":-0.01,"status":"aligned"}));
+                offset += 1;
+            }
+            words.push(
+                serde_json::json!({"text":word,"start_char":first,"end_char":offset,
+                "start_sample":onset,"end_sample":onset+word.chars().count() as i64*320,"status":"aligned"}),
+            );
+            if offset < text.chars().count() {
+                let sample = onset + word.chars().count() as i64 * 320;
+                characters.push(serde_json::json!({"text":" ","raw_text":" ","token_id":32,
+                    "start_char":offset,"end_char":offset+1,"frame":(sample-request.start_sample)/320,
+                    "start_sample":sample,"end_sample":sample+320,"log_probability":-0.01,"status":"aligned"}));
+                offset += 1;
+            }
+        }
+        TailPart {
+            request: request.clone(),
+            text: text.into(),
+            complete: true,
+            alignment: Some(serde_json::json!({
+                "raw_text":text,"text_sha256":sha256_hex(text.as_bytes()),
+                "audio_anchor":{"start_sample":request.start_sample,"end_sample":request.end_sample},
+                "provider_identity_sha256":crate::alignment::NATIVE_PROVIDER,"model_sha256":timing::MODEL,
+                "frame_calibration_id":timing::CALIBRATION,"score_calibration_id":timing::CALIBRATION,
+                "status":"aligned","complete":true,"characters":characters,"words":words
+            })),
+        }
+    }
+
+    #[test]
+    fn authoritative_context_cells_keep_raw_overlap_once_and_distinct_repetitions() {
+        let mut row = anchor(26 * RATE + 513);
+        row.start_sample = 7 * RATE + 137;
+        row.end_sample += row.start_sample;
+        let requests = authoritative_requests(&row).unwrap();
+        assert_eq!(requests.len(), 2);
+        let parts = vec![
+            overlap_part(
+                &requests[0],
+                "Café, repeat bridge context",
+                &[
+                    8 * RATE + 137,
+                    20 * RATE + 137,
+                    21 * RATE + 137,
+                    23 * RATE + 137,
+                ],
+            ),
+            overlap_part(
+                &requests[1],
+                "repeat bridge finish repeat",
+                &[
+                    20 * RATE + 137,
+                    21 * RATE + 137,
+                    27 * RATE + 137,
+                    32 * RATE + 137,
+                ],
+            ),
+        ];
+        let assembled = assemble_authoritative(&row, &requests, &parts).unwrap();
+        assert!(assembled.complete, "{:?}", assembled.reason);
+        assert_eq!(
+            assembled.text.as_deref(),
+            Some("Café, repeat bridge finish repeat")
+        );
+        assert_eq!(
+            assembled
+                .words
+                .iter()
+                .filter(|w| w.text == "repeat")
+                .count(),
+            2,
+            "distinct repeated acoustic events must both remain"
+        );
+        assert_eq!(
+            assembled
+                .words
+                .iter()
+                .filter(|w| w.text == "bridge")
+                .count(),
+            1
+        );
+        assert!(
+            assembled
+                .words
+                .iter()
+                .all(|w| w.start_sample.is_none_or(|start| start >= row.start_sample))
+        );
+        for case in [
+            "missing",
+            "stale_anchor",
+            "shifted",
+            "unmapped",
+            "incomplete",
+        ] {
+            let mut changed = parts.clone();
+            match case {
+                "missing" => changed[1].alignment = None,
+                "stale_anchor" => {
+                    changed[1].alignment.as_mut().unwrap()["audio_anchor"]["start_sample"] =
+                        Value::from(0)
+                }
+                "shifted" | "unmapped" => {
+                    let delta = if case == "unmapped" { -RATE } else { RATE };
+                    let alignment = changed[1].alignment.as_mut().unwrap();
+                    for group in ["characters", "words"] {
+                        for cell in alignment[group].as_array_mut().unwrap() {
+                            cell["start_sample"] =
+                                Value::from(cell["start_sample"].as_i64().unwrap() + delta);
+                            cell["end_sample"] =
+                                Value::from(cell["end_sample"].as_i64().unwrap() + delta);
+                            if case == "unmapped" && group == "characters" {
+                                cell["frame"] =
+                                    Value::from(cell["frame"].as_i64().unwrap() + delta / 320);
+                            }
+                        }
+                    }
+                }
+                "incomplete" => changed[1].complete = false,
+                _ => unreachable!(),
+            }
+            let rejected = assemble_authoritative(&row, &requests, &changed).unwrap();
+            assert!(!rejected.complete, "{case}");
+            if case == "unmapped" {
+                assert_eq!(rejected.reason, Some("boundary_mapping_absent"));
+            }
+            assert!(
+                rejected.text.is_none(),
+                "{case}: never fall back to concatenated overlap"
+            );
+        }
+    }
+
+    #[test]
+    fn authoritative_context_rejects_valid_but_ambiguous_acoustic_events() {
+        let row = anchor(26 * RATE);
+        let requests = authoritative_requests(&row).unwrap();
+        let mut left = overlap_part(&requests[0], "go", &[13 * RATE]);
+        // One stretched source event maps onto two short repeated events. Every
+        // cell remains on its own physical crop's grid and has a valid envelope.
+        let alignment = left.alignment.as_mut().unwrap();
+        alignment["characters"][1]["frame"] = Value::from((13 * RATE + 3200) / 320);
+        alignment["characters"][1]["start_sample"] = Value::from(13 * RATE + 3200);
+        alignment["characters"][1]["end_sample"] = Value::from(13 * RATE + 3520);
+        alignment["words"][0]["end_sample"] = Value::from(13 * RATE + 3520);
+        let right = overlap_part(&requests[1], "go go", &[13 * RATE, 13 * RATE + 2880]);
+        let result = assemble_authoritative(&row, &requests, &[left, right]).unwrap();
+        assert_eq!(result.reason, Some("ambiguous_boundary_mapping"));
+        assert!(result.text.is_none());
     }
 
     fn no_speech(start: i64, end: i64) -> Admission {
