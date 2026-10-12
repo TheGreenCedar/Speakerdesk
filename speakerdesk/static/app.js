@@ -635,6 +635,7 @@ function passageReviewReason(segment) {
   if(segment.transcription_review?.reason==='refinement_conflict')return 'Previous words retained because the new passage also covers another passage needing review.';
   if(['transcription_failed','empty_result','token_limit'].includes(segment.transcription_review?.reason))return reviewReasons[segment.transcription_review.reason];
   if(hasOverlappingSpeakers(segment))return reviewReasons.overlapping_speech;
+  if(segment.language_detection?.reason==='mixed')return 'Multiple languages detected; review the passage';
   if(segment.transcription_review?.reason)return reviewReasons[segment.transcription_review.reason] || 'Passage needs review; audio retained';
   if(segment.language_detection?.reason==='recent_context')return 'Language inferred from recent meeting context';
   if(segment.language_detection?.reason==='best_effort')return 'Best-effort words; language needs review';
@@ -674,7 +675,7 @@ function renderRetainedAudioReview() {
   const host=$('retained-audio-review'),open=host.open;
   if(host.contains(document.activeElement))return;
   const rows=doc.segments.filter(segment=>!showTranscriptPassage(segment) && !isEmptyNonSpeechPlaceholder(segment) &&
-    (segment.transcription_review?.reason || ['unsupported','uncertain','change_pending','needs_language','insufficient_speech'].includes(segment.language_detection?.reason) ||
+    (segment.transcription_review?.reason || ['unsupported','uncertain','change_pending','needs_language','insufficient_speech','mixed'].includes(segment.language_detection?.reason) ||
      (segment.refinement_state==='unresolved' && segment.language_detection?.reason!=='silence')));
   host.hidden=!rows.length;host.replaceChildren();if(!rows.length)return;
   host.append(node('summary','Audio details'));

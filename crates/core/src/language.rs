@@ -68,6 +68,7 @@ pub enum DetectionReason {
     NeedsLanguage,
     Unsupported,
     Detected,
+    Mixed,
     BestEffort,
     RecentContext,
     InsufficientSpeech,
@@ -82,6 +83,7 @@ impl DetectionReason {
             Self::NeedsLanguage => "needs_language",
             Self::Unsupported => "unsupported",
             Self::Detected => "detected",
+            Self::Mixed => "mixed",
             Self::BestEffort => "best_effort",
             Self::RecentContext => "recent_context",
             Self::InsufficientSpeech => "insufficient_speech",
@@ -179,6 +181,96 @@ pub struct ProbeEvent {
     pub language: Option<String>,
     pub decision: LanguageDetection,
     pub review: bool,
+}
+
+/// Retain decisions from actual routing, including the single-window case where
+/// the transcriber has no nested probe list. Live options already use the saved
+/// recording clock; only passage display bounds are relative to this crop.
+pub(crate) fn append_passage_decisions(
+    events: &mut Vec<ProbeEvent>,
+    passages: &[Passage],
+    start: i64,
+) {
+    for passage in passages {
+        // Verified non-speech carries no spoken-language decision. Unknown speech
+        // and failed/unsupported routing still participate in the summary.
+        if passage.text.trim().is_empty()
+            && matches!(
+                passage.audio_state,
+                Some(
+                    AudioState::DigitalSilence
+                        | AudioState::ConstantSignal
+                        | AudioState::ModelNonSpeech
+                )
+            )
+        {
+            continue;
+        }
+        if passage.language_detection.probes.is_empty() {
+            events.push(ProbeEvent {
+                start_sample: start
+                    + (passage.start * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                end_sample: start + (passage.end * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                language: passage.language.clone(),
+                decision: passage.language_detection.clone(),
+                review: passage.language_review,
+            });
+        } else {
+            events.extend(passage.language_detection.probes.iter().cloned());
+        }
+    }
+}
+
+/// A display summary of retained routing decisions, not a new detection. Mixed
+/// crops have no single language or invented aggregate probability; each actual
+/// decision remains available at its absolute acoustic position.
+pub(crate) fn summarize_decisions(events: Vec<ProbeEvent>) -> Option<PolicyDecision> {
+    let first = events.first()?;
+    let first_language = events.iter().find_map(|event| event.language.as_deref());
+    let mixed = events
+        .iter()
+        .filter_map(|event| event.language.as_deref())
+        .any(|language| Some(language) != first_language);
+    let unknown = events.iter().find(|event| event.language.is_none());
+    let selected = unknown.unwrap_or_else(|| {
+        events
+            .iter()
+            .min_by(|left, right| {
+                // A reviewed decision remains visible even when another probe is confident.
+                right.review.cmp(&left.review).then_with(|| {
+                    left.decision
+                        .probability
+                        .unwrap_or(1.)
+                        .total_cmp(&right.decision.probability.unwrap_or(1.))
+                })
+            })
+            .expect("nonempty decisions")
+    });
+    let language = if mixed || unknown.is_some() {
+        None
+    } else {
+        first.language.clone()
+    };
+    let mut detection = selected.decision.clone();
+    if mixed {
+        detection.reason = DetectionReason::Mixed;
+        detection.probability = None;
+        detection.margin = None;
+        detection.candidates.clear();
+        detection.context_end_sample = None;
+    }
+    detection.detector_error = events.iter().any(|event| event.decision.detector_error);
+    let review = mixed || unknown.is_some() || events.iter().any(|event| event.review);
+    detection.probes = if detection.mode == DetectionMode::Auto {
+        events
+    } else {
+        Vec::new()
+    };
+    Some(PolicyDecision {
+        language,
+        review,
+        detection,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1430,6 +1522,79 @@ mod tests {
             LanguageChoice::parse("ru").unwrap_err().to_string(),
             "Choose a supported language mode."
         );
+    }
+
+    #[test]
+    fn language_summary_distinguishes_verified_non_speech_from_unknown_speech() {
+        for case in ["digital", "constant", "model", "unknown"] {
+            let mut spoken = speech_rig(vec![pair("en", 0.99, "de")], None);
+            let speech = spoken
+                .router
+                .transcribe(
+                    &varying(3 * 16000),
+                    16000,
+                    &speaker(),
+                    TranscribeOptions {
+                        start_sample: 7 * 16000,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let decision = match case {
+                "model" => SpeechDecision::NoSpeech,
+                "unknown" => SpeechDecision::Uncertain,
+                _ => SpeechDecision::Speech,
+            };
+            let mut tail = rig(
+                "auto",
+                Vec::new(),
+                decision,
+                if decision == SpeechDecision::Speech {
+                    0.9
+                } else {
+                    0.1
+                },
+                None,
+                Vec::new(),
+            );
+            let pcm = match case {
+                "digital" => vec![0.; 3 * 16000],
+                "constant" => vec![0.1; 3 * 16000],
+                _ => varying(3 * 16000),
+            };
+            let silent = tail
+                .router
+                .transcribe(
+                    &pcm,
+                    16000,
+                    &speaker(),
+                    TranscribeOptions {
+                        start_sample: 10 * 16000,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert!(silent.iter().all(|row| row.text.is_empty()));
+            assert_eq!(tail.detects.load(Ordering::Relaxed), 0);
+            let mut events = Vec::new();
+            append_passage_decisions(&mut events, &speech, 7 * 16000);
+            append_passage_decisions(&mut events, &silent, 10 * 16000);
+            let summary = summarize_decisions(events).unwrap();
+            if case == "unknown" {
+                assert!(summary.language.is_none());
+                assert!(summary.review);
+                assert_eq!(
+                    summary.detection.reason,
+                    DetectionReason::SpeechAdmissionUncertain
+                );
+                assert_eq!(summary.detection.probes.len(), 2);
+            } else {
+                assert_eq!(summary.language.as_deref(), Some("en"), "{case}");
+                assert!(!summary.review, "{case}");
+                assert_eq!(summary.detection.reason, DetectionReason::Detected);
+                assert_eq!(summary.detection.probes.len(), 1);
+            }
+        }
     }
 
     #[test]

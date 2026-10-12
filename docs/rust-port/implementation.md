@@ -37,7 +37,8 @@ Local implementation branch: `codex/python-free-mac`.
 5. In progress: native capture coordination, streaming tails, child-loss recovery
    and live-edit continuation pass mounted replays and saved-PCM real-model tests.
    Sealed live timing, identity and saved Auto/explicit-language accuracy passes pass
-   real-model saved-PCM checks, including long English context assembly. Long
+   real-model saved-PCM checks, including long English context assembly and live
+   language-decision persistence across protected continuation and restart. Long
    non-English accuracy, rolling live refinement, qualified Pause/Resume, raw
    dual-source echo, physical capture and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
@@ -1208,6 +1209,52 @@ Pause/Resume and raw dual-source echo, physical capture and long-session behavio
 the pending Tauri live/setup/long-import workflow, default native startup and actual
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
+remain untouched. Windows and issue #25 remain deferred.
+
+## Ordinary live language publication
+
+Ordinary short, routed and disjoint-core live decodes now retain typed language
+decisions in the existing utterance state and serialize them through the shared
+document adapter. The captured Auto/manual mode remains separate from the actual
+selected language. Long Auto rows no longer publish the mode string `auto` as a
+detected language. Mixed results retain per-probe decisions without an invented
+single-language probability; the editor describes them as multiple languages.
+Known digital silence, constant signal and model non-speech do not erase a spoken
+language, while uncertain speech retains its review reason. Protected prefixes
+keep their original evidence, and new continuation starts with fresh metadata.
+
+The mounted red test reproduced a completed Auto transcript with null detection
+metadata. The corrected seven-case matrix covers short/long Auto, manual mode,
+mixed decisions, uncertainty, edit/epoch change, child recovery and reopen. Core
+tests additionally cover verified non-speech versus unknown speech, and a routed
+recent-context decision at a seven-second crop origin whose nested context endpoint
+remains exactly ten seconds. Read/reopen checks assert no new probe calls.
+Final results: 169 core, 61 host, 13 mounted live-service, one service-lifecycle
+and nine process tests pass; strict all-target core/host Clippy passes. Four
+existing explicit Rust ignores remain. Reading-turn frontend checks pass 16 tests
+with one existing source-fixture-dependent skip, including the mixed-language
+label. Logs are `/tmp/speakerdesk-live-language-{red,core-green,silence,host-green,tests,clippy,frontend,release}.log`.
+
+The locked optimized build completed in 25.24 seconds with the existing upstream
+mlx-sys warnings. Binary SHA-256:
+`6c4676bf7d672122659c8ebcc8c8705d33017e4e35c149b380f30a27749a0388`.
+Real MLX execution on the existing synthetic 18.3204375-second recording passes
+capture replay, Pause/edit/name, Resume/Stop, whole-host restart and export.
+Job `474aad8710ef423bbf40984671af76a3` keeps three original probes with the edited
+prefix, and publishes four continuation probes covering samples 115,200–293,127.
+Both rows retain Auto mode and actual English language. All 293,127 PCM samples
+remain byte-exact, and all expected continuation markers remain. Evidence and the
+external Python test harness are in `/private/tmp/speakerdesk-live-language.wy1io308/`.
+All qualification hosts and children exited. This is real-model service evidence,
+not physical capture, UI, population-quality or performance qualification.
+
+The running isolated Tauri preview remains the preceding long-context candidate
+at `http://127.0.0.1:57677/`; no new UI claim is made while CUA reports the Mac
+locked. The accepted full replacement remains active: growing live work and
+rolling accuracy, long non-English accuracy, qualified Pause/Resume and raw
+dual-source echo, actual capture and long-session gates, pending Tauri workflows,
+native default startup/package, disposable updater/security checks and equivalent
+0.6.6 measurements. Installed app, production data, existing model cache and GitHub
 remain untouched. Windows and issue #25 remain deferred.
 
 ## Saved long-context accuracy

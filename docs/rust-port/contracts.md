@@ -63,6 +63,14 @@ and bidirectionally unique CTC cells select raw-text boundaries; ambiguous seams
 retain the previous transcript. Selected word timing uses the normal publication
 validator. Long non-English accuracy and scheduling during capture remain unfinished.
 
+Ordinary live rows retain the language decisions already produced by routing.
+Captured mode and epoch are separate from the selected language. Auto probe and
+recent-context endpoints use absolute recording samples, including continuation
+after an edit. Mixed speech has no invented single-language probability; verified
+non-speech does not erase a supported spoken-language decision. Protected words
+retain their existing decision evidence. GET, export and reopen do not run models
+to reconstruct metadata.
+
 ## Messages and security
 
 User-facing strings live in `speakerdesk_core::messages` and are copied from v0.6.6. The token header, CSP, and host allowlist live in `speakerdesk_core::security`. Do not change them without an owner decision.

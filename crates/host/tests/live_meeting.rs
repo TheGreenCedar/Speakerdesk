@@ -1108,6 +1108,205 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
 }
 
 #[tokio::test]
+async fn ordinary_live_language_evidence_survives_routing_edits_and_restart() {
+    for case in [
+        "short",
+        "long",
+        "manual",
+        "mixed",
+        "uncertain",
+        "edit_epoch",
+        "recovery",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        if case == "uncertain" {
+            fs::write(
+                root.join("replay-probe.json"),
+                json!({"probabilities":[0.55,0.45],"codes":["en","de"]}).to_string(),
+            )
+            .unwrap();
+        }
+        let host = Running::open(root, false).await;
+        trigger(root, 1);
+        let response=host.post("api/meetings",json!({"name":"Ordinary live language evidence replay","language":if case=="manual"{"fr"}else{"auto"},"sources":["microphone"]})).await;
+        assert_eq!(response.status(), 202, "{}", response.text().await.unwrap());
+        let id = host.wait("api/meeting", |v| v["id"].is_string()).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let path = format!("api/jobs/{id}");
+        let stages = if matches!(case, "long" | "mixed") {
+            4
+        } else {
+            1
+        };
+        for stage in 1..=stages {
+            if stage > 1 {
+                trigger(root, stage);
+            }
+            host.wait(&path, |v| {
+                v["duration"].as_f64().unwrap_or(0.) >= f64::from(stage * 7) - 0.5
+            })
+            .await;
+        }
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        let paused = host
+            .wait(&path, |v| {
+                v["status"] == "paused" && v["pause_flush"]["status"] == "complete"
+            })
+            .await;
+        let prefix = paused["document"]["segments"][0].clone();
+        if matches!(case, "edit_epoch" | "recovery") {
+            let edited=host.client.patch(format!("{}{path}/segments/{}",host.url,prefix["id"].as_str().unwrap())).header("X-Speakerdesk-Token",&host.token)
+                .json(&json!({"segment_revision":prefix["machine_revision"],"changes":{"text":"Preserved language prefix","start":0.1}})).send().await.unwrap();
+            assert_eq!(edited.status(), 200, "{}", edited.text().await.unwrap());
+            if case == "recovery" {
+                let pid: i32 = fs::read_to_string(root.join("fixture-child-pid"))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+            }
+            assert_eq!(
+                host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            trigger(root, 2);
+            host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 13.5)
+                .await;
+            if case == "edit_epoch" {
+                let changed = host
+                    .client
+                    .patch(format!("{}api/meetings/{id}/language", host.url))
+                    .header("X-Speakerdesk-Token", &host.token)
+                    .json(&json!({"language":"fr","language_revision":0}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(changed.status(), 200, "{}", changed.text().await.unwrap());
+                host.wait("api/meeting", |v| v["language_acknowledged_revision"] == 1)
+                    .await;
+                trigger(root, 3);
+                host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 20.5)
+                    .await;
+            }
+        }
+        if case == "mixed" {
+            let en = json!({"probabilities":[0.99,0.01],"codes":["en","de"]});
+            let de = json!({"probabilities":[0.01,0.99],"codes":["en","de"]});
+            // Final 28s decode has two disjoint cores; each core gets its own
+            // confident language. It must not become one confident 'auto' row.
+            fs::write(
+                root.join("replay-probe-sequence.json"),
+                json!([en, en, en, en, en, de]).to_string(),
+            )
+            .unwrap();
+        }
+        let done = host.stop(&id).await;
+        assert_eq!(done["status"], "ready", "{case}: {done}");
+        let rows = done["document"]["segments"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        for row in rows {
+            let detection = &row["language_detection"];
+            let manual = row["language_mode"] != "auto";
+            assert_eq!(
+                detection["mode"],
+                if manual { "manual" } else { "auto" },
+                "{case}: {row}"
+            );
+            assert_ne!(
+                row["language"], "auto",
+                "captured mode is never a detected language"
+            );
+            if manual {
+                assert_eq!(row["language"], row["language_mode"]);
+                assert_eq!(detection["reason"], "override");
+            } else {
+                let probes = detection["probes"]
+                    .as_array()
+                    .expect("retained actual routing probes");
+                assert!(!probes.is_empty());
+                for probe in probes {
+                    let a = probe["start_sample"].as_i64().unwrap();
+                    let b = probe["end_sample"].as_i64().unwrap();
+                    // Protected display bounds may differ from the original acoustic scope.
+                    let floor = if row["text"] == "Preserved language prefix" {
+                        0
+                    } else {
+                        (row["start"].as_f64().unwrap() * 16000.).round() as i64
+                    };
+                    let end = (row["end"].as_f64().unwrap() * 16000.).round() as i64;
+                    assert!(
+                        floor <= a && a < b && b <= end,
+                        "{case}: {probe} outside {floor}..{end}"
+                    );
+                    if let Some(context) = probe["decision"]["context_end_sample"].as_i64() {
+                        assert!(0 <= context && context <= a);
+                    }
+                }
+            }
+        }
+        if case == "mixed" {
+            let row = &rows[0];
+            assert!(row["language"].is_null(), "{row}");
+            assert_eq!(row["review"], true);
+            assert_ne!(row["language_detection"]["reason"], "detected");
+            let probes = row["language_detection"]["probes"].as_array().unwrap();
+            assert!(
+                probes.iter().any(|p| p["language"] == "en")
+                    && probes.iter().any(|p| p["language"] == "de")
+            );
+        } else if case == "uncertain" {
+            assert_eq!(rows[0]["review"], true);
+            assert_eq!(rows[0]["language_detection"]["reason"], "best_effort");
+            assert_eq!(
+                rows[0]["language_detection"]["probability"],
+                f64::from(0.55_f32)
+            );
+        } else if case == "long" {
+            assert_eq!(rows[0]["language"], "en");
+            assert!(
+                rows[0]["language_detection"]["probes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["start_sample"].as_i64().unwrap() >= 14 * 16000)
+            );
+        }
+        if matches!(case, "edit_epoch" | "recovery") {
+            let retained = rows.iter().find(|r| r["id"] == prefix["id"]).unwrap();
+            assert_eq!(retained["text"], "Preserved language prefix");
+            assert_eq!(retained["language_detection"], prefix["language_detection"]);
+            assert!(rows.iter().any(|r| r["start"].as_f64().unwrap() >= 6.));
+            if case == "edit_epoch" {
+                assert!(rows.iter().any(|r| r["language_epoch"] == 1
+                    && r["language_mode"] == "fr"
+                    && r["language"] == "fr"));
+            }
+        }
+        let calls = fs::read_to_string(root.join("language-probe-calls")).unwrap_or_default();
+        // Read/poll/export must not probe merely to serialize decisions.
+        assert_eq!(host.get(&path).await["document"], done["document"]);
+        host.close(root).await;
+        let reopened = Running::open(root, false).await;
+        assert_eq!(reopened.get(&path).await["document"], done["document"]);
+        assert_eq!(
+            fs::read_to_string(root.join("language-probe-calls")).unwrap_or_default(),
+            calls
+        );
+        reopened.close(root).await;
+    }
+}
+
+#[tokio::test]
 async fn saved_long_accuracy_reaches_bounded_context_models_and_retains_missing_timing() {
     // Native helper/model protocol replay. Missing CTC must retain prior words,
     // but the long route must actually attempt bounded decoding rather than reject duration.

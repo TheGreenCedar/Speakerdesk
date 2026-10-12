@@ -20,8 +20,8 @@ use crate::document::{Document, Segment};
 use crate::error::ChildError;
 use crate::ipc::{DiarPreset, GainPolicy, Handle, Turn, VadFeedOut};
 use crate::language::{
-    AcousticEvidence, AsrOutput, AudioState, LanguageDetector, Passage, Recognizer,
-    SpeechTranscriber, TranscribeOptions,
+    AcousticEvidence, AsrOutput, AudioState, LanguageDetection, LanguageDetector, Passage,
+    Recognizer, SpeechTranscriber, TranscribeOptions,
 };
 use crate::languages;
 use crate::limits;
@@ -296,6 +296,7 @@ struct Utterance {
     protected_fields: Vec<String>,
     refinement_state: String,
     language: Option<String>,
+    language_detection: Option<LanguageDetection>,
     review: bool,
     audio_state: Option<AudioState>,
     transcription_review: bool,
@@ -454,6 +455,7 @@ impl UtteranceBook {
                         protected_fields: Vec::new(),
                         refinement_state: "provisional".to_string(),
                         language: None,
+                        language_detection: None,
                         review: false,
                         audio_state: None,
                         transcription_review: false,
@@ -1373,6 +1375,10 @@ pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Do
         if row.text.trim().is_empty() && !prior.text.trim().is_empty() {
             row.text = prior.text.clone();
         }
+        if protected.iter().any(|field| field == "text") {
+            row.language = prior.language.clone();
+            row.language_detection = prior.language_detection.clone();
+        }
         if kept_text {
             // A later decode does not extend the audio represented by preserved words.
             for key in ["canonical_text_end_sample", "text_audio_anchor"] {
@@ -1816,6 +1822,7 @@ impl<M: Models + 'static> Engine<M> {
         tail.refinement_state = "provisional".into();
         tail.canonical_unresolved = None;
         tail.language = None;
+        tail.language_detection = None;
         tail.audio_state = None;
         tail.transcription_review = false;
         tail.review = false;
@@ -2359,22 +2366,19 @@ impl<M: Models + 'static> Engine<M> {
         self.book
             .apply_model(&row.id, &text, DecodeStage::Live, complete)?;
         let stored = self.book.rows.get_mut(&row.id).expect("row");
-        if let Some(passage) = passages.first()
-            && routed.is_none()
-        {
-            stored.language = passage.language.clone();
-            stored.review = passage.review;
-            stored.audio_state = passage.audio_state;
-            stored.transcription_review = passage.transcription_review.is_some();
+        let mut decisions = Vec::new();
+        crate::language::append_passage_decisions(&mut decisions, &passages, row.start_sample);
+        if let Some(summary) = crate::language::summarize_decisions(decisions) {
+            stored.language = summary.language;
+            stored.language_detection = Some(summary.detection);
+            stored.review = summary.review || passages.iter().any(|passage| passage.review);
         }
-        if let Some(routed) = routed
-            && stored.protected_fields.iter().all(|field| field != "text")
-            && stored.text == routed.text
-        {
-            stored.language = passages
-                .first()
-                .and_then(|passage| passage.language.clone());
-        }
+        stored.audio_state = (passages.len() == 1)
+            .then(|| passages[0].audio_state)
+            .flatten();
+        stored.transcription_review = passages
+            .iter()
+            .any(|passage| passage.transcription_review.is_some());
         if !complete || text.trim().is_empty() {
             stored.canonical_unresolved = Some("incomplete_cohere_revision".to_string());
         } else {
@@ -2463,6 +2467,8 @@ impl<M: Models + 'static> Engine<M> {
             requests.push(request_for(&anchor, pair[0], pair[1], pair[0], pair[1]));
         }
         let mut parts = Vec::new();
+        let mut decisions = Vec::new();
+        let mut review = false;
         for request in &requests {
             let passages = self.transcribe_span(
                 request.start_sample,
@@ -2471,6 +2477,12 @@ impl<M: Models + 'static> Engine<M> {
                 &row.speaker_candidates,
                 (0, 0),
             )?;
+            crate::language::append_passage_decisions(
+                &mut decisions,
+                &passages,
+                request.start_sample,
+            );
+            review |= passages.iter().any(|passage| passage.review);
             let tail = tail_part(request, &passages, false);
             parts.push(CorePart {
                 text: tail.text,
@@ -2486,9 +2498,15 @@ impl<M: Models + 'static> Engine<M> {
         self.book
             .apply_model(&row.id, &text, DecodeStage::Live, complete)?;
         let stored = self.book.rows.get_mut(&row.id).expect("row");
+        if let Some(summary) = crate::language::summarize_decisions(decisions) {
+            stored.language = summary.language;
+            stored.language_detection = Some(summary.detection);
+            stored.review = review || summary.review;
+        }
+        stored.audio_state = None;
+        stored.transcription_review = !complete;
         if complete && !text.trim().is_empty() {
             stored.canonical_unresolved = None;
-            stored.language = Some(language.to_string());
         } else {
             stored.canonical_unresolved = Some("incomplete_cohere_revision".to_string());
         }
@@ -2824,7 +2842,7 @@ fn project_segment(row: &Utterance, stamp: &LanguageStamp) -> Segment {
         } else {
             row.language.clone()
         },
-        language_detection: None,
+        language_detection: row.language_detection.as_ref().map(crate::import::detection_value),
         transcription_review: row.canonical_unresolved.as_ref().map(|reason| {
             serde_json::json!({"reason": reason, "partial_text": !row.text.trim().is_empty()})
         }),
@@ -4442,6 +4460,83 @@ mod tests {
         assert_eq!(content(&split_document), content(&replay_document));
         assert_eq!(replay.ledger.lock().unwrap().end_sample(), pcm.len() as i64);
         assert_eq!(replay.diar_observed, pcm.len() as i64 / 160 * 160);
+    }
+
+    #[test]
+    fn live_routed_decisions_keep_absolute_recent_context_and_captured_epoch() {
+        let mut engine = TestEngine::new(
+            EngineConfig::new("language-clock", "en"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        engine.models.probe_scores.lock().unwrap().extend([
+            Ok(LanguageProbeOut {
+                probabilities: vec![0.99, 0.01],
+                codes: vec!["en".into(), "ru".into()],
+            }),
+            Ok(LanguageProbeOut {
+                probabilities: vec![0.55, 0.45],
+                codes: vec!["ru".into(), "en".into()],
+            }),
+        ]);
+        engine.append_pcm(&loud((13 * RATE) as usize));
+        let mut events = engine.handle(notice(0, 7 * RATE, 0)).unwrap();
+        events.extend(
+            engine
+                .handle(LiveCommand::Language {
+                    language: "auto".into(),
+                    generation: 1,
+                    start_sample: 7 * RATE,
+                })
+                .unwrap(),
+        );
+        events.extend(
+            engine
+                .handle(LiveCommand::Audio(AudioNotice {
+                    start_sample: 7 * RATE,
+                    end_sample: 13 * RATE,
+                    language_epoch: 1,
+                    language: "auto".into(),
+                }))
+                .unwrap(),
+        );
+        events.extend(engine.handle(LiveCommand::Stop).unwrap());
+        let rows = revisions(&events);
+        let row = rows
+            .iter()
+            .rev()
+            .find(|row| row.rest["language_epoch"] == 1)
+            .unwrap();
+        assert_eq!(row.rest["language_mode"], "auto");
+        assert_eq!(row.language.as_deref(), Some("en"));
+        let detection = row.language_detection.as_ref().unwrap();
+        assert_eq!(detection["reason"], "recent_context");
+        assert_eq!(detection["context_end_sample"], 10 * RATE);
+        assert_eq!(detection["probes"][0]["start_sample"], 7 * RATE);
+        assert_eq!(detection["probes"][0]["end_sample"], 10 * RATE);
+        assert_eq!(detection["probes"][1]["start_sample"], 10 * RATE);
+        assert_eq!(detection["probes"][1]["end_sample"], 13 * RATE);
+        assert_eq!(
+            detection["probes"][1]["decision"]["context_end_sample"],
+            10 * RATE
+        );
+        assert_eq!(
+            detection["probes"][1]["decision"]["candidates"][0]["language"],
+            "ru"
+        );
+        assert_eq!(row.review, Some(true));
+        assert_eq!(engine.models.probe_calls.load(Ordering::SeqCst), 2);
+        let encoded = serde_json::to_value(row).unwrap();
+        assert_eq!(encoded["language_detection"], *detection);
+        let manual = rows
+            .iter()
+            .rev()
+            .find(|row| row.rest["language_epoch"] == 0)
+            .unwrap();
+        assert_eq!(
+            manual.language_detection.as_ref().unwrap()["reason"],
+            "override"
+        );
     }
 
     #[test]

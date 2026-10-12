@@ -1228,7 +1228,7 @@ fn manual_language(language: &str) -> Option<String> {
     }
 }
 
-fn detection_value(detection: &LanguageDetection) -> Value {
+pub(crate) fn detection_value(detection: &LanguageDetection) -> Value {
     let mut value = detection_summary(detection);
     if !detection.probes.is_empty() {
         value["probes"] = json!(
