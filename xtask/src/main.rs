@@ -14,15 +14,6 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Fail if agent ownership paths overlap, or if a diff leaves an agent's set.
-    Ownership {
-        #[arg(long)]
-        check: bool,
-        #[arg(long)]
-        agent: Option<String>,
-        #[arg(long)]
-        base: Option<String>,
-    },
     Parity,
     FakeCapture,
     Acceptance,
@@ -46,7 +37,6 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Ownership { check, agent, base } => commands::ownership::run(check, agent, base),
         Command::FakeCapture => commands::fake_capture::run(),
         Command::Parity => commands::pending::run("parity"),
         Command::Acceptance => commands::pending::run("acceptance"),

@@ -1,12 +1,14 @@
 # Speakerdesk
 
-Private meeting transcription and speaker labeling for Apple Silicon Macs, using NVIDIA Nemotron 3 diarization and Cohere Transcribe through MLX. Audio stays on the Mac; the app downloads pinned public model checkpoints during explicit setup. No paid transcription API is required.
+Private meeting transcription and speaker labeling for Apple Silicon Macs. Speakerdesk records or imports audio and works out who spoke. It transcribes locally with NVIDIA Nemotron diarization and Cohere Transcribe on MLX, and you can name, edit and export the transcript. Audio never leaves the Mac, and no paid transcription API is involved.
 
-The desktop shell uses Tauri, a native Rust host and inference child, and a Swift microphone/system-audio capture helper. macOS 15 or newer and an Apple Silicon processor are required. Allow roughly 4.1 GB for model setup including prepared timing weights and additional space for recordings. The core models occupy about 1.8 GB; the current timing provider adds about 1.7 GB including prepared GPU weights. This source repository contains no recordings, model weights, credentials or prebuilt application.
+Requires macOS 15 or newer on Apple Silicon. Model setup downloads about 2.2 GB of pinned public checkpoints and prepares about 3.5 GB on disk, plus space for recordings. This repository contains no recordings, model weights, credentials or prebuilt app.
+
+**Download:** <https://rootandruntime.com/downloads/speakerdesk/latest/macos-arm64>
 
 ## Interface previews
 
-These previews use invented names and transcript text with silent fixture audio. Native capture and model inference were not run for these screenshots. Meeting and name-picker images follow your GitHub light or dark appearance.
+These previews use invented names and text with silent fixture audio.
 
 ### Meeting
 
@@ -34,37 +36,28 @@ Choose a saved person or apply a name to this meeting.
 
 ## Development
 
-Install Node.js 24, Rust 1.99.0, Python 3.13, and Apple command line tools.
-Python is used only by build and test tools; the application runs native code.
-For a runnable desktop app, use the Apple build below and its setup control to
-download pinned models.
+Install Node.js 24, Rust 1.99.0 (pinned by `rust-toolchain.toml`), Python 3.13 and the Apple command line tools. Python is only used for build and test tooling.
 
-The focused CPU/native checks do not download models or record audio:
+These checks need no models or audio devices:
 
 ```sh
-python3 -m pip install -r requirements-ci.lock.txt
-python3 -m unittest discover -s tests -v
-python3 scripts/check_source.py
 cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p xtask
-cargo xtask ownership --check
+python3 -m pip install -r requirements-ci.lock.txt
+python3 scripts/check_source.py
+python3 -m unittest discover -s tests -v
+node --test tests/*.test.cjs
 ```
 
-On macOS, the Python suite also executes the Swift capture-format, converter,
-startup and epoch checks with generated buffers. Model numerical references
-remain independent fixtures; their provenance is recorded beside each fixture.
+On macOS, run `bash scripts/fetch_mlx_runtime.sh` once, then add `-p speakerdesk-models -p speakerdesk-echo` to the cargo command. The Python suite also runs the Swift capture checks on macOS. To build an app, run `APPLE_SIGNING_IDENTITY=- ./scripts/build_macos.sh`, then use the in-app setup to download models.
 
-## Apple builds
+## Documentation
 
-`Apple package` is a manual GitHub Actions workflow. Its default ad-hoc mode produces private test artifacts. Ad-hoc signing does not establish trusted distribution or notarization. Exact candidate signing/notarization uses the separate approved AppleRelease workflow with existing central Apple credentials; see [credential reuse](docs/credential-reuse.md). No secrets are provisioned by the producer and no release is published.
+- [Architecture](docs/architecture.md): processes, crates, inference boundary, storage
+- [Product behavior](docs/product-behavior.md): the user-visible rules
+- [Releasing](docs/releasing.md): build, signing, promotion and delivery
+- [CI build reuse](docs/ci-build-reuse.md): cache keys, trust and uncached runs
+- [Glossary](GLOSSARY.md) and [decision records](docs/adr/)
 
-```sh
-APPLE_SIGNING_IDENTITY="existing Developer ID identity" ./scripts/build_macos.sh
-```
+## License
 
-Local real-model streaming has been exercised on synthetic two-voice speech. CPU CI checks timing, lifecycle and access controls; it does not prove noisy-meeting accuracy, native capture quality or packaged-model parity. Live text replaces stable canonical utterances; Stop performs bounded larger-context refinement while preserving human edits and original audio. NVIDIA supplies independent speaker activity and Cohere supplies all words. Required supplied-text timing covers all fourteen configured languages, with independent coarse accuracy calibration in English. CJK character units and unsupported or uncertain units remain explicit; their ownership is never inferred from missing timing. Setup verifies the timing provider before admitting transcription, and a runtime failure keeps existing text while exposing a retry. Exported passage times are retained audio anchors. See [canonical protocol](docs/silero-canonical-protocol.md) and [alignment scope](docs/alignment-integration-status.md).
-
-Public releases require notarization and native-package qualification. [Release acceptance](docs/core-acceptance.md) records that process; [download delivery](docs/download-contract.md) describes the stable installer and updater handoff.
-
-People saves reusable local names; corrections and confirmed introduction suggestions apply to the current meeting. Native ReDimNet uses Core ML with the measured `CPU_AND_GPU` policy; mixed execution is allowed. Explicit enrollment and background recognition share the resident inference child. Uncertain speakers keep their current label. Choose Remember voice explicitly to save a profile; automatic matches never create or update profiles. Incompatible saved profiles remain intact and require consented replacement before recognition. Native startup discovers the legacy library before creating its store, and metadata-only voice-check revisions preserve pending editor saves; see [current status and evidence](docs/rust-port/implementation.md).
-
-Speakerdesk's first-party code and documentation use the [MIT license](LICENSE). Third-party code and models retain their own licenses. Model and source attributions are recorded in [packaging/THIRD_PARTY_NOTICES.md](packaging/THIRD_PARTY_NOTICES.md). The Mac build collects dependency notices into one generated app resource, available from Settings. NVIDIA's checkpoint uses OpenMDW 1.1; Cohere's checkpoint uses Apache 2.0. Model licenses remain applicable when downloading weights separately.
+Speakerdesk's own code and documentation use the [MIT license](LICENSE). Third-party code and models keep their own licenses, recorded in [packaging/THIRD_PARTY_NOTICES.md](packaging/THIRD_PARTY_NOTICES.md). The Mac build collects every dependency notice into one app resource, which you can view from Settings. NVIDIA's checkpoint uses OpenMDW 1.1 and Cohere's uses Apache 2.0. Those licenses still apply if you download the weights separately.

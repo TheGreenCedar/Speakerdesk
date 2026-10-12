@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted and implemented for Mac. Local qualification and remaining release boundaries are recorded in [implementation and evidence](../rust-port/implementation.md).
+Accepted and implemented for Mac in 0.7.0. See [architecture](../architecture.md) for the resulting process and crate layout.
 
 ## Decision
 
@@ -10,10 +10,9 @@ Rust owns product behavior, persistence, publication and capture coordination.
 Axum serves the existing frontend inside Tauri. One resident child isolates
 native inference failures from recordings and the editor. Swift capture remains.
 
-Speech model graphs and decoding use Rust with mlx-rs 0.32.0. Its locked native
-runtime is MLX 0.32.2, as is the packaged 0.6.6 Python runtime; the development
-Python lockfiles instead specify 0.32.3. Backend wheel variants can still differ.
-Qualify behavior and performance on the actual artifacts. ReDimNet uses its existing
+Speech model graphs and decoding use Rust with mlx-rs 0.32.0 on the native MLX
+0.32.2 runtime. Backend builds of the same MLX version can differ, so qualify
+behavior and performance on the actual artifacts. ReDimNet uses its existing
 compiled artifact through objc2-core-ml; do not build a generic MIL interpreter.
 
 Heavy inference requires measured acceleration. Ordinary CPU preprocessing and
