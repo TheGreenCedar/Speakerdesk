@@ -23,6 +23,7 @@ mlx-sys = "0.6.0"
 
 # Resolved on macOS agents. Linux CI does not compile these.
 [target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "=0.11.0", default-features = false }
 mlx-rs = { version = "0.32.0", features = ["metal", "accelerate", "safetensors"] }
 safetensors = "0.8.0"
 tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }

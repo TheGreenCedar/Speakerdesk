@@ -145,6 +145,31 @@ pub struct MetricsOut {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeparatedAudio {
+    pub model: String,
+    pub channels: [Vec<f32>; 2],
+}
+
+impl SeparatedAudio {
+    pub fn validate(&self, length: usize) -> Result<(), ChildError> {
+        if length == 0
+            || length > crate::separation::MAX_SAMPLES
+            || self.model != crate::separation::MODEL
+            || self
+                .channels
+                .iter()
+                .any(|pcm| pcm.len() != length || pcm.iter().any(|s| !s.is_finite()))
+        {
+            return Err(ChildError::failed(
+                "Invalid separated audio response",
+                false,
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
     Hello {
         build_id: String,
@@ -196,6 +221,10 @@ pub enum Request {
     Shutdown,
     /// Convert pinned CTC sources in the child's fixed private setup directory.
     PrepareAlignment,
+    Separate {
+        pcm: Vec<f32>,
+    },
+    PrepareSeparation,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -215,6 +244,7 @@ pub enum Response {
     Setup(Vec<SetupModelReport>),
     Metrics(MetricsOut),
     Ack,
+    Separated(SeparatedAudio),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,12 +261,12 @@ pub enum EnvelopeBody {
 
 pub fn request_timeout(request: &Request) -> Duration {
     let seconds = match request {
-        Request::Transcribe { .. } => 60,
+        Request::Transcribe { .. } | Request::Separate { .. } => 60,
         Request::LanguageProbe { .. } => 10,
         Request::CtcScores { .. } => 30,
         Request::EmbedVoice { .. } => 10,
         Request::VadFeed { .. } | Request::DiarFeed { .. } => 10,
-        Request::SetupCheck { .. } | Request::PrepareAlignment => 120,
+        Request::SetupCheck { .. } | Request::PrepareAlignment | Request::PrepareSeparation => 120,
         Request::Hello { .. }
         | Request::VadOpen { .. }
         | Request::VadClose { .. }

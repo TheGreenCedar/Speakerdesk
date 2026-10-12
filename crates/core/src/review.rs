@@ -46,6 +46,11 @@ fn known_reason(code: &str) -> Option<&'static str> {
 
 /// `review.review_reason`.
 pub fn review_reason(segment: &Segment) -> &'static str {
+    if segment.separation.is_some()
+        && segment.review_resolution.as_deref() != Some("words_reviewed")
+    {
+        return "Separated voice estimate; check words and speaker";
+    }
     let speaker = segment.speaker.as_str();
     let mixed = speaker.starts_with("overlap");
     let text = segment.text.as_str();
@@ -199,6 +204,8 @@ fn unassigned_segment(id: String, start: f64, end: f64) -> Segment {
         audio_revision: None,
         review: Some(true),
         capture_source: None,
+        separation_candidate: None,
+        separation: None,
         rest,
     }
 }

@@ -576,6 +576,12 @@ fn overlay_duration(duration: Option<f64>, checkpoint: Option<f64>) -> Option<f6
 fn recover_one(stored: StoredJob, active: &[&str]) -> Option<Job> {
     let mut changed = stored.checkpoint.is_some();
     let mut job = overlay_checkpoint(stored);
+    if job.extra.remove("passage_separation").is_some() {
+        job.message = "Voice separation stopped. Existing words and audio are retained.".into();
+        job.extra.insert("separation_error".into(), serde_json::json!("Separation interrupted. Your original words and recording are retained; retry when ready."));
+        job.revision += 1;
+        changed = true;
+    }
     let retry_interrupted = job
         .extra
         .get("passage_retry")

@@ -42,6 +42,7 @@ use crate::worker::JobWorker;
 
 pub(crate) mod refinement;
 mod retry;
+pub(crate) mod separation;
 
 const NOT_FOUND: &str = "The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.";
 const PREPARING_AUDIO: &str = "Preparing local audio…";
@@ -66,6 +67,8 @@ const PRIVATE_FIELDS: &[&str] = &[
     "refinement_generation",
     "rolling_sources",
     "refinement_history",
+    "separation_history",
+    "separation_attempts",
     "fast_history",
     "fast_previous_revision",
     "boundary_candidate",
@@ -101,6 +104,23 @@ pub trait ApplicationModels: Send + Sync {
         _cancellation: &CancellationToken,
     ) -> Result<speakerdesk_core::import::PassageCandidate, String> {
         Err("Passage retry is unavailable in this build.".into())
+    }
+    fn separate_passage(
+        &self,
+        _pcm: &[f32],
+        _language: &str,
+        _cancellation: &CancellationToken,
+    ) -> Result<
+        (
+            speakerdesk_core::ipc::SeparatedAudio,
+            [speakerdesk_core::separation::CandidateVoice; 2],
+        ),
+        String,
+    > {
+        Err("Separation model setup is required.".into())
+    }
+    fn separation_available(&self) -> bool {
+        false
     }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
         None
@@ -234,6 +254,7 @@ impl AppState {
         }
         let mut store = SqliteJobStore::open(database)?;
         store.recover(ACTIVE)?;
+        separation::cleanup(&data_dir, &store)?;
         Ok(Self {
             native: Arc::new(std::sync::OnceLock::new()),
             token: Arc::from(random_hex(32)),
@@ -279,6 +300,14 @@ impl AppState {
         self.worker.drain();
     }
 
+    pub(crate) fn queue_separation(&self, id: JobId, generation: u64) {
+        let shared = self.shared.clone();
+        let admission = self.admission.clone();
+        self.worker.queue_handle().enqueue(move || {
+            separation::automatic(&shared, &admission, &id, generation);
+        });
+    }
+
     pub fn insert_job(&self, job: Job) {
         self.shared
             .store
@@ -322,52 +351,7 @@ impl AppState {
         job: &mut Job,
         activity: Activity,
     ) -> Result<OperationGuard, ApiError> {
-        if self.admission.closed() {
-            return Err(ApiError::new(409, messages::UPDATE_RESERVED));
-        }
-        if store.count_status(ACTIVE)? > 0
-            || self
-                .shared
-                .operations
-                .lock()
-                .expect("operations")
-                .iter()
-                .any(|(id, op)| {
-                    matches!(activity, Activity::Recording { .. })
-                        || matches!(op.activity, Activity::Recording { .. })
-                        || id == &job.id
-                })
-        {
-            return Err(ApiError::new(
-                409,
-                "Finish the active recording or transcription before starting this operation.",
-            ));
-        }
-        let generation = job
-            .extra
-            .get("operation_generation")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| ApiError::new(409, "Operation generation exhausted"))?;
-        job.extra
-            .insert("operation_generation".into(), json!(generation));
-        store.put(job, None)?;
-        let cancellation = CancellationToken::new();
-        self.shared.operations.lock().expect("operations").insert(
-            job.id.clone(),
-            RunningOperation {
-                generation,
-                cancellation: cancellation.clone(),
-                activity,
-            },
-        );
-        Ok(OperationGuard {
-            shared: self.shared.clone(),
-            id: job.id.clone(),
-            generation,
-            cancellation,
-        })
+        begin_operation(&self.shared, &self.admission, store, job, activity)
     }
 
     pub(crate) fn model_status(
@@ -378,7 +362,6 @@ impl AppState {
             self.shared.reports.lock().expect("reports").clone(),
         )
     }
-
     pub(crate) fn set_model_reports(&self, reports: Vec<speakerdesk_core::ipc::SetupModelReport>) {
         *self.shared.reports.lock().expect("reports") = reports;
         self.set_issues(Vec::new());
@@ -439,6 +422,7 @@ impl AppState {
                         job.extra
                             .insert("operation_generation".into(), json!(generation + 1));
                         refinement::interrupt(job);
+                        separation::interrupt(job);
                         if job
                             .extra
                             .remove("passage_retry")
@@ -473,6 +457,60 @@ impl AppState {
         }
         result
     }
+}
+
+fn begin_operation(
+    shared: &Arc<Shared>,
+    admission: &UpdateAdmission,
+    store: &mut SqliteJobStore,
+    job: &mut Job,
+    activity: Activity,
+) -> Result<OperationGuard, ApiError> {
+    if admission.closed() {
+        return Err(ApiError::new(409, messages::UPDATE_RESERVED));
+    }
+    if store.count_status(ACTIVE)? > 0
+        || shared
+            .operations
+            .lock()
+            .expect("operations")
+            .iter()
+            .any(|(id, op)| {
+                matches!(activity, Activity::Recording { .. })
+                    || matches!(op.activity, Activity::Recording { .. })
+                    || id == &job.id
+            })
+    {
+        return Err(ApiError::new(
+            409,
+            "Finish the active recording or transcription before starting this operation.",
+        ));
+    }
+    let generation = job
+        .extra
+        .get("operation_generation")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| ApiError::new(409, "Operation generation exhausted"))?;
+    job.extra
+        .insert("operation_generation".into(), json!(generation));
+    store.put(job, None)?;
+    let cancellation = CancellationToken::new();
+    shared.operations.lock().expect("operations").insert(
+        job.id.clone(),
+        RunningOperation {
+            generation,
+            cancellation: cancellation.clone(),
+            activity,
+        },
+    );
+    Ok(OperationGuard {
+        shared: shared.clone(),
+        id: job.id.clone(),
+        generation,
+        cancellation,
+    })
 }
 
 fn legacy_database(root: &Path) -> Result<Option<PathBuf>, StoreError> {
@@ -512,6 +550,35 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{jid}/export/{kind}", get(export_job))
         .route("/api/jobs/{jid}/run", post(run_job))
         .route("/api/jobs/{jid}/retry", post(retry::retry_passage))
+        .route("/api/jobs/{jid}/separation", post(separation::begin))
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/accept",
+            post(separation::accept),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/discard",
+            post(separation::discard),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/restore",
+            post(separation::restore),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/history",
+            get(separation::history),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/original/audio",
+            get(separation::original_audio),
+        )
+        .route(
+            "/api/jobs/{jid}/separation/{episode}/{channel}/audio",
+            get(separation::playback),
+        )
+        .route(
+            "/api/jobs/{jid}/passages/{pid}/audio",
+            get(separation::passage_audio),
+        )
         .route("/api/jobs/{jid}/cancel", post(cancel_job))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
@@ -939,10 +1006,15 @@ async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -
         drop(directory);
         let body = stored_job_json(&job);
         let shared = Arc::clone(&app.shared);
+        let admission = app.admission.clone();
+        let queue = app.worker.queue_handle();
         let queued = id.clone();
         app.worker.enqueue(move || {
-            let _lease = lease;
             execute_import(&shared, &queued, generation, &cancellation);
+            drop(lease);
+            queue.enqueue(move || {
+                separation::automatic(&shared, &admission, &queued, generation);
+            });
         });
         (StatusCode::ACCEPTED, Json(body)).into_response()
     })
@@ -988,6 +1060,7 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
             job.extra
                 .insert("operation_generation".into(), json!(generation + 1));
             refinement::interrupt(job);
+            separation::interrupt(job);
             if job
                 .extra
                 .remove("passage_retry")
@@ -1153,6 +1226,10 @@ pub(crate) struct OperationGuard {
 }
 
 impl OperationGuard {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Retain the same operation through optional checks of an already editable result.
     /// Caller runs on the existing blocking worker, after capture/inference has joined.
     pub(crate) fn check_saved_voices(&self, models: &dyn ApplicationModels) {
@@ -1748,6 +1825,8 @@ mod tests {
             audio_revision: None,
             review: None,
             capture_source: None,
+            separation_candidate: None,
+            separation: None,
             rest: Map::new(),
         }
     }

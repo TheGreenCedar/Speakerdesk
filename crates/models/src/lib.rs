@@ -5,6 +5,7 @@ pub mod ctc;
 pub mod dispatch;
 pub mod memory;
 pub mod metallib;
+pub mod mossformer2;
 pub mod redimnet;
 pub mod serve;
 pub mod silero;

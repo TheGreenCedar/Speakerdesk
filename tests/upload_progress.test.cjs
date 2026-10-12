@@ -68,6 +68,7 @@ test('passage retry progress follows pending work and terminal candidates withou
     const retry=f.document.getElementById('segments').querySelectorAll('button').find(b=>b.textContent==='Retry passage locally');
     retry.click();await Promise.resolve();await Promise.resolve();
     assert.equal(f.document.getElementById('job-progress').hidden,false,result);
+    assert.match(f.document.getElementById('job-message').textContent,/Retrying passage/);
     f.run("request.resolve({...selected,passage_retry:{id:'pending',segment_id:'r0'}})");
     await Promise.all(retry.lastEventResults);
     assert.equal(f.document.getElementById('job-progress').hidden,false,result);
@@ -88,5 +89,25 @@ test('passage retry progress follows pending work and terminal candidates withou
     f.context.status=status;
     f.run("selected.kind='meeting';selected.status=status;setStatus()");
     assert.equal(f.document.getElementById('job-progress').hidden,true,status);
+  }
+});
+
+test('voice separation progress identifies the request and active model work',async()=>{
+  for(const [path,message] of [['/separation','Starting voice separation…'],['/cancel','Stopping voice separation…'],['/separation/episode/restore','Restoring the original passage…']]) {
+    const f=frontend(root);f.seed(1);
+    f.run("selected.kind='upload';selected.message='Ready';flushSave=async()=>{};window.request=null;api=()=>new Promise(resolve=>{request={resolve}})");
+    if(path!=='/separation')f.run("selected.passage_separation={id:'pending',segment_id:'r0',phase:'Separating voices and transcribing each estimate…'}");
+    f.context.path=path;
+    const pending=f.run('separationRequest(path)');await Promise.resolve();await Promise.resolve();
+    assert.equal(f.document.getElementById('job-message').textContent,message,path);
+    assert.equal(f.document.getElementById('job-progress').hidden,false,path);
+    f.run("window.next=structuredClone(selected);next.revision++;next.passage_separation={id:'pending',segment_id:'r0',phase:'Separating voices and transcribing each estimate…'};request.resolve(next)");
+    await pending;
+    assert.equal(f.document.getElementById('job-message').textContent,'Separating voices and transcribing each estimate…',path);
+    assert.equal(f.document.getElementById('job-progress').hidden,false,path);
+    assert.equal(f.document.getElementById('editor').inert,false,path);
+    f.run("delete selected.passage_separation;setStatus()");
+    assert.equal(f.document.getElementById('job-message').textContent,'Ready',path);
+    assert.equal(f.document.getElementById('job-progress').hidden,true,path);
   }
 });

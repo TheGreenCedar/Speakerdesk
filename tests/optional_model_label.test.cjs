@@ -61,3 +61,20 @@ test('cached unqualified voice weights are unavailable rather than usable',async
   f.run("api=async()=>structuredClone(setupFixture)");await f.run('refreshSetup()');
   assert.equal(f.document.getElementById('model-list').children[0].querySelector('span').textContent,'Unavailable');
 });
+
+test('optional separation download and installed repair use the dedicated setup route without changing speech readiness',async()=>{
+  const f=frontend(root);f.seed();
+  f.run(`window.requests=[];window.setupFixture={status:'ready',ready:true,core_ready:true,supported:true,total_bytes:100,downloaded_bytes:100,
+    voice:{status:'ready',available:false,enabled:false},separation:{installed:false,bytes:670353271,can_download:true,active:false},
+    models:[{id:'mossformer2-16k',name:'Voice separation',installed:false,optional:true,bytes:670353271}]};
+    api=async(path,options)=>{if(options){requests.push({path,options});setupFixture.separation.active=true;}return structuredClone(setupFixture)};`);
+  await f.run('refreshSetup()');
+  let action=f.document.getElementById('model-list').querySelector('button');assert.match(action.textContent,/Download separation/);assert.equal(action.disabled,false);
+  assert.match(f.document.getElementById('model-list').textContent,/Once enabled, automatically separates saved passages where two voices overlap/);
+  assert.equal(f.run('requests.length'),0);
+  action.click();await Promise.all(action.lastEventResults);assert.equal(f.run('requests[0].path'),'/api/setup/separation');assert.equal(f.run('requests[0].options.method'),'POST');
+  assert.equal(f.run('languageReady("en")'),true);assert.equal(f.document.getElementById('model-list').querySelector('button').disabled,true);
+  f.run('setupFixture.separation.installed=true;setupFixture.separation.active=false;setupFixture.models[0].installed=true');await f.run('refreshSetup()');
+  action=f.document.getElementById('model-list').querySelector('button');assert.equal(action.textContent,'Check / repair separation model');assert.equal(action.disabled,false);
+  action.click();await Promise.all(action.lastEventResults);assert.equal(f.run('requests[1].path'),'/api/setup/separation');assert.equal(f.run('languageReady("en")'),true);
+});

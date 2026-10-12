@@ -60,6 +60,8 @@ const TYPED_SERVER_KEYS: &[&str] = &[
     "speaker_activity",
     "reading_turns",
     "reading_turn_provenance",
+    "separation_candidate",
+    "separation",
 ];
 
 /// Inputs for `PATCH /api/jobs/<jid>/segments/<sid>`.
@@ -152,6 +154,7 @@ pub fn edit_passage(input: PassageEditInput<'_>) -> Result<PassageEditOutcome, A
     else {
         return Err(ApiError::new(404, NOT_FOUND));
     };
+    crate::separation::validate_bounds(row)?;
     finish_passage_edit(row, &prior, changes);
     let segment = row.clone();
     validated.edited_at = Some(input.now);
@@ -182,7 +185,9 @@ pub fn save_transcript(input: SaveInput<'_>) -> Result<SaveOutcome, ApiError> {
     for segment in &mut incoming.segments {
         let prior = priors.get(&segment.id);
         apply_save_rules(segment, prior, imported, input.now);
+        crate::separation::validate_bounds(segment)?;
     }
+    crate::transcript::sort_segments(&mut incoming.segments);
     let mut document = assemble_document(input.saved, incoming, imported, input.now);
     document.edited_at = Some(input.now);
     let (speaker_assignments, voice_checks) = reconcile_assignments(
@@ -294,6 +299,8 @@ fn restore_server_owned(segment: &mut Segment, prior: Option<&Segment>) {
     for key in TYPED_SERVER_KEYS {
         segment.rest.remove(*key);
     }
+    segment.separation_candidate = None;
+    segment.separation = None;
     segment.canonical_utterance_id = None;
     segment.audio_revision = None;
     segment.capture_source = None;
@@ -304,6 +311,8 @@ fn restore_server_owned(segment: &mut Segment, prior: Option<&Segment>) {
     let Some(prior) = prior else {
         return;
     };
+    segment.separation_candidate = prior.separation_candidate.clone();
+    segment.separation = prior.separation.clone();
     segment.canonical_utterance_id = prior.canonical_utterance_id.clone();
     segment.audio_revision = prior.audio_revision;
     segment.capture_source = prior.capture_source.clone();
@@ -449,7 +458,10 @@ fn apply_voice(segment: &mut Segment, prior: Option<&Segment>, imported: bool, n
 }
 
 fn speaker_audio_eligible(segment: &Segment, track_id: &str) -> bool {
-    if segment.speaker != track_id || json_truthy(segment.rest.get("audio_state")) {
+    if segment.separation.is_some()
+        || segment.speaker != track_id
+        || json_truthy(segment.rest.get("audio_state"))
+    {
         return false;
     }
     if segment.rest.get("finalized") == Some(&Value::Bool(false)) {

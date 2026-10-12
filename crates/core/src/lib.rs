@@ -19,6 +19,7 @@ pub mod models;
 pub mod people;
 pub mod review;
 pub mod security;
+pub mod separation;
 pub mod speech;
 pub mod store;
 pub mod timing;

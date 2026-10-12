@@ -10,7 +10,8 @@ pub(crate) fn available(job: &Job) -> bool {
     job.status == "ready"
         && job.document.as_ref().is_some_and(|doc| {
             doc.segments.iter().any(|s| {
-                s.canonical_utterance_id.is_some()
+                s.separation.is_none()
+                    && s.canonical_utterance_id.is_some()
                     && s.rest.get("canonical_state").and_then(Value::as_str) == Some("sealed")
             })
         })
@@ -103,11 +104,19 @@ fn begin(app: &AppState, jid: &str) -> Result<Job, ApiError> {
     job.updated = unix_now();
     let operation = app.begin_refinement_operation(&mut store, &mut job)?;
     drop(store);
+    let shared = app.shared.clone();
+    let admission = app.admission.clone();
+    let queue = app.worker.queue_handle();
+    let generation = operation.generation;
     app.worker.enqueue(move || {
-        let _lease = lease;
         if let Err(error) = execute(&operation, models.as_ref()) {
             tracing::error!(?error, "saved accuracy pass could not publish its state");
         }
+        drop(operation);
+        drop(lease);
+        queue.enqueue(move || {
+            separation::automatic(&shared, &admission, &id, generation);
+        });
     });
     Ok(job)
 }
@@ -233,7 +242,7 @@ fn publish_candidate(
     prior: &Segment,
     candidate: &Segment,
 ) -> Result<bool, live::LiveError> {
-    if !fresh(current, original, prior) {
+    if prior.separation.is_some() || !fresh(current, original, prior) {
         return Ok(false);
     }
     let document = current.document.as_mut().expect("fresh document");
@@ -317,10 +326,11 @@ fn execute(
             else {
                 continue;
             };
-            if segment
-                .protected_fields
-                .as_ref()
-                .is_some_and(|f| !f.is_empty())
+            if segment.separation.is_some()
+                || segment
+                    .protected_fields
+                    .as_ref()
+                    .is_some_and(|f| !f.is_empty())
                 || checkpoint(&job, segment)
             {
                 continue;

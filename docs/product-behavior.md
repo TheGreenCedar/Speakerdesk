@@ -34,6 +34,14 @@ Owner: `host/src/routes/retry.rs`, `core/src/review.rs`, `core/src/export.rs`.
 - Passages carry review reasons: unknown language, empty ASR, model error, partial output, overlap, unassigned audio and uncertain speaker. **Mark words reviewed** resolves the words. Overlap and unassigned-speaker warnings remain, because reviewing words does not settle who spoke.
 - TXT/SRT/VTT exports skip blank passages and print `[Needs review: …]` markers. JSON keeps every range, its reasons and any candidates. Exported times are audio anchors, not phonetic word boundaries.
 
+## Overlapping voices
+
+Owner: `core/src/separation.rs`, `host/src/routes/separation.rs`.
+
+- After an import, saved accuracy pass or meeting finishes, Speakerdesk automatically processes unedited passages with observed overlap between exactly two voices, within one language setting and at most **24.5 s** long. This uses the optional, locally prepared separation model; it never downloads weights automatically. Capture, setup or a newer operation takes precedence over queued separation work.
+- A successful attempt publishes two ordinary editable rows, each with its own generated audio and a **Check separated voices** hint. Both rows remain unassigned: output channel order does not identify a speaker, and current voice calibration does not qualify separated estimates for identity matching or voice enrollment. The original words and audio remain available in passage history, and an unchanged pair can restore the original passage.
+- Protected edits, stale source observations, pending candidates and already separated rows are skipped. Each original passage's source/model pair is attempted once automatically, including failed or interrupted attempts and restored originals. Failure, cancellation or edits during processing retain the current words and original recording. Estimates saved as pending candidates by an older runtime still offer explicit use or discard.
+
 ## People and voices
 
 Owner: `core/src/people.rs`, `core/src/voice.rs`, `host/src/people_routes/`.

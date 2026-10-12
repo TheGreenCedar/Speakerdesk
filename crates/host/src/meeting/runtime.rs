@@ -635,6 +635,17 @@ pub(super) async fn record(
             )));
         }
     }
-    state.progress.send_modify(|p| p.error = state.failure);
+    let separate =
+        cleanup.is_ok() && state.failure.is_none() && !operation.cancellation.is_cancelled();
+    state
+        .progress
+        .send_modify(|p| p.error = state.failure.take());
+    let generation = operation.generation();
+    drop(state);
+    drop(operation);
+    drop(_lease);
+    if separate {
+        app.queue_separation(id, generation);
+    }
     cleanup
 }

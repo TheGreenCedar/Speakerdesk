@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 
 struct Queue {
@@ -24,6 +24,27 @@ struct Shared {
 pub struct JobWorker {
     shared: Arc<Shared>,
     thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Successor runs can queue work without owning the worker's join handle.
+#[derive(Clone)]
+pub(crate) struct QueueHandle(Weak<Shared>);
+
+impl QueueHandle {
+    pub(crate) fn enqueue(&self, run: impl FnOnce() + Send + 'static) {
+        if let Some(shared) = self.0.upgrade() {
+            enqueue(&shared, Box::new(run));
+        }
+    }
+}
+
+fn enqueue(shared: &Shared, run: Box<dyn FnOnce() + Send>) {
+    let mut queue = shared.queue.lock().expect("import queue lock");
+    if queue.stop {
+        return;
+    }
+    queue.pending.push_back(run);
+    shared.wake.notify_one();
 }
 
 impl JobWorker {
@@ -49,12 +70,11 @@ impl JobWorker {
 
     /// Add an import run. It starts only when no other run is in progress.
     pub fn enqueue(&self, run: impl FnOnce() + Send + 'static) {
-        let mut queue = self.shared.queue.lock().expect("import queue lock");
-        if queue.stop {
-            return;
-        }
-        queue.pending.push_back(Box::new(run));
-        self.shared.wake.notify_one();
+        enqueue(&self.shared, Box::new(run));
+    }
+
+    pub(crate) fn queue_handle(&self) -> QueueHandle {
+        QueueHandle(Arc::downgrade(&self.shared))
     }
 
     /// Block until every queued run has finished.
@@ -172,5 +192,22 @@ mod tests {
         });
         worker.drain();
         assert_eq!(ran.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn successor_runs_after_its_predecessor_without_retaining_the_worker() {
+        let worker = JobWorker::new();
+        let queue = worker.queue_handle();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let first = order.clone();
+        worker.enqueue(move || {
+            first.lock().unwrap().push(1);
+            let successor = first.clone();
+            queue.enqueue(move || successor.lock().unwrap().push(3));
+            first.lock().unwrap().push(2);
+        });
+        worker.drain();
+        assert_eq!(*order.lock().unwrap(), [1, 2, 3]);
+        drop(worker);
     }
 }

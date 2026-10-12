@@ -73,6 +73,31 @@ impl ApplicationModels for NativeModels {
         )
         .map_err(|error| error.to_string())
     }
+    fn separate_passage(
+        &self,
+        pcm: &[f32],
+        language: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        (
+            speakerdesk_core::ipc::SeparatedAudio,
+            [speakerdesk_core::separation::CandidateVoice; 2],
+        ),
+        String,
+    > {
+        speakerdesk_core::separation::run(
+            &self.supervisor.models(cancellation.clone()),
+            pcm,
+            language,
+        )
+        .map_err(|e| e.to_string())
+    }
+    fn separation_available(&self) -> bool {
+        self.model_root
+            .join(crate::setup::separation_artifact().id)
+            .join("model.safetensors")
+            .is_file()
+    }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
         self.voice.read().expect("voice capability").clone()
     }
@@ -105,6 +130,7 @@ impl NativeModels {
         self: &Arc<Self>,
         app: AppState,
         download: bool,
+        separation: bool,
     ) -> Result<(), crate::admission::AdmissionError> {
         let mut task = self.task.lock().expect("setup task");
         if task.as_ref().is_some_and(|(_, task)| !task.is_finished()) {
@@ -114,14 +140,21 @@ impl NativeModels {
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         let native = self.clone();
-        native.setup.begin(&crate::setup::artifacts(), download);
+        native.setup.begin(
+            &if separation {
+                vec![crate::setup::separation_artifact()]
+            } else {
+                crate::setup::artifacts()
+            },
+            download,
+        );
         if !download {
             app.set_issues(vec!["Initializing native speech models…".into()]);
         }
         let handle = tokio::spawn(async move {
             let _lease = lease;
             let result = if download {
-                native.install(&app, &token).await
+                native.install(&app, &token, separation).await
             } else {
                 native
                     .initialize_async(app.clone(), token.clone(), false)
@@ -260,12 +293,17 @@ impl NativeModels {
         self: &Arc<Self>,
         app: &AppState,
         cancel: &CancellationToken,
+        separation: bool,
     ) -> Result<(), String> {
         let installer = crate::setup::Installer::open(&self.model_root)
             .await
             .map_err(|e| e.to_string())?;
         let mut completed = 0;
-        for model in crate::setup::artifacts() {
+        for model in if separation {
+            vec![crate::setup::separation_artifact()]
+        } else {
+            crate::setup::artifacts()
+        } {
             if !installer
                 .installed(&model, cancel)
                 .await
@@ -280,11 +318,19 @@ impl NativeModels {
                     .await
                     .map_err(|e| e.to_string())?
                 {
-                    self.setup.phase("Preparing native timing weights");
+                    self.setup.phase(if separation {
+                        "Preparing separation weights"
+                    } else {
+                        "Preparing native timing weights"
+                    });
                     let supervisor = self.supervisor.clone();
                     let cancellation = cancel.clone();
                     tokio::task::spawn_blocking(move || {
-                        supervisor.prepare_alignment(&cancellation)
+                        if separation {
+                            supervisor.prepare_separation(&cancellation)
+                        } else {
+                            supervisor.prepare_alignment(&cancellation)
+                        }
                     })
                     .await
                     .map_err(|e| e.to_string())?
@@ -307,7 +353,30 @@ impl NativeModels {
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
         self.initialize_async(app.clone(), cancel.clone(), true)
+            .await?;
+        if separation {
+            let supervisor = self.supervisor.clone();
+            let cancellation = cancel.clone();
+            tokio::task::spawn_blocking(move || {
+                let reports = supervisor
+                    .models(cancellation)
+                    .setup_check(&["mossformer2-16k".into()])
+                    .map_err(|e| e.to_string())?;
+                if reports.len() != 1
+                    || !reports[0].ok
+                    || reports[0].model != speakerdesk_core::separation::MODEL
+                {
+                    return Err(
+                        "Separation model initialization returned an unexpected identity"
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            })
             .await
+            .map_err(|e| e.to_string())??;
+        }
+        Ok(())
     }
 }
 
@@ -364,6 +433,9 @@ pub(crate) fn passage_recording_path(
     job: &Job,
     segment: &speakerdesk_core::document::Segment,
 ) -> std::io::Result<PathBuf> {
+    if let Some(voice) = &segment.separation {
+        return crate::routes::separation::asset_path(root, job, &voice.episode_id, voice.channel);
+    }
     let invalid = || {
         std::io::Error::other(
             "Passage capture source is unavailable or no longer matches its recording",
@@ -452,6 +524,7 @@ pub(crate) fn passage_audio_unchanged(
         ]
         .iter()
         .all(|key| current.extra.get(*key) == original.extra.get(*key))
+        && current_segment.separation == original_segment.separation
         && current_segment.capture_source == original_segment.capture_source
         && current_segment.audio_revision == original_segment.audio_revision
         && current_segment.canonical_utterance_id == original_segment.canonical_utterance_id
@@ -501,7 +574,7 @@ async fn serve(
         .ok()
         .expect("native setup configured once");
     app.updates.lock().expect("updates").connect();
-    native.start(app.clone(), false)?;
+    native.start(app.clone(), false, false)?;
     crate::meeting::configure_capture(
         &app,
         std::env::var_os("SPEAKERDESK_CAPTURE_HELPER").map(PathBuf::from),
@@ -612,6 +685,10 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/api/preferences/language", patch(language))
         .route("/api/setup", get(setup).post(start_setup))
         .route("/api/setup/cancel", axum::routing::post(cancel_setup))
+        .route(
+            "/api/setup/separation",
+            axum::routing::post(start_separation_setup),
+        )
         .route("/api/notices", get(notices))
 }
 
@@ -700,15 +777,20 @@ async fn setup(State(app): State<AppState>) -> Response {
         let supported = cfg!(all(target_os="macos",target_arch="aarch64"));
         let can_download = supported && app.native.get().is_some() && !app.admission.busy() && !app.admission.closed() && !app.admission.reserved();
         let catalog = crate::setup::artifacts();
-        let models: Vec<_> = catalog.iter().enumerate().map(|(index, model)| json!({"id":model.id,"name":model.name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":model.download_bytes(),"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
+        let mut models: Vec<_> = catalog.iter().enumerate().map(|(index, model)| json!({"id":model.id,"name":model.name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":model.download_bytes(),"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
         let alignment = &catalog[4];
+        let separation = crate::setup::separation_artifact();
+        let separation_setup = progress.models.iter().any(|id|id==&separation.id);
+        let separation_installed = app.native.get().is_some_and(|native|native.model_root.join(&separation.id).join("model.safetensors").is_file());
+        models.push(json!({"id":separation.id,"name":separation.name,"installed":separation_installed,"optional":true,"bytes":separation.download_bytes(),"checkpoint":speakerdesk_core::separation::MODEL}));
         let status = if busy || progress.status == "missing" {progress.status} else if progress.error.is_some() {"failed"} else if ready {"ready"} else {"idle"};
         Json(json!({
             "supported":supported,"ready":ready,"core_ready":core_ready,"automatic_language":automatic,
             "status":status,"phase":progress.phase,"error":progress.error,
             "download_required":progress.download_required,
-            "models":models,"total_bytes":catalog.iter().map(|m| m.download_bytes()).sum::<u64>(),
-            "downloaded_bytes":progress.downloaded_bytes,"required_free_bytes":catalog.iter().map(|m| m.stored_bytes()).sum::<u64>(),
+            "models":models,"total_bytes":if separation_setup {separation.download_bytes()} else {catalog.iter().map(|m| m.download_bytes()).sum::<u64>()},
+            "separation":{"installed":separation_installed,"bytes":separation.download_bytes(),"can_download":can_download,"active":separation_setup && busy},
+            "downloaded_bytes":progress.downloaded_bytes,"required_free_bytes":if separation_setup {separation.stored_bytes()} else {catalog.iter().map(|m| m.stored_bytes()).sum::<u64>()},
             "can_download":can_download,"can_cancel":busy && app.native.get().is_some(),
             "alignment":{"id":alignment.id,"status":if busy {progress.status}else if timing {"ready"}else {"idle"},"ready":timing,"can_download":false,
                 "supported_languages":languages::LANGUAGES.iter().map(|(code,_)| *code).collect::<Vec<_>>(),"timing_accuracy_calibrated_languages":["en"],"total_bytes":alignment.download_bytes(),"stored_bytes":alignment.stored_bytes(),"required_free_bytes":alignment.stored_bytes(),
@@ -724,7 +806,20 @@ async fn start_setup(State(app): State<AppState>) -> Response {
     let Some(native) = app.native.get().cloned() else {
         return failure("Native model setup is unavailable in this runtime");
     };
-    match native.start(app, true) {
+    match native.start(app, true, false) {
+        Ok(()) => Json(json!({"status":native.setup.progress().status})).into_response(),
+        Err(error) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+async fn start_separation_setup(State(app): State<AppState>) -> Response {
+    let Some(native) = app.native.get().cloned() else {
+        return failure("Native model setup is unavailable in this runtime");
+    };
+    match native.start(app, true, true) {
         Ok(()) => Json(json!({"status":native.setup.progress().status})).into_response(),
         Err(error) => (
             StatusCode::CONFLICT,
@@ -977,6 +1072,21 @@ mod setup_tests {
         assert_eq!(loading["can_cancel"], true);
         assert_eq!(loading["can_download"], false);
         assert_eq!(loading["download_required"], false);
+        let optional = loading["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "mossformer2-16k")
+            .expect("Settings must expose optional separation setup");
+        assert_eq!(optional["installed"], false);
+        assert_eq!(optional["optional"], true);
+        assert_eq!(
+            loading["total_bytes"],
+            crate::setup::artifacts()
+                .iter()
+                .map(|model| model.download_bytes())
+                .sum::<u64>()
+        );
         // Transfers and resident initialization share one owned setup task, but not a UI state.
         native.setup.begin(&crate::setup::artifacts(), true);
         native.setup.bytes(12);

@@ -343,6 +343,30 @@ pub fn retry_passage<M: Models + ?Sized>(
     retry_passage_source(models, pcm, start, end, language, None)
 }
 
+/// A generated voice uses ordinary speech admission and its own Auto language decision.
+pub fn separated_passage<M: Models + ?Sized>(
+    models: &M,
+    pcm: &[f32],
+    language: &str,
+) -> Result<PassageCandidate, ImportError> {
+    LanguageChoice::parse(language).map_err(language_err)?;
+    let end = pcm.len() as f64 / 16000.;
+    let parts = decode_passage_source(models, pcm, 0., end, language, None, None)?;
+    let languages: std::collections::BTreeSet<_> = parts
+        .iter()
+        .filter(|p| !p.text.trim().is_empty())
+        .filter_map(|p| p.language.as_deref())
+        .collect();
+    let chosen = if language != crate::languages::AUTOMATIC {
+        language
+    } else if languages.len() == 1 {
+        *languages.iter().next().expect("one language")
+    } else {
+        ""
+    };
+    Ok(candidate_from_parts(0., end, chosen, &parts))
+}
+
 /// The host supplies a validated catalog only for the qualified processed microphone.
 pub fn retry_passage_source<M: Models + ?Sized>(
     models: &M,
@@ -1230,6 +1254,8 @@ fn segment_from_row(
         audio_revision,
         review: Some(review),
         capture_source: None,
+        separation_candidate: None,
+        separation: None,
         rest,
     }
 }
