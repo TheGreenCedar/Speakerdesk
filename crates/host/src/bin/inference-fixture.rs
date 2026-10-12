@@ -41,11 +41,16 @@ fn main() {
     let mut race_error = false;
     let root = PathBuf::from(std::env::args_os().nth(2).unwrap());
     let mut held_live_feed = false;
+    let mut held_live_asr = false;
     while let Ok(envelope) = read_envelope(&mut std::io::stdin()) {
         let id = envelope.request_id;
         let EnvelopeBody::Request(request) = envelope.body else {
             std::process::exit(2);
         };
+        let hold_asr = matches!(request, Request::Transcribe { .. })
+            && root.join("fixture-live").exists()
+            && root.join("hold-live-asr").exists()
+            && !held_live_asr;
         let hold_eof = matches!(request, Request::VadFeed { last: true, .. })
             && root.join("fixture-live").exists()
             && root.join("hold-live-eof").exists();
@@ -310,14 +315,20 @@ fn main() {
             }
             _ => Err(ChildError::Unimplemented),
         };
-        if hold_live || hold_eof {
-            held_live_feed = true;
+        if hold_live || hold_eof || hold_asr {
+            if hold_asr {
+                held_live_asr = true;
+            } else {
+                held_live_feed = true;
+            }
             let flag = Arc::new(AtomicBool::new(false));
             active = Some((id, flag.clone()));
             let writer = output.clone();
             let root = root.clone();
             std::thread::spawn(move || {
-                let (marker, hold) = if hold_eof {
+                let (marker, hold) = if hold_asr {
+                    ("edit-asr-started", "hold-live-asr")
+                } else if hold_eof {
                     ("recovery-eof-started", "hold-live-eof")
                 } else {
                     ("recovery-feed-started", "hold-live-feed")

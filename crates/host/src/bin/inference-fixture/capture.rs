@@ -68,7 +68,15 @@ pub fn run() {
     loop {
         if !paused && root.join(format!("stage-{}", stage + 1)).exists() {
             stage += 1;
-            let target = endpoint + 112000;
+            let samples = if stage == 1 {
+                fs::read_to_string(root.join("first-stage-samples"))
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(112000)
+            } else {
+                112000
+            };
+            let target = endpoint + samples;
             audio(endpoint, target, &sources);
             endpoint = target;
             fs::write(root.join(format!("sent-{stage}")), endpoint.to_string()).unwrap();

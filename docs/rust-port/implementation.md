@@ -1143,3 +1143,61 @@ measurements, the pending Tauri live/setup/long-import workflow, default native
 startup/packaging, updater/security qualification and equivalent 0.6.6 gates.
 The installed app, production data and existing model cache remain untouched;
 Windows and issue #25 remain follow-ups.
+
+## Live edits preserve subsequent speech
+
+An independent real-model replay reproduced lost content after editing an open
+passage: the recording reached Ready with all 293,127 PCM samples retained, but
+none of the later words published. Editing live text now records the endpoint
+represented by those words. Publication feeds that boundary back to the serial
+live engine, which seals the protected prefix and decodes the remaining audio as
+a separate passage. Manual text entered before the first decode uses the displayed
+saved-audio boundary. Protected bounds and speaker names survive. No recording
+replay, extra document authority or new control queue is involved.
+
+Both halves retain only their own speech and speaker activity. This matters when
+the final decode races an edit across a speaker change after the engine has pruned
+its global turn history. Continuation IDs are stable across packet splits and
+language boundaries; EOF and repeated feedback do not duplicate them. Removed the
+unused per-utterance machine-version copies.
+
+On the M5 Mac, 160 core, 59 host, six mounted live-service, one native-service,
+nine process and 14 xtask tests pass. The mounted live-edit test groups text-only,
+protected bounds, held ASR, empty-before-ASR, language-change and child-recovery
+cases; it also checks restart, export and stale saves. Strict all-target core,
+host and xtask Clippy passes. Four external/network/model qualification tests were
+explicitly ignored; unchanged model proofs were reused. Logs:
+`/tmp/speakerdesk-live-edit-{tests,clippy,release}.log` and the focused
+`matrix-core` / `matrix-host-fixtures` logs. The initial host matrix invocation
+without the fixture feature ran zero tests; only the corrected fixtures log is
+evidence for that matrix.
+
+The optimized executable built successfully with the known upstream mlx-sys
+binding warnings. Its SHA-256 is
+`736426c07b856bb14dcaadc0028e6ba08b9b2c887d5b2698e2a9f3d2bce79783`.
+The same synthetic Samantha speech replay now publishes the later afternoon
+meeting, delivery schedule, after-lunch and project-team text. Exact edited words,
+start bound and Casey speaker name survive Stop, whole-host restart and TXT export.
+All retained PCM bytes match the source. The qualification hosts and children
+exited. Before/after input, documents, logs and export are retained in
+`/private/tmp/speakerdesk-live-edit.deNKoi/`; the successful job is
+`dab840a2f01f44bfb9bebcd021d55748`. This is real model execution through the native
+capture/service path with a saved-PCM helper, not physical capture, Tauri interaction
+or a performance comparison. Python runs only the external qualification harness.
+
+The isolated Tauri preview was refreshed earlier to 3eb78e7, with the same
+disposable data and replay helper; its service at `http://127.0.0.1:59923/` reports
+ready models and capture availability. State/logs are `recovery-preview.json` and
+`app-recovery.log` in `/private/tmp/speakerdesk-native-desktop.WJKAde/`. CUA still
+reports the Mac locked after the latest unlock reply, so no new editor claim is
+made. GitHub PR #27 remains open at head
+`db9da655b3eeeeef598ba21a21cb54505e6bce21`, base
+`59e7b0c860f72ca94c24e6eab18ac820b144ee24`; these local changes are not pushed.
+
+The complete replacement remains active and unfinished. Next complete live
+timing/refinement/identity and source-specific saved-audio consumers, then qualified
+Pause/Resume and raw dual-source echo, physical capture and long-session behavior,
+the pending Tauri live/setup/long-import workflow, default native startup and actual
+Python-free packaging, updater/security qualification and equivalent 0.6.6
+performance gates. The installed app, production data and existing model cache
+remain untouched. Windows and issue #25 remain deferred.

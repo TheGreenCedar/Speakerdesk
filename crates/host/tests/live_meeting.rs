@@ -458,6 +458,177 @@ async fn recovery_covers_asr_and_final_eof_child_loss() {
 }
 
 #[tokio::test]
+async fn editing_open_live_words_preserves_the_edit_and_publishes_continued_speech() {
+    for mode in [
+        "text", "bounds", "inflight", "empty", "language", "recovery",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        if mode == "empty" {
+            fs::write(root.join("first-stage-samples"), b"32000").unwrap();
+        }
+        let host = Running::open(root, false).await;
+        trigger(root, 1);
+        let id = host.start(json!(["microphone"])).await;
+        let path = format!("api/jobs/{id}");
+        host.wait(&path, |v| {
+            v["document"]["segments"].as_array().is_some_and(|rows| {
+                rows.iter().any(|r| {
+                    if mode == "empty" {
+                        r["text"] == ""
+                    } else {
+                        r["text"] == "Replay transcript"
+                    }
+                })
+            })
+        })
+        .await;
+        host.wait("api/meeting", |v| {
+            v["processed_seconds"].as_f64().unwrap_or(0.) >= if mode == "empty" { 1.4 } else { 6.4 }
+        })
+        .await;
+        let first = if mode == "inflight" {
+            fs::write(root.join("hold-live-asr"), b"hold next decoder response").unwrap();
+            trigger(root, 2);
+            wait_file(&root.join("edit-asr-started")).await;
+            host.get(&path).await
+        } else {
+            host.get(&path).await
+        };
+        let row = &first["document"]["segments"][0];
+        let sid = row["id"].as_str().unwrap();
+        let coverage = row["canonical_text_end_sample"]
+            .as_i64()
+            .unwrap_or_else(|| row["end_sample"].as_i64().unwrap());
+        assert_eq!(row["canonical_state"], "open", "{mode}");
+        let changes = if mode == "bounds" || mode == "inflight" {
+            json!({"text":"Human corrected introduction","start":0.1,"end":6.})
+        } else {
+            json!({"text":"Human corrected introduction"})
+        };
+        let edited = host
+            .client
+            .patch(format!("{}{path}/segments/{sid}", host.url))
+            .header("X-Speakerdesk-Token", &host.token)
+            .json(&json!({"segment_revision":row["machine_revision"], "changes":changes}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            edited.status(),
+            200,
+            "{mode}: {}",
+            edited.text().await.unwrap()
+        );
+        let saved = host.get(&path).await;
+        assert_eq!(
+            host.post(
+                &format!("{path}/speakers/speaker_0/identity"),
+                json!({"revision":saved["revision"],"name":"Casey","person_id":null})
+            )
+            .await
+            .status(),
+            200
+        );
+        if mode == "inflight" {
+            fs::remove_file(root.join("hold-live-asr")).unwrap();
+        }
+        if mode == "language" {
+            let response = host
+                .client
+                .patch(format!("{}api/meetings/{id}/language", host.url))
+                .header("X-Speakerdesk-Token", &host.token)
+                .json(&json!({"language":"de","language_revision":0}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            host.wait("api/meeting", |v| v["language_acknowledged_revision"] == 1)
+                .await;
+        }
+        if mode == "recovery" {
+            let pid: i32 = fs::read_to_string(root.join("fixture-child-pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        }
+        trigger(root, 2);
+        trigger(root, 3);
+        let end = if mode == "empty" { 256513 } else { 336513 };
+        host.wait("api/meeting", |v| {
+            v["duration"].as_f64().unwrap_or(0.) >= (end - 8513) as f64 / 16000.
+        })
+        .await;
+        let final_job = host.stop(&id).await;
+        assert_eq!(final_job["status"], "ready", "{mode}: {final_job}");
+        let rows = final_job["document"]["segments"].as_array().unwrap();
+        let original = rows.iter().find(|r| r["id"] == sid).unwrap();
+        assert_eq!(original["text"], "Human corrected introduction");
+        if mode == "bounds" || mode == "inflight" {
+            assert_eq!(original["start"], 0.1);
+            assert_eq!(original["end"], 6.);
+        }
+        assert_eq!(final_job["document"]["speakers"]["speaker_0"], "Casey");
+        let continuations: Vec<_> = rows
+            .iter()
+            .filter(|r| r["id"] != sid && r["text"] == "Replay transcript")
+            .collect();
+        assert!(
+            !continuations.is_empty(),
+            "{mode}: continued speech disappeared: {final_job}"
+        );
+        assert!(
+            continuations
+                .iter()
+                .all(|r| r["start_sample"].as_i64().unwrap() >= coverage)
+        );
+        if mode != "language" {
+            assert_eq!(continuations[0]["start_sample"], coverage);
+        }
+        if mode == "language" {
+            assert!(continuations.iter().any(|r| r["language"] == "de"));
+        }
+        if mode == "recovery" {
+            assert_eq!(final_job["live_recovery"]["status"], "recovered");
+        }
+        let ids: std::collections::HashSet<_> =
+            rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), rows.len());
+        assert_eq!(final_job["canonical_observed_sample"], end);
+        host.close(root).await;
+        if mode == "inflight" {
+            let reopened = Running::open(root, false).await;
+            assert_eq!(reopened.get(&path).await["document"], final_job["document"]);
+            let text = reopened
+                .client
+                .get(format!("{}{path}/export/txt", reopened.url))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(
+                text.contains("Human corrected introduction")
+                    && text.contains("Replay transcript")
+                    && text.contains("Casey")
+            );
+            let stale = reopened
+                .client
+                .put(format!("{}{path}/transcript", reopened.url))
+                .header("X-Speakerdesk-Token", &reopened.token)
+                .json(&json!({"revision":first["revision"], "document":first["document"]}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(stale.status(), 409);
+            reopened.close(root).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn concurrent_starts_and_terminal_replacement_create_only_owned_jobs() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

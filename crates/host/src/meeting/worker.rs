@@ -13,12 +13,13 @@ use speakerdesk_core::{
     error::{ApiError, ChildError, StoreError},
     ids::JobId,
     live::{
-        AudioNotice, Engine, EngineConfig, EngineEvent, Inbox, LiveCommand, LiveError,
-        RecoveryBoundary, SourceRuntime, StreamRecovery, apply_canonical_candidate,
+        AudioNotice, EditedBoundary, Engine, EngineConfig, EngineEvent, Inbox, LiveCommand,
+        LiveError, RecoveryBoundary, SourceRuntime, StreamRecovery, apply_canonical_candidate,
+        edited_boundary,
     },
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -195,6 +196,15 @@ impl Engines {
             Self::Sources(e) => e.poll(),
         }
     }
+    fn continue_edited(
+        &mut self,
+        boundary: &EditedBoundary,
+    ) -> Result<Vec<EngineEvent>, LiveError> {
+        match self {
+            Self::Single(e) => e.continue_edited(boundary),
+            Self::Sources(e) => e.continue_edited(boundary),
+        }
+    }
     fn handle(&mut self, command: LiveCommand) -> Result<Vec<EngineEvent>, LiveError> {
         match self {
             Self::Single(e) => e.handle(command),
@@ -252,7 +262,9 @@ fn stream_update(
     })
     .map_err(|e| LiveError::Detail(e.message))
 }
+#[allow(clippy::too_many_arguments)]
 fn publish(
+    engine: &mut Engines,
     app: &AppState,
     id: &JobId,
     op: &OperationGuard,
@@ -261,14 +273,40 @@ fn publish(
     events: Vec<EngineEvent>,
 ) -> Result<bool, LiveError> {
     let mut finished = false;
-    for event in events {
+    let mut events = VecDeque::from(events);
+    let mut boundaries = BTreeMap::new();
+    while let Some(event) = events.pop_front() {
         match event {
             EngineEvent::CanonicalRevision { candidate, .. } => {
+                if boundaries.get(&candidate.id).is_some_and(|cut| {
+                    candidate
+                        .rest
+                        .get("end_sample")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|end| end > *cut)
+                }) {
+                    continue;
+                }
+                let mut boundary = None;
                 stream_update(app, id, op, generation, |job| {
                     let document = job
                         .document
                         .as_ref()
                         .ok_or_else(|| conflict("Meeting document is missing."))?;
+                    boundary = edited_boundary(document, &candidate);
+                    if boundary.is_some() {
+                        let prior = job
+                            .document
+                            .as_mut()
+                            .expect("document")
+                            .segments
+                            .iter_mut()
+                            .find(|row| row.id == candidate.id)
+                            .expect("edited passage");
+                        prior.rest.insert("canonical_state".into(), json!("sealed"));
+                        prior.rest.insert("finalized".into(), json!(true));
+                        return Ok(());
+                    }
                     let mut merged = apply_canonical_candidate(document, &candidate);
                     let mut next = document
                         .speakers
@@ -292,6 +330,13 @@ fn publish(
                     job.document = Some(merged);
                     Ok(())
                 })?;
+                if let Some(boundary) = boundary {
+                    boundaries.insert(boundary.utterance_id.clone(), boundary.end_sample);
+                    let continuation = engine.continue_edited(&boundary)?;
+                    for event in continuation.into_iter().rev() {
+                        events.push_front(event);
+                    }
+                }
             }
             EngineEvent::Progress {
                 processed_seconds, ..
@@ -421,7 +466,15 @@ pub(super) async fn worker(
                             generation: stamp.epoch,
                             start_sample: cursor,
                         })?;
-                        publish(&app, &id, &operation, generation, &progress, events)?;
+                        publish(
+                            &mut engine,
+                            &app,
+                            &id,
+                            &operation,
+                            generation,
+                            &progress,
+                            events,
+                        )?;
                         continue;
                     }
                     let next = (cursor + 16000).min(plan.boundary.through_sample).min(
@@ -439,14 +492,30 @@ pub(super) async fn worker(
                         language_epoch: stamp.epoch,
                         language: stamp.language.clone(),
                     }))?;
-                    publish(&app, &id, &operation, generation, &progress, events)?;
+                    publish(
+                        &mut engine,
+                        &app,
+                        &id,
+                        &operation,
+                        generation,
+                        &progress,
+                        events,
+                    )?;
                     cursor = next;
                 }
                 let events = engine.handle(LiveCommand::Flush {
                     request_id: None,
                     through_sample: Some(cursor),
                 })?;
-                publish(&app, &id, &operation, generation, &progress, events)?;
+                publish(
+                    &mut engine,
+                    &app,
+                    &id,
+                    &operation,
+                    generation,
+                    &progress,
+                    events,
+                )?;
                 stream_update(&app, &id, &operation, generation, |job| {
                     job.extra["live_recovery"]["status"] = json!("recovered");
                     job.extra["live_recovery"]["elapsed_ms"] =
@@ -464,7 +533,15 @@ pub(super) async fn worker(
                     return Err(LiveError::Child(ChildError::Cancelled));
                 }
                 while let Some(events) = engine.poll()? {
-                    if publish(&app, &id, &operation, generation, &progress, events)? {
+                    if publish(
+                        &mut engine,
+                        &app,
+                        &id,
+                        &operation,
+                        generation,
+                        &progress,
+                        events,
+                    )? {
                         return Ok(());
                     }
                 }

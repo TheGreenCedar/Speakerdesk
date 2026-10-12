@@ -458,13 +458,6 @@ enum UtteranceState {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct MachineVersion {
-    text: String,
-    complete: bool,
-    reason: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 struct Utterance {
     id: String,
     start_sample: i64,
@@ -477,7 +470,6 @@ struct Utterance {
     audio_revision: i64,
     speech_regions: Vec<SampleSpan>,
     protected_fields: Vec<String>,
-    machine_versions: Vec<MachineVersion>,
     refinement_state: String,
     language: Option<String>,
     review: bool,
@@ -636,7 +628,6 @@ impl UtteranceBook {
                         audio_revision: 0,
                         speech_regions: Vec::new(),
                         protected_fields: Vec::new(),
-                        machine_versions: Vec::new(),
                         refinement_state: "provisional".to_string(),
                         language: None,
                         review: false,
@@ -713,11 +704,6 @@ impl UtteranceBook {
         if complete && text.trim().is_empty() {
             complete = false;
         }
-        row.machine_versions.push(MachineVersion {
-            text: text.to_string(),
-            complete,
-            reason: None,
-        });
         if complete && !row.protected_fields.iter().any(|field| field == "text") {
             row.text = text.to_string();
             row.text_end_sample = Some(row.end_sample);
@@ -1526,8 +1512,38 @@ pub fn reconcile_window(
     })
 }
 
+/// A persisted edit to an open passage closes its machine-owned text extent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditedBoundary {
+    pub utterance_id: String,
+    pub end_sample: i64,
+}
+
+pub fn edited_boundary(document: &Document, candidate: &Segment) -> Option<EditedBoundary> {
+    let prior = document
+        .segments
+        .iter()
+        .find(|row| row.id == candidate.id)?;
+    let end = prior.rest.get("canonical_text_boundary_sample")?.as_i64()?;
+    let candidate_end = candidate.rest.get("end_sample")?.as_i64()?;
+    (candidate_end > end
+        || (candidate_end == end
+            && candidate
+                .rest
+                .get("canonical_state")
+                .and_then(Value::as_str)
+                == Some("open")))
+    .then(|| EditedBoundary {
+        utterance_id: prior.id.clone(),
+        end_sample: end,
+    })
+}
+
 /// Keep fields [`crate::edit::edit_passage`] marked protected when a canonical candidate arrives.
 pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Document {
+    if edited_boundary(document, candidate).is_some() {
+        return document.clone();
+    }
     let mut document = document.clone();
     if let Some(prior) = document
         .segments
@@ -1536,6 +1552,10 @@ pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Do
         .cloned()
     {
         let mut row = candidate.clone();
+        if let Some(boundary) = prior.rest.get("canonical_text_boundary_sample") {
+            row.rest
+                .insert("canonical_text_boundary_sample".into(), boundary.clone());
+        }
         let protected = prior.protected_fields.clone().unwrap_or_default();
         row.protected_fields = if protected.is_empty() {
             prior.protected_fields.clone()
@@ -1955,6 +1975,122 @@ impl<M: Models + 'static> Engine<M> {
         Ok(std::mem::take(&mut self.events))
     }
 
+    /// Publication feedback, serviced by the same serial owner even after final ASR.
+    /// Only this known utterance is split; no historical PCM or document replay occurs.
+    pub fn continue_edited(
+        &mut self,
+        boundary: &EditedBoundary,
+    ) -> Result<Vec<EngineEvent>, LiveError> {
+        self.events.clear();
+        let Some(original) = self.book.rows.get(&boundary.utterance_id).cloned() else {
+            return Ok(Vec::new());
+        };
+        let cut = boundary.end_sample;
+        if cut <= original.start_sample || cut > original.end_sample {
+            return Err(LiveError::Message("Invalid edited text boundary."));
+        }
+        if original
+            .protected_fields
+            .iter()
+            .any(|field| field == "text")
+            && original.end_sample == cut
+        {
+            return Ok(Vec::new());
+        }
+        let mut tail = original.clone();
+        tail.id = utterance_id(&self.book.job_id, original.language_epoch, cut);
+        tail.start_sample = cut;
+        tail.speech_regions = original
+            .speech_regions
+            .iter()
+            .filter_map(|span| {
+                (span.end_sample > cut).then_some(SampleSpan {
+                    start_sample: span.start_sample.max(cut),
+                    end_sample: span.end_sample,
+                })
+            })
+            .collect();
+        tail.text.clear();
+        tail.text_audio_anchor = None;
+        tail.text_end_sample = None;
+        tail.protected_fields.clear();
+        tail.machine_revision = 0;
+        tail.audio_revision = 0;
+        tail.refinement_state = "provisional".into();
+        tail.canonical_unresolved = None;
+        tail.language = None;
+        tail.audio_state = None;
+        tail.transcription_review = false;
+        tail.review = false;
+        clip_retained_activity(&mut tail, original.speaker_activity.as_ref());
+        let old = self
+            .book
+            .rows
+            .get_mut(&boundary.utterance_id)
+            .expect("known utterance");
+        UtteranceBook::set_end(old, cut);
+        old.text_end_sample = Some(cut);
+        old.state = UtteranceState::Sealed;
+        old.protected_fields.push("text".into());
+        old.speech_regions = original
+            .speech_regions
+            .iter()
+            .filter_map(|span| {
+                (span.start_sample < cut).then_some(SampleSpan {
+                    start_sample: span.start_sample,
+                    end_sample: span.end_sample.min(cut),
+                })
+            })
+            .collect();
+        old.last_speech_sample = old.last_speech_sample.min(cut);
+        clip_retained_activity(old, original.speaker_activity.as_ref());
+        let old = old.clone();
+        self.publish(old)?;
+        self.published.remove(&boundary.utterance_id);
+        self.last_decoded.remove(&boundary.utterance_id);
+        let was_active = self.book.active.as_ref() == Some(&boundary.utterance_id);
+        if was_active {
+            self.book.active = None;
+        }
+        if !tail.speech_regions.is_empty() {
+            let index = self
+                .book
+                .order
+                .iter()
+                .position(|id| id == &boundary.utterance_id)
+                .expect("known order")
+                + 1;
+            if self.book.rows.contains_key(&tail.id) {
+                return Err(LiveError::Message("Continuation identity already exists."));
+            }
+            self.book.order.insert(index, tail.id.clone());
+            if index <= self.next_utterance {
+                self.next_utterance += 1;
+            }
+            if was_active {
+                self.book.active = Some(tail.id.clone());
+            }
+            if tail.state == UtteranceState::Open {
+                self.next_utterance = self.next_utterance.min(index);
+            }
+            let identity = tail.id.clone();
+            let decode = tail.state == UtteranceState::Sealed
+                || self.capture_finished
+                || tail.end_sample - cut >= 6 * RATE;
+            self.book.rows.insert(identity.clone(), tail);
+            if decode {
+                self.decode(&identity)?;
+            }
+            let tail = self.book.rows[&identity].clone();
+            self.publish(tail)?;
+            if self.book.rows[&identity].state == UtteranceState::Sealed {
+                self.published.remove(&identity);
+                self.last_decoded.remove(&identity);
+            }
+        }
+        Ok(std::mem::take(&mut self.events))
+    }
+
     fn on_audio(&mut self, notice: AudioNotice) -> Result<(), LiveError> {
         if self.capture_finished {
             return Err(LiveError::Message("Audio arrived after capture finished."));
@@ -2341,7 +2477,7 @@ impl<M: Models + 'static> Engine<M> {
                 due = last.is_none()
                     || (decode_open && row.end_sample - last.expect("decoded").0 >= 6 * RATE);
             }
-            if changed && due {
+            if changed && due && !row.protected_fields.iter().any(|field| field == "text") {
                 self.decode(&identity)?;
             }
             let row = self.book.rows.get(&identity).expect("row").clone();
@@ -2496,11 +2632,6 @@ impl<M: Models + 'static> Engine<M> {
         }
         let assembled = assemble_authoritative(&anchor, &requests, &parts)?;
         let stored = self.book.rows.get_mut(&row.id).expect("row");
-        stored.machine_versions.push(MachineVersion {
-            text: assembled.text.clone().unwrap_or_default(),
-            complete: assembled.complete,
-            reason: assembled.reason.map(str::to_string),
-        });
         if assembled.complete {
             if let Some(text) = assembled.text
                 && stored.protected_fields.iter().all(|field| field != "text")
@@ -2713,6 +2844,40 @@ fn tail_part(request: &DecodeRequest, passages: &[Passage], aligned: bool) -> Ta
         text: texts.join(" "),
         complete,
     }
+}
+
+fn clip_retained_activity(row: &mut Utterance, activity: Option<&timing::SpeakerActivity>) {
+    row.speaker_candidates.clear();
+    row.speaker_activity = activity.map(|activity| {
+        let regions: Vec<_> = activity
+            .regions
+            .iter()
+            .filter_map(|region| {
+                let start = region.start_sample.max(row.start_sample);
+                let end = region.end_sample.min(row.end_sample);
+                (start < end).then(|| timing::ActivityRegion {
+                    start_sample: start,
+                    end_sample: end,
+                    speakers: region.speakers.clone(),
+                })
+            })
+            .collect();
+        for region in &regions {
+            for owner in &region.speakers {
+                if !row.speaker_candidates.contains(owner) {
+                    row.speaker_candidates.push(owner.clone());
+                }
+            }
+        }
+        row.speaker_candidates.sort();
+        timing::SpeakerActivity {
+            audio_revision: row.audio_revision,
+            observed_end_sample: activity
+                .observed_end_sample
+                .map(|end| end.clamp(row.start_sample, row.end_sample)),
+            regions,
+        }
+    });
 }
 
 fn project_segment(row: &Utterance, stamp: &LanguageStamp) -> Segment {
@@ -2931,6 +3096,23 @@ impl<M: Models + 'static> SourceRuntime<M> {
             engines,
             received: 0,
         })
+    }
+
+    pub fn continue_edited(
+        &mut self,
+        boundary: &EditedBoundary,
+    ) -> Result<Vec<EngineEvent>, LiveError> {
+        let mut events = Vec::new();
+        for engine in &mut self.engines {
+            for mut event in engine.continue_edited(boundary)? {
+                if let EngineEvent::CanonicalRevision { fast_sequence, .. } = &mut event {
+                    self.fast_sequence += 1;
+                    *fast_sequence = self.fast_sequence;
+                }
+                events.push(event);
+            }
+        }
+        Ok(events)
     }
 
     pub fn push(&self, command: LiveCommand) -> Result<(), LiveError> {
@@ -3553,6 +3735,7 @@ mod tests {
         diar_sessions: AtomicUsize,
         diar_progress: Mutex<BTreeMap<u64, (u64, u64)>>,
         delayed_diar: AtomicBool,
+        speaker_switch: AtomicUsize,
     }
 
     impl FakeModels {
@@ -3568,6 +3751,7 @@ mod tests {
                 diar_sessions: AtomicUsize::new(0),
                 diar_progress: Mutex::new(BTreeMap::new()),
                 delayed_diar: AtomicBool::new(false),
+                speaker_switch: AtomicUsize::new(usize::MAX),
             }
         }
     }
@@ -3658,11 +3842,19 @@ mod tests {
             *previous = observed;
             Ok(DiarFeedOut {
                 turns: if observed > start {
-                    vec![crate::ipc::DiarTurn {
+                    let split = self.speaker_switch.load(Ordering::Relaxed) as u64;
+                    [
+                        (start, observed.min(split), "speaker_0"),
+                        (start.max(split), observed, "speaker_1"),
+                    ]
+                    .into_iter()
+                    .filter(|(start, end, _)| start < end)
+                    .map(|(start, end, speaker)| crate::ipc::DiarTurn {
                         start,
-                        end: observed,
-                        speaker: "speaker_0".into(),
-                    }]
+                        end,
+                        speaker: speaker.into(),
+                    })
+                    .collect()
                 } else {
                     Vec::new()
                 },
@@ -3797,6 +3989,237 @@ mod tests {
                 speakers: vec![]
             }]
         );
+    }
+
+    fn accept_live_events(
+        document: &mut Document,
+        events: Vec<EngineEvent>,
+        mut feedback: impl FnMut(&EditedBoundary) -> Vec<EngineEvent>,
+    ) {
+        let mut events = VecDeque::from(events);
+        while let Some(event) = events.pop_front() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                if let Some(boundary) = edited_boundary(document, &candidate) {
+                    for event in feedback(&boundary).into_iter().rev() {
+                        events.push_front(event);
+                    }
+                } else {
+                    *document = apply_canonical_candidate(document, &candidate);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn edited_continuations_keep_packet_independent_ids_and_language_boundaries() {
+        let cut = 99840;
+        let language_boundary = 9 * RATE;
+        let end = 15 * RATE + 159;
+        let mut expected = None;
+        for splits in [
+            vec![language_boundary, end],
+            vec![
+                cut + 1,
+                cut + 511,
+                cut + 1025,
+                language_boundary,
+                language_boundary + 37,
+                end,
+            ],
+        ] {
+            let mut engine =
+                TestEngine::new(EngineConfig::new("partitions", "en"), FakeModels::english())
+                    .unwrap();
+            engine.append_pcm(&loud(end as usize));
+            let first = engine.handle(notice(0, cut, 0)).unwrap();
+            let mut document = empty_document();
+            accept_live_events(&mut document, first, |boundary| {
+                engine.continue_edited(boundary).unwrap()
+            });
+            let row = document.segments[0].clone();
+            document = edit_passage(PassageEditInput {status:"recording",duration:7.,revision:1,document:Some(&document),segment_id:&row.id,
+                body:&serde_json::json!({"segment_revision":row.machine_revision,"changes":{"text":"Corrected prefix"}}),now:1.}).unwrap().document;
+            let mut cursor = cut;
+            let mut epoch = 0;
+            for stop in splits {
+                let events = engine.handle(notice(cursor, stop, epoch)).unwrap();
+                accept_live_events(&mut document, events, |boundary| {
+                    engine.continue_edited(boundary).unwrap()
+                });
+                cursor = stop;
+                if stop == language_boundary {
+                    epoch = 1;
+                    let events = engine
+                        .handle(LiveCommand::Language {
+                            language: "de".into(),
+                            generation: 1,
+                            start_sample: stop,
+                        })
+                        .unwrap();
+                    accept_live_events(&mut document, events, |boundary| {
+                        engine.continue_edited(boundary).unwrap()
+                    });
+                }
+            }
+            let events = engine.handle(LiveCommand::Stop).unwrap();
+            accept_live_events(&mut document, events, |boundary| {
+                engine.continue_edited(boundary).unwrap()
+            });
+            let count = document.segments.len();
+            let events = engine.handle(LiveCommand::Stop).unwrap();
+            accept_live_events(&mut document, events, |boundary| {
+                engine.continue_edited(boundary).unwrap()
+            });
+            assert_eq!(document.segments.len(), count);
+            assert_eq!(document.segments[0].text, "Corrected prefix");
+            let spans: Vec<_> = document
+                .segments
+                .iter()
+                .map(|row| {
+                    (
+                        row.id.clone(),
+                        row.rest["start_sample"].as_i64().unwrap(),
+                        row.rest["end_sample"].as_i64().unwrap(),
+                        row.text.clone(),
+                        row.language.clone(),
+                    )
+                })
+                .collect();
+            assert!(
+                spans.windows(2).all(|pair| pair[0].2 == pair[1].1),
+                "continuations must partition canonical audio: {spans:?}"
+            );
+            assert!(
+                spans
+                    .iter()
+                    .any(|row| row.1 == language_boundary && row.3 == "eins")
+            );
+            if let Some(expected) = &expected {
+                assert_eq!(&spans, expected);
+            } else {
+                expected = Some(spans);
+            }
+            let sealed = document.segments.last().unwrap().clone();
+            let edit = edit_passage(PassageEditInput {status:"ready",duration:end as f64/RATE as f64,revision:2,document:Some(&document),segment_id:&sealed.id,
+                body:&serde_json::json!({"segment_revision":sealed.machine_revision,"changes":{"text":"Sealed correction"}}),now:2.}).unwrap();
+            assert!(
+                !edit
+                    .segment
+                    .rest
+                    .contains_key("canonical_text_boundary_sample")
+            );
+        }
+    }
+
+    #[test]
+    fn edited_source_eof_uses_each_clipped_speaker_ledger_after_turns_pruning() {
+        let cut = 99840;
+        let end = 14 * RATE + 159;
+        let mut inputs = [TestRecording::new(), TestRecording::new()];
+        for input in &mut inputs {
+            input.writer.write_samples(&loud(end as usize)).unwrap();
+        }
+        let mut config = EngineConfig::new("edited-sources", "en");
+        config.processed_microphone_contract = Some("a".repeat(64));
+        config.capture_catalog_sha256 = Some("b".repeat(64));
+        let models = FakeModels::english();
+        models.speaker_switch.store(cut as usize, Ordering::Relaxed);
+        let mut runtime = SourceRuntime::new(
+            config,
+            models,
+            inputs
+                .each_ref()
+                .map(|input| RecordingReader::open(&input.path).unwrap()),
+        )
+        .unwrap();
+        let first = runtime.handle(notice(0, cut, 0)).unwrap();
+        let mut document = empty_document();
+        accept_live_events(&mut document, first, |boundary| {
+            runtime.continue_edited(boundary).unwrap()
+        });
+        let originals = document.segments.clone();
+        for row in &originals {
+            document = edit_passage(PassageEditInput {status:"recording",duration:7.,revision:1,document:Some(&document),segment_id:&row.id,
+                body:&serde_json::json!({"segment_revision":row.machine_revision,"changes":{"text":"Corrected source prefix"}}),now:1.}).unwrap().document;
+        }
+        let mut pending = runtime.handle(notice(cut, end, 0)).unwrap();
+        pending.extend(runtime.handle(LiveCommand::Stop).unwrap());
+        assert!(
+            runtime
+                .engines
+                .iter()
+                .all(|engine| engine.turns.iter().all(|turn| turn.end > 13.))
+        );
+        accept_live_events(&mut document, pending, |boundary| {
+            runtime.continue_edited(boundary).unwrap()
+        });
+        assert_eq!(document.segments.len(), 4);
+        for (source, old_owner, new_owner) in [
+            ("microphone_clean", "speaker_0", "speaker_1"),
+            ("system", "speaker_32", "speaker_33"),
+        ] {
+            let rows: Vec<_> = document
+                .segments
+                .iter()
+                .filter(|row| row.capture_source.as_ref().unwrap()["source_id"] == source)
+                .collect();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].speaker, old_owner);
+            assert_eq!(rows[1].speaker, new_owner);
+            assert_eq!(rows[0].rest["end_sample"], cut);
+            assert_eq!(rows[1].rest["start_sample"], cut);
+            assert_eq!(rows[1].text, "hello");
+        }
+    }
+
+    #[test]
+    fn edited_open_passage_does_not_swallow_continuing_audio() {
+        let mut engine = TestEngine::new(
+            EngineConfig::new("edited-open", "en"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        engine.append_pcm(&loud((14 * RATE + 159) as usize));
+        let mut document = empty_document();
+        for candidate in revisions(&engine.handle(notice(0, 6 * RATE + 512, 0)).unwrap()) {
+            document = apply_canonical_candidate(&document, candidate);
+        }
+        let original = document.segments[0].clone();
+        let cut = original.rest["canonical_text_end_sample"].as_i64().unwrap();
+        document = edit_passage(PassageEditInput {
+            status:"recording",duration:7.,revision:1,document:Some(&document),segment_id:&original.id,
+            body:&serde_json::json!({"segment_revision":original.machine_revision,"changes":{"text":"Human introduction","start":0.1,"end":6.}}),now:1.,
+        }).unwrap().document;
+        let mut events = engine
+            .handle(notice(6 * RATE + 512, 14 * RATE + 159, 0))
+            .unwrap();
+        events.extend(engine.handle(LiveCommand::Stop).unwrap());
+        let mut events = VecDeque::from(events);
+        while let Some(event) = events.pop_front() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                if let Some(boundary) = edited_boundary(&document, &candidate) {
+                    events.extend(engine.continue_edited(&boundary).unwrap());
+                } else {
+                    document = apply_canonical_candidate(&document, &candidate);
+                }
+            }
+        }
+        let edited = document
+            .segments
+            .iter()
+            .find(|r| r.id == original.id)
+            .unwrap();
+        assert_eq!(
+            (edited.text.as_str(), edited.start, edited.end),
+            ("Human introduction", 0.1, 6.)
+        );
+        let tail = document
+            .segments
+            .iter()
+            .find(|r| r.id != original.id && !r.text.is_empty())
+            .expect("later speech must have its own passage");
+        assert_eq!(tail.rest["start_sample"], cut);
+        assert_eq!(tail.rest["end_sample"], 14 * RATE + 159);
     }
 
     #[test]

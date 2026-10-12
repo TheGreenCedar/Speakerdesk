@@ -41,6 +41,7 @@ const SERVER_REST_KEYS: &[&str] = &[
     "capture_audio",
     "text_audio_anchor",
     "canonical_text_end_sample",
+    "canonical_text_boundary_sample",
     "stream_generation",
     "reading_alignment",
     "decode_context",
@@ -235,6 +236,24 @@ fn finish_passage_edit(row: &mut Segment, prior: &Segment, changes: &Map<String,
     row.rest.remove("refinement_state");
     row.refinement_state = Some("edited".to_string());
     clear_alignment_bundle(row);
+    if changes.contains_key("text")
+        && prior.rest.get("canonical_state").and_then(Value::as_str) == Some("open")
+    {
+        // A manual fill before first ASR covers the saved displayed audio scope. A
+        // correction to decoded words covers only that decode's original endpoint.
+        if let Some(boundary) = prior
+            .rest
+            .get("canonical_text_boundary_sample")
+            .or_else(|| prior.rest.get("canonical_text_end_sample"))
+            .or_else(|| prior.rest.get("end_sample"))
+            .and_then(Value::as_i64)
+        {
+            row.rest.insert(
+                "canonical_text_boundary_sample".into(),
+                Value::from(boundary),
+            );
+        }
+    }
     if row.start != prior.start || row.end != prior.end {
         row.rest.remove("text_audio_anchor");
     }
