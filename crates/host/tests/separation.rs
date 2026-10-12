@@ -3,7 +3,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -12,9 +12,11 @@ use serde_json::{Value, json};
 use speakerdesk_core::{
     audio,
     document::{Document, Job},
+    ids::JobId,
     import::PassageCandidate,
     ipc::SeparatedAudio,
     separation::{CandidateVoice, MODEL},
+    store::{JobStore, SqliteJobStore},
     voice,
 };
 use speakerdesk_host::routes::{AppState, ApplicationModels};
@@ -22,12 +24,17 @@ use tokio_util::sync::CancellationToken;
 
 const JOB: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const INTERRUPTED: &str = "cccccccccccccccccccccccccccccccc";
+const SEPARATION_STOPPED: &str = "Voice separation stopped. Existing words and audio are retained.";
 
 struct Replay {
     entered: AtomicBool,
     release: (Mutex<bool>, Condvar),
     fail: bool,
     retried: AtomicBool,
+    document: Option<Document>,
+    available: bool,
+    empty_voice: bool,
+    calls: AtomicUsize,
 }
 
 impl Replay {
@@ -37,6 +44,10 @@ impl Replay {
             release: (Mutex::new(!blocked), Condvar::new()),
             fail,
             retried: AtomicBool::new(false),
+            document: None,
+            available: true,
+            empty_voice: false,
+            calls: AtomicUsize::new(0),
         }
     }
     fn release(&self) {
@@ -47,7 +58,13 @@ impl Replay {
 
 impl ApplicationModels for Replay {
     fn infer(&self, _: &Job, _: &CancellationToken) -> Result<Document, String> {
-        unreachable!("separation never reruns the import")
+        Ok(self
+            .document
+            .clone()
+            .expect("manual separation never reruns the import"))
+    }
+    fn separation_available(&self) -> bool {
+        self.available
     }
     fn separate_passage(
         &self,
@@ -57,6 +74,7 @@ impl ApplicationModels for Replay {
     ) -> Result<(SeparatedAudio, [CandidateVoice; 2]), String> {
         assert_eq!(pcm.len(), 32000);
         assert_eq!(language, "en");
+        self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.store(true, Ordering::SeqCst);
         let mut released = self.release.0.lock().unwrap();
         while !*released {
@@ -71,7 +89,11 @@ impl ApplicationModels for Replay {
                 channels: [vec![0.25; pcm.len()], vec![0.5; pcm.len()]],
             },
             std::array::from_fn(|channel| CandidateVoice {
-                text: format!("estimated voice {channel}"),
+                text: if self.empty_voice && channel == 1 {
+                    String::new()
+                } else {
+                    format!("estimated voice {channel}")
+                },
                 language: "en".into(),
                 review: false,
                 transcription_review: None,
@@ -217,6 +239,323 @@ fn segment<'a>(job: &'a Value, id: &str) -> &'a Value {
         .iter()
         .find(|row| row["id"] == id)
         .unwrap()
+}
+
+fn stored(root: &Path) -> Job {
+    SqliteJobStore::open(root.join("speakerdesk.sqlite"))
+        .unwrap()
+        .get(&JobId::parse(JOB).unwrap(), false)
+        .unwrap()
+        .unwrap()
+}
+
+fn automatic_fixture(root: &Path, blocked: bool, mode: &str) -> (AppState, Arc<Replay>) {
+    let state = fixture(root, false);
+    let mut job = stored(root);
+    let mut document = job.document.take().unwrap();
+    document.segments[0].text = "original mixed words".into();
+    if mode != "protected" {
+        document.segments[0].protected_fields = None;
+    }
+    job.status = "uploaded".into();
+    state.insert_job(job);
+    state.set_issues(Vec::new());
+    let mut replay = Replay::new(blocked, mode == "failure");
+    replay.document = Some(document);
+    replay.available = mode != "unavailable";
+    replay.empty_voice = mode == "empty_voice";
+    let replay = Arc::new(replay);
+    state.set_models(replay.clone());
+    (state, replay)
+}
+
+async fn wait_separation(replay: &Replay) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !replay.entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn automatic_import_separation_preserves_protection_cancellation_and_unrelated_edits() {
+    for mode in [
+        "protected",
+        "unavailable",
+        "edit",
+        "cancel",
+        "stale_generation",
+        "failure",
+        "empty_voice",
+        "unrelated",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let skip = matches!(mode, "protected" | "unavailable");
+        let (state, replay) = automatic_fixture(temp.path(), !skip, mode);
+        let _release_on_failure = ReleaseOnDrop(replay.clone());
+        let host = Host::start(state).await;
+        host.post("/run", 202).await;
+        if !skip {
+            wait_separation(&replay).await;
+            match mode {
+                "edit" => {
+                    let response = host.request(reqwest::Method::PATCH, "/segments/mixed", Some(json!({"segment_revision":2,"changes":{"text":"my concurrent correction"}}))).await;
+                    assert_eq!(response.status(), 200);
+                }
+                "cancel" => {
+                    let cancelled = host.post("/cancel", 200).await;
+                    assert!(cancelled.get("passage_separation").is_none());
+                    assert_eq!(cancelled["message"], SEPARATION_STOPPED);
+                }
+                "stale_generation" => {
+                    let mut current = stored(temp.path());
+                    let generation = current.extra["operation_generation"].as_u64().unwrap();
+                    current
+                        .extra
+                        .insert("operation_generation".into(), json!(generation + 1));
+                    current.extra.remove("passage_separation");
+                    current.message = "A newer operation owns this message.".into();
+                    host.state.insert_job(current);
+                }
+                "unrelated" => {
+                    let current = host.job().await;
+                    let mut document = current["document"].clone();
+                    document["segments"][1]["text"] = json!("my neighbouring correction");
+                    document["speakers"]["speaker_0"] = json!("Renamed Ada");
+                    let response = host
+                        .request(
+                            reqwest::Method::PUT,
+                            "/transcript",
+                            Some(json!({"revision":current["revision"],"document":document})),
+                        )
+                        .await;
+                    assert_eq!(response.status(), 200);
+                }
+                _ => {}
+            }
+            replay.release();
+        }
+        host.state.drain();
+        let finished = host.job().await;
+        assert_eq!(finished["status"], "ready", "{mode}");
+        assert!(finished.get("passage_separation").is_none(), "{mode}");
+        if mode == "stale_generation" {
+            assert_eq!(finished["message"], "A newer operation owns this message.");
+        } else if matches!(mode, "edit" | "cancel" | "failure" | "empty_voice") {
+            assert!(
+                finished["separation_error"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty()),
+                "{mode}"
+            );
+            assert_eq!(
+                finished["message"], SEPARATION_STOPPED,
+                "{mode}: the editor status must report that separation stopped"
+            );
+        }
+        assert_eq!(
+            replay.calls.load(Ordering::SeqCst),
+            usize::from(!skip),
+            "{mode}"
+        );
+        assert!(
+            finished["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("separation_candidate").is_none()),
+            "automatic work must never leave an acceptance task: {mode}"
+        );
+        if mode == "unrelated" {
+            let rows = finished["document"]["segments"].as_array().unwrap();
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[0]["text"], "estimated voice 0");
+            assert_eq!(rows[1]["text"], "estimated voice 1");
+            assert_eq!(rows[2]["id"], "adjacent");
+            assert_eq!(rows[2]["text"], "my neighbouring correction");
+            assert_eq!(finished["document"]["speakers"]["speaker_0"], "Renamed Ada");
+            for row in &rows[..2] {
+                assert_eq!(
+                    row["speaker"], "unassigned",
+                    "channel order cannot identify the local tracks"
+                );
+                assert_eq!(row["review"], true);
+                assert_eq!(row["review_resolution"], "separated_estimate");
+            }
+        } else {
+            let rows = finished["document"]["segments"].as_array().unwrap();
+            assert_eq!(rows.len(), 2, "{mode}");
+            assert_eq!(rows[0]["id"], "mixed", "{mode}");
+            assert_eq!(
+                rows[0]["text"],
+                if mode == "edit" {
+                    "my concurrent correction"
+                } else {
+                    "original mixed words"
+                },
+                "{mode}"
+            );
+            assert_eq!(rows[1]["text"], "adjacent words", "{mode}");
+            let directory = temp.path().join(JOB).join("separated");
+            if directory.exists() {
+                assert_eq!(
+                    std::fs::read_dir(directory).unwrap().count(),
+                    0,
+                    "{mode}: rejected automatic work cannot retain generated assets"
+                );
+            }
+        }
+        assert!(temp.path().join(JOB).join("audio.wav").is_file());
+        host.stop().await;
+        if matches!(mode, "cancel" | "failure") {
+            let state = AppState::open(temp.path()).unwrap();
+            let mut previous = stored(temp.path());
+            let mut replay = Replay::new(false, false);
+            replay.document = previous.document.take();
+            let replay = Arc::new(replay);
+            state.set_models(replay.clone());
+            state.set_issues(Vec::new());
+            previous.status = "uploaded".into();
+            state.insert_job(previous);
+            let host = Host::start(state).await;
+            host.post("/run", 202).await;
+            host.state.drain();
+            assert_eq!(
+                replay.calls.load(Ordering::SeqCst),
+                0,
+                "{mode}: restart cannot repeat the attempted source"
+            );
+            assert_eq!(
+                host.job().await["document"]["segments"][0]["text"],
+                "original mixed words"
+            );
+            host.stop().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn automatic_rows_export_restart_restore_and_do_not_repeat_the_same_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let (state, replay) = automatic_fixture(temp.path(), false, "ordinary");
+    let original_audio = std::fs::read(temp.path().join(JOB).join("audio.wav")).unwrap();
+    let host = Host::start(state).await;
+    host.post("/run", 202).await;
+    host.state.drain();
+    let split = host.job().await;
+    let rows = split["document"]["segments"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    let episode = rows[0]["separation"]["episode_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for channel in 0..2 {
+        assert_eq!(rows[channel]["separation"]["channel"], channel);
+        assert_eq!(rows[channel]["separation"]["origin_sample"], 32000);
+        assert_eq!(rows[channel]["separation"]["length_samples"], 32000);
+        assert!(rows[channel].get("alignment").is_none());
+        assert!(rows[channel].get("reading_turns").is_none());
+        let asset = temp
+            .path()
+            .join(JOB)
+            .join("separated")
+            .join(format!("{episode}-{channel}.wav"));
+        let samples = audio::read_pcm16(asset).unwrap();
+        assert_eq!(samples, vec![if channel == 0 { 0.25 } else { 0.5 }; 32000]);
+        let response = host
+            .request(
+                reqwest::Method::GET,
+                &format!("/separation/{episode}/{channel}/audio"),
+                None,
+            )
+            .await;
+        assert_eq!(response.status(), 200);
+        assert!(response.bytes().await.unwrap().len() > 44);
+    }
+    for kind in ["txt", "srt", "vtt", "json"] {
+        let response = host
+            .request(reqwest::Method::GET, &format!("/export/{kind}"), None)
+            .await;
+        assert_eq!(response.status(), 200);
+        let body = response.text().await.unwrap();
+        assert!(body.find("estimated voice 0").unwrap() < body.find("estimated voice 1").unwrap());
+        assert!(!body.contains("original mixed words"));
+        if kind != "json" {
+            assert!(body.contains("Voice A") && body.contains("Voice B"));
+        }
+    }
+    assert_eq!(replay.calls.load(Ordering::SeqCst), 1);
+    host.stop().await;
+
+    let state = AppState::open(temp.path()).unwrap();
+    let replay = Arc::new(Replay::new(false, false));
+    state.set_models(replay.clone());
+    let host = Host::start(state).await;
+    assert_eq!(host.job().await["document"], split["document"]);
+    let restored = host
+        .post(&format!("/separation/{episode}/restore"), 200)
+        .await;
+    assert_eq!(
+        restored["document"]["segments"][0]["text"],
+        "original mixed words"
+    );
+    for _ in 0..2 {
+        let current = host.job().await;
+        let response = host
+            .request(
+                reqwest::Method::PUT,
+                "/transcript",
+                Some(json!({"revision":current["revision"],"document":current["document"]})),
+            )
+            .await;
+        assert_eq!(response.status(), 200);
+        let response = host
+            .request(reqwest::Method::GET, "/export/json", None)
+            .await;
+        assert_eq!(response.status(), 200);
+    }
+    host.state.drain();
+    assert_eq!(
+        replay.calls.load(Ordering::SeqCst),
+        0,
+        "GET, save, export and restore cannot start model work"
+    );
+    host.stop().await;
+
+    let state = AppState::open(temp.path()).unwrap();
+    let mut restored_job = stored(temp.path());
+    let mut replay = Replay::new(false, false);
+    replay.document = restored_job.document.take();
+    let replay = Arc::new(replay);
+    state.set_models(replay.clone());
+    state.set_issues(Vec::new());
+    // Re-enter the import Ready boundary with the persisted original source.
+    restored_job.status = "uploaded".into();
+    state.insert_job(restored_job);
+    let host = Host::start(state).await;
+    host.post("/run", 202).await;
+    host.state.drain();
+    let finished = host.job().await;
+    assert_eq!(
+        replay.calls.load(Ordering::SeqCst),
+        0,
+        "the persisted attempt must survive restore, saves and restart"
+    );
+    assert_eq!(
+        finished["document"]["segments"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        finished["document"]["segments"][0]["text"],
+        "original mixed words"
+    );
+    assert_eq!(
+        std::fs::read(temp.path().join(JOB).join("audio.wav")).unwrap(),
+        original_audio
+    );
+    host.stop().await;
 }
 
 #[tokio::test]
@@ -492,6 +831,7 @@ async fn restart_stops_only_the_interrupted_attempt_and_keeps_original_audio() {
     let initial = Host::start(state.clone()).await;
     let mut stored: Job = serde_json::from_value(initial.job().await).unwrap();
     initial.stop().await;
+    stored.message = "Separating overlapping voices. Your original words remain editable.".into();
     stored.extra.insert(
         "passage_separation".into(),
         json!({"id":INTERRUPTED,"segment_id":"mixed"}),
@@ -511,6 +851,7 @@ async fn restart_stops_only_the_interrupted_attempt_and_keeps_original_audio() {
     let host = Host::start(AppState::open(temp.path()).unwrap()).await;
     let job = host.job().await;
     assert_eq!(job["status"], "ready");
+    assert_eq!(job["message"], SEPARATION_STOPPED);
     assert!(job.get("passage_separation").is_none());
     assert!(job.get("separation_error").is_some());
     assert!(!directory.join(format!("{INTERRUPTED}-0.part")).exists());

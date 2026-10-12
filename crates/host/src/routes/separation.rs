@@ -5,6 +5,8 @@ use speakerdesk_core::{
     separation::{self as domain, Candidate},
 };
 
+const RETAINED: &str = "Voice separation stopped. Existing words and audio are retained.";
+
 #[derive(Deserialize)]
 struct Begin {
     revision: i64,
@@ -52,7 +54,7 @@ fn start(app: &AppState, jid: &str, body: &[u8]) -> Result<Job, ApiError> {
             "Use or discard the existing voice estimates before trying again.",
         ));
     }
-    let path = crate::native::passage_recording_path(app.data_dir(), &job, &segment)
+    crate::native::passage_recording_path(app.data_dir(), &job, &segment)
         .map_err(|_| ApiError::new(409, "The original passage audio is unavailable."))?;
     let episode = random_hex(16);
     job.extra.remove("separation_error");
@@ -66,9 +68,116 @@ fn start(app: &AppState, jid: &str, body: &[u8]) -> Result<Job, ApiError> {
     let models = app.models();
     app.worker.enqueue(move || {
         let _lease = lease;
-        execute(&operation, models.as_ref(), &job, &segment, &path, &episode);
+        execute(&operation, models.as_ref(), &job, &segment, &episode, false);
     });
     Ok(reply)
+}
+
+fn unattempted(job: &Job, segment: &Segment) -> bool {
+    segment.separation_candidate.is_none()
+        && segment
+            .protected_fields
+            .as_ref()
+            .is_none_or(|fields| fields.is_empty())
+        && domain::eligible(job, segment).is_ok()
+        && job
+            .extra
+            .get("separation_attempts")
+            .and_then(|attempts| attempts.get(&segment.id))
+            .and_then(|attempts| attempts.get(domain::source_key(job, segment)))
+            .and_then(Value::as_str)
+            != Some(domain::MODEL)
+}
+
+/// A saved operation's successor rechecks admission and current source at dequeue time.
+pub(super) fn automatic(
+    shared: &Arc<Shared>,
+    admission: &UpdateAdmission,
+    id: &JobId,
+    predecessor_generation: u64,
+) {
+    let models = shared.models.lock().expect("models").clone();
+    if !models.separation_available() {
+        return;
+    }
+    let Ok(_lease) = admission.lease(Activity::Refinement) else {
+        return;
+    };
+    let mut store = shared.store.lock().expect("store");
+    let Ok(Some(mut job)) = store.get(id, false) else {
+        return;
+    };
+    if job.status != "ready"
+        || job.extra.contains_key("passage_separation")
+        || job
+            .extra
+            .get("operation_generation")
+            .and_then(Value::as_u64)
+            != Some(predecessor_generation)
+    {
+        return;
+    }
+    let ids: Vec<_> = job
+        .document
+        .iter()
+        .flat_map(|document| &document.segments)
+        .filter(|segment| unattempted(&job, segment))
+        .map(|segment| segment.id.clone())
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let Ok(operation) = begin_operation(
+        shared,
+        admission,
+        &mut store,
+        &mut job,
+        Activity::Refinement,
+    ) else {
+        return;
+    };
+    drop(store);
+    for segment_id in ids {
+        if operation.cancellation.is_cancelled() {
+            break;
+        }
+        let episode = random_hex(16);
+        let started = shared.store.lock().expect("store").update_job(id, |job| {
+            if !operation.current(job) {
+                return Err(ApiError::new(409, "Separation was superseded."));
+            }
+            let segment = job
+                .document
+                .as_ref()
+                .and_then(|document| document.segments.iter().find(|segment| segment.id == segment_id))
+                .filter(|segment| unattempted(job, segment))
+                .cloned()
+                .ok_or_else(|| ApiError::new(409, "The passage no longer needs automatic separation."))?;
+            let source_key = domain::source_key(job, &segment);
+            job.extra
+                .entry("separation_attempts")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("owned attempt map")
+                .entry(segment.id.clone())
+                .or_insert_with(|| json!({}))[&source_key] = json!(domain::MODEL);
+            job.extra.remove("separation_error");
+            job.extra.insert("passage_separation".into(), json!({"id":episode,"segment_id":segment.id,"phase":"Separating voices and transcribing each estimate…"}));
+            job.message = "Separating overlapping voices. Your original words remain editable.".into();
+            Ok::<_, ApiError>(segment)
+        });
+        let Ok(Some((original, segment))) = started else {
+            continue;
+        };
+        execute(
+            &operation,
+            models.as_ref(),
+            &original,
+            &segment,
+            &episode,
+            true,
+        );
+    }
 }
 
 fn valid_episode(id: &str) -> bool {
@@ -164,14 +273,17 @@ fn execute(
     models: &dyn ApplicationModels,
     original: &Job,
     segment: &Segment,
-    path: &Path,
     episode: &str,
+    automatic: bool,
 ) {
     let source_key = domain::source_key(original, segment);
     let result: Result<Candidate, String> = (|| {
         if operation.cancellation.is_cancelled() {
             return Err("Separation cancelled.".into());
         }
+        let path =
+            crate::native::passage_recording_path(&operation.shared.data_dir, original, segment)
+                .map_err(|e| e.to_string())?;
         let pcm =
             audio::read_pcm16_range(path, segment.start, segment.end).map_err(|e| e.to_string())?;
         let language = segment
@@ -232,19 +344,32 @@ fn execute(
         }
         job.extra.remove("passage_separation");
         let current=job.document.as_ref().and_then(|d|d.segments.iter().find(|s|s.id==segment.id));
-        if current.is_none_or(|row|domain::source_key(job,row)!=source_key) {
+        if current.is_none_or(|row|domain::source_key(job,row)!=source_key
+            || automatic && !row.protected_fields.as_ref().is_none_or(|fields|fields.is_empty())) {
             job.extra.insert("separation_error".into(),json!("The passage changed during separation. Your edits are retained; retry the current passage."));
+            job.message=RETAINED.into();
             return Ok(false);
         }
         match &result {
             Ok(candidate) => {
                 job.document.as_mut().expect("current document").segments.iter_mut().find(|s|s.id==segment.id).expect("current passage").separation_candidate=Some(Box::new(candidate.clone()));
+                if automatic {
+                    if let Err(error) = domain::accept(job, &segment.id, episode) {
+                        job.document.as_mut().expect("current document").segments.iter_mut().find(|s|s.id==segment.id).expect("current passage").separation_candidate=None;
+                        job.extra.insert("separation_error".into(),json!(error.message));
+                        job.message=RETAINED.into();
+                        return Ok(false);
+                    }
+                    job.message="Separated voices saved. Check separated voices.".into();
+                    return Ok(true);
+                }
                 job.message="Voice estimates ready. Listen to both before replacing the original passage.".into();
                 Ok(true)
             }
             Err(error) => {
                 tracing::warn!(%error,"saved separation failed");
                 job.extra.insert("separation_error".into(),json!("Separation did not finish. Original words and audio are retained; check model setup and retry."));
+                job.message=RETAINED.into();
                 Ok(false)
             }
         }
@@ -257,10 +382,95 @@ fn execute(
 
 pub(super) fn interrupt(job: &mut Job) {
     if job.extra.remove("passage_separation").is_some() {
+        job.message = RETAINED.into();
         job.extra.insert(
             "separation_error".into(),
             json!("Separation stopped. Original words and audio are retained."),
         );
+    }
+}
+
+#[cfg(test)]
+mod automatic_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+
+    struct CountingModel(AtomicUsize);
+    impl ApplicationModels for CountingModel {
+        fn infer(&self, _: &Job, _: &CancellationToken) -> Result<Document, String> {
+            unreachable!()
+        }
+        fn separation_available(&self) -> bool {
+            true
+        }
+        fn separate_passage(
+            &self,
+            _: &[f32],
+            _: &str,
+            _: &CancellationToken,
+        ) -> Result<
+            (
+                speakerdesk_core::ipc::SeparatedAudio,
+                [domain::CandidateVoice; 2],
+            ),
+            String,
+        > {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("scripted separation failure".into())
+        }
+    }
+
+    #[test]
+    fn queued_work_skips_capture_and_setup_without_consuming_the_attempt() {
+        for activity in [Activity::Setup, Activity::recording()] {
+            let root = tempfile::tempdir().unwrap();
+            let app = AppState::open(root.path()).unwrap();
+            let job: Job = serde_json::from_value(json!({"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"mix","status":"ready","language":"en","duration":2.,"created":0.,"updated":0.,"operation_generation":7,"document":{"speakers":{},"segments":[{"id":"mixed","start":0.,"end":2.,"speaker":"multiple_speakers","text":"original words","audio_revision":0,"speaker_activity":{"audio_revision":0,"observed_end_sample":32000,"regions":[{"start_sample":0,"end_sample":32000,"speakers":["speaker_0","speaker_1"]}]}}]}})).unwrap();
+            let folder = root.path().join(job.id.as_str());
+            fs::create_dir(&folder).unwrap();
+            let mut writer = audio::RecordingWriter::create(folder.join("audio.wav")).unwrap();
+            writer.write_samples(&vec![0.125; 32000]).unwrap();
+            drop(writer);
+            app.insert_job(job.clone());
+            let models = Arc::new(CountingModel(AtomicUsize::new(0)));
+            app.set_models(models.clone());
+            let (started, waiting) = mpsc::channel();
+            let (release, blocked) = mpsc::channel();
+            app.worker.enqueue(move || {
+                started.send(()).unwrap();
+                blocked.recv().unwrap();
+            });
+            waiting.recv().unwrap();
+            app.queue_separation(job.id.clone(), 7);
+            let lease = app.admission.lease(activity).unwrap();
+            let recording = if activity == Activity::recording() {
+                let mut other = job.clone();
+                other.id = JobId::parse("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+                Some(
+                    app.begin_recording_operation(&mut app.store(), &mut other)
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            release.send(()).unwrap();
+            app.drain();
+            let skipped = app.store().get(&job.id, false).unwrap().unwrap();
+            assert_eq!(models.0.load(Ordering::SeqCst), 0);
+            assert!(!skipped.extra.contains_key("separation_attempts"));
+            assert_eq!(skipped.document, job.document);
+            drop(recording);
+            drop(lease);
+            app.queue_separation(job.id.clone(), 7);
+            app.drain();
+            let attempted = app.store().get(&job.id, false).unwrap().unwrap();
+            assert_eq!(models.0.load(Ordering::SeqCst), 1);
+            assert!(attempted.extra.contains_key("separation_attempts"));
+            assert_eq!(attempted.document, job.document);
+        }
     }
 }
 

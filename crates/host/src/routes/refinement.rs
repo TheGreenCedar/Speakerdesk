@@ -104,11 +104,19 @@ fn begin(app: &AppState, jid: &str) -> Result<Job, ApiError> {
     job.updated = unix_now();
     let operation = app.begin_refinement_operation(&mut store, &mut job)?;
     drop(store);
+    let shared = app.shared.clone();
+    let admission = app.admission.clone();
+    let queue = app.worker.queue_handle();
+    let generation = operation.generation;
     app.worker.enqueue(move || {
-        let _lease = lease;
         if let Err(error) = execute(&operation, models.as_ref()) {
             tracing::error!(?error, "saved accuracy pass could not publish its state");
         }
+        drop(operation);
+        drop(lease);
+        queue.enqueue(move || {
+            separation::automatic(&shared, &admission, &id, generation);
+        });
     });
     Ok(job)
 }

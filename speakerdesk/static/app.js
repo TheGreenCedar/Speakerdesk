@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="speakerdesk-token"]').content;
 let config, jobs = [], selected = null, doc = null, dirty = false, polling = false, saving = false, editGeneration = 0, selectionGeneration = 0;
-let meeting = null, followingLive = true, passageEnd = null, passageStart = null, retrying = false, startingJob = null;
+let meeting = null, followingLive = true, passageEnd = null, passageStart = null, retrying = false, separationRequestMessage = '', startingJob = null;
 let changingLiveLanguage = false, changingDefaultLanguage = false, defaultLanguageGeneration = 0;
 let pendingExport = null, autosaveTimer = null, setupState = null, undoRemoval = null;
 let updateState = {id: 0, state: 'unavailable'}, updateFrozen = false, updatePolling = false;
@@ -189,9 +189,10 @@ function setStatus() {
   $('recording-name').textContent = selected.name; $('recording-name').title = selected.name;
   $('meeting-date').textContent = new Date(selected.created*1000).toLocaleString(undefined,{weekday:'long',month:'long',day:'numeric',hour:'numeric',minute:'2-digit'});
   const starting=startingJob===selected.id;
-  $('job-message').textContent = selected.passage_separation?.phase || (retrying || selected.passage_retry ? 'Working on passage locally…' : starting ? 'Starting transcription…' : selected.message);
+  const passageMessage=separationRequestMessage || (selected.passage_separation ? selected.passage_separation.phase || 'Separating voices locally…' : retrying || selected.passage_retry ? 'Retrying passage locally…' : '');
+  $('job-message').textContent = passageMessage || (starting ? 'Starting transcription…' : selected.message);
   const live=isLive(), busy=live || starting || ['preparing','processing','queued'].includes(selected.status);
-  $('job-progress').hidden=selected.kind==='meeting' || !(busy || retrying || selected.passage_retry);
+  $('job-progress').hidden=selected.kind==='meeting' || !(busy || retrying || selected.passage_retry || selected.passage_separation);
   $('editor').inert=updateFrozen || retrying || (busy && !live);
   $('recording-dot').hidden=!live;
   $('recording-dot').classList.toggle('paused',selected.status==='paused');
@@ -659,6 +660,7 @@ async function separationRequest(path,body) {
     await flushSave();
   }
   if(selected?.id!==jid || generation!==selectionGeneration)throw new Error('The selected recording changed. Try again on its current passage.');
+  separationRequestMessage={separation:'Starting voice separation…',cancel:'Stopping voice separation…',accept:'Saving separated voices…',discard:'Keeping the original passage…',restore:'Restoring the original passage…'}[path.split('/').pop()] || 'Starting voice separation…';
   retrying=true;const requestGeneration=++selectionGeneration;setStatus();
   try {
     const next=await api(`/api/jobs/${jid}${path}`,{method:'POST',...(body?{body:JSON.stringify(body())}:{})});
@@ -666,7 +668,7 @@ async function separationRequest(path,body) {
     selected=next;
     if(!cancelling || (!dirty && !hasPassageDrafts() && !hasPendingPassageSaves()))doc=structuredClone(next.document);
     setStatus();renderEditor();
-  }finally{retrying=false;if(selected)setStatus();}
+  }finally{retrying=false;separationRequestMessage='';if(selected)setStatus();}
 }
 function playOriginalPassage(segment,episode=null) {
   const audio=$('player');

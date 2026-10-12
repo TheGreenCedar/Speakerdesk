@@ -92,6 +92,12 @@ impl ApplicationModels for NativeModels {
         )
         .map_err(|e| e.to_string())
     }
+    fn separation_available(&self) -> bool {
+        self.model_root
+            .join(crate::setup::separation_artifact().id)
+            .join("model.safetensors")
+            .is_file()
+    }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
         self.voice.read().expect("voice capability").clone()
     }

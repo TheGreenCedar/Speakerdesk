@@ -1,6 +1,10 @@
 # Saved-passage separation proposal — issue #25
 
-Status: proposed product behavior and architecture, for review before implementation.
+Status: historical proposal. The owner subsequently requested automatic separation
+and publication, with a compact verification hint instead of mandatory comparison,
+acceptance, or labeling. See [current product behavior](product-behavior.md) for the
+implemented rules. The manual flow below records the original proposal; it is not
+the current acceptance contract or evidence that the feature has been qualified.
 Source baseline: PR #27 commit `92bac44662832468cdc38b67f8137c1547536f9e`.
 This design is separate from the 0.7.0 release; it does not establish separation support.
 

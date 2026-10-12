@@ -2,8 +2,9 @@ use super::layers::{self, AffineNorm, Flash, Fsmn};
 use crate::weights::{error, take, verify};
 use mlx_rs::{
     Array, Dtype,
-    module::{Module, Param},
-    nn::{Conv1d, ConvTranspose1d, LayerNorm},
+    error::Exception,
+    module::Module,
+    nn::{Conv1d, LayerNorm},
     ops::{self, indexing::IndexOp},
 };
 use speakerdesk_core::error::ChildError;
@@ -14,7 +15,7 @@ use std::{
 
 pub struct Network {
     encoder: Conv1d,
-    decoder: ConvTranspose1d,
+    decoder: Array,
     input_norm: AffineNorm,
     input_projection: Conv1d,
     position_scale: Array,
@@ -44,18 +45,9 @@ impl Network {
         }
         let network = Self {
             encoder: layers::conv(&mut w, "enc.conv1d", 1, 512, 16, 8, 0, 1, 1, false)?,
-            // PyTorch transposed convolution is [input, output, kernel].
-            decoder: ConvTranspose1d {
-                weight: Param::new(
-                    take(&mut w, "dec.weight", &[512, 1, 16], Dtype::Float32)?
-                        .transpose_axes(&[1, 2, 0])
-                        .map_err(error)?,
-                ),
-                bias: Param::new(None),
-                padding: 0,
-                output_padding: 0,
-                stride: 8,
-            },
+            decoder: take(&mut w, "dec.weight", &[512, 1, 16], Dtype::Float32)?
+                .reshape(&[512, 16])
+                .map_err(error)?,
             input_norm: AffineNorm::load(&mut w, "mask_net.norm", 512)?,
             input_projection: layers::conv(
                 &mut w,
@@ -208,7 +200,7 @@ impl Network {
         if cancel.load(Ordering::Acquire) {
             return Err(ChildError::Cancelled);
         }
-        let decoded = self.decoder.forward(&masked).map_err(error)?;
+        let decoded = decode(&masked, &self.decoder).map_err(error)?;
         let decoded = layers::pad_time(&decoded, pcm.len() as i32).map_err(error)?;
         decoded.eval().map_err(error)?;
         if cancel.load(Ordering::Acquire) {
@@ -229,5 +221,65 @@ impl Network {
             return Err(error("MossFormer2 produced an invalid waveform"));
         }
         Ok(result)
+    }
+}
+
+/// Kernel 16 / stride 8 transpose convolution without MLX's dilated-input unfold buffer.
+fn decode(masked: &Array, weight: &Array) -> Result<Array, Exception> {
+    let frames = masked.matmul(weight)?;
+    let shape = [frames.dim(0), frames.dim(1) * 8, 1];
+    let head = frames.index((.., .., ..8)).reshape(&shape)?;
+    let tail = frames.index((.., .., 8..)).reshape(&shape)?;
+    let zero = ops::zeros::<f32>(&[frames.dim(0), 8, 1])?;
+    ops::concatenate(&[head, zero.clone()], 1)?.add(ops::concatenate(&[zero, tail], 1)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoder_matches_transpose_convolution_sample_coordinates_and_zero_tails() {
+        mlx_rs::with_device(mlx_rs::Device::cpu(), || {
+            let mut weights = vec![0f32; 512 * 16];
+            for tap in 0..16 {
+                weights[tap] = (tap + 1) as f32;
+                weights[16 + tap] = (16 - tap) as f32 * 0.25;
+                weights[511 * 16 + tap] =
+                    (tap + 1) as f32 * if tap % 2 == 0 { 0.125 } else { -0.125 };
+            }
+            let weight = Array::from_slice(&weights, &[512, 16]);
+            for samples in 16..40 {
+                let n = (samples - 16) / 8 + 1;
+                let mut input = vec![0f32; 2 * n * 512];
+                let mut expected = vec![0f32; 2 * samples];
+                for batch in 0..2 {
+                    for frame in 0..n {
+                        let start = (batch * n + frame) * 512;
+                        input[start] = (batch + frame + 1) as f32;
+                        input[start + 1] = -(batch as f32 + 1.) * (frame as f32 + 1.) * 0.5;
+                        input[start + 511] = frame as f32 - batch as f32 + 0.25;
+                        for tap in 0..16 {
+                            for channel in [0, 1, 511] {
+                                expected[batch * samples + frame * 8 + tap] +=
+                                    input[start + channel] * weights[channel * 16 + tap];
+                            }
+                        }
+                    }
+                }
+                let masked = Array::from_slice(&input, &[2, n as i32, 512]);
+                let decoded = decode(&masked, &weight).unwrap();
+                assert_eq!(decoded.shape(), [2, (8 * n + 8) as i32, 1]);
+                let padded = layers::pad_time(&decoded, samples as i32).unwrap();
+                let actual = padded.try_as_slice::<f32>().unwrap();
+                assert_eq!(actual.len(), expected.len());
+                for (actual, expected) in actual.iter().zip(&expected) {
+                    assert!(
+                        (actual - expected).abs() <= 1e-5,
+                        "{samples} samples: {actual} != {expected}"
+                    );
+                }
+            }
+        });
     }
 }
