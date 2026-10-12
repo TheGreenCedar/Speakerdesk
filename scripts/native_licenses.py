@@ -85,7 +85,8 @@ if __name__ == '__main__':
         ['cargo', 'metadata', '--locked', '--format-version', '1', '--filter-platform', 'aarch64-apple-darwin'], cwd=ROOT))
     pins = json.loads((ROOT / 'packaging/native-license-sources.json').read_text())
     destination = ROOT / 'target/native/THIRD_PARTY_NOTICES.txt'
-    extra = {'Model and source attribution': (ROOT / 'packaging/THIRD_PARTY_NOTICES.md').read_text()}
+    extra = {'Speakerdesk': (ROOT / 'LICENSE').read_text(),
+             'Model and source attribution': (ROOT / 'packaging/THIRD_PARTY_NOTICES.md').read_text()}
     for title, pin in pins['sources'].items():
         extra[f"{title} / {pin['url']} / SHA-256: {pin['sha256']}"] = fetch_text(pin, destination.parent / 'license-sources')
     for title, relative in {

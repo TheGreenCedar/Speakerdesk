@@ -2,6 +2,7 @@
   "name": "speakerdesk-desktop",
   "private": true,
   "version": "0.7.0",
+  "license": "MIT",
   "scripts": {
     "build": "tauri build",
     "dev": "tauri dev"
