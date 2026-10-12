@@ -1,8 +1,10 @@
 # CI build reuse
 
 The Linux/macOS native checks and the manual Apple producer reuse Cargo
-downloads and compiler objects through the existing pinned sccache 0.16.0
-action. Cargo target directories stay fresh. Every candidate still runs the
+downloads and dependency build outputs through pinned Swatinem/rust-cache
+2.9.2, and compiler objects through pinned sccache 0.16.0. Workspace crates
+remain fresh; the maintained action prunes them, final binaries and incremental
+output before saving. Every candidate still runs the
 locked build, native dependency preparation, bundle checks and exact-source
 artifact manifest generation.
 
@@ -16,21 +18,28 @@ package verification.
 
 | Cache | Reuse rule | Persisted paths |
 | --- | --- | --- |
-| Cargo downloads | Exact Cargo.lock key, compatible tool/environment fallback | `~/.cargo/registry`, `~/.cargo/git` |
+| Cargo dependency outputs and downloads | Native contract/job profile plus the maintained action tool/environment and dependency keys; compatible lock fallback | Pruned `target`, `~/.cargo/registry`, `~/.cargo/git` |
 | Rust compiler objects | Exact source/profile key, compatible native contract fallback; sccache validates each compilation | `$RUNNER_TEMP/speakerdesk-sccache` |
 | npm downloads (producer) | Exact package-lock.json key, compatible tool/environment fallback | `.cache/npm` |
 | Swift capture helper (producer) | Exact source/tool/environment key and verified receipt; no fallback | `.cache/components/capture` |
+| Echo component | Exact pinned source, build/guard scripts and tools plus verified receipt; no fallback | `.cache/components/echo` |
 | Source-check Python downloads | Exact CI requirements key | `~/.cache/pip` |
 
-Compiler compatibility binds OS, runner image, architecture/host target, Rust,
+Dependency compatibility binds OS, runner image, architecture/host target, Rust,
 sccache, native C compiler, CMake/Ninja and Rust flags. On macOS it also binds
 Xcode, Swift, SDK and deployment target (15.0 in the producer; Rust's default in
-native CI unless explicitly set). The tracked contract covers
-Cargo configuration/toolchain, workflow/build scripts, vendored MLX adapter,
-MLX runtime fetch pins, echo source lock/build guard, Tauri configuration and
-embedded web/model metadata. Changing these inputs blocks compiler fallback.
-The pinned MLX 0.32.2 runtime and echo sources are still prepared and checked by
-their existing scripts; their downloads and build trees are not persisted.
+native CI unless explicitly set). The dependency contract covers the vendored MLX adapter, runtime fetch pins
+and echo source/build guard. The maintained action additionally binds Cargo
+configuration, manifests/lockfiles and Rust environment. Application, UI, CI
+and documentation edits preserve unchanged dependency outputs. Native contract
+or tool changes block dependency fallback. The sccache contract separately
+binds workflow/build scripts, Tauri configuration and embedded web/model
+metadata as before.
+The pinned MLX 0.32.2 runtime is still prepared and checked by its existing
+script. Echo output reuse requires an exact identity and payload digest; misses
+still fetch and verify the pinned source through the guarded build. Native
+runtime downloads and echo source/build trees are not persisted. Notice
+generation fetches verified echo source notices even when the library is a hit.
 
 Rust source, Cargo manifest/lock/version and job profile changes select a new
 exact compiler key. If the native contract is unchanged, the compatible prefix
@@ -43,10 +52,13 @@ store. A different Rust version, target or native toolchain does.
 Rust incremental compilation is disabled. sccache does not cache Rust crates
 that invoke the linker, so final executables, linking and packaging remain real
 work on every run. See the [pinned sccache Rust documentation](https://github.com/mozilla/sccache/blob/v0.16.0/docs/Rust.md).
-No Cargo target directory, model weights, recording, credential, keychain,
-whole home/temp directory or signed artifact is saved. The existing limits are
-512 MiB for sccache and 2 GiB for total native cache uploads; an oversized cache
-skips upload without invalidating an otherwise successful build.
+No workspace build output, model weights, recording, credential, keychain,
+whole home/temp directory or signed artifact is saved. The explicit compiler/component caches retain a 512 MiB sccache limit and
+2 GiB aggregate byte guard; an oversized cache skips their upload without
+invalidating an otherwise successful build. Cargo dependency outputs use the
+maintained action pruning and GitHub cache limits. Its post-save runs only on
+successful trusted main jobs and reports actual pruned archive bytes and
+transfer cost. No arbitrary raw target-size threshold prevents dependency reuse.
 
 The exact Swift cache remains confined to the ad-hoc producer. Its receipt must
 match both identity and payload digest before restoration. Developer ID builds
@@ -57,16 +69,18 @@ package after authenticating its producer provenance.
 
 Restore/save use separate pinned Actions. Only successful `main` push or manual
 runs save native CI caches, and only successful `main` manual runs save producer
-caches. The job byte budget must pass before native saves. PR and branch runs
+caches. The job byte budget must pass before compiler/component saves; Cargo dependency
+outputs are pruned before the maintained action saves them. PR and branch runs
 can restore within GitHub's cache scope but cannot write trusted main caches.
-The sccache GitHub backend is disabled, so explicit guarded save steps own
-persistence. All source/producer jobs retain read-only permissions and no
+The sccache GitHub backend is disabled. Explicit guarded save steps own
+compiler/component persistence; the pinned Rust action owns pruned dependency
+output persistence with an equivalent trusted-main save condition. All source/producer jobs retain read-only permissions and no
 signing credentials.
 
 Both workflows accept the boolean manual input `cache`, defaulting to `true`.
 Dispatch with `cache=false` for an uncached comparison: all cache restores/saves
-are skipped, `RUSTC_WRAPPER` is empty, and the producer passes no Swift component
-key. Locked commands, integrity checks, packaging and provenance remain the
+are skipped, `RUSTC_WRAPPER` is empty, and no exact echo or Swift component key
+is passed. Locked commands, integrity checks, packaging and provenance remain the
 same. The expression checks the raw event input against the string `'false'`;
 absent inputs on push/PR keep normal caching enabled.
 
@@ -81,7 +95,9 @@ No cold/warm speedup is claimed by this source change. Record comparable hosted
 runs of the same revision, runner image, toolchain, target and profile with
 `cache=false` and with a populated cache; report transfer costs as well as build
 time. A new version/contract key may be cold, and sccache's library-only coverage
-limits the possible gain. Reuse an already required exact-source producer
+limits the possible gain. Cargo dependency output reuse also covers unchanged
+procedural macros and dependency build scripts that sccache cannot cache.
+Reuse an already required exact-source producer
 artifact for signing instead of rebuilding it merely for release.
 
 The implementation follows [CodeStory's pinned sccache and explicit trusted

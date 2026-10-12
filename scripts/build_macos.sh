@@ -15,7 +15,7 @@ mkdir -p "$CARGO_TARGET_DIR" .cache release
 # Python is only a build tool for the pinned native DSP and helper manifest.
 export MLX_PREBUILT_ROOT
 MLX_PREBUILT_ROOT="$(bash scripts/fetch_mlx_runtime.sh)"
-"$build_python" scripts/setup_echo.py
+"$build_python" scripts/component_cache.py .cache/components/echo "${SPEAKERDESK_ECHO_KEY:-}" desktop/capture/echo/libspeakerdesk_echo.dylib -- "$build_python" scripts/setup_echo.py
 "$build_python" scripts/native_licenses.py
 package_version="$(node -p 'require("./desktop/src-tauri/tauri.conf.json").version')"
 "$build_python" scripts/component_cache.py .cache/components/capture "${SPEAKERDESK_CAPTURE_KEY:-}" desktop/capture/speakerdesk-capture -- xcrun swiftc -O -j 1 -num-threads 1 -target arm64-apple-macos15.0 -module-cache-path "$task_root/.cache/swift-capture" desktop/capture/MeetingCapture.swift desktop/capture/CaptureAudioConverter.swift desktop/capture/LosslessRedundantChannels.swift desktop/capture/AppleCaptureRoute.swift -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker desktop/capture/Info.plist -o desktop/capture/speakerdesk-capture
