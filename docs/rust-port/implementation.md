@@ -20,8 +20,11 @@ disposable updater replacement. The canonical signed package runs without a
 Python application runtime. The optimization work did not replace these broader
 migration acceptance criteria.
 
-Final package qualification is in progress for the repaired Ogg/Opus preparation
-path and forced-shutdown process cleanup. The bounded long-import comparison and
+The accepted Mac implementation and local qualification are complete at code
+revision `0201c8063c0a56bd597f721ddedce3946bcbeafe`, including the repaired
+Ogg/Opus editor path and forced-shutdown process cleanup. This is a local
+qualification decision within the recorded fixtures and hardware, not a release
+or installation. The bounded long-import comparison and
 dispatched-accuracy cancellation check below establish no observed regression on
 those fixtures; baseline lacks an automatic child-recovery comparator. Existing legacy voice profiles are preserved
 but incompatible model identities do not participate in native recognition;
@@ -39,9 +42,10 @@ unrelated latency, sustained backlog or peak-memory regressions. Neural Engine
 execution/overlap for the speech models is separate follow-up work, not part of
 this rewrite. Existing ReDimNet compute policy stays measured CPU_AND_GPU.
 
-PR head `40c3827b9bc20b67423beb405d3c5d5fab246dd5` passed all three GitHub CI
-jobs: source, Linux Rust and Mac Rust. Local implementation continues from that
-clean revision; the results below remain scoped to their recorded artifacts.
+Code revision `0201c8063c0a56bd597f721ddedce3946bcbeafe` passed all three GitHub
+CI jobs: source, Linux Rust and Mac Rust (run `38277886287`). The final status
+update changes documentation only; results below remain scoped to their recorded
+artifacts. Earlier entries are a historical work log, not the current gate list.
 
 Legacy Python application sources remain test/oracle references, not package
 inputs. Current CI, reference generators and source-boundary checks still depend
@@ -61,7 +65,7 @@ the application's runtime-free requirement.
    transactions, guarded import publication, consistent migration snapshots,
    private journal recovery and legacy audio copy-on-write. Process lifecycle and
    operation cancellation and active meeting state share that store and owner.
-3. In progress: Silero, multi-window offline Nemotron and Cohere run through
+3. Qualified: Silero, multi-window offline Nemotron and Cohere run through
    the actual native child and assembled import pipeline. An isolated Tauri
    preview now starts the Rust HTTP service and resident child. Actual HTTP
    import/edit/name/export/restart passes on synthetic audio (proof below).
@@ -69,14 +73,15 @@ the application's runtime-free requirement.
    passes, including Auto language and CTC. Short synthetic/public recordings have
    equivalent warm application measurements. Long Nemotron execution has an
    independent numerical reference. An 82-second import now passes the actual
-   editor, tail edit, save and full restart; long-session performance remains pending.
-4. In progress: automatic language, supplied-text CTC and native Core ML ReDimNet
+   editor, tail edit, save and full restart. Short/long import and nine-minute live
+   comparisons are recorded below, with output differences and sampling limits.
+4. Qualified: automatic language, supplied-text CTC and native Core ML ReDimNet
    extraction work. Manual voice enrollment/checking now passes the actual editor
    and full restart (below). Automatic import recognition and native model setup
    pass service/model tests; actual setup cancel/resume and post-setup import now
    pass in Tauri. Live recognition also passes
    a real-model saved-PCM test, described below.
-5. In progress: native capture coordination, streaming tails, child-loss recovery
+5. Qualified: native capture coordination, streaming tails, child-loss recovery
    and live-edit continuation pass mounted replays and saved-PCM real-model tests.
    Sealed live timing, identity and saved Auto/explicit-language accuracy passes pass
    real-model saved-PCM checks, including long English context assembly and live
@@ -92,15 +97,17 @@ the application's runtime-free requirement.
    editor on the current Mac route. Bundled-helper failure preserves data through
    restart and permits a new capture. Nine-minute saved-PCM comparison preserves
    words/audio with lower observed backlog and memory; Stop is slower. Equivalent
-   performance qualification and the stated acoustic limits remain open.
-6. In progress: native-default startup and canonical Python-free packaging are
+   performance observations meet the amended acceptance criteria on these fixtures;
+   the stated acoustic limits remain qualifications on the result.
+6. Qualified: native-default startup and canonical Python-free packaging are
    implemented. The relocated Developer ID signed package runs real inference
    with an isolated store and sanitized environment, reaches the editor and
    saves word/name/boundary edits through full restart and native export. The
    packaged security/data matrix passes. Disposable outgoing updater cancellation,
    retry, shutdown/replacement, network failure and preservation pass. Equivalent
-   performance qualification remains open. The refreshed signed package also
-   passes the final timing-inspector and failed-meeting accuracy-control checks.
+   performance observations and their limits are recorded below. The refreshed
+   signed package also passes the final timing-inspector and failed-meeting
+   accuracy-control checks.
 
 Planned validation uses disposable storage and synthetic/public audio. An
 unintended baseline relaunch touched default storage directory metadata; the
@@ -449,8 +456,8 @@ the cut-off final “last.” fragment remains unassigned with null reading-turn
 times. Complete supplied-text alignment does not establish full speaker/time
 attribution or full-fixture transcription accuracy for this interrupted capture.
 
-The full replacement remains active while the final format and lifecycle checks
-are joined. The known Stop cost is accepted, and the long-import timing and
+The final format and lifecycle checks are now joined, as recorded below.
+The known Stop cost is accepted, and the long-import timing and
 output differences are recorded above. No additional cache, scheduler, concurrent preparation
 or heavyweight GPU-overlap experiment is justified by the current measurements.
 
@@ -530,8 +537,20 @@ show the native host and model child in the host's owned process group, with no
 Python application process. The cloned incompatible voice profile, including
 centroid, version and enrollment payload, and all saved names remain unchanged.
 The People API exposes saved/incompatible status and re-enrollment guidance.
-The final editor check is pending because the UI tool reports the Mac locked;
-earlier actual editor proof remains scoped to its recorded package. Receipts:
+After unlock, the same signed package imported the 7.06-second public speech
+fixture encoded as Ogg/Opus through the actual Tauri file picker. The UI showed
+preparation and transcription activity, then the expected model-produced words
+and timed reading turn. A word edit saved at revision 4, survived a full app
+Quit/relaunch, and appeared unchanged in the reopened editor and native text
+export. API documents and revisions match exactly across restart. The actual
+People panel showed “Save this voice again to use recognition” and the preserved
+Daniel fixture name before and after restart; the second observation used a
+screenshot because the accessibility tree omitted the reopened modal controls.
+The profile centroid, identity, version, consent and enrollment payload, and all
+person rows, match the pre-run copied fixture exactly after both quits. All six
+attributed desktop/host/inference/WebKit processes from each run were absent
+after Quit. This is a synthetic incompatible-identity fixture, not proof that
+historical embeddings can participate in native recognition. Receipts:
 `/private/tmp/speakerdesk-import-closeout-0ckgcmrz/`.
 
 One short real-model service pair uses the unchanged 288,647-sample synthetic
