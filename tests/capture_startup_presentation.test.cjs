@@ -46,6 +46,8 @@ test('saved accuracy controls start, pause and retry through the existing routes
     assert.equal(f.document.getElementById('refinement-controls').hidden,false);
     assert.equal(f.document.getElementById('refinement-toggle').textContent,label);
     if(status==='refining')assert.equal(f.document.getElementById('refinement-status').textContent,'Rechecking saved passages…');
+    assert.match(f.document.getElementById('refinement-status').title,/captured Auto or explicit language/);
+    assert.match(f.document.getElementById('refinement-status').title,/uncertain or mixed-language/);
     await f.run('toggleRefinement()');
     assert.equal(f.run('calls.at(-1).path'),`/api/jobs/${'d'.repeat(32)}/refinement/${action}`);
     assert.equal(f.run('calls.at(-1).method'),'POST');

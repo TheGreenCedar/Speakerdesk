@@ -113,6 +113,7 @@ fn main() {
                                 "silero-speech" => "mlx-community/silero-vad-v6@2ebf4a5".into(),
                                 "nemotron" => "mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f".into(),
                                 "cohere-speech" => "spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12".into(),
+                                "whisper-language" => speakerdesk_core::languages::LID_CHECKPOINT.into(),
                                 "redimnet2-b6" if root.join("fixture-voice").exists() => "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU".into(),
                                 _ => format!("replay:{model}"),
                             },
@@ -292,7 +293,35 @@ fn main() {
                 });
                 continue;
             }
-            Request::Transcribe { .. } => {
+            Request::LanguageProbe { pcm } => {
+                writeln!(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(root.join("language-probe-calls"))
+                        .unwrap(),
+                    "{}",
+                    pcm.len()
+                )
+                .unwrap();
+                let scores = std::fs::read(root.join("replay-probe.json"))
+                    .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+                    .unwrap_or_else(|_| speakerdesk_core::ipc::LanguageProbeOut {
+                        probabilities: vec![0.99, 0.01],
+                        codes: vec!["en".into(), "de".into()],
+                    });
+                Ok(Response::Probe(scores))
+            }
+            Request::Transcribe { language, .. } => {
+                writeln!(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(root.join("transcribe-languages"))
+                        .unwrap(),
+                    "{language}"
+                )
+                .unwrap();
                 let text = std::fs::read_to_string(root.join("replay-transcript"))
                     .unwrap_or_else(|_| "Replay transcript".into());
                 Ok(Response::Text(AsrText {

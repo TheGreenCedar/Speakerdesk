@@ -791,6 +791,65 @@ mod tests {
     }
 
     #[test]
+    fn saved_language_checkpoint_survives_sqlite_float_roundtrip() {
+        // Actual Whisper f32 scores from the retained synthetic Auto qualification.
+        // The checkpoint is computed before SQLite serializes the model result.
+        let scores = [
+            (0.98747057_f32, 0.0011382839_f32),
+            (0.9886158, 0.0020635556),
+            (0.98884296, 0.0011488063),
+            (0.9973476, 0.00040357182),
+        ];
+        let probes: Vec<_> = scores.into_iter().enumerate().map(|(index,(winner, runner))| {
+            let winner = f64::from(winner);
+            let runner = f64::from(runner);
+            json!({"start_sample":115200 + index * 44481,"end_sample":115200 + (index+1)*44481,
+                "language":"en","review":false,"decision":{"mode":"auto","reason":"detected",
+                "probability":winner,"margin":winner-runner,
+                "candidates":[{"language":"en","probability":winner},{"language":"cy","probability":runner}]}})
+        }).collect();
+        let mut saved = job(MEETING_ID, JobKind::Meeting, "ready", 1.);
+        saved.language = "auto".into();
+        saved.document.as_mut().unwrap().segments.push(serde_json::from_value(json!({
+            "id":"canonical-1","start":7.2,"end":18.3204375,"speaker":"speaker_0","text":"Retained words",
+            "language":"en","language_mode":"auto","language_epoch":0,"machine_revision":4,
+            "canonical_utterance_id":"canonical-1","canonical_machine_revision":4,"canonical_state":"sealed",
+            "audio_revision":11,"language_detection":{"mode":"auto","reason":"detected","probes":probes}
+        })).unwrap());
+        let before = saved.document.as_ref().unwrap().segments[0].clone();
+        let version = crate::live::segment_version(&before);
+        saved.extra.insert(
+            "rolling_refinement".into(),
+            json!({"mode":"saved","completed":{"canonical-1":version}}),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "speakerdesk-float-roundtrip-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let mut store = SqliteJobStore::open(&path).unwrap();
+            store.put(&saved, None).unwrap();
+        }
+        for _ in 0..3 {
+            let mut store = SqliteJobStore::open(&path).unwrap();
+            let reopened = store.get(&saved.id, false).unwrap().unwrap();
+            let row = &reopened.document.as_ref().unwrap().segments[0];
+            assert_eq!(
+                crate::live::segment_version(row),
+                version,
+                "unchanged model probabilities must preserve the completed passage checkpoint"
+            );
+            assert_eq!(row.language_detection, before.language_detection);
+            assert_eq!(
+                reopened.extra["rolling_refinement"]["completed"]["canonical-1"],
+                version
+            );
+            store.put(&reopened, None).unwrap();
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn voice_publication_preserves_edits_and_rejects_forget_replace_and_missing_job() {
         use crate::{
             error::StoreError,

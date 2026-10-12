@@ -1107,11 +1107,10 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
         || end <= start
         || end - start > MAX_DECODE_SAMPLES
         || end - start != pcm.len() as i64
-        || !languages::is_supported(language)
-        || language == languages::AUTOMATIC
+        || (language != languages::AUTOMATIC && !languages::is_supported(language))
     {
         return Err(LiveError::Message(
-            "This saved passage needs a longer or explicit-language accuracy pass.",
+            "This saved passage needs a longer accuracy pass or its captured language setting.",
         ));
     }
     let processed = original
@@ -1119,38 +1118,14 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
         .as_ref()
         .filter(|s| s["source_id"] == "microphone_clean")
         .and_then(|s| s["catalog_sha256"].as_str());
-    let decoded = crate::import::retry_passage_source(
-        models,
-        pcm,
-        0.,
-        pcm.len() as f64 / RATE as f64,
-        language,
-        processed,
-    )
-    .map_err(|e| LiveError::Detail(e.to_string()))?;
-    let partial = decoded.retry_parts.iter().any(|part| {
-        part["text"]
-            .as_str()
-            .is_none_or(|text| text.trim().is_empty())
-            && !matches!(
-                part["audio_state"].as_str(),
-                Some("model_non_speech" | "digital_silence" | "constant_signal")
-            )
-    });
-    if decoded.text.trim().is_empty()
-        || decoded.review
-        || partial
-        || decoded.transcription_review.is_some()
-    {
-        return Err(LiveError::Message(
-            "The new decode is incomplete; previous words and audio are retained.",
-        ));
-    }
+    let (text, detected_language, detection) =
+        crate::import::refine_passage_source(models, pcm, language, start, processed)
+            .map_err(|e| LiveError::Detail(e.to_string()))?;
     let mut candidate = original.clone();
     crate::edit::clear_alignment_bundle(&mut candidate);
-    candidate.text = decoded.text;
-    candidate.language = Some(decoded.language);
-    candidate.language_detection = Some(serde_json::json!({"mode":"manual","reason":"override"}));
+    candidate.text = text;
+    candidate.language = Some(detected_language.clone());
+    candidate.language_detection = Some(detection);
     candidate.machine_revision = Some(
         original
             .machine_revision
@@ -1179,7 +1154,7 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
     candidate.rest.remove("text_audio_anchor");
     candidate.rest.remove("audio_float32_sha256");
     if let Some(vocabulary) = vocabulary {
-        match vocabulary.align(models, pcm, &candidate.text, start, language) {
+        match vocabulary.align(models, pcm, &candidate.text, start, &detected_language) {
             Ok(alignment) => crate::alignment::attach(&mut candidate, alignment),
             Err(
                 error @ (ChildError::ProcessLost { .. }
@@ -3521,6 +3496,9 @@ mod tests {
         conditioning: Mutex<Vec<Option<GainPolicy>>>,
         ctc_calls: AtomicUsize,
         transcribe_calls: AtomicUsize,
+        probe_calls: AtomicUsize,
+        probe_scores: Mutex<VecDeque<Result<LanguageProbeOut, ChildError>>>,
+        transcription_languages: Mutex<Vec<String>>,
         vad_sessions: Mutex<BTreeMap<u64, (u64, Vec<f32>)>>,
         next_session: AtomicUsize,
         fail_diar_open: AtomicBool,
@@ -3539,6 +3517,9 @@ mod tests {
                 conditioning: Mutex::new(Vec::new()),
                 ctc_calls: AtomicUsize::new(0),
                 transcribe_calls: AtomicUsize::new(0),
+                probe_calls: AtomicUsize::new(0),
+                probe_scores: Mutex::new(VecDeque::new()),
+                transcription_languages: Mutex::new(Vec::new()),
                 vad_sessions: Mutex::new(BTreeMap::new()),
                 next_session: AtomicUsize::new(1),
                 fail_diar_open: AtomicBool::new(false),
@@ -3668,10 +3649,17 @@ mod tests {
             Err(ChildError::Unimplemented)
         }
         fn language_probe(&self, _pcm: &[f32]) -> Result<LanguageProbeOut, ChildError> {
-            Ok(LanguageProbeOut {
-                probabilities: vec![0.99],
-                codes: vec!["en".into()],
-            })
+            self.probe_calls.fetch_add(1, Ordering::SeqCst);
+            self.probe_scores
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(LanguageProbeOut {
+                        probabilities: vec![0.99],
+                        codes: vec!["en".into()],
+                    })
+                })
         }
         fn transcribe(
             &self,
@@ -3680,6 +3668,10 @@ mod tests {
             _padding: (u32, u32),
         ) -> Result<AsrText, ChildError> {
             self.transcribe_calls.fetch_add(1, Ordering::SeqCst);
+            self.transcription_languages
+                .lock()
+                .unwrap()
+                .push(language.into());
             let text = self
                 .alignment
                 .as_ref()
@@ -4432,6 +4424,89 @@ mod tests {
     }
 
     #[test]
+    fn saved_auto_accuracy_reprobes_and_preserves_uncertain_or_mixed_anchors() {
+        let mut old = sample_segment("Earlier legible English words", 7);
+        old.start = 1.;
+        old.end = 7.;
+        old.canonical_utterance_id = Some(old.id.clone());
+        old.language = Some("en".into());
+        old.language_detection = Some(serde_json::json!({"mode":"auto","reason":"detected"}));
+        old.rest.extend(
+            serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+                "canonical_state":"sealed","language_mode":"auto","language_epoch":3,
+                "canonical_machine_revision":7
+            }))
+            .unwrap(),
+        );
+        let probe = |language: &str, probability: f32| {
+            Ok(LanguageProbeOut {
+                probabilities: vec![probability, 1. - probability],
+                codes: vec![
+                    language.into(),
+                    if language == "en" { "de" } else { "en" }.into(),
+                ],
+            })
+        };
+        for case in [
+            "single",
+            "uncertain",
+            "unsupported",
+            "mixed",
+            "detector_error",
+        ] {
+            let models = FakeModels::english();
+            let scores = match case {
+                "single" => vec![probe("de", 0.99), probe("de", 0.99)],
+                "uncertain" => vec![probe("de", 0.51), probe("de", 0.51)],
+                "unsupported" => vec![probe("ru", 0.99), probe("ru", 0.99)],
+                "mixed" => vec![probe("en", 0.99), probe("de", 0.99)],
+                "detector_error" => {
+                    vec![Err(ChildError::failed("replayed detector failure", false)); 2]
+                }
+                _ => unreachable!(),
+            };
+            models.probe_scores.lock().unwrap().extend(scores);
+            let result = refine_saved_passage(&models, &old, &loud(6 * RATE as usize), None);
+            assert_eq!(
+                models.probe_calls.load(Ordering::SeqCst),
+                2,
+                "{case}: captured Auto must probe again instead of forcing the old detected language"
+            );
+            let mut document = document_with(old.clone());
+            if case == "single" {
+                let candidate = result.unwrap();
+                assert_eq!(candidate.text, "eins");
+                assert_eq!(candidate.language.as_deref(), Some("de"));
+                assert_eq!(
+                    candidate.language_detection.as_ref().unwrap()["mode"],
+                    "auto"
+                );
+                assert_eq!(candidate.rest["language_mode"], "auto");
+                assert_eq!(candidate.rest["language_epoch"], 3);
+                let detection = candidate.language_detection.as_ref().unwrap();
+                assert_eq!(detection["probes"][0]["start_sample"], RATE);
+                assert_eq!(detection["probes"][1]["end_sample"], 7 * RATE);
+                assert_eq!(*models.transcription_languages.lock().unwrap(), vec!["de"]);
+                assert!(publish_saved_passage(&mut document, &old, &candidate).unwrap());
+            } else {
+                assert!(
+                    result.is_err(),
+                    "{case}: preserve previous words if this anchor has no complete single-language replacement"
+                );
+                assert_eq!(document, document_with(old.clone()));
+                if case == "mixed" {
+                    assert_eq!(
+                        *models.transcription_languages.lock().unwrap(),
+                        vec!["en", "de"]
+                    );
+                } else if case != "uncertain" {
+                    assert_eq!(models.transcribe_calls.load(Ordering::SeqCst), 0, "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn saved_canonical_accuracy_keeps_timing_identity_and_blocks_stale_or_incomplete_audio() {
         let (vocabulary, text, scores) = crate::alignment::tests::live_fixture();
         let samples = scores.audio_num_samples as usize;
@@ -4539,9 +4614,33 @@ mod tests {
         let mut auto = old.clone();
         auto.rest
             .insert("language_mode".into(), Value::from("auto"));
-        let calls = models.transcribe_calls.load(Ordering::SeqCst);
-        assert!(refine_saved_passage(&models, &auto, &loud(samples), None).is_err());
+        auto.language = Some("fr".into());
+        let automatic =
+            refine_saved_passage(&models, &auto, &loud(samples), Some(&vocabulary)).unwrap();
+        assert_eq!(automatic.language.as_deref(), Some("en"));
+        assert_eq!(
+            automatic.language_detection.as_ref().unwrap()["mode"],
+            "auto"
+        );
+        assert_eq!(automatic.rest["reading_alignment"]["language"], "en");
+        assert_eq!(
+            automatic.reading_turn_provenance.as_ref().unwrap()["language_epoch"],
+            3
+        );
+        assert_eq!(automatic.machine_revision, Some(8));
+        assert!(automatic.reading_turns.is_some());
+        let mut automatic_document = document_with(auto.clone());
+        assert!(publish_saved_passage(&mut automatic_document, &auto, &automatic).unwrap());
+        let roundtrip: Document =
+            serde_json::from_value(serde_json::to_value(automatic_document).unwrap()).unwrap();
+        assert!(
+            crate::export::export(&roundtrip, "srt")
+                .unwrap()
+                .body
+                .contains("Go")
+        );
         auto.rest.remove("language_mode");
+        let calls = models.transcribe_calls.load(Ordering::SeqCst);
         assert!(
             refine_saved_passage(&models, &auto, &loud(samples), None).is_err(),
             "a detected language does not prove the captured setting"

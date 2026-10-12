@@ -53,8 +53,11 @@ its slot without changing names, neighboring passages or source order. Pause
 invalidates publication before cancellation, and admission remains held until
 the worker exits. Completed passage versions survive restart; history retains
 only the previous words, bounds, identity and speaker. This first saved path
-supports explicit-language anchors up to 24.5 seconds. Automatic language,
-longer anchors and scheduling during capture remain unfinished.
+supports Auto and explicit-language anchors up to 24.5 seconds. Auto reruns
+language detection from the saved source audio, preserves captured mode and epoch,
+and aligns with the newly selected language. Incomplete, uncertain or mixed-language
+replacements retain the previous words. Longer anchors and scheduling during
+capture remain unfinished.
 
 ## Messages and security
 

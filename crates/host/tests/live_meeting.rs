@@ -1108,6 +1108,115 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
 }
 
 #[tokio::test]
+async fn saved_auto_accuracy_uses_fresh_probe_and_keeps_captured_mode_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let host = Running::open(root, false).await;
+    trigger(root, 1);
+    let response = host
+        .post(
+            "api/meetings",
+            json!({
+                "name":"Disposable Auto routing replay","language":"auto","sources":["microphone"]
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), 202, "{}", response.text().await.unwrap());
+    let id = host.wait("api/meeting", |v| v["id"].is_string()).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = format!("api/jobs/{id}");
+    host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 6.5)
+        .await;
+    let before = host.stop(&id).await;
+    assert_eq!(before["status"], "ready");
+    let old = &before["document"]["segments"][0];
+    assert_eq!(old["language_mode"], "auto");
+    assert_eq!(old["language"], "en");
+    fs::write(
+        root.join("replay-probe.json"),
+        // Retained real score precision exercises JSON/SQLite checkpoint stability.
+        json!({"probabilities":[f64::from(0.9886158_f32),f64::from(0.0020635556_f32)],"codes":["de","en"]}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        root.join("replay-transcript"),
+        "Neue Worte aus dem gespeicherten Audio.",
+    )
+    .unwrap();
+    let calls_before = fs::read_to_string(root.join("language-probe-calls"))
+        .unwrap()
+        .lines()
+        .count();
+    let language_calls_before = fs::read_to_string(root.join("transcribe-languages"))
+        .unwrap()
+        .lines()
+        .count();
+    let resume = host
+        .post(&format!("{path}/refinement/resume"), json!({}))
+        .await;
+    assert_eq!(resume.status(), 202, "{}", resume.text().await.unwrap());
+    let after = host.wait(&path, |v| v["inference_owned"] == false).await;
+    assert_eq!(after["refinement_status"], "complete", "{after}");
+    let row = after["document"]["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == old["id"])
+        .unwrap();
+    assert_eq!(row["text"], "Neue Worte aus dem gespeicherten Audio.");
+    assert_eq!(row["language"], "de");
+    assert_eq!(row["language_mode"], "auto");
+    assert_eq!(row["language_epoch"], old["language_epoch"]);
+    assert_eq!(row["language_detection"]["mode"], "auto");
+    assert!(
+        fs::read_to_string(root.join("language-probe-calls"))
+            .unwrap()
+            .lines()
+            .count()
+            > calls_before
+    );
+    let languages = fs::read_to_string(root.join("transcribe-languages")).unwrap();
+    assert!(
+        languages
+            .lines()
+            .skip(language_calls_before)
+            .all(|language| language == "de")
+    );
+    assert_eq!(
+        after["document"]["segments"].as_array().unwrap().len(),
+        before["document"]["segments"].as_array().unwrap().len()
+    );
+    host.close(root).await;
+    let reopened = Running::open(root, false).await;
+    assert_eq!(reopened.get(&path).await["document"], after["document"]);
+    let probes_after = fs::read_to_string(root.join("language-probe-calls")).unwrap();
+    let asr_after = fs::read_to_string(root.join("transcribe-languages")).unwrap();
+    let repeat = reopened
+        .post(&format!("{path}/refinement/resume"), json!({}))
+        .await;
+    assert_eq!(repeat.status(), 202, "{}", repeat.text().await.unwrap());
+    let repeated = reopened
+        .wait(&path, |v| v["inference_owned"] == false)
+        .await;
+    assert_eq!(repeated["refinement_status"], "complete");
+    assert_eq!(
+        repeated["document"], after["document"],
+        "completed Auto anchors must not republish after SQLite reopen"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("language-probe-calls")).unwrap(),
+        probes_after
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("transcribe-languages")).unwrap(),
+        asr_after
+    );
+    reopened.close(root).await;
+}
+
+#[tokio::test]
 async fn saved_accuracy_pass_publishes_child_candidate_and_keeps_history_after_restart() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

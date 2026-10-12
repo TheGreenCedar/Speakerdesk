@@ -15,7 +15,7 @@ use crate::export;
 use crate::ipc::Turn;
 use crate::language::{
     AsrOutput, LanguageChoice, LanguageDetection, LanguageDetector, LanguageError, Passage,
-    Recognizer, RouteError, SpeechTranscriber, TranscribeOptions, TranscriptionReview,
+    ProbeEvent, Recognizer, RouteError, SpeechTranscriber, TranscribeOptions, TranscriptionReview,
 };
 use crate::languages;
 use crate::limits;
@@ -347,6 +347,27 @@ pub fn retry_passage_source<M: Models + ?Sized + 'static>(
     if language == languages::AUTOMATIC || !languages::is_supported(language) {
         return Err(ImportError::new(messages::RETRY_LANGUAGE));
     }
+    let parts = decode_passage_source(
+        models,
+        pcm,
+        start,
+        end,
+        language,
+        processed_microphone_catalog,
+    )?;
+    Ok(candidate_from_parts(start, end, language, &parts))
+}
+
+/// Shared bounded admission and language routing. Manual retry guards its public
+/// language choice before entering; saved canonical work uses its captured mode.
+fn decode_passage_source<M: Models + ?Sized + 'static>(
+    models: &M,
+    pcm: &[f32],
+    start: f64,
+    end: f64,
+    language: &str,
+    processed_microphone_catalog: Option<&str>,
+) -> Result<Vec<Decoded>, ImportError> {
     let duration = require_pcm(pcm)?;
     if !start.is_finite()
         || !end.is_finite()
@@ -372,7 +393,7 @@ pub fn retry_passage_source<M: Models + ?Sized + 'static>(
     } else {
         None
     };
-    let speakers = vec!["manual_retry".to_string()];
+    let speakers = vec!["saved_passage".to_string()];
     let mut parts = Vec::new();
     for item in &windows {
         parts.extend(decode_window(
@@ -383,7 +404,123 @@ pub fn retry_passage_source<M: Models + ?Sized + 'static>(
             item,
         )?);
     }
-    Ok(candidate_from_parts(start, end, language, origin, &parts))
+    Ok(parts)
+}
+
+/// Keep a saved anchor intact unless every routed part supplies complete text in
+/// the same supported language. Mixed/uncertain routes retain the prior words.
+pub(crate) fn refine_passage_source<M: Models + ?Sized + 'static>(
+    models: &M,
+    pcm: &[f32],
+    language_mode: &str,
+    start_sample: i64,
+    processed_microphone_catalog: Option<&str>,
+) -> Result<(String, String, Value), ImportError> {
+    let parts = decode_passage_source(
+        models,
+        pcm,
+        0.,
+        samples_to_seconds(pcm.len() as i64),
+        language_mode,
+        processed_microphone_catalog,
+    )?;
+    let incomplete = || {
+        ImportError::new(
+            "The new decode is incomplete or has uncertain or mixed language; previous words and audio are retained.",
+        )
+    };
+    if parts.is_empty()
+        || parts.iter().any(|part| {
+            part.review
+                || part.transcription_review.is_some()
+                || (part.text.trim().is_empty()
+                    && !matches!(
+                        part.audio_state.as_deref(),
+                        Some("model_non_speech" | "digital_silence" | "constant_signal")
+                    ))
+        })
+    {
+        return Err(incomplete());
+    }
+    let mut cursor = 0;
+    for part in &parts {
+        let first = (part.start * f64::from(limits::SAMPLE_RATE)).round() as i64;
+        let last = (part.end * f64::from(limits::SAMPLE_RATE)).round() as i64;
+        if first != cursor || last <= first || last > pcm.len() as i64 {
+            return Err(incomplete());
+        }
+        cursor = last;
+    }
+    if cursor != pcm.len() as i64 {
+        return Err(incomplete());
+    }
+    let spoken: Vec<_> = parts
+        .iter()
+        .filter(|part| !part.text.trim().is_empty())
+        .collect();
+    let selected = spoken
+        .first()
+        .and_then(|part| part.language.as_deref())
+        .ok_or_else(incomplete)?;
+    if !languages::is_supported(selected)
+        || spoken
+            .iter()
+            .any(|part| part.language.as_deref() != Some(selected))
+    {
+        return Err(incomplete());
+    }
+    let text = spoken
+        .iter()
+        .map(|part| part.raw.as_deref().unwrap_or(&part.text))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut detection = spoken
+        .iter()
+        .filter_map(|part| part.detection.as_ref())
+        .min_by(|left, right| {
+            left.probability
+                .unwrap_or(1.)
+                .total_cmp(&right.probability.unwrap_or(1.))
+        })
+        .cloned()
+        .ok_or_else(incomplete)?;
+    if language_mode == languages::AUTOMATIC {
+        detection.probes = spoken
+            .iter()
+            .flat_map(|part| {
+                let Some(decision) = part.detection.as_ref() else {
+                    return Vec::new();
+                };
+                if !decision.probes.is_empty() {
+                    return decision.probes.clone();
+                }
+                vec![ProbeEvent {
+                    start_sample: (part.start * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                    end_sample: (part.end * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                    language: part.language.clone(),
+                    decision: decision.clone(),
+                    review: part.review,
+                }]
+            })
+            .collect();
+        for probe in &mut detection.probes {
+            probe.start_sample = probe
+                .start_sample
+                .checked_add(start_sample)
+                .ok_or_else(incomplete)?;
+            probe.end_sample = probe
+                .end_sample
+                .checked_add(start_sample)
+                .ok_or_else(incomplete)?;
+            if let Some(end) = probe.decision.context_end_sample.as_mut() {
+                *end = end.checked_add(start_sample).ok_or_else(incomplete)?;
+            }
+        }
+        if let Some(end) = detection.context_end_sample.as_mut() {
+            *end = end.checked_add(start_sample).ok_or_else(incomplete)?;
+        }
+    }
+    Ok((text, selected.to_owned(), detection_value(&detection)))
 }
 
 fn region_from(slice: &ActivitySlice) -> DecodeRegion {
@@ -669,7 +806,7 @@ struct Decoded {
     language: Option<String>,
     review: bool,
     audio_state: Option<String>,
-    detection: Option<Value>,
+    detection: Option<LanguageDetection>,
     transcription_review: Option<Value>,
     acoustic: Option<Value>,
     pcm: Option<Value>,
@@ -829,7 +966,7 @@ fn passage_row(origin: i64, passage: Passage) -> Decoded {
         language: passage.language,
         review: passage.review,
         audio_state: passage.audio_state.map(|state| state.as_str().to_string()),
-        detection: Some(detection_value(&passage.language_detection)),
+        detection: Some(passage.language_detection),
         transcription_review: passage
             .transcription_review
             .as_ref()
@@ -859,10 +996,8 @@ fn candidate_from_parts(
     start: f64,
     end: f64,
     language: &str,
-    origin: i64,
     parts: &[Decoded],
 ) -> PassageCandidate {
-    let _ = origin;
     let mut raws = Vec::new();
     let mut review = false;
     let mut reviews: Vec<&Value> = Vec::new();
@@ -1019,7 +1154,7 @@ fn segment_from_row(
         speaker,
         text: row.text.clone(),
         language: row.language.clone(),
-        language_detection: row.detection.clone(),
+        language_detection: row.detection.as_ref().map(detection_value),
         transcription_review: row.transcription_review.clone(),
         reading_turns: None,
         reading_turn_provenance: None,

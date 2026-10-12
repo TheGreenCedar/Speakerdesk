@@ -36,8 +36,8 @@ Local implementation branch: `codex/python-free-mac`.
    a real-model saved-PCM test, described below.
 5. In progress: native capture coordination, streaming tails, child-loss recovery
    and live-edit continuation pass mounted replays and saved-PCM real-model tests.
-   Sealed live timing, identity and saved explicit-language accuracy passes pass
-   real-model saved-PCM checks. Automatic/long-passage and rolling live refinement, qualified
+   Sealed live timing, identity and saved Auto/explicit-language accuracy passes pass
+   real-model saved-PCM checks. Long-passage and rolling live refinement, qualified
    Pause/Resume, raw dual-source echo, physical capture and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
@@ -1208,6 +1208,62 @@ the pending Tauri live/setup/long-import workflow, default native startup and ac
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
+
+## Saved Auto-language accuracy and stable restart checkpoints
+
+Saved canonical passages up to 24.5 seconds now use their captured Auto setting
+to run fresh Whisper routing before Cohere. They keep the captured mode and epoch,
+carry actual language decisions and absolute probe coordinates, and align against
+the freshly selected language. Manual Retry remains explicitly manual. The shared
+decode path retains source conditioning and rejects incomplete, uncertain,
+unsupported or mixed-language replacements without discarding existing words.
+
+The core and mounted red tests first reproduced the former explicit-language
+restriction. A retained real-model run then exposed a separate persistence defect:
+JSON parsing changed model probabilities by one floating-point bit, invalidating
+an unchanged completed-passage checkpoint after restart. The SQLite regression
+reproduces that exact hash change. Enabling the existing serde_json dependency's
+`float_roundtrip` feature preserves the evidence; no rounding or weakened
+freshness comparison was added. The mounted restart test now asserts that Resume
+neither republishes the passage nor makes new probe/transcription calls.
+
+Final validation on the same M5 Mac: 164 core, 61 host, ten mounted live-service,
+one service-lifecycle and nine process tests pass, as does strict all-target
+core/host Clippy. Four existing tests remain explicitly ignored (one network and
+three separately qualified acoustic tests). Four capture-presentation Node checks
+pass; unchanged editor/updater proof is reused. Logs are
+`/tmp/speakerdesk-auto-refinement-{core-red,host-red,float-red,float-green,final-tests,final-clippy,controls,final-release}.log`.
+The corrected locked optimized build completed in 34.98 seconds with the existing
+upstream mlx-sys warnings. Its SHA-256 is
+`c82ae8d583cc3e12b47c63ee32b891676b6a24430ccb7acacceff755f9418b89`.
+
+Real MLX/CTC execution on synthetic Auto job
+`726c942e55de4fb1b6df70eb8ded04af` preserves one protected prefix and refines its
+unedited tail with four fresh English probes and 36 aligned words. Names, profile
+catalog and PCM bytes remain unchanged. History, stale-save HTTP 409, whole-host
+restart, export and idempotent Resume pass. The 1.177-second measurement is
+diagnostic, not equivalent performance or improved-accuracy proof. The saved-PCM
+capture, failed first refinement and corrected fresh-copy run are retained under
+`/private/tmp/speakerdesk-auto-refinement.1uvO3t/`; the successful run is in
+`after-float-fix/`. The Python harness is external test code; the application and
+model child are native. All qualification hosts and children exited.
+
+The isolated Tauri preview now serves ready models at `http://127.0.0.1:54035/` and
+reports saved Auto support accurately. Its ad-hoc signed executable SHA-256 is
+`088c177dca54b88d2b27ea04d5791133de6fd5d048a8aecf1522bf82c162e565`.
+`auto-refinement-preview.json` and `app-auto-refinement.log` live under the existing
+temporary preview directory. CUA still reports the Mac locked despite the unlock
+reply. This adds no editor, physical capture or distributable-package claim; the
+preview still uses a development library path and saved-PCM capture helper.
+
+PR #27 remains open at `db9da655b3eeeeef598ba21a21cb54505e6bce21`, base
+`59e7b0c860f72ca94c24e6eab18ac820b144ee24`. The full accepted replacement remains
+active and unfinished: long-passage/context and rolling live refinement, ordinary
+live language-decision metadata, qualified Pause/Resume and raw dual-source echo,
+physical capture and long-session gates, pending Tauri workflows, native default
+startup and packaging, disposable updater/security checks and equivalent 0.6.6
+performance measurements. Windows and issue #25 remain deferred. Installed app,
+production data, existing model cache and GitHub state remain untouched.
 
 ## Saved canonical accuracy pass
 
