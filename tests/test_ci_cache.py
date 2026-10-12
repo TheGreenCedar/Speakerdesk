@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+import ci_cache
 from ci_cache import keys, source_changed
 from component_cache import restore, run
 
@@ -25,13 +26,17 @@ class IdentityTests(unittest.TestCase):
                       'desktop/src-tauri/Entitlements.plist', 'desktop/capture/MeetingCapture.swift',
                       'desktop/capture/Info.plist', 'desktop/package-lock.json']
         self.paths+=['desktop/capture/echo/source-lock.json','desktop/capture/echo/speakerdesk_echo.cc',
-                     'scripts/setup_echo.py','scripts/echo_compile_guard.py']
+                     'scripts/setup_echo.py','scripts/echo_compile_guard.py',
+                     '.cargo/config.toml','rust-toolchain.toml','vendor/mlx-sys/build.rs']
         for name in self.paths:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('original')
         self.tools = {'os': '15.7', 'arch': 'arm64', 'rust': '1.99.0',
-                      'python': '3.13.15', 'swift': '6.2', 'sdk': '15.5'}
+                      'python': '3.13.15', 'swift': '6.2', 'sdk': '15.5',
+                      'target': 'aarch64-apple-darwin', 'deployment': '15.0',
+                      'cc': 'clang', 'cmake': '4.2', 'ninja': '1.13',
+                      'image': 'fixture image', 'sccache': '0.16.0', 'rustflags': ''}
 
     def test_changed_input_invalidates_owning_component(self):
         cases = [('crates/core/src/live.rs', 'compiler-key'),
@@ -59,13 +64,13 @@ class IdentityTests(unittest.TestCase):
 
     def test_toolchain_or_platform_change_blocks_all_reuse(self):
         baseline = keys(self.root, self.paths, self.tools)
-        for name in self.tools:
+        for name in self.tools.keys() - {'python'}:
             with self.subTest(tool=name):
                 current = keys(self.root, self.paths, dict(self.tools, **{name: 'different'}))
                 for key in baseline:
                     self.assertNotEqual(baseline[key], current[key])
 
-    def test_release_version_preserves_compiler_compatibility(self):
+    def test_manifest_version_preserves_compiler_compatibility(self):
         manifest = self.root / 'desktop/src-tauri/Cargo.toml'
         manifest.write_text('[package]\nname = "speakerdesk"\nversion = "0.3.0"\n')
         baseline = keys(self.root, self.paths, self.tools)
@@ -73,6 +78,54 @@ class IdentityTests(unittest.TestCase):
         current = keys(self.root, self.paths, self.tools)
         self.assertEqual(baseline['compiler-prefix'], current['compiler-prefix'])
         self.assertNotEqual(baseline['compiler-key'], current['compiler-key'])
+
+    def test_native_contract_and_embedded_files_block_compiler_fallback(self):
+        baseline = keys(self.root, self.paths, self.tools)
+        for name in ['.cargo/config.toml', 'rust-toolchain.toml', 'vendor/mlx-sys/build.rs',
+                     'scripts/fetch_mlx_runtime.sh', 'scripts/native_licenses.py',
+                     'scripts/setup_echo.py', 'scripts/echo_compile_guard.py',
+                     'desktop/capture/echo/source-lock.json', 'desktop/capture/echo/speakerdesk_echo.cc',
+                     'speakerdesk/static/app.js']:
+            with self.subTest(input=name):
+                (self.root / name).write_text('changed')
+                current = keys(self.root, self.paths, self.tools)
+                self.assertNotEqual(baseline['compiler-prefix'], current['compiler-prefix'])
+                (self.root / name).write_text('original')
+
+    def test_profile_changes_exact_key_and_non_rust_tools_do_not_split_object_store(self):
+        baseline = keys(self.root, self.paths, dict(self.tools, profile='debug-fixtures', node='24'))
+        release = keys(self.root, self.paths, dict(self.tools, profile='release', node='24'))
+        self.assertNotEqual(baseline['compiler-key'], release['compiler-key'])
+        self.assertEqual(baseline['compiler-prefix'], release['compiler-prefix'])
+        for name in ('python', 'node'):
+            with self.subTest(tool=name):
+                tools = dict(self.tools, profile='debug-fixtures', node='24')
+                tools[name] = 'different'
+                changed = keys(self.root, self.paths, tools)
+                self.assertEqual(baseline['compiler-key'], changed['compiler-key'])
+
+    def test_linux_identity_uses_host_target_without_apple_tools(self):
+        def command(*args):
+            if args[0] in ('sw_vers', 'xcodebuild', 'xcrun'):
+                raise AssertionError('Linux must not invoke Apple tools')
+            if args == ('rustc', '-Vv'):
+                return 'release: 1.99.0\nhost: x86_64-unknown-linux-gnu'
+            return 'fixture tool identity'
+        with patch.object(ci_cache.platform, 'system', return_value='Linux'), patch.object(ci_cache, 'command', side_effect=command):
+            tools = ci_cache.tool_identity('debug-fixtures')
+        self.assertEqual(tools['target'], 'x86_64-unknown-linux-gnu')
+        self.assertEqual(tools['profile'], 'debug-fixtures')
+
+    def test_macos_deployment_identity_matches_existing_jobs(self):
+        def command(*args):
+            return 'host: aarch64-apple-darwin' if args == ('rustc', '-Vv') else 'fixture tool identity'
+        with patch.object(ci_cache.platform, 'system', return_value='Darwin'), \
+                patch.object(ci_cache, 'command', side_effect=command), \
+                patch.dict(os.environ, {'MACOSX_DEPLOYMENT_TARGET': '14.0'}):
+            native = ci_cache.tool_identity('debug-fixtures-release-default')
+            producer = ci_cache.tool_identity('release-default-features-adhoc')
+        self.assertEqual(native['deployment'], '14.0')
+        self.assertEqual(producer['deployment'], '15.0')
 
     def test_lock_changes_preserve_download_prefixes_but_change_exact_keys(self):
         baseline = keys(self.root, self.paths, self.tools)

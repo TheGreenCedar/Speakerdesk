@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import platform
 import subprocess
 from pathlib import Path
 
@@ -25,17 +26,24 @@ def keys(root, tracked, tools):
     environment = fingerprint(root, [], tools)
     prefix = f"speakerdesk-native-v1-{environment}"
     rust_inputs = files('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/', 'vendor/mlx-sys/', 'desktop/src-tauri/', 'speakerdesk/static/', 'speakerdesk/templates/')
-    rust_contract = files('.cargo/', 'scripts/build_macos.sh', 'scripts/fetch_mlx_runtime.sh', 'scripts/native_licenses.py', 'scripts/ci_cache.py')
+    rust_contract = files('.cargo/', 'rust-toolchain.toml', '.github/workflows/',
+                          'vendor/mlx-sys/', 'speakerdesk/',
+                          'desktop/src-tauri/tauri.conf.json', 'desktop/src-tauri/Info.plist',
+                          'desktop/src-tauri/Entitlements.plist', 'desktop/capture/echo/',
+                          'scripts/build_macos.sh', 'scripts/fetch_mlx_runtime.sh',
+                          'scripts/native_licenses.py', 'scripts/setup_echo.py',
+                          'scripts/echo_compile_guard.py', 'scripts/ci_cache.py')
     # sccache validates each rustc invocation, source, dependency and environment.
     # Version/lock/manifest changes must not discard unchanged dependency objects.
-    compiler_prefix = f"{prefix}-compiler-v2-"
+    compiler_tools = {name: value for name, value in tools.items() if name not in {'python', 'node', 'profile'}}
+    compiler_prefix = f"speakerdesk-compiler-v3-{fingerprint(root, rust_contract, compiler_tools)}-"
     return {
         'cargo-key': f"{prefix}-cargo-{fingerprint(root, files('Cargo.lock'), {})}",
         'cargo-prefix': f"{prefix}-cargo-",
         'npm-key': f"{prefix}-npm-{fingerprint(root, files('desktop/package-lock.json'), {})}",
         'npm-prefix': f"{prefix}-npm-",
         'compiler-prefix': compiler_prefix,
-        'compiler-key': compiler_prefix + fingerprint(root, rust_inputs + rust_contract, {}),
+        'compiler-key': compiler_prefix + fingerprint(root, rust_inputs, {'profile': tools.get('profile', '')}),
         # Whole components use exact inputs only. No prefix restore for executable outputs.
         'capture-key': f"{prefix}-capture-{fingerprint(root, files('desktop/capture/', 'desktop/src-tauri/Entitlements.plist', 'scripts/build_macos.sh', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
     }
@@ -48,6 +56,27 @@ def source_changed(paths):
 
 def command(*args):
     return subprocess.check_output(args, cwd=ROOT, text=True).strip()
+
+
+def tool_identity(profile):
+    mac = platform.system() == 'Darwin'
+    rust = command('rustc', '-Vv')
+    tools = {
+        'os': command('sw_vers', '-productVersion') if mac else command('uname', '-sr'),
+        'arch': command('uname', '-m'), 'image': os.getenv('ImageVersion', 'local'),
+        'target': next(line.removeprefix('host: ') for line in rust.splitlines() if line.startswith('host: ')),
+        'rust': rust, 'profile': profile, 'python': command('python3', '--version'),
+        'node': command('node', '--version'), 'sccache': command('sccache', '--version'),
+        'cc': command('cc', '--version'), 'rustflags': os.getenv('RUSTFLAGS', ''),
+        'cmake': command('cmake', '--version'), 'ninja': command('ninja', '--version'),
+    }
+    if mac:
+        # The producer sets 15.0 in build_macos.sh; native CI uses Rust's default.
+        tools.update(deployment='15.0' if profile == 'release-default-features-adhoc' else os.getenv('MACOSX_DEPLOYMENT_TARGET', 'default'),
+                     xcode=command('xcodebuild', '-version'),
+                     swift=command('xcrun', 'swiftc', '--version'), sdk=command('xcrun', '--show-sdk-version'),
+                     clang=command('xcrun', 'clang', '--version'))
+    return tools
 
 
 def emit(values):
@@ -67,6 +96,9 @@ if __name__ == '__main__':
         total = sum(p.stat().st_size for directory in paths if directory.exists()
                     for p in directory.rglob('*') if p.is_file() and not p.is_symlink())
         emit({'cache-bytes': total, 'within-limit': str(total <= 2 * 1024**3).lower()})
+        if os.getenv('GITHUB_STEP_SUMMARY'):
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                summary.write(f'- Total cache bytes: {total}; save limit: {2 * 1024**3}\n')
     elif sys.argv[1:] == ['changes']:
         base = os.getenv('BASE_SHA', '')
         if not base or set(base) == {'0'}:
@@ -76,16 +108,8 @@ if __name__ == '__main__':
             changed = source_changed(list(filter(None, names)))
         emit({'source': str(changed).lower()})
     else:
-        tools = {
-            'os': command('sw_vers', '-productVersion'), 'arch': command('uname', '-m'),
-            'image': os.getenv('ImageVersion', 'local'), 'target': 'aarch64-apple-darwin',
-            'deployment': '15.0', 'rust': command('rustc', '-Vv'),
-            'xcode': command('xcodebuild', '-version'), 'swift': command('xcrun', 'swiftc', '--version'),
-            'sdk': command('xcrun', '--show-sdk-version'), 'python': command('python3', '--version'),
-            'clang': command('xcrun','clang','--version'),
-            'cmake': command('cmake','--version'), 'ninja': command('ninja','--version'),
-            'node': command('node', '--version'),
-            'sccache': command('sccache', '--version'), 'profile': 'release-default-features-adhoc',
-        }
+        profile = 'release-default-features-adhoc'
+        if sys.argv[1:] == ['rust']:
+            profile = 'debug-fixtures-release-default' if platform.system() == 'Darwin' else 'debug-fixtures'
         tracked = command('git', 'ls-files', '-z').split('\0')
-        emit(keys(ROOT, list(filter(None, tracked)), tools))
+        emit(keys(ROOT, list(filter(None, tracked)), tool_identity(profile)))
