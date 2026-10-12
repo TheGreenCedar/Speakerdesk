@@ -55,6 +55,7 @@ On macOS, run `bash scripts/fetch_mlx_runtime.sh` once, then add `-p speakerdesk
 - [Architecture](docs/architecture.md): processes, crates, inference boundary, storage
 - [Product behavior](docs/product-behavior.md): the user-visible rules
 - [Releasing](docs/releasing.md): build, signing, promotion and delivery
+- [CI build reuse](docs/ci-build-reuse.md): cache keys, trust and uncached runs
 - [Glossary](GLOSSARY.md) and [decision records](docs/adr/)
 
 ## License

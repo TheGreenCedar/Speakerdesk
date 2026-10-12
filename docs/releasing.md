@@ -4,7 +4,7 @@ A release moves one exact build of a commit through four stages. Speakerdesk bui
 
 ## 1. Build the candidate
 
-Run `Apple package` (`.github/workflows/apple-build.yml`) by manual dispatch on `main`. It produces an ad-hoc signed candidate artifact. The workflow has read-only permissions and no Apple credentials. PR artifacts are not promotable.
+Run `Apple package` (`.github/workflows/apple-build.yml`) by manual dispatch on `main`. It produces an ad-hoc signed candidate artifact. Caching is described in [CI build reuse](ci-build-reuse.md). The workflow has read-only permissions and no Apple credentials. PR artifacts are not promotable.
 
 To build locally, run `APPLE_SIGNING_IDENTITY="<Developer ID identity>" ./scripts/build_macos.sh` (or `-` for ad-hoc). Local signing is fine for disposable checks. It does not count as notarization or release provenance.
 
@@ -31,7 +31,7 @@ python3 scripts/promote_release.py --manifest artifact-manifest.json --native-qa
 # add --publish only for an authorized release
 ```
 
-Preparation checks the payload inventory and hashes, notarization, the compiled updater key, and the QA binding to the signed app ZIP. It then authenticates the producer run, the signer run and the original signer artifact against GitHub. The notes must name the exact source commit. `--publish` creates a draft release, verifies its assets and tag, publishes it, and rehashes the downloads. Producer manifests stay `public_ready: false`, and promotion never rewrites provenance artifacts.
+Preparation checks the payload inventory and hashes, notarization, the compiled updater key, and the QA binding to the signed app ZIP. It then authenticates the producer run, the signer run and the original signer artifact against GitHub. The notes must name the exact source commit. `--publish` uploads a draft release and resolves it by identity, then verifies its assets. If the `v<version>` tag doesn't exist, it creates the tag at the source commit; an existing tag must already point there. It then publishes the release and rehashes the downloads. Producer manifests stay `public_ready: false`, and promotion never rewrites provenance artifacts.
 
 ## 4. Website and updater delivery
 

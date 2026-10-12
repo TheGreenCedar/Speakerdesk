@@ -21,6 +21,7 @@ These mirror `.github/workflows/ci.yml`:
 - `docs/architecture.md`: read before changing process, IPC, storage, refinement, capture or setup boundaries.
 - `docs/product-behavior.md`: update it in the same change when you change a user-visible rule.
 - `docs/releasing.md`: build, signing, promotion and website delivery.
+- `docs/ci-build-reuse.md`: read before changing CI caches or workflow trust boundaries.
 
 ## Agent skills
 
