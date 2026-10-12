@@ -14,6 +14,11 @@ This records local qualification, not a release or notarization claim.
 
 ## Product and failure boundaries
 
+The import/edit/export UI check used signed executable
+`dca0beef25325474ac431632ddf708bf153c4207329a0b10ff26e5a8179f6b76`,
+before the decoder and terminal-status corrections. Its editor and automatic
+publication path are unchanged in the final candidate; real-child output and
+cancellation checks cover those corrections separately.
 The actual Tauri app imported the first public fixture through its file picker.
 Transcribe showed progress, then automatically replaced two detected overlap
 passages with four ordinary editable rows. No comparison/acceptance step was
@@ -27,7 +32,7 @@ JSON included the edits. A stale PUT returned 409. Original source bytes matched
 the imported fixture. Generated playback controls were exercised; this does not
 substitute for a listening study.
 
-The same signed candidate also captured Mac audio with the microphone disabled,
+The final signed candidate also captured Mac audio with the microphone disabled,
 using two playbacks of the fixed public mixture. The 102.377-second recording
 included idle silence; its two detected overlap passages became four editable
 rows automatically after capture stopped. No separation ran while recording.
