@@ -103,9 +103,9 @@ def prepare(manifest_path, qa_path, notes, signer_archive):
     return {'repository':REPOSITORY,'tag':'v'+version,'source_commit':manifest['source_commit'],'version':version,
             'files':files,'notes_file':str(notes),'notes':body,'native_gate_sha256':digest_file(qa_path)}
 
-def api(endpoint,body=None):
+def api(endpoint,body=None,*,method='PATCH'):
     command=['gh','api',endpoint]
-    if body is not None:command+=['--method','PATCH','--input','-']
+    if body is not None:command+=['--method',method,'--input','-']
     result=subprocess.run(command,input=json.dumps(body) if body is not None else None,text=True,capture_output=True,timeout=60)
     require(result.returncode==0,'GitHub request failed; preserve partial draft for inspection')
     return json.loads(result.stdout)
@@ -158,13 +158,14 @@ def check_tag(plan,required=False):
     refs=api('repos/'+REPOSITORY+'/git/matching-refs/tags/'+plan['tag'])
     refs=[r for r in refs if r['ref']=='refs/tags/'+plan['tag']]
     require(len(refs)<=1 and (refs or not required),'Expected release Git tag missing/ambiguous')
-    if not refs:return
+    if not refs:return False
     obj=refs[0]['object']
     for _ in range(10):
         if obj['type']=='commit':break
         require(obj['type']=='tag','Release tag must resolve to a commit')
         obj=api('repos/'+REPOSITORY+'/git/tags/'+obj['sha'])['object']
     require(obj['type']=='commit' and obj['sha']==plan['source_commit'],'Existing release tag points to different source')
+    return True
 
 def downloaded_digest(asset_id):
     process=subprocess.Popen(['gh','api','-H','Accept: application/octet-stream',
@@ -202,10 +203,19 @@ def publish(plan):
           '--title','Speakerdesk '+plan['version'],'--notes-file',plan['notes_file'],'--draft']+
           [item['path'] for item in plan['files'].values()],text=True,capture_output=True,timeout=180)
     require(result.returncode==0,'Draft upload failed; preserve any partial draft')
-    release=api('repos/'+REPOSITORY+'/releases/tags/'+plan['tag']);verify(release,plan)
-    check_tag(plan,required=True)
+    # The tag endpoint exposes published releases; drafts are listed by identity.
+    drafts=[r for r in api('repos/'+REPOSITORY+'/releases?per_page=100') if r['tag_name']==plan['tag']]
+    require(len(drafts)==1 and type(drafts[0].get('id')) is int and drafts[0]['id']>0 and
+            drafts[0]['id'] not in {r['id'] for r in releases},'Created draft identity missing/ambiguous')
+    release_id=drafts[0]['id']
+    release=api('repos/'+REPOSITORY+'/releases/'+str(release_id))
+    require(release.get('id')==release_id,'Created draft identity differs');verify(release,plan)
     require(release['draft'] is True,'Unexpected release visibility')
-    release=api('repos/'+REPOSITORY+'/releases/'+str(release['id']),{'draft':False,'prerelease':False,'make_latest':'true'})
+    if not check_tag(plan):
+        api('repos/'+REPOSITORY+'/git/refs',{'ref':'refs/tags/'+plan['tag'],'sha':plan['source_commit']},method='POST')
+    check_tag(plan,required=True)
+    release=api('repos/'+REPOSITORY+'/releases/'+str(release_id),{'draft':False,'prerelease':False,'make_latest':'true'})
+    require(release.get('id')==release_id,'Published release identity differs')
     verify(release,plan);require(release['draft'] is False and release['published_at'],'Publication incomplete')
     check_tag(plan,required=True)
     # Rehash authenticated actual downloads without storing a duplicate installer.
