@@ -533,25 +533,25 @@ pub fn accept_admission(evidence: Admission, start: i64, end: i64) -> Admission 
     }
 }
 
-pub struct SpeechTranscriber {
+pub struct SpeechTranscriber<'a> {
     language: LanguageChoice,
     policy: LanguagePolicy,
     context: Option<LanguageContext>,
-    evidence: Box<dyn AcousticEvidence>,
-    detector: Option<Box<dyn LanguageDetector>>,
-    recognizer: Box<dyn Recognizer>,
+    evidence: Box<dyn AcousticEvidence + 'a>,
+    detector: Option<Box<dyn LanguageDetector + 'a>>,
+    recognizer: Box<dyn Recognizer + 'a>,
     memo: Option<ExactMemo>,
     probe_scope: MemoScope,
     language_epoch: u64,
     pub cohere_calls: u64,
 }
 
-impl SpeechTranscriber {
+impl<'a> SpeechTranscriber<'a> {
     pub fn new(
         language: &str,
-        evidence: Box<dyn AcousticEvidence>,
-        detector: Option<Box<dyn LanguageDetector>>,
-        recognizer: Box<dyn Recognizer>,
+        evidence: Box<dyn AcousticEvidence + 'a>,
+        detector: Option<Box<dyn LanguageDetector + 'a>>,
+        recognizer: Box<dyn Recognizer + 'a>,
         context: Option<LanguageContext>,
     ) -> Result<Self, LanguageError> {
         let choice = LanguageChoice::parse(language)?;
@@ -1377,7 +1377,7 @@ mod tests {
     }
 
     struct Rig {
-        router: SpeechTranscriber,
+        router: SpeechTranscriber<'static>,
         detects: Arc<AtomicUsize>,
         asrs: Arc<AtomicUsize>,
         pcm: Arc<Mutex<Vec<Vec<f32>>>>,

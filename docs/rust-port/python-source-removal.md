@@ -79,8 +79,9 @@ publishes a native release, and does not change application behavior.
 The removal was implemented by a third Sol 6.1 agent and independently checked
 against `7d94c8011a9501bd2357e07c73d61964c55a3886`. Native runtime/desktop code,
 shared UI assets, model metadata, notices/licenses and committed golden bytes are
-unchanged. The fresh reviews' migration-discovery and metadata/autosave defects
-remain open; see [current delivery status](implementation.md).
+unchanged by that deletion. The subsequent review-repair batch fixes migration
+discovery and metadata/autosave, and consolidates packaged notices; see
+[current delivery status](implementation.md).
 
 On Apple M5/macOS 27 with Rust 1.99.0 and an isolated Python 3.13 environment:
 

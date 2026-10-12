@@ -1,8 +1,0 @@
-alloc-stdlib-0.3.0
-Declared license: BSD-3-Clause
-Published crate source: https://github.com/dropbox/rust-alloc-no-stdlib/tree/0a81fd6928ea3b33c8cd484aa4575d50ffb98012
-
-Original upstream license retained because the published crate omits its license text.
-
-Retained text: https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE
-SHA-256: c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae

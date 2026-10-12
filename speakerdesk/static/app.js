@@ -814,9 +814,9 @@ async function save({quiet = false} = {}) {
     let result;
     try {result=await put(base.revision);}
     catch(error) {
-      if(error.status!==409 || !base.passage_retry)throw error;
+      if(error.status!==409)throw error;
       const latest=await api(`/api/jobs/${jid}`);
-      // Only candidate publication may advance this save; authoritative edits still conflict.
+      // Metadata and retry candidates may advance revision; authoritative edits still conflict.
       const withoutCandidates=document=>{
         const copy=structuredClone(document);for(const segment of copy?.segments || [])delete segment.retry_candidate;
         return JSON.stringify(copy);
@@ -1144,6 +1144,11 @@ function formatBytes(bytes) {
 async function installModels() {
   await api('/api/setup',{method:'POST'}); await refreshSetup();
 }
+function modelSetupMessage(state) {
+  if(!state.supported)return 'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.';
+  if(state.status==='failed')return 'Model setup did not finish. Try again, or open Details for more information.';
+  return 'Download the local models once. Meetings are transcribed offline on this Mac.';
+}
 function renderStartState() {
   if(!config)return;
   const modelsReady=languageReady($('language').value), capture=meeting?.capture_available!==false;
@@ -1152,12 +1157,11 @@ function renderStartState() {
   $('setup-card-install').hidden=loading;
   if(state && !modelsReady && !loading) {
     const percent=state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0;
-    $('setup-card-text').textContent=state.message || (!state.supported?'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.'
-      :state.status==='failed' && !state.download_required?'Model setup did not finish. Retry setup to check the local models.':`Download the local models once (${formatBytes(state.total_bytes)}). After that, meetings are transcribed offline on this Mac.`);
+    $('setup-card-text').textContent=downloading?'Downloading local models. Meetings are transcribed offline on this Mac.':modelSetupMessage(state);
     $('setup-card-progress').hidden=!downloading;$('setup-card-progress').value=percent;
-    $('setup-card-status').textContent=state.error || (downloading?`${state.phase} · ${percent}%`:'');
+    $('setup-card-status').textContent=downloading?`${state.phase} · ${percent}%`:'';
     $('setup-card-install').disabled=busy || !state.supported || state.can_download===false || state.voice?.status==='downloading';
-    $('setup-card-install').querySelector('span').textContent=downloading?'Downloading…':state.status==='failed' && !state.download_required?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
+    $('setup-card-install').querySelector('span').textContent=downloading?'Downloading…':state.status==='failed'?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
   }
   $('start-meeting').disabled=busy || !modelsReady || !capture || changingLiveLanguage || changingDefaultLanguage;
   $('start-hint').textContent=!capture?'Live recording isn’t available in this build. Use Import recording in the sidebar to transcribe a file.'
@@ -1209,12 +1213,14 @@ async function refreshSetup() {
     $('setup-disk-note').hidden=loading || state.ready || (state.status==='failed' && !state.download_required);
     $('model-progress').hidden=!downloading;
     $('model-progress').value=state.total_bytes?100*state.downloaded_bytes/state.total_bytes:0;
-    $('model-status').textContent=state.error || (loading?(state.phase || 'Loading models…'):state.message || (downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?'Ready to transcribe on this Mac.':'Finish required model setup before transcribing.'));
+    $('model-status').textContent=loading?(state.phase || 'Loading models…'):downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?'Ready to transcribe on this Mac.':modelSetupMessage(state);
+    $('model-error').textContent=[...new Set([state.error,state.message].filter(Boolean))].join('\n');
+    $('model-error-details').hidden=!$('model-error').textContent;
     $('install-models').hidden=loading || state.ready;
     $('cancel-model-setup').hidden=!state.can_cancel;
     const voice=state.voice,voiceBusy=voice.status==='downloading';
     $('install-models').disabled=busy || voiceBusy || !state.supported || state.can_download===false;
-    $('install-models').textContent=downloading?'Downloading…':state.status==='failed' && !state.download_required?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
+    $('install-models').textContent=downloading?'Downloading…':state.status==='failed'?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
     if(voiceAvailable!==voice.available) await loadPeople();
     $('settings-voice-note').textContent=voice.enabled?voice.message:'Recognition is off. Saved names and voices stay on this Mac.';
     if(document.activeElement!==$('recognize-voices')) $('recognize-voices').checked=voice.enabled;
@@ -1222,7 +1228,10 @@ async function refreshSetup() {
       await refreshConfig();renderLanguageDefault();if(selected)setStatus();
     }
     renderStartState();
-  } catch(error) { $('model-status').textContent=error.message; }
+  } catch(error) {
+    $('model-error').textContent=error.message;$('model-error-details').hidden=false;
+    $('model-status').textContent='Could not check model setup. Open Details and try again.';
+  }
 }
 async function meetingAction(action) {
   if(!meeting?.id)return;

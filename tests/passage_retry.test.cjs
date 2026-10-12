@@ -10,24 +10,29 @@ test('pending retry prevents duplicate retries while the saved transcript stays 
   f.run('delete selected.passage_retry;renderSegments()');
   assert.equal(retry().disabled,false);
 });
-test('a completed retry can advance revision before dirty words autosave without stranding or overwriting them',async()=>{
-  for(const conflict of [null,'text','speaker','boundary','name','second_save']) {
+for(const update of ['retry candidate','voice metadata'])test(`${update} can advance revision before dirty words autosave without stranding or overwriting them`,async()=>{
+  for(const conflict of [null,'text','speaker','boundary','name','status','duration','second_save']) {
     const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
-    f.context.conflict=conflict;
-    f.run(`selected.passage_retry={id:'pending',segment_id:'r0'};
+    f.context.conflict=conflict;f.context.update=update;
+    f.run(`selected.kind='import';selected.status='ready';
+      if(update==='retry candidate')selected.passage_retry={id:'pending',segment_id:'r0'};
       window.latest=structuredClone(selected);latest.revision++;delete latest.passage_retry;
-      latest.document.segments[0].retry_candidate={id:'pending',start:0,end:10,speaker:'s0',text:'Model candidate',language:'en'};
+      if(update==='retry candidate')latest.document.segments[0].retry_candidate={id:'pending',start:0,end:10,speaker:'s0',text:'Model candidate',language:'en'};
+      else latest.voice_checks={s0:{status:'unknown'}};
       if(conflict==='text')latest.document.segments[0].text='New authoritative words';
       if(conflict==='speaker')latest.document.segments[0].speaker='s1';
       if(conflict==='boundary')latest.document.segments[0].end=9;
       if(conflict==='name')latest.document.speakers.s0='Changed name';
+      if(conflict==='status')latest.status='processing';
+      if(conflict==='duration')latest.duration++;
       doc.segments[0].text='My exact unsaved words';changed();renderSegments();
       document.getElementById('segments').querySelector('textarea').focus();
       window.puts=[];fetch=async(path,options)=>{
         if(options.method!=='PUT')return {ok:true,status:200,json:async()=>structuredClone(latest)};
         const body=JSON.parse(options.body);puts.push(body);
         if(body.revision!==latest.revision || conflict==='second_save')return {ok:false,status:409,json:async()=>({error:'This transcript changed.'})};
-        latest.document=body.document;latest.document.segments[0].retry_candidate={id:'pending',start:0,end:10,speaker:'s0',text:'Model candidate',language:'en'};
+        latest.document=body.document;
+        if(update==='retry candidate')latest.document.segments[0].retry_candidate={id:'pending',start:0,end:10,speaker:'s0',text:'Model candidate',language:'en'};
         latest.revision++;return {ok:true,status:200,json:async()=>structuredClone(latest)};
       };`);
     if(conflict) {
@@ -37,7 +42,9 @@ test('a completed retry can advance revision before dirty words autosave without
     } else {
       await f.run('save({quiet:true})');assert.equal(f.run('dirty'),false);
       assert.equal(f.run('latest.document.segments[0].text'),'My exact unsaved words');
-      assert.equal(f.run('doc.segments[0].retry_candidate.text'),'Model candidate');
+      assert.deepEqual(Array.from(f.run('puts.map(p=>p.revision)')),[1,2]);
+      if(update==='retry candidate')assert.equal(f.run('doc.segments[0].retry_candidate.text'),'Model candidate');
+      else assert.equal(f.run('selected.voice_checks.s0.status'),'unknown');
     }
     assert.equal(f.run('doc.segments[0].text'),'My exact unsaved words');
   }

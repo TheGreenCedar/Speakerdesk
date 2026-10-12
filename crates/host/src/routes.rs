@@ -219,8 +219,18 @@ impl AppState {
             .try_lock()
             .map_err(|e| StoreError::message(format!("Cannot own native storage: {e}")))?;
         let database = data_dir.join("speakerdesk.sqlite");
+        let legacy_db = match legacy_db {
+            Some(path) => Some(path.to_path_buf()),
+            None if !database
+                .try_exists()
+                .map_err(|e| StoreError::message(e.to_string()))? =>
+            {
+                legacy_database(&data_dir)?
+            }
+            None => None,
+        };
         if let Some(legacy_db) = legacy_db {
-            speakerdesk_core::store::import_legacy(legacy_db, &database)?;
+            speakerdesk_core::store::import_legacy(&legacy_db, &database)?;
         }
         let mut store = SqliteJobStore::open(database)?;
         store.recover(ACTIVE)?;
@@ -463,6 +473,28 @@ impl AppState {
         }
         result
     }
+}
+
+fn legacy_database(root: &Path) -> Result<Option<PathBuf>, StoreError> {
+    let mut candidates = vec![
+        root.join("recordings/jobs.sqlite"),
+        root.join("jobs.sqlite"),
+    ];
+    // The packaged Python app used Speakerdesk before Tauri adopted its bundle identifier.
+    if root.ends_with("Library/Application Support/com.speakerdesk.desktop") {
+        candidates.push(
+            root.with_file_name("Speakerdesk")
+                .join("recordings/jobs.sqlite"),
+        );
+    }
+    for path in candidates {
+        match fs::symlink_metadata(&path) {
+            Ok(_) => return Ok(Some(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(StoreError::message(error.to_string())),
+        }
+    }
+    Ok(None)
 }
 
 /// Job routes, including token checks and the v0.6.6 security headers.

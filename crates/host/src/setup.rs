@@ -104,11 +104,39 @@ impl SetupService {
             .expect("setup progress")
             .downloaded_bytes = bytes;
     }
-    pub fn finish(&self, result: Result<(), String>) {
+    pub fn missing(&self) {
+        self.progress.lock().expect("setup progress").status = "missing";
+    }
+    pub fn finish(&self, result: Result<(), String>, missing: bool) {
         let mut progress = self.progress.lock().expect("setup progress");
-        progress.status = if result.is_ok() { "ready" } else { "failed" };
+        progress.status = if result.is_ok() {
+            "ready"
+        } else if missing {
+            "missing"
+        } else {
+            "failed"
+        };
         progress.error = result.err();
     }
+}
+
+pub(crate) fn initial_models_missing(
+    root: &Path,
+    models: &[ModelArtifact],
+    reports: &[speakerdesk_core::ipc::SetupModelReport],
+) -> bool {
+    !std::fs::symlink_metadata(root)
+        .is_ok_and(|meta| meta.is_symlink() || !meta.is_dir())
+        && reports.len() >= models.len()
+        && reports.iter().take(models.len()).any(|report| !report.ok)
+        && models.iter().zip(reports).all(|(model, report)| {
+            report.ok
+                || (!std::fs::symlink_metadata(root.join(&model.id))
+                    .is_ok_and(|meta| meta.is_symlink() || !meta.is_dir())
+                    && model.files.keys().all(|name| {
+                        matches!(std::fs::symlink_metadata(root.join(&model.id).join(name)), Err(error) if error.kind() == io::ErrorKind::NotFound)
+                    }))
+        })
 }
 
 pub fn directory_free_bytes(path: &Path) -> io::Result<u64> {
@@ -602,14 +630,61 @@ mod tests {
     fn initializer_presence_distinguishes_missing_downloads_from_load_failure() {
         let temp = tempfile::tempdir().unwrap();
         let models = artifacts();
+        let reports: Vec<_> = models
+            .iter()
+            .map(|model| speakerdesk_core::ipc::SetupModelReport {
+                model: model.id.clone(),
+                ok: false,
+                timing_ms: 0,
+            })
+            .collect();
         let progress = SetupService::default();
         progress.begin(&models, false);
         progress.check_downloads(temp.path(), &models);
-        progress.finish(Err("Replay initializer failure".into()));
+        progress.finish(
+            Err("Replay initializer failure".into()),
+            initial_models_missing(temp.path(), &models[..3], &reports),
+        );
         assert!(
             progress.progress().download_required,
             "first setup needs model files"
         );
+        assert_eq!(progress.progress().status, "missing");
+        assert_eq!(
+            progress.progress().error.as_deref(),
+            Some("Replay initializer failure")
+        );
+        #[cfg(unix)]
+        {
+            let directory = temp.path().join(&models[0].id);
+            std::os::unix::fs::symlink("missing-model-directory", &directory).unwrap();
+            assert!(!initial_models_missing(temp.path(), &models, &reports));
+            std::fs::remove_file(&directory).unwrap();
+            std::fs::create_dir_all(&directory).unwrap();
+            let link = directory.join(models[0].files.keys().next().unwrap());
+            std::os::unix::fs::symlink("missing-model-file", &link).unwrap();
+            assert!(!initial_models_missing(temp.path(), &models, &reports));
+            std::fs::remove_file(link).unwrap();
+        }
+        progress.begin(&models, true);
+        progress.finish(Err("HTTP 503 during a requested download".into()), false);
+        assert_eq!(progress.progress().status, "failed");
+        assert!(progress.progress().download_required);
+        // A bad present model alongside absent models must stay a real failure.
+        let present = temp
+            .path()
+            .join(&models[0].id)
+            .join(models[0].files.keys().next().unwrap());
+        std::fs::create_dir_all(present.parent().unwrap()).unwrap();
+        std::fs::write(present, b"invalid model").unwrap();
+        progress.begin(&models, false);
+        progress.check_downloads(temp.path(), &models);
+        progress.finish(
+            Err("A present model could not load".into()),
+            initial_models_missing(temp.path(), &models[..3], &reports),
+        );
+        assert_eq!(progress.progress().status, "failed");
+        assert!(progress.progress().download_required);
         // Empty files deliberately establish presence, not model validity or readiness.
         // Prepared outputs may be missing without requiring a network transfer.
         for model in &models {
@@ -621,7 +696,10 @@ mod tests {
         }
         progress.begin(&models, false);
         progress.check_downloads(temp.path(), &models);
-        progress.finish(Err("Replay initializer failure".into()));
+        progress.finish(
+            Err("Replay initializer failure".into()),
+            initial_models_missing(temp.path(), &models[..3], &reports),
+        );
         assert!(
             !progress.progress().download_required,
             "load failure is not evidence of a missing download"
@@ -634,6 +712,7 @@ mod tests {
             !progress.progress().download_required,
             "filesystem errors leave download need unknown"
         );
+        assert!(!initial_models_missing(&unknown, &models[..3], &reports));
     }
     async fn server(
         mode: &'static str,

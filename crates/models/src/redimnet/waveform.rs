@@ -16,8 +16,6 @@ pub const MAX_SAMPLES: usize = RATE as usize * 10;
 pub const SILENCE_RMS: f64 = 1.0 / 32768.0;
 /// PCM16 positive full scale. `abs(sample) >= CLIP_ABS` is clipping.
 pub const CLIP_ABS: f32 = 32767.0 / 32768.0;
-/// Cosine at or above this reuses an existing identity (D7).
-pub const IDENTITY_REUSE_COSINE: f64 = 0.9999;
 
 const _: () = assert!(RATE == speakerdesk_core::limits::SAMPLE_RATE);
 const _: () = assert!(INPUT_SAMPLES == speakerdesk_core::limits::VOICE_WINDOW_SAMPLES);
@@ -67,12 +65,6 @@ pub fn is_silent(samples: &[f32]) -> bool {
 /// True when any sample is at or beyond PCM16 full scale.
 pub fn is_clipped(samples: &[f32]) -> bool {
     samples.iter().any(|sample| sample.abs() >= CLIP_ABS)
-}
-
-/// D7: a cosine at or above [`IDENTITY_REUSE_COSINE`] reuses an existing identity.
-/// This does not mint a new identity.
-pub fn reuses_identity(cosine: f64) -> bool {
-    cosine >= IDENTITY_REUSE_COSINE
 }
 
 #[cfg(test)]

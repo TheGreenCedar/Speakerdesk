@@ -374,36 +374,16 @@ fn take_f64(fields: &mut Map<String, Value>, key: &str) -> Option<f64> {
     }
 }
 
-/// Python 3 `round` of a finite value: half away from the odd neighbor.
+/// Python 3 `round` of a finite value, with nonfinite input mapped to zero.
 fn round_half_even(value: f64) -> i64 {
     if !value.is_finite() {
         return 0;
     }
-    let floor = value.floor();
-    let fraction = value - floor;
-    let rounded = if fraction > 0.5 {
-        floor + 1.0
-    } else if fraction < 0.5 {
-        floor
-    } else {
-        let floor_i = floor as i64;
-        if floor_i.rem_euclid(2) == 0 {
-            floor
-        } else {
-            floor + 1.0
-        }
-    };
-    rounded as i64
+    value.round_ties_even() as i64
 }
 
 fn divmod(value: i64, divisor: i64) -> (i64, i64) {
-    let mut quotient = value / divisor;
-    let mut remainder = value % divisor;
-    if remainder < 0 {
-        quotient -= 1;
-        remainder += divisor;
-    }
-    (quotient, remainder)
+    (value.div_euclid(divisor), value.rem_euclid(divisor))
 }
 
 #[cfg(test)]
@@ -651,11 +631,24 @@ mod tests {
 
     #[test]
     fn timestamp_matches_python_round_half_even() {
-        assert_eq!(timestamp(0.0, "."), "00:00:00.000");
-        assert_eq!(timestamp(1.5, ","), "00:00:01,500");
-        assert_eq!(timestamp(0.0005, "."), "00:00:00.000");
-        assert_eq!(timestamp(0.0015, "."), "00:00:00.002");
-        assert_eq!(timestamp(3661.25, "."), "01:01:01.250");
+        for (seconds, separator, expected) in [
+            (0.0, ".", "00:00:00.000"),
+            (1.5, ",", "00:00:01,500"),
+            (0.0005, ".", "00:00:00.000"),
+            (0.0015, ".", "00:00:00.002"),
+            (-0.0005, ".", "00:00:00.000"),
+            (-0.0015, ".", "-1:59:59.998"),
+            (-0.0025, ",", "-1:59:59,998"),
+            (59.9995, ".", "00:01:00.000"),
+            (3599.9995, ",", "01:00:00,000"),
+            (3661.25, ".", "01:01:01.250"),
+            (f64::NAN, ".", "00:00:00.000"),
+            (f64::INFINITY, ",", "00:00:00,000"),
+            (f64::NEG_INFINITY, ".", "00:00:00.000"),
+            (f64::MAX, ".", "00:00:00.000"),
+        ] {
+            assert_eq!(timestamp(seconds, separator), expected);
+        }
     }
 
     #[test]

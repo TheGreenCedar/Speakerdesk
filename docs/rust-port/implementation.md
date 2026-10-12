@@ -13,31 +13,38 @@ Local implementation branch: `codex/python-free-mac`.
 
 ## Delivery status after the fresh review
 
-The replacement is **not ready to ship**. Independent reviews of
-`7d94c8011a9501bd2357e07c73d61964c55a3886` found two confirmed product defects
-after the local workflow qualification below. These findings supersede the
-earlier completion decision; the passing tests remain evidence only for their
-recorded paths.
+The two confirmed product defects from review of
+`7d94c8011a9501bd2357e07c73d61964c55a3886` are fixed and independently reviewed.
+Native startup discovers known legacy database layouts under the storage-owner
+lock before creating a destination. An existing native database still wins.
+Metadata-only voice-check revisions now use the editor's existing unchanged-document
+409 retry; genuine text, speaker/name, boundary, status and duration conflicts remain.
+The original failing reproductions are retained, with new ordinary regression tests.
 
-- Production native startup calls `AppState::open` without a legacy database
-  path. The importer is implemented but never reached on upgrade. A signed-host
-  reproduction with two synthetic legacy layouts returned empty jobs and People
-  and created an empty native store; both legacy databases remained byte-identical.
-  Discover and import the legacy database before creating the native destination,
-  then test actual startup and restart through HTTP.
-- A background no-match voice check advances the job revision without changing
-  its transcript. Dirty editor polling skips that document, and ordinary import
-  autosave does not rebase on HTTP 409. A frontend DOM/mocked-HTTP reproduction
-  repeatedly submitted revision 1 against revision 2 and retained the correction
-  only in memory. Reuse the existing unchanged-document conflict comparison for
-  this metadata-only case; keep genuine text/name/boundary conflicts.
+The four bounded simplifications are also applied: borrowed model lifetimes replace
+the unsafe pointer adapter; unused foundation algorithms and their self-tests are
+removed; People delegates ID generation; timestamp arithmetic uses Rust primitives.
+Compiled model constants and independent reference fixtures remain protected.
+No model graph, decoder scheduling or performance policy changed.
 
-The current cleanup removes the legacy Python application, sidecar, obsolete
-tests and filename ledger while preserving native runtime code, shared editor
-assets, model metadata and independent golden bytes. See
-[source-removal scope](python-source-removal.md). It does not fix either runtime
-defect. Python remains build/test tooling, and native release promotion automation
-explicitly remains unsupported.
+The legacy Python application, sidecar, obsolete tests and filename ledger are
+removed; shared editor assets, model metadata and independent golden bytes remain.
+See [source-removal scope](python-source-removal.md). Python remains build/test
+tooling. Native release promotion automation explicitly remains unsupported.
+
+Duplicated checked-in license dumps are removed. The existing build collector
+produces one packaged notice from locked dependency sources and pinned upstream
+texts. Direct vendored-source notices remain. The app exports the packaged resource;
+missing resources return an explicit failure rather than stale compiled-in notices.
+`mlx-rs` remains the Rust API; the small `mlx-sys` build patch links official prebuilt
+MLX 0.32.2 because macOS supplies Metal, not MLX, and this pinned crate has no external
+MLX-prefix build option. Unused vendored documentation/generators are removed.
+
+The startup setup card now distinguishes missing models, active loading and failed
+setup. Raw errors appear once under collapsed Technical details in Settings. The
+actual signed app passed the same-window layout check: the heading, setup card and
+Start controls remain fully visible without compression. This work is a local
+candidate, not a notarized or published release.
 
 The main native Mac workflows are implemented and have passed the retained actual-app
 tests: import and live capture, editing and revision conflicts, save/reopen and
@@ -67,11 +74,56 @@ execution/overlap for the speech models is separate follow-up work, not part of
 this rewrite. Existing ReDimNet compute policy stays measured CPU_AND_GPU.
 
 Code revision `0201c8063c0a56bd597f721ddedce3946bcbeafe` passed all three GitHub
-CI jobs: source, Linux Rust and Mac Rust (run `38277886287`). The later docs-only
-head `7d94c801` passed source, Linux and Mac crate tests, but its Mac job failed
-with HTTP 503 while fetching the echo dependency (run `38281636327`). Results
-below remain scoped to their recorded artifacts. Earlier entries are a historical
-work log, not the current gate list.
+CI jobs (run `38277886287`). Heads `7d94c801` and `a55a57e9` passed source/Linux
+and Mac crate tests, but their Mac jobs failed on upstream echo-source HTTP 503
+(runs `38281636327` and `38284218741`). The downloader now retries 502/503/504
+at most three times within its existing deadline and size bound. Hash failures and
+permanent HTTP failures are not retried. This mitigates transient failures; a
+persistently unavailable upstream still blocks a clean build.
+
+### Review repair verification — October 12
+
+Apple M5, macOS 27, Rust 1.99.0; optimized Developer ID package built with the
+canonical script using Command Line Tools and prebuilt MLX 0.32.2.
+
+- 338 locked core/host/model/echo/xtask tests and 27 desktop tests passed; the
+  explicitly ignored hardware/model tests were not rerun. All 36 tooling tests
+  and 114 frontend tests passed (one existing optional frontend skip). The setup
+  delta also passed 13 focused Rust tests and the focused host Clippy check. Strict
+  workspace Clippy, formatting, source/workflow checks and actionlint passed.
+- Three file-backed migration integrations invoke the production host entrypoint
+  with a fixture inference child. They cover known legacy layouts, restart,
+  edit/audio/People/preferences, profile version strings, failed-import retry,
+  ownership and preservation of original database/audio bytes.
+- The signed package separately passed all three legacy layouts through its actual
+  native host: list/People/preferences, edit/restart, audio and stale revision
+  rejection. The legacy fixture hashes remained unchanged. This is synthetic
+  data and service proof without inference.
+- Actual Tauri editing on that package recovered from a forced metadata-only
+  conflict and displayed the saved words after full app restart. Only the background
+  metadata mutation was injected into the disposable store; no voice inference
+  is claimed. Native Settings export exactly matched the 1,117,805-byte packaged notice.
+- Evidence is retained under `/private/tmp/speakerdesk-review-fixes-package-bbldpm15/`
+  (`result.json`, `ui-race.json`); the regression/build logs use the
+  `/private/tmp/speakerdesk-pr27-review-fixes-` prefix.
+- The final setup/layout package passed the same three actual-host migration
+  fixtures, and its API classified absent artifacts as `missing`. Actual Tauri
+  showed one short setup explanation, one download action, a fully visible heading
+  and Start controls, and collapsed Technical details in Models. All three owned
+  processes exited after Quit. Evidence: `/private/tmp/speakerdesk-review-fixes-package-1y693z13/`
+  (`result.json`, `setup.json`, `ui-setup.json`). Archive SHA-256:
+  `02f07dff58f8b064889e8cedce0ffc81e1e8135f97989dea7e0f7e8d7fef32a9`;
+  executable SHA-256: `fa4e03549f6b4bedf3fd176c2e4067ee3575cc4d9c9fcaf548de9ee1bdefe314`.
+  This setup check used an empty disposable model directory; it did not rerun
+  inference or download models. The frontend loading/failure matrix is covered by
+  the focused regression tests, not claimed as real inference from this check.
+
+Harness incident: a post-quit accessibility observation unexpectedly relaunched the
+preview without its test environment and briefly opened default native storage.
+Those owned processes were stopped immediately. Its database contents were not
+inspected or cleaned up, so this run does not establish that location was untouched.
+Subsequent UI checks use explicit isolated launches and verify child arguments;
+there is no post-quit UI observation that could relaunch the app.
 
 Historical Python reference generation remains reproducible from its recorded
 commits in a separate checkout. The current `speakerdesk` directory contains the

@@ -1,8 +1,0 @@
-realfft-3.5.0
-Declared license: MIT
-Published crate source: https://github.com/HEnquist/realfft/tree/d0d4eee0525fd27c96c8a046d6d107acd5ed84a6
-
-The pinned upstream Cargo.toml and README declare MIT; the published crate and pinned repository contain no license text. Standard MIT terms are retained from SPDX without inventing a copyright year or replacing its template placeholders. Declared author: HEnquist <henrik.enquist@gmail.com>.
-
-Retained text: https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt
-SHA-256: b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5

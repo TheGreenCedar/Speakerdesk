@@ -139,7 +139,7 @@ using Git tree hashes and individual file SHA256 hashes:
   `8a83e63525b495aa7f35648a3b4b676279deb864`, upstream Abseil
   `7f008af1930f59d869a816795ac5d445e3628e4d`.
 - BSD3/PATENTS/AUTHORS, Apache2 and Ooura notices ship under
-  `packaging/licenses/capture-echo` and in the runtime.
+  the generated `Contents/Resources/THIRD_PARTY_NOTICES.txt`, collected from the pinned echo source during the Mac build.
 
 `scripts/setup_echo.py` uses existing Apple Clang, CMake and Ninja. Fetches are
 limited to approved official origins, with redirects refused, 30 s wall bounds,

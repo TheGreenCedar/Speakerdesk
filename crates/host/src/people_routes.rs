@@ -1,8 +1,6 @@
 //! People and identity routes share the application SQLite store.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
@@ -784,24 +782,9 @@ fn unix_now() -> f64 {
 }
 
 fn new_id() -> String {
-    random_hex(16)
-}
-
-fn random_hex(bytes: usize) -> String {
-    let mut raw = vec![0_u8; bytes];
-    let mut file = File::open("/dev/urandom").expect("urandom");
-    file.read_exact(&mut raw).expect("urandom");
-    if bytes == 16 {
-        raw[6] = (raw[6] & 0x0f) | 0x40;
-        raw[8] = (raw[8] & 0x3f) | 0x80;
-    }
-    let mut hex = String::with_capacity(raw.len() * 2);
-    for byte in raw {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        hex.push(HEX[(byte >> 4) as usize] as char);
-        hex.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    hex
+    crate::routes::new_job_id()
+        .expect("generated job ID")
+        .to_string()
 }
 
 #[cfg(test)]

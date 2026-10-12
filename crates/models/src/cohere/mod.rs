@@ -17,8 +17,8 @@ mod layers;
 #[cfg(target_os = "macos")]
 pub mod network;
 
-pub use greedy::{EOS_TOKEN_ID, greedy_stop};
-pub use preemphasis::{PREEMPHASIS, apply_preemphasis};
+pub use greedy::EOS_TOKEN_ID;
+pub use preemphasis::PREEMPHASIS;
 
 pub const WEIGHT_PIN: &str =
     "spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12";

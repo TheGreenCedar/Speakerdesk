@@ -41,6 +41,7 @@ pub(crate) struct NativeModels {
     alignment: RwLock<Option<Arc<speakerdesk_core::alignment::Vocabulary>>>,
     voice: RwLock<Option<speakerdesk_core::voice::Calibration>>,
     model_root: PathBuf,
+    notices: PathBuf,
     setup: crate::setup::SetupService,
     task: Mutex<Option<(CancellationToken, tokio::task::JoinHandle<()>)>>,
 }
@@ -132,7 +133,11 @@ impl NativeModels {
                     app.set_issues(vec![error.clone()]);
                 }
             }
-            native.setup.finish(result);
+            let missing = !download
+                && !token.is_cancelled()
+                && !app.admission.closed()
+                && native.setup.progress().status == "missing";
+            native.setup.finish(result, missing);
         });
         *task = Some((cancel, handle));
         Ok(())
@@ -177,6 +182,7 @@ impl NativeModels {
         let mut reports = Vec::new();
         let mut failures = Vec::new();
         let mut core_failures = Vec::new();
+        let mut ordinary_errors = true;
         let mut alignment = None;
         let mut voice = None;
         for (index, artifact) in artifacts.iter().enumerate() {
@@ -190,30 +196,33 @@ impl NativeModels {
                 _ => format!("{}@{}", artifact.repo, artifact.revision),
             };
             self.setup.phase(format!("Loading {}…", artifact.name));
-            let loaded = models
-                .setup_check(std::slice::from_ref(&artifact.id))
-                .map_err(|e| e.to_string())
-                .and_then(|mut loaded| {
-                    if loaded.len() != 1 || !loaded[0].ok || loaded[0].model != identity {
-                        return Err("Model initialization returned an unexpected identity".into());
-                    }
-                    if artifact.id == "coarse-alignment" {
-                        let tokens = std::fs::read_to_string(
-                            self.model_root.join("coarse-alignment/tokens.txt"),
-                        )
-                        .map_err(|e| e.to_string())?;
-                        alignment = Some(Arc::new(speakerdesk_core::alignment::Vocabulary::parse(
-                            &tokens,
-                        )?));
-                    }
-                    if artifact.id == "redimnet2-b6" {
-                        voice = Some(native_voice_policy());
-                    }
-                    Ok(loaded.remove(0))
-                });
+            let checked = models.setup_check(std::slice::from_ref(&artifact.id));
+            let ordinary_error = matches!(
+                &checked,
+                Err(speakerdesk_core::error::ChildError::Failed { .. })
+            );
+            let loaded = checked.map_err(|e| e.to_string()).and_then(|mut loaded| {
+                if loaded.len() != 1 || !loaded[0].ok || loaded[0].model != identity {
+                    return Err("Model initialization returned an unexpected identity".into());
+                }
+                if artifact.id == "coarse-alignment" {
+                    let tokens = std::fs::read_to_string(
+                        self.model_root.join("coarse-alignment/tokens.txt"),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    alignment = Some(Arc::new(speakerdesk_core::alignment::Vocabulary::parse(
+                        &tokens,
+                    )?));
+                }
+                if artifact.id == "redimnet2-b6" {
+                    voice = Some(native_voice_policy());
+                }
+                Ok(loaded.remove(0))
+            });
             match loaded {
                 Ok(report) => reports.push(report),
                 Err(error) => {
+                    ordinary_errors &= ordinary_error;
                     let message = format!("{}: {error}", artifact.name);
                     if index < 3 {
                         core_failures.push(message.clone());
@@ -232,12 +241,18 @@ impl NativeModels {
         }
         *self.alignment.write().expect("alignment capability") = alignment;
         *self.voice.write().expect("voice capability") = voice;
+        let missing = !all
+            && ordinary_errors
+            && crate::setup::initial_models_missing(&self.model_root, &artifacts, &reports);
         app.set_model_reports(reports);
         app.set_issues(core_failures.clone());
         let errors = if all { failures } else { core_failures };
         if errors.is_empty() {
             Ok(())
         } else {
+            if missing {
+                self.setup.missing();
+            }
             Err(errors.join(" "))
         }
     }
@@ -464,12 +479,17 @@ async fn serve(
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
+    let notices = executable
+        .parent()
+        .ok_or("native executable has no parent directory")?
+        .join("../Resources/THIRD_PARTY_NOTICES.txt");
     let supervisor =
         InferenceSupervisor::new(executable, env!("CARGO_PKG_VERSION"), model_root.clone())?;
     let native = Arc::new(NativeModels {
         supervisor: supervisor.clone(),
         root: app.data_dir().to_path_buf(),
         model_root,
+        notices,
         alignment: RwLock::new(None),
         voice: RwLock::new(None),
         setup: crate::setup::SetupService::default(),
@@ -682,7 +702,7 @@ async fn setup(State(app): State<AppState>) -> Response {
         let catalog = crate::setup::artifacts();
         let models: Vec<_> = catalog.iter().enumerate().map(|(index, model)| json!({"id":model.id,"name":model.name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":model.download_bytes(),"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
         let alignment = &catalog[4];
-        let status = if busy {progress.status} else if progress.error.is_some() {"failed"} else if ready {"ready"} else {"idle"};
+        let status = if busy || progress.status == "missing" {progress.status} else if progress.error.is_some() {"failed"} else if ready {"ready"} else {"idle"};
         Json(json!({
             "supported":supported,"ready":ready,"core_ready":core_ready,"automatic_language":automatic,
             "status":status,"phase":progress.phase,"error":progress.error,
@@ -719,7 +739,18 @@ async fn cancel_setup(State(app): State<AppState>) -> Response {
     }
     Json(json!({"status":"cancelling"})).into_response()
 }
-async fn notices() -> Response {
+async fn notices(State(app): State<AppState>) -> Response {
+    let bytes = match app.native.get() {
+        Some(native) => tokio::fs::read(&native.notices).await.ok(),
+        None => None,
+    };
+    let Some(bytes) = bytes else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"Third-party notices are unavailable in this build."})),
+        )
+            .into_response();
+    };
     (
         [
             (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
@@ -728,7 +759,7 @@ async fn notices() -> Response {
                 "attachment; filename=Speakerdesk-third-party-notices.txt",
             ),
         ],
-        include_str!("../../../packaging/THIRD_PARTY_NOTICES.txt"),
+        bytes,
     )
         .into_response()
 }
@@ -871,6 +902,7 @@ mod setup_tests {
             supervisor: supervisor.clone(),
             root: app.data_dir().into(),
             model_root: invalid_root,
+            notices: temp.path().join("THIRD_PARTY_NOTICES.txt"),
             alignment: RwLock::new(None),
             voice: RwLock::new(None),
             setup: crate::setup::SetupService::default(),
@@ -903,6 +935,19 @@ mod setup_tests {
                 .unwrap();
         });
         let client = reqwest::Client::new();
+        let notice_url = format!("http://{address}/api/notices");
+        assert_eq!(
+            client.get(&notice_url).send().await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        std::fs::write(&native.notices, b"Fixture dependency notice").unwrap();
+        let response = client.get(notice_url).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(response.text().await.unwrap(), "Fixture dependency notice");
         let url = format!("http://{address}");
         let post = |path: &str| {
             client

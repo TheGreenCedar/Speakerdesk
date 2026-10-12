@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted design; application integration and model qualification are unfinished.
+Accepted and implemented for Mac. Local qualification and remaining release boundaries are recorded in [implementation and evidence](../rust-port/implementation.md).
 
 ## Decision
 

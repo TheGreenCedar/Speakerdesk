@@ -4,7 +4,6 @@
 //! Optional supplied-text CTC timing uses the pinned vocabulary and original crop.
 
 use std::collections::BTreeMap;
-use std::marker::PhantomData;
 
 use serde_json::{Map, Value, json};
 
@@ -215,7 +214,7 @@ pub fn activity_slice(regions: &[ActivitySlice], start: f64, end: f64) -> Vec<Ac
 ///
 /// Manual language calls [`Models::transcribe`] for admitted speech only.
 /// `auto` also calls [`Models::language_probe`] through [`SpeechTranscriber`].
-pub fn import_recording<M: Models + ?Sized + 'static>(
+pub fn import_recording<M: Models + ?Sized>(
     models: &M,
     pcm: &[f32],
     language: &str,
@@ -334,7 +333,7 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
 }
 
 /// Transcribe one explicit-language passage. The result is not written onto a document.
-pub fn retry_passage<M: Models + ?Sized + 'static>(
+pub fn retry_passage<M: Models + ?Sized>(
     models: &M,
     pcm: &[f32],
     start: f64,
@@ -345,7 +344,7 @@ pub fn retry_passage<M: Models + ?Sized + 'static>(
 }
 
 /// The host supplies a validated catalog only for the qualified processed microphone.
-pub fn retry_passage_source<M: Models + ?Sized + 'static>(
+pub fn retry_passage_source<M: Models + ?Sized>(
     models: &M,
     pcm: &[f32],
     start: f64,
@@ -370,7 +369,7 @@ pub fn retry_passage_source<M: Models + ?Sized + 'static>(
 
 /// Shared bounded admission and language routing. Manual retry guards its public
 /// language choice before entering; saved canonical work uses its captured mode.
-fn decode_passage_source<M: Models + ?Sized + 'static>(
+fn decode_passage_source<M: Models + ?Sized>(
     models: &M,
     pcm: &[f32],
     start: f64,
@@ -442,7 +441,7 @@ fn decode_passage_source<M: Models + ?Sized + 'static>(
 
 /// Keep a saved anchor intact unless every routed part supplies complete text in
 /// the same supported language. Mixed/uncertain routes retain the prior words.
-pub(crate) fn refine_passage_source<M: Models + ?Sized + 'static>(
+pub(crate) fn refine_passage_source<M: Models + ?Sized>(
     models: &M,
     pcm: &[f32],
     language_mode: &str,
@@ -461,7 +460,7 @@ pub(crate) fn refine_passage_source<M: Models + ?Sized + 'static>(
 
 /// A physical context crop is one recognition request (up to 20 seconds). Only
 /// Cohere sees edge padding; VAD, language probes and CTC retain physical coordinates.
-pub(crate) fn refine_context_source<M: Models + ?Sized + 'static>(
+pub(crate) fn refine_context_source<M: Models + ?Sized>(
     models: &M,
     pcm: &[f32],
     language_mode: &str,
@@ -957,7 +956,7 @@ fn examine(ledger: &SpeechLedger, pcm: &[f32], window: Window) -> Result<Examine
 }
 
 fn decode_window(
-    transcriber: Option<&mut SpeechTranscriber>,
+    transcriber: Option<&mut SpeechTranscriber<'_>>,
     pcm: &[f32],
     language: &str,
     speakers: &[String],
@@ -1339,14 +1338,11 @@ fn seconds_to_sample(seconds: f64, len: i64) -> i64 {
     frames as i64
 }
 
-fn admit<M: Models + ?Sized + 'static>(
-    models: &M,
-    pcm: &[f32],
-) -> Result<SpeechLedger, ImportError> {
+fn admit<M: Models + ?Sized>(models: &M, pcm: &[f32]) -> Result<SpeechLedger, ImportError> {
     admit_source(models, pcm, None)
 }
 
-fn admit_source<M: Models + ?Sized + 'static>(
+fn admit_source<M: Models + ?Sized>(
     models: &M,
     pcm: &[f32],
     processed_microphone_catalog: Option<&str>,
@@ -1404,22 +1400,17 @@ fn admit_source<M: Models + ?Sized + 'static>(
     Ok(ledger)
 }
 
-struct BorrowedModels<M: Models + ?Sized> {
-    models: *const M,
-    _marker: PhantomData<*const M>,
+struct BorrowedModels<'a, M: Models + ?Sized> {
+    models: &'a M,
     failure: Option<std::sync::Arc<std::sync::Mutex<Option<ChildError>>>>,
 }
 
-impl<M: Models + ?Sized> BorrowedModels<M> {
+impl<'a, M: Models + ?Sized> BorrowedModels<'a, M> {
     fn new(
-        models: &M,
+        models: &'a M,
         failure: Option<std::sync::Arc<std::sync::Mutex<Option<ChildError>>>>,
     ) -> Self {
-        Self {
-            models: std::ptr::from_ref(models),
-            _marker: PhantomData,
-            failure,
-        }
+        Self { models, failure }
     }
 
     fn retain_lifecycle(&self, error: &ChildError) {
@@ -1439,20 +1430,15 @@ impl<M: Models + ?Sized> BorrowedModels<M> {
             .as_ref()
             .is_some_and(|failure| failure.lock().expect("child failure").is_some())
     }
-    fn models(&self) -> &M {
-        // SAFETY: the pointer is the caller's `&M`, and every transcriber that
-        // holds it returns before `import_recording` / `retry_passage` returns.
-        unsafe { &*self.models }
-    }
 }
 
-impl<M: Models + ?Sized> Recognizer for BorrowedModels<M> {
+impl<M: Models + ?Sized> Recognizer for BorrowedModels<'_, M> {
     fn transcribe(&mut self, pcm: &[f32], language: &str) -> Result<AsrOutput, RouteError> {
         if self.stopped() || audio::pcm16_bytes(pcm).is_err() {
             return Err(RouteError::Recognition);
         }
         let decoded = self
-            .models()
+            .models
             .transcribe(pcm, language, (0, 0))
             .map_err(|error| {
                 self.retain_lifecycle(&error);
@@ -1468,12 +1454,12 @@ impl<M: Models + ?Sized> Recognizer for BorrowedModels<M> {
     }
 }
 
-impl<M: Models + ?Sized> LanguageDetector for BorrowedModels<M> {
+impl<M: Models + ?Sized> LanguageDetector for BorrowedModels<'_, M> {
     fn detect(&mut self, pcm: &[f32]) -> Result<Vec<(String, f64)>, RouteError> {
         if self.stopped() {
             return Err(RouteError::Detector);
         }
-        let probe = self.models().language_probe(pcm).map_err(|error| {
+        let probe = self.models.language_probe(pcm).map_err(|error| {
             self.retain_lifecycle(&error);
             RouteError::Detector
         })?;
@@ -1488,14 +1474,15 @@ impl<M: Models + ?Sized> LanguageDetector for BorrowedModels<M> {
     }
 }
 
-fn open_transcriber<M: Models + ?Sized + 'static>(
-    models: &M,
+fn open_transcriber<'a, M: Models + ?Sized>(
+    models: &'a M,
     language: &str,
     ledger: SpeechLedger,
     failure: Option<std::sync::Arc<std::sync::Mutex<Option<ChildError>>>>,
-) -> Result<SpeechTranscriber, ImportError> {
+) -> Result<SpeechTranscriber<'a>, ImportError> {
     let detector = if language == languages::AUTOMATIC {
-        Some(Box::new(BorrowedModels::new(models, failure.clone())) as Box<dyn LanguageDetector>)
+        Some(Box::new(BorrowedModels::new(models, failure.clone()))
+            as Box<dyn LanguageDetector + 'a>)
     } else {
         None
     };
@@ -1546,6 +1533,7 @@ pub(crate) mod tests {
     use crate::models::{Models, UnimplementedModels};
     use crate::timing;
     use serde_json::Value;
+    use std::borrow::Cow;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -1564,8 +1552,8 @@ pub(crate) mod tests {
         Transcribe(AsrCall),
     }
 
-    pub(crate) struct Scripted {
-        turns: Vec<Turn>,
+    pub(crate) struct Scripted<'a> {
+        turns: Cow<'a, [Turn]>,
         speech: Vec<(usize, usize)>,
         token_count: u32,
         probe_scores: Mutex<std::collections::VecDeque<Vec<f32>>>,
@@ -1576,10 +1564,10 @@ pub(crate) mod tests {
         observed_limit: Option<usize>,
     }
 
-    impl Scripted {
+    impl Scripted<'_> {
         pub(crate) fn new(turns: Vec<Turn>, speech: Vec<(usize, usize)>) -> Self {
             Self {
-                turns,
+                turns: turns.into(),
                 speech,
                 token_count: 1,
                 probe_scores: Mutex::new(Default::default()),
@@ -1618,7 +1606,7 @@ pub(crate) mod tests {
         }
     }
 
-    impl Models for Scripted {
+    impl Models for Scripted<'_> {
         fn vad_open(
             &self,
             conditioning: Option<GainPolicy>,
@@ -1683,7 +1671,7 @@ pub(crate) mod tests {
         }
         fn diarize_window(&self, _pcm: &[f32]) -> Result<Vec<Turn>, crate::error::ChildError> {
             self.events.lock().unwrap().push(Event::Diarize);
-            Ok(self.turns.clone())
+            Ok(self.turns.to_vec())
         }
         fn language_probe(
             &self,
@@ -2033,16 +2021,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn manual_import_names_one_speaker_and_skips_language_id() {
+    fn manual_import_borrows_models_names_one_speaker_and_skips_language_id() {
         let samples = 8_160;
-        let models = Scripted::new(
-            vec![Turn {
-                start: 0.0,
-                end: seconds(samples),
-                speaker: "speaker_0".into(),
-            }],
-            vec![(0, samples as usize)],
-        );
+        let turns = [Turn {
+            start: 0.0,
+            end: seconds(samples),
+            speaker: "speaker_0".into(),
+        }];
+        let mut models = Scripted::new(Vec::new(), vec![(0, samples as usize)]);
+        models.turns = Cow::Borrowed(&turns);
         let document = import_recording(&models, &tone(samples as usize), "en", None).unwrap();
         assert_eq!(
             document.speakers.get("speaker_0").map(String::as_str),

@@ -46,4 +46,5 @@ required-features = ["fixtures"]
 
 [dev-dependencies]
 libc = "0.2.190"
+rusqlite = "0.40.2"
 tempfile = "3"

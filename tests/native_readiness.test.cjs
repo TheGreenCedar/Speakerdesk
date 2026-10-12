@@ -22,6 +22,37 @@ test('required alignment on the existing runtime still blocks import until ready
   assert.equal(f.document.getElementById('run').disabled, false);
 });
 
+test('first setup keeps native diagnostics in Details and failures stay recoverable', async () => {
+  const raw='Speech detection: Silero: No such file or directory (os error 2) Speaker diarization: Nemotron: No such file or directory (os error 2) Transcription: Cohere: No such file or directory (os error 2)';
+  for(const [status,download_required,error,expected,action,supported=true] of [
+    ['missing',true,raw,'Download the local models once. Meetings are transcribed offline on this Mac.','Download models · 2.2 GB'],
+    ['failed',true,'HTTP 503 while downloading model weights','Model setup did not finish. Try again, or open Details for more information.','Retry setup'],
+    ['failed',true,'Model checksum differs from the pinned artifact','Model setup did not finish. Try again, or open Details for more information.','Retry setup'],
+    ['failed',true,'No space left on device (os error 28)','Model setup did not finish. Try again, or open Details for more information.','Retry setup'],
+    ['failed',true,'Model setup cancelled. Downloaded files can be resumed.','Model setup did not finish. Try again, or open Details for more information.','Retry setup'],
+    ['failed',false,'Metal model initialization failed','Model setup did not finish. Try again, or open Details for more information.','Retry setup'],
+    ['missing',true,raw,'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.','Download models · 2.2 GB',false],
+  ]) {
+    const f=frontend(path.resolve(__dirname,'..'));f.seed(0,'uploaded');
+    f.document.getElementById('setup-card-install').append(f.document.createElement('span'));
+    f.context.setupFixture={status,download_required,error,message:error,core_ready:false,ready:false,supported,
+      automatic_language:false,total_bytes:2.2e9,downloaded_bytes:0,can_download:true,models:[],
+      voice:{status:'unavailable',available:false,enabled:false}};
+    f.run("config.readiness={configured:false,automatic_language:false,word_alignment:false};$('language').value='en';api=async()=>structuredClone(setupFixture)");
+    await f.run('refreshSetup()');
+    const el=id=>f.document.getElementById(id);
+    assert.equal(el('setup-card-text').textContent,expected,status);
+    assert.equal(el('setup-card-status').textContent,'',status);
+    assert.equal(el('model-status').textContent,expected,status);
+    assert.equal(el('setup-card-install').querySelector('span').textContent,action,status);
+    assert.equal(el('install-models').textContent,action,status);
+    assert.equal(el('setup-card-install').disabled,!supported,status);
+    assert.equal(el('model-error').textContent,error,status);
+    assert.equal(el('model-error-details').hidden,false,status);
+    assert.equal(el('start-meeting').disabled,true,status);
+  }
+});
+
 test('model loading hides download actions and progress across the start card and Settings', async () => {
   const f=frontend(path.resolve(__dirname,'..'));f.seed(0,'uploaded');
   f.document.getElementById('setup-card-install').append(f.document.createElement('span'));
@@ -80,11 +111,12 @@ test('model loading hides download actions and progress across the start card an
   assert.equal(el('setup-card').hidden,false);
   assert.equal(el('install-models').textContent,'Retry setup');
   assert.equal(el('setup-card-install').querySelector('span').textContent,'Retry setup');
-  assert.equal(el('model-status').textContent,state.error);
+  assert.match(el('model-status').textContent,/setup did not finish/);
+  assert.equal(el('model-error').textContent,state.error);
   assert.equal(el('cancel-model-setup').hidden,true);
 
   // A catalog presence check can positively distinguish a missing download from a load failure.
-  Object.assign(state,{download_required:true,error:'Required model files are missing.'});
+  Object.assign(state,{status:'missing',download_required:true,error:'Required model files are missing.'});
   await f.run('refreshSetup()');
   assert.match(el('install-models').textContent,/^Download models · /);
   assert.match(el('setup-card-install').querySelector('span').textContent,/^Download models · /);

@@ -36,8 +36,6 @@ fn native_layout(root: &Path) -> anyhow::Result<()> {
         "Contents/Resources/libspeakerdesk_echo.dylib",
         "Contents/Frameworks/libmlx.dylib",
         "Contents/Resources/mlx/mlx.metallib",
-        "Contents/Resources/licenses/mlx/LICENSE",
-        "Contents/Resources/licenses/native/packages.json",
         "Contents/Resources/THIRD_PARTY_NOTICES.txt",
     ] {
         let path = root.join(relative);
@@ -225,8 +223,6 @@ mod tests {
             "Contents/Resources/libspeakerdesk_echo.dylib",
             "Contents/Frameworks/libmlx.dylib",
             "Contents/Resources/mlx/mlx.metallib",
-            "Contents/Resources/licenses/mlx/LICENSE",
-            "Contents/Resources/licenses/native/packages.json",
             "Contents/Resources/THIRD_PARTY_NOTICES.txt",
         ];
         for relative in paths {

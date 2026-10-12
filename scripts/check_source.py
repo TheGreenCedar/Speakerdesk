@@ -13,12 +13,12 @@ required = {'scripts/promote_release.py', 'scripts/build_macos.sh',
             'scripts/replay_capture.py', 'scripts/acceptance_fixtures.py',
             'tests/acceptance/recipes.json', 'tests/acceptance/holdout-recipes.json',
             'tests/acceptance/model-metadata.json',
-            'packaging/THIRD_PARTY_NOTICES.txt', 'desktop/capture/MeetingCapture.swift',
+            'packaging/THIRD_PARTY_NOTICES.md', 'packaging/native-license-sources.json',
+            'desktop/capture/MeetingCapture.swift',
             'desktop/capture/Info.plist', 'desktop/src-tauri/icons/icon.icns',
             'desktop/src-tauri/icons/icon.png', 'speakerdesk/redimnet2_artifact.json',
             'speakerdesk/voice_calibration.json', 'speakerdesk/alignment-mlx/manifest.json',
-            'speakerdesk/static/app.js', 'speakerdesk/templates/index.html',
-            'packaging/licenses/redimnet2/LICENSE', 'packaging/licenses/voice-runtime/packages.json'}
+            'speakerdesk/static/app.js', 'speakerdesk/templates/index.html'}
 assert required.issubset(set(tracked)), f'Missing packaging source: {sorted(required-set(tracked))}'
 prohibited_prefixes = ('models/', 'vendor/', '.venv', '.cache/', 'speakerdesk/data/',
                        'speakerdesk/fixtures/', 'fixtures/', 'evidence/', 'attachments/',

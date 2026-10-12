@@ -4694,6 +4694,7 @@ dependencies = [
  "libc",
  "postcard",
  "reqwest",
+ "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
