@@ -52,6 +52,9 @@ impl ApplicationModels for NativeModels {
     ) -> Option<crate::inference::ChildModels> {
         Some(self.supervisor.models(cancellation.clone()))
     }
+    fn live_alignment(&self) -> Option<Arc<speakerdesk_core::alignment::Vocabulary>> {
+        self.alignment.read().expect("alignment capability").clone()
+    }
     fn retry_passage(
         &self,
         pcm: &[f32],
@@ -338,6 +341,106 @@ pub(crate) fn recording_path(root: &Path, job: &Job) -> std::io::Result<PathBuf>
     ))
 }
 
+/// Resolve a passage on its original recording clock. Source-bound live passages
+/// cannot fall back to the mixed recording when their catalog is absent or stale.
+pub(crate) fn passage_recording_path(
+    root: &Path,
+    job: &Job,
+    segment: &speakerdesk_core::document::Segment,
+) -> std::io::Result<PathBuf> {
+    let invalid = || {
+        std::io::Error::other(
+            "Passage capture source is unavailable or no longer matches its recording",
+        )
+    };
+    let Some(binding) = segment.capture_source.as_ref().filter(|v| !v.is_null()) else {
+        if job.extra.contains_key("capture_source_catalog")
+            || job
+                .extra
+                .get("sources")
+                .and_then(Value::as_array)
+                .is_some_and(|s| s.len() > 1)
+        {
+            return Err(invalid());
+        }
+        return recording_path(root, job);
+    };
+    let catalog = job
+        .extra
+        .get("capture_source_catalog")
+        .ok_or_else(invalid)?;
+    let hash = speakerdesk_core::memo::sha256_hex(
+        &serde_json::to_vec(catalog).map_err(std::io::Error::other)?,
+    );
+    let source = binding["source_id"].as_str().ok_or_else(invalid)?;
+    let basename = match source {
+        "microphone_clean" => "microphone_clean.wav",
+        "system" => "system.wav",
+        _ => return Err(invalid()),
+    };
+    if binding["catalog_sha256"].as_str() != Some(hash.as_str())
+        || binding["source_revision"] != 1
+        || catalog["schema_version"] != 1
+        || catalog["job_id"].as_str() != Some(job.id.as_str())
+        || catalog["sample_rate"] != 16000
+        || catalog["clock"] != "recording_samples"
+        || catalog["policy"] != "aligned_aec_microphone_and_original_system_v1"
+        || catalog["sources"]
+            != json!([
+            {"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1},
+            {"source_id":"system","basename":"system.wav","revision":1}])
+    {
+        return Err(invalid());
+    }
+    // Prefer an owned derived source, otherwise keep migrated v1 source audio read-only.
+    // A copy of audio.wav alone does not claim ownership of its separate source files.
+    let native = media_write_directory(root, job);
+    let (authority, folder) = match std::fs::symlink_metadata(native.join(basename)) {
+        Ok(_) => (root, native),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(legacy) = job.extra.get("legacy_media_root").and_then(Value::as_str) {
+                (Path::new(legacy), Path::new(legacy).join(job.id.as_str()))
+            } else {
+                (root, native)
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    if std::fs::symlink_metadata(&folder)?.file_type().is_symlink()
+        || std::fs::symlink_metadata(folder.join(basename))?
+            .file_type()
+            .is_symlink()
+    {
+        return Err(invalid());
+    }
+    let path = folder.join(basename);
+    let relative = path
+        .strip_prefix(authority)
+        .map_err(std::io::Error::other)?;
+    confined_file(authority, relative.to_str().ok_or_else(invalid)?)
+}
+
+pub(crate) fn passage_audio_unchanged(
+    current: &Job,
+    original: &Job,
+    current_segment: &speakerdesk_core::document::Segment,
+    original_segment: &speakerdesk_core::document::Segment,
+) -> bool {
+    current.id == original.id
+        && current.source_file == original.source_file
+        && [
+            "legacy_media_root",
+            "audio_revision",
+            "capture_source_catalog",
+            "sources",
+        ]
+        .iter()
+        .all(|key| current.extra.get(*key) == original.extra.get(*key))
+        && current_segment.capture_source == original_segment.capture_source
+        && current_segment.audio_revision == original_segment.audio_revision
+        && current_segment.canonical_utterance_id == original_segment.canonical_utterance_id
+}
+
 pub fn run(
     storage: PathBuf,
     model_root: PathBuf,
@@ -589,7 +692,7 @@ async fn setup(State(app): State<AppState>) -> Response {
                 "message":"Supplied-text timing preserves authoritative transcript words. Use Download models below to finish setup for all local models.","phase":progress.phase,"downloaded_bytes":0},
             "voice":{"status":if voice {"ready"}else {"unavailable"},"enabled":enabled,"available":voice,"released":false,
                 "message":if voice {"Native voice enrollment and manual and automatic checks are available."}else {"The native voice model did not initialize. Saved voices and names are kept."}},
-            "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing for imports: {}. Live accuracy refinement and word timing are not available yet.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
+            "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing for imports and supported sealed live passages: {}. Live accuracy refinement is not available yet.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
         })).into_response()
     }).await
 }
@@ -633,6 +736,121 @@ fn failure(message: &str) -> Response {
 #[cfg(test)]
 mod setup_tests {
     use super::*;
+    #[test]
+    fn passage_source_resolution_rejects_missing_stale_and_escaping_catalogs() {
+        use speakerdesk_core::{document::Segment, ids::JobId};
+        let root = tempfile::tempdir().unwrap();
+        let id = JobId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let mut job: Job = serde_json::from_value(json!({"id":id,"name":"sources","kind":"meeting","language":"en","status":"ready","created":0.,"updated":0.,"revision":0,"sources":["microphone","system"]})).unwrap();
+        let folder = root.path().join(job.id.as_str());
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("audio.wav"), "mix").unwrap();
+        std::fs::write(folder.join("system.wav"), "system").unwrap();
+        std::fs::write(folder.join("microphone_clean.wav"), "microphone").unwrap();
+        let catalog = json!({"schema_version":1,"job_id":job.id,"sample_rate":16000,"clock":"recording_samples",
+            "policy":"aligned_aec_microphone_and_original_system_v1","sources":[
+            {"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1},
+            {"source_id":"system","basename":"system.wav","revision":1}]});
+        let hash = speakerdesk_core::memo::sha256_hex(&serde_json::to_vec(&catalog).unwrap());
+        job.extra.insert("capture_source_catalog".into(), catalog);
+        let segment: Segment = serde_json::from_value(
+            json!({"id":"s","start":0.,"end":1.,"speaker":"speaker_0","text":"words",
+            "capture_source":{"source_id":"system","source_revision":1,"catalog_sha256":hash}}),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(passage_recording_path(root.path(), &job, &segment).unwrap())
+                .unwrap(),
+            "system"
+        );
+        for case in ["missing", "source", "revision", "hash", "job", "basename"] {
+            let mut bad = job.clone();
+            let mut row = segment.clone();
+            match case {
+                "missing" => row.capture_source = None,
+                "source" => row.capture_source.as_mut().unwrap()["source_id"] = json!("audio"),
+                "revision" => row.capture_source.as_mut().unwrap()["source_revision"] = json!(2),
+                "hash" => row.capture_source.as_mut().unwrap()["catalog_sha256"] = json!("wrong"),
+                "job" => {
+                    bad.extra.get_mut("capture_source_catalog").unwrap()["job_id"] =
+                        json!("another")
+                }
+                "basename" => {
+                    let catalog = bad.extra.get_mut("capture_source_catalog").unwrap();
+                    catalog["sources"][1]["basename"] = json!("../outside.wav");
+                    row.capture_source.as_mut().unwrap()["catalog_sha256"] = json!(
+                        speakerdesk_core::memo::sha256_hex(&serde_json::to_vec(catalog).unwrap())
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                passage_recording_path(root.path(), &bad, &row).is_err(),
+                "{case}"
+            );
+        }
+        let native_root = root.path().join("native");
+        std::fs::create_dir(&native_root).unwrap();
+        let mut migrated = job.clone();
+        migrated
+            .extra
+            .insert("legacy_media_root".into(), json!(root.path()));
+        let before = std::fs::read(folder.join("system.wav")).unwrap();
+        assert_eq!(
+            std::fs::read(passage_recording_path(&native_root, &migrated, &segment).unwrap())
+                .unwrap(),
+            before
+        );
+        let derived = media_write_directory(&native_root, &migrated);
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::write(derived.join("audio.wav"), "derived mix only").unwrap();
+        assert_eq!(
+            std::fs::read(passage_recording_path(&native_root, &migrated, &segment).unwrap())
+                .unwrap(),
+            before
+        );
+        std::fs::write(derived.join("system.wav"), "derived source").unwrap();
+        assert_eq!(
+            std::fs::read(passage_recording_path(&native_root, &migrated, &segment).unwrap())
+                .unwrap(),
+            b"derived source"
+        );
+        assert_eq!(std::fs::read(folder.join("system.wav")).unwrap(), before);
+        let invalid_native = root.path().join("invalid-native");
+        std::fs::create_dir(&invalid_native).unwrap();
+        std::fs::write(invalid_native.join("derived"), "not a directory").unwrap();
+        assert!(
+            passage_recording_path(&invalid_native, &migrated, &segment).is_err(),
+            "native I/O errors must not silently select legacy audio"
+        );
+        #[cfg(unix)]
+        {
+            let linked_native = root.path().join("linked-native");
+            std::fs::create_dir(&linked_native).unwrap();
+            std::os::unix::fs::symlink(native_root.join("derived"), linked_native.join("derived"))
+                .unwrap();
+            assert!(
+                passage_recording_path(&linked_native, &migrated, &segment).is_err(),
+                "a derived parent symlink must not escape native media ownership"
+            );
+            let outside = root.path().join("outside.wav");
+            std::fs::write(&outside, "outside").unwrap();
+            std::fs::remove_file(folder.join("system.wav")).unwrap();
+            std::os::unix::fs::symlink(outside, folder.join("system.wav")).unwrap();
+            assert!(passage_recording_path(root.path(), &job, &segment).is_err());
+        }
+        let mut single = job;
+        single.extra.remove("capture_source_catalog");
+        single.extra.insert("sources".into(), json!(["microphone"]));
+        let mut row = segment;
+        row.capture_source = None;
+        assert_eq!(
+            std::fs::read_to_string(passage_recording_path(root.path(), &single, &row).unwrap())
+                .unwrap(),
+            "mix"
+        );
+    }
+
     #[tokio::test]
     async fn actual_router_allows_edits_and_cancellation_until_setup_cleanup_finishes() {
         // Model work is a held replay. Requests use the production router and file-backed store.

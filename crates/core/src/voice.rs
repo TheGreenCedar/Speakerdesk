@@ -273,6 +273,7 @@ pub struct ActivityRegion {
 pub struct SpeakerActivity {
     pub audio_revision: i64,
     pub observed_end_sample: i64,
+    #[serde(default)]
     pub regions: Vec<ActivityRegion>,
 }
 
@@ -431,7 +432,8 @@ pub fn eligible_segment(segment: &AudioSegment, track_id: &str) -> bool {
 }
 
 pub fn speaker_audio_ranges(segment: &AudioSegment, track_id: &str) -> Vec<(f64, f64)> {
-    if speaker_audio_reason(segment, track_id).is_none() {
+    if segment.canonical_utterance_id.is_none() && speaker_audio_reason(segment, track_id).is_none()
+    {
         return vec![(segment.start, segment.end)];
     }
     let Some((start_sample, end_sample, revision)) = crop_anchor(segment, track_id) else {

@@ -1,4 +1,4 @@
-//! Optional checks run after transcript publication under the import's existing lease.
+//! Optional checks run after transcript publication under the existing operation lease.
 use std::{path::Path, sync::Mutex};
 
 use serde_json::json;
@@ -9,12 +9,9 @@ use speakerdesk_core::{
 };
 
 use super::{Catalog, HttpError, unix_now, voice_http};
-use crate::{
-    native::recording_path,
-    routes::{ApplicationModels, OperationGuard},
-};
+use crate::routes::{ApplicationModels, OperationGuard};
 
-pub(crate) fn check_import_voices(
+pub(crate) fn check_saved_voices(
     database: &Mutex<SqliteJobStore>,
     root: &Path,
     models: &dyn ApplicationModels,
@@ -34,9 +31,6 @@ fn run(
     published: &Job,
 ) -> Result<(), HttpError> {
     let Some(policy) = models.voice_policy() else {
-        return Ok(());
-    };
-    let Ok(path) = recording_path(root, published) else {
         return Ok(());
     };
     let (original, scheduled, profiles) = {
@@ -125,7 +119,8 @@ fn run(
             let outcome = if eligible {
                 let matched = voice_http::embeddings(
                     models,
-                    &path,
+                    root,
+                    &original,
                     &policy,
                     &scheduled.clips,
                     &operation.cancellation,

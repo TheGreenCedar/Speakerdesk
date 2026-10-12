@@ -385,7 +385,7 @@ fn clear_bookkeeping(segment: &mut Segment) {
     segment.rest.remove("refinement_state");
 }
 
-fn clear_alignment_bundle(segment: &mut Segment) {
+pub(crate) fn clear_alignment_bundle(segment: &mut Segment) {
     segment.alignment = None;
     segment.reading_turns = None;
     segment.reading_turn_provenance = None;

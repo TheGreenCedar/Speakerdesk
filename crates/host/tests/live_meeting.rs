@@ -228,14 +228,29 @@ async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_o
         let save=host.client.patch(format!("{}{path}/segments/{}",host.url,old_id.as_str().unwrap())).header("X-Speakerdesk-Token",&host.token)
             .json(&json!({"segment_revision":row["machine_revision"],"changes":{"text":"Protected before child loss","start":0.1}})).send().await.unwrap();
         assert_eq!(save.status(), 200, "{}", save.text().await.unwrap());
-        let current = host.get(&path).await;
-        let named = host
-            .post(
-                &format!("{path}/speakers/{old_speaker}/identity"),
-                json!({"revision":current["revision"],"name":"Casey","person_id":null}),
-            )
-            .await;
-        assert_eq!(named.status(), 200, "{}", named.text().await.unwrap());
+        // Protecting an open row schedules its continuation, which may publish
+        // between this GET and naming. Retry only that genuine revision conflict.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let current = host.get(&path).await;
+                let named = host
+                    .post(
+                        &format!("{path}/speakers/{old_speaker}/identity"),
+                        json!({"revision":current["revision"],"name":"Casey","person_id":null}),
+                    )
+                    .await;
+                let status = named.status();
+                if status == 200 {
+                    break;
+                }
+                let body: Value = named.json().await.unwrap();
+                assert_eq!(status, 409, "{body}");
+                assert_eq!(body["error"], speakerdesk_core::messages::NAME_STALE);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pre-loss naming did not reach a current revision");
         // Persist a real pre-loss language boundary; replay must reconstruct it.
         let changed = host
             .client
@@ -935,5 +950,159 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
                 reopened.close(root).await;
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn completed_live_transcript_checks_saved_voices_without_owning_or_replacing_words() {
+    for mode in ["match", "disabled", "cancel", "shutdown"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(
+            root.join("fixture-voice"),
+            b"explicit replay of native voice identity",
+        )
+        .unwrap();
+        let host = Running::open(root, false).await;
+        trigger(root, 1);
+        trigger(root, 2);
+        let first = host.start(json!(["microphone"])).await;
+        host.wait(&format!("api/jobs/{first}"), |v| {
+            v["duration"].as_f64().unwrap_or(0.) >= 13.5
+        })
+        .await;
+        let saved = host.stop(&first).await;
+        assert_eq!(saved["status"], "ready");
+        assert!(
+            !root.join("voice-calls").exists(),
+            "no profile must mean no automatic enrollment/inference"
+        );
+        let person = host
+            .post("api/people", json!({"name":"Ada"}))
+            .await
+            .json::<Value>()
+            .await
+            .unwrap();
+        let pid = person["person"]["id"]
+            .as_str()
+            .or_else(|| person["id"].as_str())
+            .expect("created person");
+        let named = host
+            .post(
+                &format!("api/jobs/{first}/speakers/speaker_0/identity"),
+                json!({"revision":saved["revision"],"person_id":pid}),
+            )
+            .await;
+        assert_eq!(named.status(), 200);
+        let named = named.json::<Value>().await.unwrap();
+        let clips = host
+            .get(&format!("api/jobs/{first}/speakers/speaker_0/voice-clips"))
+            .await;
+        assert_eq!(clips["status"], "ready", "{mode}: {clips}");
+        let enroll=host.post(&format!("api/people/{pid}/voice"),json!({"revision":named["revision"],"meeting_id":first,"track_id":"speaker_0","segment_ids":clips["recommended_ids"],"consent":true})).await;
+        assert_eq!(enroll.status(), 200, "{}", enroll.text().await.unwrap());
+        let people_before = host.get("api/people").await;
+        assert_eq!(
+            fs::read_to_string(root.join("voice-calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        if mode == "disabled" {
+            let response = host
+                .client
+                .patch(format!("{}api/recognition", host.url))
+                .header("X-Speakerdesk-Token", &host.token)
+                .json(&json!({"enabled":false}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+        } else {
+            fs::write(
+                root.join("hold-live-voice"),
+                b"block optional check after ready",
+            )
+            .unwrap();
+        }
+        let second = host.start(json!(["microphone"])).await;
+        let path = format!("api/jobs/{second}");
+        host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 13.5)
+            .await;
+        let stopping = host
+            .post(&format!("api/meetings/{second}/stop"), json!({}))
+            .await;
+        assert_eq!(stopping.status(), 202);
+        let ready = host.wait(&path, |v| v["status"] == "ready").await;
+        let original_text = ready["document"]["segments"][0]["text"].clone();
+        assert!(!original_text.as_str().unwrap().is_empty());
+        if mode == "disabled" {
+            host.wait(&path, |v| v["inference_owned"] == false).await;
+            assert_eq!(
+                fs::read_to_string(root.join("voice-calls"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                2
+            );
+        } else {
+            wait_file(&root.join("voice-started")).await;
+            let blocked = host.get(&path).await;
+            assert_eq!(blocked["inference_owned"], true);
+            let passage = &blocked["document"]["segments"][0];
+            let edited=host.client.patch(format!("{}{path}/segments/{}",host.url,passage["id"].as_str().unwrap()))
+                .header("X-Speakerdesk-Token",&host.token)
+                .json(&json!({"segment_revision":passage["machine_revision"],"changes":{"text":"Edited while optional voice matching is running."}}))
+                .send().await.unwrap();
+            assert_eq!(
+                edited.status(),
+                200,
+                "Ready must remain editable during optional inference"
+            );
+            let competing = host
+                .post(
+                    "api/meetings",
+                    json!({"name":"must wait","language":"en","sources":["microphone"]}),
+                )
+                .await;
+            assert_eq!(competing.status(), 409);
+            if mode == "shutdown" {
+                host.close(root).await;
+                continue;
+            }
+            if mode == "cancel" {
+                let cancelled = host.post(&format!("{path}/cancel"), json!({})).await;
+                assert_eq!(cancelled.status(), 200);
+            } else {
+                fs::remove_file(root.join("hold-live-voice")).unwrap();
+            }
+            let done = host.wait(&path, |v| v["inference_owned"] == false).await;
+            assert_eq!(done["status"], "ready");
+            assert_eq!(
+                done["document"]["segments"][0]["text"],
+                "Edited while optional voice matching is running."
+            );
+            assert_eq!(
+                done["voice_checks"]["speaker_0"]["status"],
+                if mode == "match" {
+                    "matched"
+                } else {
+                    "cancelled"
+                }
+            );
+            if mode == "match" {
+                assert_eq!(done["speaker_assignments"]["speaker_0"]["person_id"], pid);
+                assert_eq!(done["speaker_assignments"]["speaker_0"]["confirmed"], false);
+            } else {
+                assert!(done["speaker_assignments"]["speaker_0"].is_null());
+            }
+        }
+        assert_eq!(
+            host.get("api/people").await,
+            people_before,
+            "checking never enrolls or changes the voice catalog"
+        );
+        host.close(root).await;
     }
 }

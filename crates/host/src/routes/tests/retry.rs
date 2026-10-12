@@ -102,6 +102,40 @@ fn fixture(fail: bool) -> (AppState, Arc<Replay>) {
     (state, models)
 }
 
+fn source_fixture() -> (AppState, Arc<Replay>) {
+    let (state, replay) = fixture(false);
+    let folder = state.data_dir().join(JOB_A);
+    std::fs::rename(folder.join("audio.wav"), folder.join("system.wav")).unwrap();
+    let mut wav = hound::WavWriter::create(
+        folder.join("audio.wav"),
+        hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )
+    .unwrap();
+    for _ in 0..160000 {
+        wav.write_sample(12345i16).unwrap();
+    }
+    wav.finalize().unwrap();
+    let mut job = state
+        .store()
+        .get(&JobId::parse(JOB_A).unwrap(), false)
+        .unwrap()
+        .unwrap();
+    let catalog = json!({"schema_version":1,"job_id":JOB_A,"sample_rate":16000,"clock":"recording_samples","policy":"aligned_aec_microphone_and_original_system_v1","sources":[{"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1},{"source_id":"system","basename":"system.wav","revision":1}]});
+    let hash = speakerdesk_core::memo::sha256_hex(&serde_json::to_vec(&catalog).unwrap());
+    job.extra
+        .insert("sources".into(), json!(["microphone", "system"]));
+    job.extra.insert("capture_source_catalog".into(), catalog);
+    job.document.as_mut().unwrap().segments[0].capture_source =
+        Some(json!({"catalog_sha256":hash,"source_id":"system","source_revision":1}));
+    state.insert_job(job);
+    (state, replay)
+}
+
 async fn start(running: &Running, revision: i64) -> reqwest::Response {
     running
         .authed(
@@ -117,7 +151,7 @@ async fn start(running: &Running, revision: i64) -> reqwest::Response {
 
 #[tokio::test]
 async fn retry_candidate_survives_unrelated_edits_and_is_accepted_explicitly() {
-    let (state, models) = fixture(false);
+    let (state, models) = source_fixture();
     let running = Running::spawn(state.clone()).await;
     let _release = ReleaseOnDrop(models.clone());
     assert_eq!(start(&running, 6).await.status(), 409);
@@ -222,12 +256,18 @@ async fn retry_stale_cancel_failure_and_restart_boundaries() {
         "speaker",
         "language",
         "audio",
+        "source",
+        "catalog",
         "cancel",
         "shutdown",
         "failure",
         "queued_cancel",
     ] {
-        let (state, models) = fixture(case == "failure");
+        let (state, models) = if matches!(case, "source" | "catalog") {
+            source_fixture()
+        } else {
+            fixture(case == "failure")
+        };
         let running = Running::spawn(state.clone()).await;
         let _release = ReleaseOnDrop(models.clone());
         let queue_gate = Arc::new((Mutex::new(false), Condvar::new()));
@@ -270,6 +310,14 @@ async fn retry_stale_cancel_failure_and_restart_boundaries() {
                         "speaker" => s.speaker = "unassigned".into(),
                         "language" => s.language = Some("es".into()),
                         "audio" => s.audio_revision = Some(2),
+                        "source" => {
+                            s.capture_source.as_mut().unwrap()["source_id"] =
+                                json!("microphone_clean")
+                        }
+                        "catalog" => {
+                            job.extra.get_mut("capture_source_catalog").unwrap()["policy"] =
+                                json!("changed")
+                        }
                         _ => unreachable!(),
                     }
                     Ok::<_, speakerdesk_core::error::StoreError>(())

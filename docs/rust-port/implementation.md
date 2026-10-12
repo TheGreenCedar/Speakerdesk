@@ -15,23 +15,29 @@ Local implementation branch: `codex/python-free-mac`.
 1. Source repairs verified: updater/export/bundle/parser/readiness and truthful
    tests. Mac CI added; prebuilt MLX linkage demonstrated (details below).
    Independent verifier architecture_capture found three issues, all corrected.
-2. In progress: data slice implemented and independently reviewed. Explicit-root
+2. Implemented and independently reviewed through mounted replay tests: explicit-root
    AppState uses SQLite for jobs, identities and preferences, immediate edit
    transactions, guarded import publication, consistent migration snapshots,
    private journal recovery and legacy audio copy-on-write. Process lifecycle and
-   operation cancellation implemented; active meeting state integration remains pending.
-3. In progress: Silero, the first offline Nemotron window and Cohere run through
+   operation cancellation and active meeting state share that store and owner.
+3. In progress: Silero, multi-window offline Nemotron and Cohere run through
    the actual native child and assembled import pipeline. An isolated Tauri
    preview now starts the Rust HTTP service and resident child. Actual HTTP
    import/edit/name/export/restart passes on synthetic audio (proof below).
    The actual editor import/edit/name/boundary/save/reopen/export/stale-save path
    passes, including Auto language and CTC. Short synthetic/public recordings have
-   equivalent warm application measurements; long imports and full performance
-   qualification remain pending.
+   equivalent warm application measurements. Long Nemotron execution has an
+   independent numerical reference; full long-import product/performance gates
+   remain pending.
 4. In progress: automatic language, supplied-text CTC and native Core ML ReDimNet
    extraction work. Manual voice enrollment/checking now passes the actual editor
-   and full restart (below). Automatic recognition and model setup remain pending.
-5. Pending: native capture coordination, streaming tails/recovery and bounded work.
+   and full restart (below). Automatic import recognition and native model setup
+   pass service/model tests; setup UI remains pending. Live recognition also passes
+   a real-model saved-PCM test, described below.
+5. In progress: native capture coordination, streaming tails, child-loss recovery
+   and live-edit continuation pass mounted replays and saved-PCM real-model tests.
+   Sealed live timing and identity pass real-model saved-PCM checks. Accuracy refinement, qualified
+   Pause/Resume, raw dual-source echo, physical capture and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
 All validation uses disposable storage and synthetic/public audio. No installed
@@ -1199,5 +1205,87 @@ timing/refinement/identity and source-specific saved-audio consumers, then quali
 Pause/Resume and raw dual-source echo, physical capture and long-session behavior,
 the pending Tauri live/setup/long-import workflow, default native startup and actual
 Python-free packaging, updater/security qualification and equivalent 0.6.6
+performance gates. The installed app, production data and existing model cache
+remain untouched. Windows and issue #25 remain deferred.
+
+## Sealed live timing, voice evidence and original source audio
+
+Live publication now retains actual speaker activity regions, owner candidates and
+sealed acoustic admission. Open publication does not rescan the full utterance's
+speech ledger. Supported sealed, unprotected crops use the existing resident CTC
+model and cached vocabulary. Timing retains passage/source identity, nonzero
+machine/audio revisions and language epoch. A late model candidate cannot reattach
+stale timing after an edit. Ordinary CTC errors retain transcribed words with an
+unavailable timing result; cancellation, timeout and child loss keep their lifecycle
+semantics. Accuracy refinement remains unavailable.
+
+Retry, voice preview, enrollment and recognition resolve each passage's original
+capture source. They reject stale catalogs and escaping files, preserve migrated
+v1 source audio read-only, and prefer a native derived source only when that source
+exists. A derived mixed file alone does not supersede a legacy source. Review found
+and reproduced a symlinked `derived` parent escaping the native root; confinement
+now uses the selected storage authority, including parent components. Filesystem
+errors other than absence do not silently fall back to legacy audio.
+
+Automatic voice checks now run after both import and live transcript publication
+under the existing operation and lease. Live capture and inference have joined
+before optional recognition begins; the result is already Ready and editable.
+Cancellation invalidates the persisted generation before notifying the child.
+Matching proposes an unconfirmed name and never enrolls or replaces a profile.
+
+Validation on the M5 Mac: 163 core, 61 host, seven mounted live-service, one service
+lifecycle and nine process tests pass. Strict all-target core/host Clippy passes.
+One network and three separately qualified model tests remain explicitly ignored;
+unchanged acoustic proofs are reused. New red controls reproduced missing activity,
+incorrect timing revisions, discarded words on CTC failure, absent post-live voice
+checks and the derived-parent symlink escape. The broader run also exposed a test
+race: continuation publication can correctly cause a speaker-name save to return
+409. The recovery test now refreshes only that exact conflict, with a bounded
+deadline; production revision checks are unchanged. Logs are
+`/tmp/speakerdesk-live-evidence-{projection-red,voice-red,optional-red,optional-green,automatic-red,source-red,final-tests,host-final,clippy}.log`.
+The corrected full host run is the final host/integration result.
+
+An optimized build completed in 23.51 seconds with the existing upstream mlx-sys
+warnings, SHA-256
+`648accf0184e9c27daa2158587dd80b0698a54bfa5b94802a4c44e16e4bb15b0`.
+Real-model evidence uses the same 18.32-second synthetic Samantha recording as
+the live-edit regression. Job `90367b1ffb2e4418b04984619eec5bc7` preserves the
+edited prefix, name, boundary, continued words and all PCM bytes through Stop and
+restart. Its unedited tail has 36 aligned words and two eligible voice clips;
+preview bytes match saved audio. Explicit consent enrollment saves a compatible
+native profile that survives restart/export. A second live job,
+`1d522699072043a285161f07b006f7f7`, matches that synthetic voice at 0.9608983951
+without changing the profile catalog. It remains an unconfirmed assignment.
+This tests real MLX/Core ML execution through the mounted application path using
+a saved-PCM helper, not physical capture, UI, population accuracy or performance.
+The external Python harness is not application code.
+
+The copied historical job that previously returned HTTP 500 from voice clips now
+returns 200 with `insufficient_clips`; its document remains exactly unchanged and
+no activity is invented. All qualification hosts and children exited. Inputs,
+scripts, documents and results are retained in
+`/private/tmp/speakerdesk-live-evidence.ILB58D/` and
+`/private/tmp/speakerdesk-live-edit.deNKoi/evidence-after/`.
+
+Runtime inspection found one stale setup sentence. A wording-only correction and
+19.76-second incremental build produce SHA-256
+`6068166783c2e16be891621d1b7026dd4b9494947a17334a1bd3aa18fe3d7f6a`;
+unchanged acoustic proof above is reused. The refreshed temporary Tauri bundle's
+ad-hoc signed executable is
+`703ff4d836f8cfabae2c5e1ac1da1d0d8d70d9cfa4814499440c72989d641fc2`.
+Its actual setup response reports supported sealed live timing and unavailable
+accuracy refinement. It is idle with ready models at `http://127.0.0.1:64790/`;
+`live-evidence-preview.json` and `app-live-evidence-final.log` record its state in
+`/private/tmp/speakerdesk-native-desktop.WJKAde/`. The old previews and their
+children were reaped before replacement. CUA still reports the Mac locked, so
+there is no new editor interaction claim. The preview still uses a saved-PCM helper
+and a development library path; this is not Python-free package acceptance.
+
+PR #27 is still open at `db9da655b3eeeeef598ba21a21cb54505e6bce21`, base
+`59e7b0c860f72ca94c24e6eab18ac820b144ee24`. Local implementation is not pushed.
+The full replacement remains active and unfinished: next complete the accuracy
+pass, qualified Pause/Resume and raw dual-source echo, physical capture and
+long-session gates, pending Tauri live/setup/long-import checks, native default
+startup and packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.

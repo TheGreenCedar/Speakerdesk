@@ -65,6 +65,8 @@ fn main() {
             && root.join("fixture-live").exists()
             && root.join("hold-live-feed").exists()
             && !held_live_feed;
+        let hold_voice =
+            matches!(request, Request::EmbedVoice { .. }) && root.join("hold-live-voice").exists();
         let result = match request {
             Request::Hello { build_id } => {
                 if root.join("fixture-live").exists() {
@@ -111,6 +113,7 @@ fn main() {
                                 "silero-speech" => "mlx-community/silero-vad-v6@2ebf4a5".into(),
                                 "nemotron" => "mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f".into(),
                                 "cohere-speech" => "spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12".into(),
+                                "redimnet2-b6" if root.join("fixture-voice").exists() => "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU".into(),
                                 _ => format!("replay:{model}"),
                             },
                             ok: true,
@@ -294,6 +297,25 @@ fn main() {
                 raw_text: "Replay transcript".into(),
                 token_count: 2,
             })),
+            Request::EmbedVoice { pcm } if root.join("fixture-voice").exists() => {
+                writeln!(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(root.join("voice-calls"))
+                        .unwrap(),
+                    "{} {}",
+                    pcm.len(),
+                    pcm[0]
+                )
+                .unwrap();
+                let mut vector = vec![0.; 192];
+                vector[0] = 1.;
+                Ok(Response::Embedding(speakerdesk_core::ipc::VoiceEmbedding {
+                    model:speakerdesk_core::voice::VoiceModel::new("aufklarer/ReDimNet2-B6-CoreML","112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU","cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",192,16000).unwrap(),
+                    clip:speakerdesk_core::voice::ClipEmbedding {vector,clean:true},
+                }))
+            }
             Request::Cancel { request_id } => {
                 if let Some((running, flag)) = &active
                     && *running == request_id
@@ -315,7 +337,7 @@ fn main() {
             }
             _ => Err(ChildError::Unimplemented),
         };
-        if hold_live || hold_eof || hold_asr {
+        if hold_live || hold_eof || hold_asr || hold_voice {
             if hold_asr {
                 held_live_asr = true;
             } else {
@@ -326,7 +348,9 @@ fn main() {
             let writer = output.clone();
             let root = root.clone();
             std::thread::spawn(move || {
-                let (marker, hold) = if hold_asr {
+                let (marker, hold) = if hold_voice {
+                    ("voice-started", "hold-live-voice")
+                } else if hold_asr {
                     ("edit-asr-started", "hold-live-asr")
                 } else if hold_eof {
                     ("recovery-eof-started", "hold-live-eof")

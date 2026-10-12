@@ -15,11 +15,27 @@ pub const NATIVE_PROVIDER: &str =
     "e82ab4bda54b01ce182babb0ac6b40e7fc1ec37095784c171e447d04e13221e0";
 pub const MAX_SAMPLES: usize = 392000;
 
-/// Called on an unpublished import candidate, after alignment of this exact crop.
-pub fn attach_import(segment: &mut crate::document::Segment, alignment: Value) {
+/// Attach timing to an unpublished candidate aligned from this exact crop.
+pub fn attach(segment: &mut crate::document::Segment, alignment: Value) {
     use timing::{AudioAnchor, ReadingRow, ReadingWordEvidence, SpeakerActivity, TimedWord};
     let start = (segment.start * 16000.).round() as i64;
     let end = (segment.end * 16000.).round() as i64;
+    let machine_revision = segment.machine_revision.unwrap_or(0);
+    let audio_revision = segment.audio_revision.unwrap_or(0);
+    let canonical_revision = segment
+        .rest
+        .get("canonical_machine_revision")
+        .and_then(Value::as_i64)
+        .unwrap_or(machine_revision);
+    let epoch = segment
+        .rest
+        .get("language_epoch")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let identity = segment
+        .canonical_utterance_id
+        .clone()
+        .unwrap_or_else(|| segment.id.clone());
     let anchor = json!({"start_sample":start,"end_sample":end});
     if alignment["raw_text"] != segment.text
         || alignment["text_sha256"] != sha256_hex(segment.text.as_bytes())
@@ -72,8 +88,8 @@ pub fn attach_import(segment: &mut crate::document::Segment, alignment: Value) {
         text: segment.text.clone(),
         start_sample: start,
         end_sample: end,
-        machine_revision: 0,
-        audio_revision: 0,
+        machine_revision,
+        audio_revision,
         protected_fields: segment.protected_fields.clone().unwrap_or_default(),
         text_audio_anchor: Some(AudioAnchor {
             start_sample: start,
@@ -81,8 +97,8 @@ pub fn attach_import(segment: &mut crate::document::Segment, alignment: Value) {
         }),
         reading_word_evidence: Some(ReadingWordEvidence {
             text_sha256: sha256_hex(segment.text.as_bytes()),
-            machine_revision: 0,
-            audio_revision: 0,
+            machine_revision,
+            audio_revision,
             retained_audio_revision: None,
             audio_anchor: AudioAnchor {
                 start_sample: start,
@@ -113,18 +129,19 @@ pub fn attach_import(segment: &mut crate::document::Segment, alignment: Value) {
     segment.reading_turns = Some(serde_json::from_str(&turns_json).expect("serialized turns"));
     segment.speaker_activity =
         Some(serde_json::from_str(&activity_json).expect("serialized activity"));
-    segment.canonical_utterance_id = Some(segment.id.clone());
-    segment.machine_revision = Some(0);
-    segment.audio_revision = Some(0);
-    segment
-        .rest
-        .insert("canonical_machine_revision".into(), json!(0));
-    segment.rest.insert("language_epoch".into(), json!(0));
+    segment.canonical_utterance_id = Some(identity.clone());
+    segment.machine_revision = Some(machine_revision);
+    segment.audio_revision = Some(audio_revision);
+    segment.rest.insert(
+        "canonical_machine_revision".into(),
+        json!(canonical_revision),
+    );
+    segment.rest.insert("language_epoch".into(), json!(epoch));
     segment
         .rest
         .insert("text_audio_anchor".into(), anchor.clone());
     segment.reading_turn_provenance = Some(
-        json!({"utterance_id":segment.id,"canonical_machine_revision":0,"machine_revision":0,"audio_revision":0,"language_epoch":0,
+        json!({"utterance_id":identity,"canonical_machine_revision":canonical_revision,"machine_revision":machine_revision,"audio_revision":audio_revision,"language_epoch":epoch,"capture_source":segment.capture_source,
         "text_sha256":sha256_hex(segment.text.as_bytes()),"audio_anchor":anchor,"activity_sha256":sha256_hex(activity_json.as_bytes()),"turns_sha256":sha256_hex(turns_json.as_bytes()),
         "method":"ctc_units_temporal_nvidia_v3","transition_margin_samples":4000,"uncertainty_policy":"emission_inside_activity_no_competing_owner_in_margin",
         "model_sha256":timing::MODEL,"calibration_id":alignment["score_calibration_id"],"frame_calibration_id":alignment["frame_calibration_id"],
@@ -570,7 +587,7 @@ fn base(p: &Prepared, start: i64, samples: usize, language: &str) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use unicode_normalization::UnicodeNormalization;
 
@@ -612,6 +629,12 @@ mod tests {
             gathered: serde_json::from_value(case["gathered"].clone()).unwrap(),
         };
         (vocabulary, prepared, scores, result)
+    }
+    pub(crate) fn live_fixture() -> (Vocabulary, String, CtcScoresOut) {
+        let all = cases();
+        let case = &all["cases"][0];
+        let (v, _, scores, _) = replay(case);
+        (v, case["text"].as_str().unwrap().into(), scores)
     }
     fn cases() -> Value {
         serde_json::from_str(include_str!("../tests/testdata/alignment-reference.json")).unwrap()
@@ -804,10 +827,15 @@ mod tests {
         let end = 1. + s.audio_num_samples as f64 / 16000.;
         let mut segment: crate::document::Segment=serde_json::from_value(json!({
             "id":"seg-0","start":1.,"end":end,"speaker":"unassigned","text":case["text"],"language":"en",
-            "speaker_activity":{"audio_revision":0,"observed_end_sample":(end*16000.).round() as i64,
+            "machine_revision":7,"audio_revision":11,"canonical_machine_revision":7,"language_epoch":3,
+            "capture_source":{"source_id":"system","source_revision":1,"catalog_sha256":"retained-catalog"},
+            "speaker_activity":{"audio_revision":11,"observed_end_sample":(end*16000.).round() as i64,
                 "regions":[{"start_sample":16000,"end_sample":(end*16000.).round() as i64,"speakers":["speaker_0"]}]}
         })).unwrap();
-        attach_import(&mut segment, result);
+        attach(&mut segment, result);
+        assert_eq!(segment.machine_revision, Some(7));
+        assert_eq!(segment.audio_revision, Some(11));
+        assert_eq!(segment.rest["language_epoch"], 3);
         assert!(segment.reading_turns.is_some());
         let document:crate::document::Document=serde_json::from_value(json!({"schema_version":1,"segments":[segment],"speakers":{"unassigned":"Unknown","speaker_0":"Alice"}})).unwrap();
         let roundtrip: crate::document::Document =
@@ -815,6 +843,27 @@ mod tests {
         let export = crate::export::export(&roundtrip, "txt").unwrap().body;
         assert!(export.contains("Alice:"), "{export}");
         assert!(export.contains(case["text"].as_str().unwrap()));
+        for changes in [
+            json!({"text":"Edited words"}),
+            json!({"start":1.01}),
+            json!({"speaker":"speaker_0"}),
+        ] {
+            let edited = crate::edit::edit_passage(crate::edit::PassageEditInput {
+                status: "ready",
+                duration: end,
+                revision: 1,
+                document: Some(&roundtrip),
+                segment_id: "seg-0",
+                body: &json!({"segment_revision":7,"changes":changes}),
+                now: 1.,
+            })
+            .unwrap();
+            let late =
+                crate::live::apply_canonical_candidate(&edited.document, &roundtrip.segments[0]);
+            assert!(late.segments[0].reading_turns.is_none());
+            assert!(late.segments[0].reading_turn_provenance.is_none());
+            assert!(!late.segments[0].rest.contains_key("reading_alignment"));
+        }
         let mut stale = roundtrip.clone();
         stale.segments[0].text = "Edited words".into();
         let export = crate::export::export(&stale, "txt").unwrap().body;

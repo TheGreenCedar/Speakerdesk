@@ -645,6 +645,28 @@ fn is_sha256_hex(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+pub(crate) fn admission_value(admission: &Admission) -> serde_json::Value {
+    serde_json::json!({
+        "source": admission.source,
+        "model_revision": admission.model_revision,
+        "start_sample": admission.start_sample,
+        "end_sample": admission.end_sample,
+        "observed_until_sample": admission.observed_until_sample,
+        "complete": admission.complete,
+        "decision": admission.decision.as_str(),
+        "speech_regions": admission.speech_regions.iter().map(|region| serde_json::json!({
+            "start_sample": region.start_sample,
+            "end_sample": region.end_sample,
+        })).collect::<Vec<_>>(),
+        "maximum_probability": admission.maximum_probability,
+        "input_policy": admission.input_policy,
+        "conditioning_sha256": admission.conditioning_sha256,
+        "maximum_model_probability": admission.maximum_model_probability,
+        "uncertain_regions": admission.uncertain_regions.iter().map(|r| serde_json::json!({"start_sample":r.start_sample,"end_sample":r.end_sample})).collect::<Vec<_>>(),
+        "evidence_error": admission.evidence_error,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

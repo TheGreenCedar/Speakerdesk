@@ -87,6 +87,9 @@ pub trait ApplicationModels: Send + Sync {
     ) -> Option<crate::inference::ChildModels> {
         None
     }
+    fn live_alignment(&self) -> Option<Arc<speakerdesk_core::alignment::Vocabulary>> {
+        None
+    }
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String>;
     fn retry_passage(
         &self,
@@ -1113,6 +1116,37 @@ pub(crate) struct OperationGuard {
 }
 
 impl OperationGuard {
+    /// Retain the same operation through optional checks of an already editable result.
+    /// Caller runs on the existing blocking worker, after capture/inference has joined.
+    pub(crate) fn check_saved_voices(&self, models: &dyn ApplicationModels) {
+        let store = self.shared.store.lock().expect("store");
+        let job = match store.get(&self.id, false) {
+            Ok(Some(job)) if job.status == "ready" && self.current(&job) => job,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(%error,"could not check voices on saved transcript");
+                return;
+            }
+        };
+        let mut operations = self.shared.operations.lock().expect("operations");
+        let Some(active) = operations
+            .get_mut(&self.id)
+            .filter(|active| active.generation == self.generation)
+        else {
+            return;
+        };
+        active.activity = Activity::Refinement;
+        drop(operations);
+        drop(store);
+        crate::people_routes::check_saved_voices(
+            &self.shared.store,
+            &self.shared.data_dir,
+            models,
+            self,
+            &job,
+        );
+    }
+
     pub(crate) fn current(&self, job: &Job) -> bool {
         !self.cancellation.is_cancelled()
             && job
@@ -1221,22 +1255,9 @@ fn execute_import(
         }
         _ => None,
     };
-    if published.is_some()
-        && let Some(active) = shared.operations.lock().expect("operations").get_mut(id)
-        && active.generation == generation
-    {
-        // Retain ownership while the editable result receives optional voice checks.
-        active.activity = Activity::Refinement;
-    }
     drop(store);
-    if let Some(job) = published {
-        crate::people_routes::check_import_voices(
-            &shared.store,
-            &shared.data_dir,
-            models.as_ref(),
-            &operation,
-            &job,
-        );
+    if published.is_some() {
+        operation.check_saved_voices(models.as_ref());
     }
 }
 

@@ -1551,6 +1551,10 @@ pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Do
         .find(|segment| segment.id == candidate.id)
         .cloned()
     {
+        // Catalog/source identity is server-owned and cannot change under a passage.
+        if prior.capture_source != candidate.capture_source {
+            return document;
+        }
         let mut row = candidate.clone();
         if let Some(boundary) = prior.rest.get("canonical_text_boundary_sample") {
             row.rest
@@ -1594,6 +1598,9 @@ pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Do
             .any(|field| field == "start" || field == "end")
         {
             row.rest.remove("text_audio_anchor");
+        }
+        if kept_text || !protected.is_empty() {
+            crate::edit::clear_alignment_bundle(&mut row);
         }
         if let Some(slot) = document
             .segments
@@ -1822,6 +1829,7 @@ pub struct Engine<M: Models> {
     diar: Option<Handle>,
     ledger: Arc<Mutex<SpeechLedger>>,
     timing_apis: bool,
+    word_alignment: Option<Arc<crate::alignment::Vocabulary>>,
     events: Vec<EngineEvent>,
 }
 
@@ -1843,7 +1851,8 @@ impl<M: Models + 'static> Engine<M> {
         inbox: Arc<Mutex<Inbox>>,
         recording: RecordingReader,
     ) -> Result<Self, LiveError> {
-        // shortcut: enable after live publication is wired to the supplied-text adapter.
+        // English authoritative-tail/refinement algorithms remain unavailable.
+        // Supplied-text projection on sealed rows is independent of those algorithms.
         let timing_apis = false;
         let namespace = if let Some(recovery) = &config.recovery {
             recovery.validate()?;
@@ -1911,6 +1920,7 @@ impl<M: Models + 'static> Engine<M> {
             diar: None,
             ledger: Arc::new(Mutex::new(ledger)),
             timing_apis,
+            word_alignment: None,
             events: Vec::new(),
         })
     }
@@ -1934,6 +1944,11 @@ impl<M: Models + 'static> Engine<M> {
 
     pub fn inbox(&self) -> Arc<Mutex<Inbox>> {
         Arc::clone(&self.inbox)
+    }
+
+    /// The host installs the already-validated vocabulary once per worker.
+    pub fn set_word_alignment(&mut self, vocabulary: Arc<crate::alignment::Vocabulary>) {
+        self.word_alignment = Some(vocabulary);
     }
 
     pub fn timing_apis(&self) -> bool {
@@ -2793,6 +2808,69 @@ impl<M: Models + 'static> Engine<M> {
                 serde_json::json!({"catalog_sha256":catalog,"source_id":source,"source_revision":1}),
             );
         }
+        if row.state == UtteranceState::Sealed {
+            let admission = self
+                .ledger
+                .lock()
+                .expect("speech ledger")
+                .admission(row.start_sample, row.end_sample)?;
+            candidate.acoustic_evidence = Some(speech::admission_value(&admission));
+            let admitted = admission.complete
+                && admission.uncertain_regions.is_empty()
+                && !admission.evidence_error;
+            if !admitted {
+                candidate
+                    .rest
+                    .insert("audio_state".into(), Value::from("unverified_audio"));
+            }
+            if !row.text.trim().is_empty()
+                && row.audio_state.is_none()
+                && row.protected_fields.is_empty()
+                && admitted
+                && let Some(vocabulary) = &self.word_alignment
+                && let Some(language) = candidate
+                    .language
+                    .as_deref()
+                    .filter(|l| languages::is_supported(l))
+            {
+                let length = row.end_sample - row.start_sample;
+                if length <= crate::alignment::MAX_SAMPLES as i64 {
+                    let pcm = self
+                        .recording
+                        .read_samples(
+                            row.start_sample as u32,
+                            row.end_sample as u32,
+                            self.committed,
+                        )
+                        .map_err(|e| LiveError::Detail(e.to_string()))?;
+                    match vocabulary.align(
+                        self.models.as_ref(),
+                        &pcm,
+                        &candidate.text,
+                        row.start_sample,
+                        language,
+                    ) {
+                        Ok(aligned) => crate::alignment::attach(&mut candidate, aligned),
+                        Err(
+                            error @ (ChildError::ProcessLost { .. }
+                            | ChildError::Timeout
+                            | ChildError::Cancelled),
+                        ) => return Err(error.into()),
+                        Err(_) => {
+                            candidate.rest.insert(
+                                "reading_alignment".into(),
+                                serde_json::json!({"status":"unavailable","reason":"model_error"}),
+                            );
+                        }
+                    }
+                } else {
+                    candidate.rest.insert(
+                        "reading_alignment".into(),
+                        serde_json::json!({"status":"unavailable","reason":"crop_too_long"}),
+                    );
+                }
+            }
+        }
         if self.published.get(&row.id) == Some(&candidate) {
             return Ok(());
         }
@@ -2931,6 +3009,13 @@ fn project_segment(row: &Utterance, stamp: &LanguageStamp) -> Segment {
             "open".to_string()
         }),
     );
+    rest.insert("speaker_candidates".into(), serde_json::json!(names));
+    rest.insert("source_speaker_candidates".into(), serde_json::json!(names));
+    // Voice crops use the observed region ledger, including partial/unknown tails.
+    rest.insert("voice_eligible".into(), Value::Bool(false));
+    if let Some(state) = &row.audio_state {
+        rest.insert("audio_state".into(), serde_json::json!(state.as_str()));
+    }
     rest.insert("start_sample".to_string(), Value::from(row.start_sample));
     rest.insert("end_sample".to_string(), Value::from(row.end_sample));
     rest.insert(
@@ -2986,6 +3071,7 @@ fn project_segment(row: &Utterance, stamp: &LanguageStamp) -> Segment {
             serde_json::json!({
                 "audio_revision": activity.audio_revision,
                 "observed_end_sample": activity.observed_end_sample,
+                "regions": activity.regions.iter().map(|r| serde_json::json!({"start_sample":r.start_sample,"end_sample":r.end_sample,"speakers":r.speakers})).collect::<Vec<_>>(),
             })
         }),
         acoustic_evidence: None,
@@ -3096,6 +3182,12 @@ impl<M: Models + 'static> SourceRuntime<M> {
             engines,
             received: 0,
         })
+    }
+
+    pub fn set_word_alignment(&mut self, vocabulary: Arc<crate::alignment::Vocabulary>) {
+        for engine in &mut self.engines {
+            engine.set_word_alignment(vocabulary.clone());
+        }
     }
 
     pub fn continue_edited(
@@ -3736,6 +3828,8 @@ mod tests {
         diar_progress: Mutex<BTreeMap<u64, (u64, u64)>>,
         delayed_diar: AtomicBool,
         speaker_switch: AtomicUsize,
+        alignment: Option<(String, CtcScoresOut)>,
+        ctc_error: Option<ChildError>,
     }
 
     impl FakeModels {
@@ -3752,6 +3846,8 @@ mod tests {
                 diar_progress: Mutex::new(BTreeMap::new()),
                 delayed_diar: AtomicBool::new(false),
                 speaker_switch: AtomicUsize::new(usize::MAX),
+                alignment: None,
+                ctc_error: None,
             }
         }
     }
@@ -3883,16 +3979,44 @@ mod tests {
             _padding: (u32, u32),
         ) -> Result<AsrText, ChildError> {
             self.transcribe_calls.fetch_add(1, Ordering::SeqCst);
-            let text = if language == "de" { "eins" } else { "hello" };
+            let text = self
+                .alignment
+                .as_ref()
+                .map(|(text, _)| text.as_str())
+                .unwrap_or(if language == "de" { "eins" } else { "hello" });
             Ok(AsrText {
                 text: text.into(),
                 raw_text: text.into(),
                 token_count: 1,
             })
         }
-        fn ctc_scores(&self, _pcm: &[f32], _token_ids: &[i32]) -> Result<CtcScoresOut, ChildError> {
+        fn ctc_scores(&self, pcm: &[f32], token_ids: &[i32]) -> Result<CtcScoresOut, ChildError> {
             self.ctc_calls.fetch_add(1, Ordering::SeqCst);
-            Err(ChildError::Unimplemented)
+            if let Some(error) = &self.ctc_error {
+                return Err(error.clone());
+            }
+            let Some((_, scores)) = &self.alignment else {
+                return Err(ChildError::Unimplemented);
+            };
+            assert_eq!(pcm.len(), scores.audio_num_samples as usize);
+            let columns: Vec<_> = token_ids
+                .iter()
+                .map(|id| {
+                    scores
+                        .token_ids
+                        .iter()
+                        .position(|known| known == id)
+                        .unwrap()
+                })
+                .collect();
+            let mut replay = scores.clone();
+            replay.gathered = scores
+                .gathered
+                .chunks(scores.token_ids.len())
+                .flat_map(|row| columns.iter().map(|i| row[*i]))
+                .collect();
+            replay.token_ids = token_ids.to_vec();
+            Ok(replay)
         }
         fn embed_voice(&self, _pcm: &[f32]) -> Result<crate::ipc::VoiceEmbedding, ChildError> {
             Err(ChildError::Unimplemented)
@@ -4631,6 +4755,110 @@ mod tests {
             engine.models.transcribe_calls.load(Ordering::SeqCst),
             models_calls
         );
+    }
+
+    #[test]
+    fn sealed_live_timing_uses_independent_ctc_replay_once_at_eof() {
+        let (vocabulary, text, scores) = crate::alignment::tests::live_fixture();
+        let samples = scores.audio_num_samples as usize;
+        let mut models = FakeModels::english();
+        models.alignment = Some((text.clone(), scores));
+        let mut engine = TestEngine::new(EngineConfig::new("timed-live", "en"), models).unwrap();
+        engine.set_word_alignment(Arc::new(vocabulary));
+        drive(&mut engine, &loud(samples), "en");
+        while engine.poll().unwrap().is_some() {}
+        assert_eq!(engine.models.ctc_calls.load(Ordering::SeqCst), 0);
+        let events = engine.handle(LiveCommand::Stop).unwrap();
+        let rows = revisions(&events);
+        let row = rows.last().unwrap();
+        assert_eq!(row.text, text);
+        assert_eq!(engine.models.ctc_calls.load(Ordering::SeqCst), 1);
+        assert!(row.reading_turns.is_some());
+        assert_eq!(
+            row.rest["reading_alignment"]["audio_anchor"],
+            serde_json::json!({"start_sample":0,"end_sample":samples})
+        );
+        let mut reading: timing::ReadingSegment =
+            serde_json::from_value(serde_json::to_value(row).unwrap()).unwrap();
+        reading.installed_provider_identity = Some(crate::alignment::NATIVE_PROVIDER.into());
+        assert_eq!(timing::validated_turns(&reading), reading.reading_turns);
+    }
+
+    #[test]
+    fn optional_live_timing_failure_preserves_words_but_child_loss_invalidates_streams() {
+        for error in [
+            ChildError::failed("CTC replay failure", false),
+            ChildError::Unimplemented,
+            ChildError::ProcessLost {
+                message: "replay child exited".into(),
+            },
+            ChildError::Timeout,
+            ChildError::Cancelled,
+        ] {
+            let (vocabulary, text, scores) = crate::alignment::tests::live_fixture();
+            let samples = scores.audio_num_samples as usize;
+            let mut models = FakeModels::english();
+            models.alignment = Some((text.clone(), scores));
+            models.ctc_error = Some(error.clone());
+            let mut engine =
+                TestEngine::new(EngineConfig::new("optional-timing", "en"), models).unwrap();
+            engine.set_word_alignment(Arc::new(vocabulary));
+            drive(&mut engine, &loud(samples), "en");
+            while engine.poll().unwrap().is_some() {}
+            let result = engine.handle(LiveCommand::Stop);
+            if matches!(error, ChildError::Failed { .. } | ChildError::Unimplemented) {
+                let events = result.expect("optional timing failure must not suppress saved words");
+                let rows = revisions(&events);
+                let row = rows.last().unwrap();
+                assert_eq!(row.text, text);
+                assert_eq!(row.rest["reading_alignment"]["status"], "unavailable");
+                assert!(row.reading_turn_provenance.is_none());
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| matches!(e, EngineEvent::CaptureFinished { .. }))
+                );
+            } else {
+                assert_eq!(result.unwrap_err(), LiveError::Child(error));
+            }
+            assert_eq!(engine.models.diar_sessions.load(Ordering::SeqCst), 0);
+            assert!(engine.models.vad_sessions.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn sealed_live_observations_keep_verified_solo_crops_and_unknown_tail() {
+        let mut engine =
+            TestEngine::new(EngineConfig::new("evidence", "en"), FakeModels::english()).unwrap();
+        drive(&mut engine, &loud((4 * RATE + 37) as usize), "en");
+        while engine.poll().unwrap().is_some() {}
+        let events = engine.handle(LiveCommand::Stop).unwrap();
+        let rows = revisions(&events);
+        let row = rows.last().unwrap();
+        let activity = row.speaker_activity.as_ref().unwrap();
+        assert_eq!(
+            activity["regions"][0]["speakers"],
+            serde_json::json!(["speaker_0"])
+        );
+        assert_eq!(activity["observed_end_sample"], 4 * RATE);
+        assert_eq!(row.acoustic_evidence.as_ref().unwrap()["complete"], true);
+        let audio: crate::voice::AudioSegment =
+            serde_json::from_value(serde_json::to_value(row).unwrap()).unwrap();
+        assert_eq!(
+            crate::voice::speaker_audio_ranges(&audio, "speaker_0"),
+            vec![(0., 4.)]
+        );
+        let mut old = serde_json::to_value(row).unwrap();
+        old["speaker_activity"]
+            .as_object_mut()
+            .unwrap()
+            .remove("regions");
+        old.as_object_mut().unwrap().remove("voice_eligible");
+        let old: crate::voice::AudioSegment = serde_json::from_value(old).unwrap();
+        assert!(crate::voice::speaker_audio_ranges(&old, "speaker_0").is_empty());
+        let mut overlap = audio.clone();
+        overlap.speaker_candidates = Some(vec!["speaker_0".into(), "speaker_1".into()]);
+        assert!(crate::voice::speaker_audio_ranges(&overlap, "speaker_0").is_empty());
     }
 
     #[test]

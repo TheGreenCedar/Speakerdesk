@@ -368,7 +368,7 @@ fn meeting_job(id: JobId, name: &str, language: &str, sources: &[String]) -> Job
         .unwrap_or_default()
         .as_secs_f64();
     Job {id,name:name.into(),kind:JobKind::Meeting,status:"starting".into(),message:"Starting meeting…".into(),language:language.into(),source_file:Some("audio.wav".into()),duration:Some(0.0),revision:0,created:now,updated:now,
-        document:Some(Document{schema_version:1,speakers:BTreeMap::new(),segments:Vec::new(),provenance:Some(json!({"kind":"local_inference","mode":"live_phrase_windows","language":language,"language_history":history,"timing":"Live phrase boundaries. Word timing and accuracy refinement are unavailable."})),warnings:vec!["Phrase boundaries and overlapping speech need review.".into()],diarization:Vec::new(),edited_at:None,rest:Map::new()}),
+        document:Some(Document{schema_version:1,speakers:BTreeMap::new(),segments:Vec::new(),provenance:Some(json!({"kind":"local_inference","mode":"live_phrase_windows","language":language,"language_history":history,"timing":"Speech crop boundaries; supported sealed passages use supplied-text word timing. Uncertain or overlapping speech needs review. Accuracy refinement is unavailable."})),warnings:vec!["Phrase boundaries and overlapping speech need review.".into()],diarization:Vec::new(),edited_at:None,rest:Map::new()}),
         extra:serde_json::from_value(json!({"sources":sources,"language_revision":0,"language_acknowledged_revision":0,"language_epoch":0,"language_history":history,"refinement_status":"unavailable"})).expect("object")}
 }
 fn update(

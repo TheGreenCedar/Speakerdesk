@@ -26,7 +26,7 @@ const VOICE_READY: &str = "Saved voices can recognize speakers in new recordings
 const VOICE_UNQUALIFIED: &str = "Voice recognition needs a qualified GPU/ANE runtime. Saved names and voices are kept. Install a Speakerdesk update with qualified voice recognition.";
 mod automatic;
 mod voice_http;
-pub(crate) use automatic::check_import_voices;
+pub(crate) use automatic::check_saved_voices;
 
 const PROFILE_KEPT: &str = "Your saved voice is kept. Voice recognition is currently unavailable.";
 
@@ -1111,6 +1111,8 @@ mod tests {
         for case in [
             "words",
             "bounds",
+            "source",
+            "catalog",
             "forget",
             "replace",
             "cancel",
@@ -1136,7 +1138,11 @@ mod tests {
             });
             state.set_models(replay);
             let jid = "9".repeat(32);
-            voice_job(&state, &jid);
+            if matches!(case, "source" | "catalog") {
+                source_voice_job(&state, &jid);
+            } else {
+                voice_job(&state, &jid);
+            }
             let running = voice_server(&state).await;
             let checking = case.starts_with("check") || case == "manual_off_on";
             let pid = if checking {
@@ -1163,6 +1169,23 @@ mod tests {
             assert!(state.admission.busy());
             let mut replacement = None;
             match case {
+                "source" | "catalog" => {
+                    state
+                        .store()
+                        .update_job(&speakerdesk_core::ids::JobId::parse(&jid).unwrap(), |job| {
+                            if case == "source" {
+                                job.document.as_mut().unwrap().segments[0]
+                                    .capture_source
+                                    .as_mut()
+                                    .unwrap()["source_id"] = json!("system");
+                            } else {
+                                job.extra.get_mut("capture_source_catalog").unwrap()["policy"] =
+                                    json!("changed");
+                            }
+                            Ok::<_, speakerdesk_core::error::StoreError>(())
+                        })
+                        .unwrap();
+                }
                 "words" | "bounds" => {
                     let changes = if case == "words" {
                         json!({"text":"Protected during voice extraction."})
@@ -1849,6 +1872,98 @@ mod tests {
         }
         wav.finalize().unwrap();
     }
+    fn source_voice_job(state: &AppState, jid: &str) {
+        voice_job(state, jid);
+        let catalog = json!({"schema_version":1,"job_id":jid,"sample_rate":16000,"clock":"recording_samples","policy":"aligned_aec_microphone_and_original_system_v1","sources":[{"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1},{"source_id":"system","basename":"system.wav","revision":1}]});
+        let hash = speakerdesk_core::memo::sha256_hex(&serde_json::to_vec(&catalog).unwrap());
+        let id = speakerdesk_core::ids::JobId::parse(jid).unwrap();
+        let mut job = state.store().get(&id, false).unwrap().unwrap();
+        job.extra
+            .insert("sources".into(), json!(["microphone", "system"]));
+        job.extra.insert("capture_source_catalog".into(), catalog);
+        for (row, source) in job
+            .document
+            .as_mut()
+            .unwrap()
+            .segments
+            .iter_mut()
+            .zip(["microphone_clean", "system"])
+        {
+            row.capture_source =
+                Some(json!({"catalog_sha256":hash,"source_id":source,"source_revision":1}));
+        }
+        state.insert_job(job);
+        for (name, value) in [("microphone_clean.wav", 1000i16), ("system.wav", 2000i16)] {
+            let mut wav = hound::WavWriter::create(
+                state.data_dir().join(jid).join(name),
+                hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )
+            .unwrap();
+            for _ in 0..9 * 16000 {
+                wav.write_sample(value).unwrap();
+            }
+            wav.finalize().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn source_bound_voice_preview_enrollment_and_manual_check_use_each_original_crop() {
+        let state = AppState::new();
+        let replay = std::sync::Arc::new(VoiceReplay::default());
+        state.set_models(replay.clone());
+        let jid = "6".repeat(32);
+        source_voice_job(&state, &jid);
+        let running = voice_server(&state).await;
+        let pid = enroll_person(&running, &jid).await;
+        for (clip, start, sample) in [("a", 0u64, 1000i16), ("b", 4u64 * 16000, 2000i16)] {
+            let offset = 44 + 2 * start;
+            let result = running
+                .client
+                .get(running.url(&format!(
+                    "/api/jobs/{jid}/speakers/speaker_0/voice-preview?revision=1&clip={clip}"
+                )))
+                .header("Range", format!("bytes={offset}-{}", offset + 1))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(result.status(), 206);
+            assert_eq!(
+                result.bytes().await.unwrap().as_ref(),
+                &sample.to_le_bytes()
+            );
+        }
+        let saved=running.client.post(running.url(&format!("/api/people/{pid}/voice"))).json(&json!({"revision":1,"meeting_id":jid,"track_id":"speaker_0","segment_ids":["a","b"],"consent":true})).send().await.unwrap();
+        assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+        let second = "5".repeat(32);
+        source_voice_job(&state, &second);
+        let checked = running
+            .client
+            .post(running.url(&format!(
+                "/api/jobs/{second}/speakers/speaker_0/voice-suggestion"
+            )))
+            .json(&json!({"revision":0,"segment_ids":["a","b"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(checked.status(), 200);
+        assert_eq!(checked.json::<Value>().await.unwrap()["matched"], true);
+        assert_eq!(
+            *replay.starts.lock().unwrap(),
+            vec![
+                1000. / 32768.,
+                2000. / 32768.,
+                1000. / 32768.,
+                2000. / 32768.
+            ]
+        );
+        running.shutdown().await;
+    }
+
     async fn voice_server(state: &AppState) -> Running {
         let mut running = serve(crate::router(state.clone())).await;
         let headers = reqwest::header::HeaderMap::from_iter([(

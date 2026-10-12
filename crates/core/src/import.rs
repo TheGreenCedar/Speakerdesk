@@ -290,7 +290,7 @@ pub fn import_recording<M: Models + ?Sized + 'static>(
                 let result = alignment
                     .align(models, &pcm[a..b], &segment.text, a as i64, language)
                     .map_err(child_err)?;
-                crate::alignment::attach_import(&mut segment, result);
+                crate::alignment::attach(&mut segment, result);
             }
             segments.push(segment);
         }
@@ -794,7 +794,7 @@ fn blocked_row(language: &str, item: &Examined, blocked: &BlockedSpeech) -> Deco
         audio_state: Some(blocked.audio_state.to_string()),
         detection: None,
         transcription_review: None,
-        acoustic: Some(admission_value(&item.admission)),
+        acoustic: Some(speech::admission_value(&item.admission)),
         pcm: blocked.pcm.as_ref().map(|pcm| {
             json!({
                 "kind": pcm.kind,
@@ -822,7 +822,7 @@ fn passage_row(origin: i64, passage: Passage) -> Decoded {
             .transcription_review
             .as_ref()
             .map(transcription_value),
-        acoustic: Some(admission_value(&passage.acoustic_evidence)),
+        acoustic: Some(speech::admission_value(&passage.acoustic_evidence)),
         pcm: passage.pcm_evidence.as_ref().map(|pcm| {
             json!({
                 "kind": pcm.kind,
@@ -1080,23 +1080,6 @@ fn transcription_value(review: &TranscriptionReview) -> Value {
         value.insert("decoder_reason".into(), json!(reason));
     }
     Value::Object(value)
-}
-
-fn admission_value(admission: &Admission) -> Value {
-    json!({
-        "source": admission.source,
-        "model_revision": admission.model_revision,
-        "start_sample": admission.start_sample,
-        "end_sample": admission.end_sample,
-        "observed_until_sample": admission.observed_until_sample,
-        "complete": admission.complete,
-        "decision": admission.decision.as_str(),
-        "speech_regions": admission.speech_regions.iter().map(|region| json!({
-            "start_sample": region.start_sample,
-            "end_sample": region.end_sample,
-        })).collect::<Vec<_>>(),
-        "maximum_probability": admission.maximum_probability,
-    })
 }
 
 fn warnings(language: &str, limit: usize) -> Vec<String> {

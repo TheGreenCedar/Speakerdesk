@@ -413,6 +413,7 @@ pub(super) async fn worker(
         .models()
         .live_models(&operation.cancellation)
         .ok_or("Live models are unavailable")?;
+    let alignment = app.models().live_alignment();
     let (init_tx, init_rx) = oneshot::channel();
     let (wake, mut receiver) = mpsc::channel(1);
     let (result_tx, result) = watch::channel(None);
@@ -445,6 +446,12 @@ pub(super) async fn worker(
                     folder.join("audio.wav"),
                 )?))
             };
+            if let Some(alignment) = alignment {
+                match &mut engine {
+                    Engines::Single(engine) => engine.set_word_alignment(alignment),
+                    Engines::Sources(engine) => engine.set_word_alignment(alignment),
+                }
+            }
             init_tx
                 .send(engine.inbox())
                 .map_err(|_| "Live owner stopped during initialization")?;

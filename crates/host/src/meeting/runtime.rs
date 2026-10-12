@@ -502,7 +502,20 @@ pub(super) async fn record(
     }
     if !operation.cancellation.is_cancelled() {
         let failure = state.failure.clone();
-        if let Err(e)=state.mutate(move|job|{job.status=if failure.is_some(){"failed"}else{"ready"}.into();job.message=failure.map_or_else(||"Recording saved. Phrase text is editable; word timing and accuracy refinement are unavailable.".into(),|e|format!("{e}. Saved audio and edits are retained."));Ok(())}).await {cleanup=Err(StoreError::message(e.message));}
+        if let Err(e)=state.mutate(move|job|{job.status=if failure.is_some(){"failed"}else{"ready"}.into();job.message=failure.map_or_else(||"Recording saved. Phrase text is editable; available supplied-text timing marks supported sealed passages. Accuracy refinement is unavailable.".into(),|e|format!("{e}. Saved audio and edits are retained."));Ok(())}).await {cleanup=Err(StoreError::message(e.message));}
+    }
+    if cleanup.is_ok() && state.failure.is_none() && !operation.cancellation.is_cancelled() {
+        // Ready is already published. This optional work keeps the existing lease/operation,
+        // is cancellable, and never holds up editable text or runs on the async executor.
+        let models = app.models();
+        let operation = operation.clone();
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || operation.check_saved_voices(models.as_ref())).await
+        {
+            cleanup = Err(StoreError::message(format!(
+                "Saved voice checks did not finish: {error}"
+            )));
+        }
     }
     state.progress.send_modify(|p| p.error = state.failure);
     cleanup

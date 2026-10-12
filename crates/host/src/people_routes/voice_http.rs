@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     admission::Activity,
-    native::recording_path,
+    native::{passage_audio_unchanged, passage_recording_path},
     routes::{AppState, blocking, stored_job_json},
 };
 use axum::{
@@ -79,7 +79,9 @@ pub(super) async fn voice_clips(
             let text = meeting.segments.iter().find(|s|s.id==clip.segment_id).map(|s|s.text.as_str()).unwrap_or("");
             let mut row = json!(clip); row["id"]=json!(id); row["text"]=json!(text); row
         }).collect();
-        let audio_available = recording_path(app.data_dir(),&job).is_ok();
+        let audio_available = job.document.as_ref().is_some_and(|doc| doc.segments.iter()
+            .filter(|row|row.speaker==track || choices.iter().any(|(_,c)|c.segment_id==row.id))
+            .all(|row|passage_recording_path(app.data_dir(), &job, row).is_ok()));
         let source_verified = meeting.provenance_kind.as_deref()==Some("local_inference");
         let excluded: Vec<_> = meeting.segments.iter().filter(|s|s.speaker==track && !choices.iter().any(|(_,c)|c.segment_id==s.id)).map(|s| {
             let message = if !source_verified { "This transcript has no verified local speaker audio." }
@@ -116,13 +118,13 @@ pub(super) async fn voice_preview(
         if job.revision != query.revision {
             return Err(conflict("Refresh passages before previewing this audio."));
         }
-        if !voice::voice_clip_choices(&meeting(&job)?, &track)
+        let choices = voice::voice_clip_choices(&meeting(&job)?, &track);
+        let clip = choices
             .iter()
-            .any(|(id, _)| *id == query.clip)
-        {
-            return Err(conflict("This voice passage is no longer current."));
-        }
-        recording_path(app.data_dir(), &job)
+            .find(|(id, _)| *id == query.clip)
+            .map(|(_, clip)| clip)
+            .ok_or_else(|| conflict("This voice passage is no longer current."))?;
+        clip_recording_path(app.data_dir(), &job, clip)
             .map_err(|_| conflict("Original speaker audio is unavailable."))
     })
     .await;
@@ -198,12 +200,11 @@ pub(super) fn selected_audio_unchanged(
     original: &Job,
     clips: &[VoiceClip],
 ) -> Result<bool, HttpError> {
-    let current = meeting(current)?;
-    let original = meeting(original)?;
-    Ok(voice::clips_current(&current,clips) && clips.iter().all(|clip| {
-        let old = original.segments.iter().find(|s|s.id==clip.segment_id);
-        let new = current.segments.iter().find(|s|s.id==clip.segment_id);
-        matches!((old,new),(Some(old),Some(new)) if old.audio_revision==new.audio_revision && old.canonical_utterance_id==new.canonical_utterance_id)
+    let current_meeting = meeting(current)?;
+    Ok(voice::clips_current(&current_meeting,clips) && clips.iter().all(|clip| {
+        let old = original.document.as_ref().and_then(|d| d.segments.iter().find(|s|s.id==clip.segment_id));
+        let new = current.document.as_ref().and_then(|d| d.segments.iter().find(|s|s.id==clip.segment_id));
+        matches!((old,new),(Some(old),Some(new)) if passage_audio_unchanged(current, original, new, old))
     }))
 }
 
@@ -278,11 +279,10 @@ fn run_voice(
         (job, clips, generation, catalog, operation)
     };
     let result = (|| {
-        let path = recording_path(app.data_dir(), &original)
-            .map_err(|_| conflict("Meeting audio is unavailable."))?;
         let vectors = embeddings(
             models.as_ref(),
-            &path,
+            app.data_dir(),
+            &original,
             &policy,
             &clips,
             &operation.cancellation,
@@ -417,9 +417,25 @@ pub(super) fn pending_check(job: &Job, track: &str, id: &str) -> bool {
         .is_some_and(|check| check["id"] == id && check["status"] == "checking")
 }
 
+fn clip_recording_path(
+    root: &std::path::Path,
+    job: &Job,
+    clip: &VoiceClip,
+) -> Result<std::path::PathBuf, HttpError> {
+    let segment = job
+        .document
+        .as_ref()
+        .and_then(|doc| doc.segments.iter().find(|s| s.id == clip.segment_id))
+        .ok_or_else(|| conflict("This voice passage is no longer current."))?;
+    passage_recording_path(root, job, segment).map_err(|_| {
+        conflict("The passage recording is unavailable or its capture source changed.")
+    })
+}
+
 pub(super) fn embeddings(
     models: &dyn crate::routes::ApplicationModels,
-    path: &std::path::Path,
+    root: &std::path::Path,
+    job: &Job,
     policy: &Calibration,
     clips: &[VoiceClip],
     cancellation: &tokio_util::sync::CancellationToken,
@@ -429,6 +445,7 @@ pub(super) fn embeddings(
         if cancellation.is_cancelled() {
             return Err(conflict("Voice operation cancelled."));
         }
+        let path = clip_recording_path(root, job, clip)?;
         let pcm = audio::read_pcm16_range(path, clip.start, clip.end)
             .map_err(|e| conflict(e.to_string()))?;
         let result = models.embed_voice(&pcm, cancellation).map_err(conflict)?;

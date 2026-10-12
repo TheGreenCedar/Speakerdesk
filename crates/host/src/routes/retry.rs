@@ -54,7 +54,7 @@ fn begin(app: &AppState, jid: &str, body: &[u8]) -> Result<Value, ApiError> {
     {
         return Err(ApiError::new(400, messages::RETRY_TOO_LONG));
     }
-    let path = crate::native::recording_path(app.data_dir(), &job)
+    let path = crate::native::passage_recording_path(app.data_dir(), &job, &segment)
         .map_err(|_| ApiError::new(409, messages::RETRY_NEEDS_AUDIO))?;
     let retry_id = random_hex(16);
     job.extra.insert(
@@ -85,26 +85,22 @@ fn begin(app: &AppState, jid: &str, body: &[u8]) -> Result<Value, ApiError> {
 }
 
 fn unchanged(current: &Job, original: &Job, prior: &Segment) -> bool {
-    current.source_file == original.source_file
-        && current.extra.get("legacy_media_root") == original.extra.get("legacy_media_root")
-        && current.extra.get("audio_revision") == original.extra.get("audio_revision")
-        && current
-            .document
-            .as_ref()
-            .and_then(|doc| doc.segments.iter().find(|s| s.id == prior.id))
-            .is_some_and(|s| {
-                s.text == prior.text
-                    && s.start == prior.start
-                    && s.end == prior.end
-                    && s.speaker == prior.speaker
-                    && s.language == prior.language
-                    && s.language_detection == prior.language_detection
-                    && s.audio_revision == prior.audio_revision
-                    && s.canonical_utterance_id == prior.canonical_utterance_id
-                    && s.machine_revision == prior.machine_revision
-                    && s.protected_fields.as_deref().unwrap_or_default()
-                        == prior.protected_fields.as_deref().unwrap_or_default()
-            })
+    current
+        .document
+        .as_ref()
+        .and_then(|doc| doc.segments.iter().find(|s| s.id == prior.id))
+        .is_some_and(|s| {
+            crate::native::passage_audio_unchanged(current, original, s, prior)
+                && s.text == prior.text
+                && s.start == prior.start
+                && s.end == prior.end
+                && s.speaker == prior.speaker
+                && s.language == prior.language
+                && s.language_detection == prior.language_detection
+                && s.machine_revision == prior.machine_revision
+                && s.protected_fields.as_deref().unwrap_or_default()
+                    == prior.protected_fields.as_deref().unwrap_or_default()
+        })
 }
 
 fn execute(
