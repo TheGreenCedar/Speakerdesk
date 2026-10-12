@@ -292,11 +292,15 @@ fn main() {
                 });
                 continue;
             }
-            Request::Transcribe { .. } => Ok(Response::Text(AsrText {
-                text: "Replay transcript".into(),
-                raw_text: "Replay transcript".into(),
-                token_count: 2,
-            })),
+            Request::Transcribe { .. } => {
+                let text = std::fs::read_to_string(root.join("replay-transcript"))
+                    .unwrap_or_else(|_| "Replay transcript".into());
+                Ok(Response::Text(AsrText {
+                    text: text.clone(),
+                    raw_text: text,
+                    token_count: 2,
+                }))
+            }
             Request::EmbedVoice { pcm } if root.join("fixture-voice").exists() => {
                 writeln!(
                     std::fs::OpenOptions::new()
@@ -360,6 +364,19 @@ fn main() {
                 std::fs::write(root.join(marker), b"started").unwrap();
                 while root.join(hold).exists() && !flag.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_millis(1));
+                }
+                if hold_asr
+                    && flag.load(Ordering::Acquire)
+                    && root.join("hold-cancel-terminal").exists()
+                {
+                    std::fs::write(
+                        root.join("asr-cancelled"),
+                        b"control acknowledged; terminal held",
+                    )
+                    .unwrap();
+                    while root.join("hold-cancel-terminal").exists() {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
                 }
                 reply(
                     &writer,

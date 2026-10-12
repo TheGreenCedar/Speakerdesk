@@ -40,6 +40,7 @@ use crate::admission::{Activity, Admission as UpdateAdmission};
 use crate::http::{security_headers, token_header};
 use crate::worker::JobWorker;
 
+pub(crate) mod refinement;
 mod retry;
 
 const NOT_FOUND: &str = "The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.";
@@ -95,6 +96,7 @@ pub trait ApplicationModels: Send + Sync {
         &self,
         _pcm: &[f32],
         _language: &str,
+        _processed_microphone_catalog: Option<&str>,
         _cancellation: &CancellationToken,
     ) -> Result<speakerdesk_core::import::PassageCandidate, String> {
         Err("Passage retry is unavailable in this build.".into())
@@ -425,6 +427,7 @@ impl AppState {
                     {
                         job.extra
                             .insert("operation_generation".into(), json!(generation + 1));
+                        refinement::interrupt(job);
                         if job
                             .extra
                             .remove("passage_retry")
@@ -951,6 +954,7 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
                 .unwrap_or(0);
             job.extra
                 .insert("operation_generation".into(), json!(generation + 1));
+            refinement::interrupt(job);
             if job
                 .extra
                 .remove("passage_retry")
@@ -1369,6 +1373,9 @@ pub(crate) fn stored_job_json(job: &Job) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.entry("duration").or_insert(Value::Null);
         object.entry("document").or_insert(Value::Null);
+        if refinement::available(job) {
+            object.insert("saved_refinement_available".into(), Value::Bool(true));
+        }
     }
     value
 }

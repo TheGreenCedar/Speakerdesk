@@ -8,7 +8,6 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -55,9 +54,6 @@ const AUTHORITATIVE_PAD: i64 = 48_000;
 const AUTHORITATIVE_MAX: i64 = 320_000;
 /// `authoritative_tail.POLICY`.
 pub const AUTHORITATIVE_POLICY: &str = "authoritative_tail_last_supported_boundary_v2";
-const FAST_MAX_SAMPLES: i64 = 392_000;
-const REFINE_CORE_SAMPLES: i64 = 18 * RATE;
-const CANCEL_MEMORY: usize = 16;
 const MAX_CONTROL_MESSAGES: usize = 128;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -162,20 +158,9 @@ pub struct AudioNotice {
     pub language: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RefineCommand {
-    pub operation_id: String,
-    pub language_epoch: i64,
-    pub canonical_sealed: bool,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiveCommand {
     Audio(AudioNotice),
-    Refine(RefineCommand),
-    CancelRefinement {
-        operation_id: String,
-    },
     Language {
         language: String,
         generation: i64,
@@ -189,83 +174,25 @@ pub enum LiveCommand {
     Stop,
 }
 
-/// Coalesces contiguous audio notices and remembers in-flight cancellations.
+/// Coalesces contiguous saved-audio notices while retaining language/control order.
 pub struct Inbox {
     audio_batch_samples: i64,
-    refinement_interval_seconds: i64,
-    last_refinement_at: Option<Instant>,
-    active_refinement: Option<(String, i64)>,
-    capture_finished: bool,
-    last_taken: Option<&'static str>,
     messages: VecDeque<LiveCommand>,
-    refinement: Option<RefineCommand>,
     shutdown: bool,
-    historical: bool,
-    latest_epoch: i64,
-    cancelled: Vec<String>,
     received: i64,
 }
 
 impl Inbox {
-    pub fn new(
-        audio_batch_seconds: i64,
-        refinement_interval_seconds: i64,
-    ) -> Result<Self, LiveError> {
+    pub fn new(audio_batch_seconds: i64) -> Result<Self, LiveError> {
         if !(1..=6).contains(&audio_batch_seconds) {
             return Err(LiveError::Message("Invalid bounded audio drain cadence."));
         }
-        if !(0..=60).contains(&refinement_interval_seconds) {
-            return Err(LiveError::Message(
-                "Invalid bounded background refinement interval.",
-            ));
-        }
         Ok(Self {
             audio_batch_samples: audio_batch_seconds * RATE,
-            refinement_interval_seconds,
-            last_refinement_at: None,
-            active_refinement: None,
-            capture_finished: false,
-            last_taken: None,
             messages: VecDeque::new(),
-            refinement: None,
             shutdown: false,
-            historical: false,
-            latest_epoch: 0,
-            cancelled: Vec::new(),
             received: 0,
         })
-    }
-
-    pub fn set_historical(&mut self, historical: bool) {
-        self.historical = historical;
-    }
-
-    pub fn set_latest_epoch(&mut self, epoch: i64) {
-        self.latest_epoch = epoch;
-    }
-
-    fn remember_cancel(&mut self, operation_id: &str) {
-        let mut keep = vec![operation_id.to_string()];
-        if let Some((active, _)) = &self.active_refinement
-            && self.cancelled.iter().any(|id| id == active)
-        {
-            keep.push(active.clone());
-        }
-        let mut retained: Vec<String> = self
-            .cancelled
-            .iter()
-            .filter(|id| !keep.iter().any(|kept| kept == *id))
-            .cloned()
-            .collect();
-        retained.sort();
-        let room = CANCEL_MEMORY.saturating_sub(keep.len());
-        if retained.len() > room {
-            retained = retained.split_off(retained.len() - room);
-        }
-        retained.extend(keep);
-        retained.sort();
-        retained.dedup();
-        self.cancelled = retained;
     }
 
     pub fn push(&mut self, message: LiveCommand) -> Result<(), LiveError> {
@@ -292,57 +219,10 @@ impl Inbox {
                     self.messages.push_back(LiveCommand::Audio(notice));
                 }
             }
-            LiveCommand::Refine(command) => {
-                if self.refinement.is_some() {
-                    return Err(LiveError::Message(
-                        "Only one dispatched refinement is allowed.",
-                    ));
-                }
-                self.refinement = Some(command);
-            }
-            LiveCommand::CancelRefinement { operation_id } => {
-                if !operation_id.is_empty() {
-                    self.remember_cancel(&operation_id);
-                }
-                if self
-                    .refinement
-                    .as_ref()
-                    .is_some_and(|pending| pending.operation_id == operation_id)
-                {
-                    self.refinement = None;
-                }
-            }
-            LiveCommand::Language {
-                language,
-                generation,
-                start_sample,
-            } => {
-                self.latest_epoch = generation;
-                if !self.historical {
-                    let stale = self
-                        .active_refinement
-                        .as_ref()
-                        .filter(|(_, epoch)| *epoch != self.latest_epoch)
-                        .map(|(operation, _)| operation.clone());
-                    if let Some(operation) = stale {
-                        self.remember_cancel(&operation);
-                    }
-                }
-                if self
-                    .refinement
-                    .as_ref()
-                    .is_some_and(|pending| pending.language_epoch != self.latest_epoch)
-                {
-                    self.refinement = None;
-                }
-                self.messages.push_back(LiveCommand::Language {
-                    language,
-                    generation,
-                    start_sample,
-                });
-            }
             LiveCommand::Shutdown => self.shutdown = true,
-            LiveCommand::Flush { .. } | LiveCommand::Stop => self.messages.push_back(message),
+            LiveCommand::Language { .. } | LiveCommand::Flush { .. } | LiveCommand::Stop => {
+                self.messages.push_back(message)
+            }
         }
         if self.messages.len() > MAX_CONTROL_MESSAGES {
             return Err(LiveError::Message(
@@ -352,36 +232,10 @@ impl Inbox {
         Ok(())
     }
 
-    pub fn cancelled_request(&self, command: &RefineCommand) -> bool {
-        let historical = self.historical
-            || (command.canonical_sealed && command.language_epoch <= self.latest_epoch);
-        self.shutdown
-            || self.cancelled.iter().any(|id| id == &command.operation_id)
-            || (!historical && command.language_epoch != self.latest_epoch)
-    }
-
     /// Contiguous audio before the next control supersedes an open tail.
     pub fn newer_audio_queued(&self, through_sample: i64, epoch: i64) -> bool {
-        match self.messages.front() {
-            Some(LiveCommand::Audio(notice)) => {
-                notice.language_epoch == epoch
-                    && notice.start_sample == through_sample
-                    && notice.end_sample > through_sample
-            }
-            _ => false,
-        }
+        matches!(self.messages.front(),Some(LiveCommand::Audio(notice)) if notice.language_epoch==epoch && notice.start_sample==through_sample && notice.end_sample>through_sample)
     }
-
-    pub fn finish_refinement(&mut self, operation_id: &str) {
-        if self
-            .active_refinement
-            .as_ref()
-            .is_some_and(|(active, _)| active == operation_id)
-        {
-            self.active_refinement = None;
-        }
-    }
-
     pub fn queued_audio_span(&self) -> Option<(i64, i64, i64)> {
         self.messages.iter().find_map(|message| match message {
             LiveCommand::Audio(notice) => Some((
@@ -392,33 +246,10 @@ impl Inbox {
             _ => None,
         })
     }
-
-    pub fn pending_refinement(&self) -> Option<&RefineCommand> {
-        self.refinement.as_ref()
-    }
-
     /// Non-blocking take. `None` means the queue is idle.
     pub fn take(&mut self) -> Result<Option<LiveCommand>, LiveError> {
         if self.shutdown {
             return Ok(Some(LiveCommand::Shutdown));
-        }
-        let refinement_due = self.refinement.as_ref().is_some_and(|_| {
-            self.refinement_interval_seconds == 0
-                || self.capture_finished
-                || self.historical
-                || self.last_refinement_at.is_none_or(|last| {
-                    last.elapsed().as_secs() >= self.refinement_interval_seconds as u64
-                })
-        });
-        let audio_waiting = matches!(self.messages.front(), Some(LiveCommand::Audio(_)));
-        if refinement_due
-            && (self.messages.is_empty() || (audio_waiting && self.last_taken == Some("audio")))
-        {
-            let result = self.refinement.take().expect("refinement is due");
-            self.last_refinement_at = Some(Instant::now());
-            self.active_refinement = Some((result.operation_id.clone(), result.language_epoch));
-            self.last_taken = Some("refine");
-            return Ok(Some(LiveCommand::Refine(result)));
         }
         let Some(mut result) = self.messages.pop_front() else {
             return Ok(None);
@@ -432,15 +263,6 @@ impl Inbox {
                 self.messages.push_front(LiveCommand::Audio(rest));
             }
         }
-        self.last_taken = Some(match &result {
-            LiveCommand::Audio(_) => "audio",
-            LiveCommand::Refine(_) => "refine",
-            LiveCommand::Language { .. } => "language",
-            LiveCommand::Flush { .. } => "flush",
-            LiveCommand::Stop => "stop",
-            LiveCommand::Shutdown => "shutdown",
-            LiveCommand::CancelRefinement { .. } => "cancel",
-        });
         Ok(Some(result))
     }
 }
@@ -1232,22 +1054,6 @@ pub fn validate_core_plan(plan: &CorePlan, row: &CoreAnchor) -> Result<Vec<i64>,
     Ok(plan.edges.clone())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnershipWindow {
-    pub id: String,
-    pub kind: Option<String>,
-    pub start_sample: i64,
-    pub end_sample: i64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReconcileOutcome {
-    pub document: Document,
-    pub previous_segments: Vec<Segment>,
-    pub protected_ids: Vec<String>,
-    pub changed: bool,
-}
-
 fn segment_bounds(segment: &Segment) -> Result<(i64, i64), LiveError> {
     if !segment.start.is_finite() || !segment.end.is_finite() || segment.start < 0.0 {
         return Err(LiveError::Message(
@@ -1257,22 +1063,138 @@ fn segment_bounds(segment: &Segment) -> Result<(i64, i64), LiveError> {
     Ok((round_samples(segment.start), round_samples(segment.end)))
 }
 
-fn intersects(left: (i64, i64), right: (i64, i64)) -> bool {
-    left.0 < right.1 && right.0 < left.1
-}
-
-/// Source snapshot of the fields a window is allowed to replace.
+/// Source snapshot of the fields a saved accuracy pass is allowed to replace.
 pub fn segment_version(segment: &Segment) -> String {
     let value = serde_json::json!({
         "end": segment.end,
         "id": segment.id,
         "machine_revision": segment.machine_revision,
-        "protected_fields": segment.protected_fields,
+        "protected_fields": segment.protected_fields.as_deref().unwrap_or_default(),
         "speaker": segment.speaker,
         "start": segment.start,
         "text": segment.text,
+        "audio_revision": segment.audio_revision,
+        "capture_source": segment.capture_source,
+        "canonical_utterance_id": segment.canonical_utterance_id,
+        "language": segment.language,
+        "language_detection": segment.language_detection,
+        "language_epoch": segment.rest.get("language_epoch"),
+        "language_generation": segment.rest.get("language_generation"),
+        "language_mode": segment.rest.get("language_mode"),
+        "canonical_machine_revision": segment.rest.get("canonical_machine_revision"),
+        "canonical_state": segment.rest.get("canonical_state"),
     });
     sha256_hex(serde_json::to_string(&value).unwrap_or_default().as_bytes())
+}
+
+/// Fresh decode of one saved canonical anchor. It owns no live stream state and
+/// retains the recorded speaker/activity identity instead of creating new tracks.
+pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
+    models: &M,
+    original: &Segment,
+    pcm: &[f32],
+    vocabulary: Option<&crate::alignment::Vocabulary>,
+) -> Result<Segment, LiveError> {
+    let (start, end) = segment_bounds(original)?;
+    let language = original
+        .rest
+        .get("language_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if original.canonical_utterance_id.is_none()
+        || original.rest.get("canonical_state").and_then(Value::as_str) != Some("sealed")
+        || protected_segment(original)
+        || end <= start
+        || end - start > MAX_DECODE_SAMPLES
+        || end - start != pcm.len() as i64
+        || !languages::is_supported(language)
+        || language == languages::AUTOMATIC
+    {
+        return Err(LiveError::Message(
+            "This saved passage needs a longer or explicit-language accuracy pass.",
+        ));
+    }
+    let processed = original
+        .capture_source
+        .as_ref()
+        .filter(|s| s["source_id"] == "microphone_clean")
+        .and_then(|s| s["catalog_sha256"].as_str());
+    let decoded = crate::import::retry_passage_source(
+        models,
+        pcm,
+        0.,
+        pcm.len() as f64 / RATE as f64,
+        language,
+        processed,
+    )
+    .map_err(|e| LiveError::Detail(e.to_string()))?;
+    let partial = decoded.retry_parts.iter().any(|part| {
+        part["text"]
+            .as_str()
+            .is_none_or(|text| text.trim().is_empty())
+            && !matches!(
+                part["audio_state"].as_str(),
+                Some("model_non_speech" | "digital_silence" | "constant_signal")
+            )
+    });
+    if decoded.text.trim().is_empty()
+        || decoded.review
+        || partial
+        || decoded.transcription_review.is_some()
+    {
+        return Err(LiveError::Message(
+            "The new decode is incomplete; previous words and audio are retained.",
+        ));
+    }
+    let mut candidate = original.clone();
+    crate::edit::clear_alignment_bundle(&mut candidate);
+    candidate.text = decoded.text;
+    candidate.language = Some(decoded.language);
+    candidate.language_detection = Some(serde_json::json!({"mode":"manual","reason":"override"}));
+    candidate.machine_revision = Some(
+        original
+            .machine_revision
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(LiveError::Message("Passage revision exhausted."))?,
+    );
+    let canonical = original
+        .rest
+        .get("canonical_machine_revision")
+        .and_then(Value::as_i64)
+        .unwrap_or(original.machine_revision.unwrap_or(0))
+        .checked_add(1)
+        .ok_or(LiveError::Message("Canonical revision exhausted."))?;
+    candidate
+        .rest
+        .insert("canonical_machine_revision".into(), Value::from(canonical));
+    candidate
+        .rest
+        .insert("canonical_text_end_sample".into(), Value::from(end));
+    candidate.rest.remove("canonical_unresolved");
+    candidate.rest.remove("cohere_raw_text");
+    candidate.transcription_review = None;
+    candidate.retry_candidate = None;
+    candidate.review_resolution = None;
+    candidate.rest.remove("text_audio_anchor");
+    candidate.rest.remove("audio_float32_sha256");
+    if let Some(vocabulary) = vocabulary {
+        match vocabulary.align(models, pcm, &candidate.text, start, language) {
+            Ok(alignment) => crate::alignment::attach(&mut candidate, alignment),
+            Err(
+                error @ (ChildError::ProcessLost { .. }
+                | ChildError::Timeout
+                | ChildError::Cancelled),
+            ) => return Err(error.into()),
+            Err(_) => {
+                candidate.rest.insert(
+                    "reading_alignment".into(),
+                    serde_json::json!({"status":"unavailable","reason":"model_error"}),
+                );
+            }
+        }
+    }
+    Ok(candidate)
 }
 
 fn protected_segment(segment: &Segment) -> bool {
@@ -1282,234 +1204,79 @@ fn protected_segment(segment: &Segment) -> bool {
         .is_some_and(|fields| !fields.is_empty())
 }
 
-fn transcription_blocked(segment: &Segment) -> bool {
-    segment.transcription_review.is_some()
-}
-
-fn successful_coverage(segment: &Segment) -> bool {
-    !segment.text.trim().is_empty() && !transcription_blocked(segment)
-}
-
-fn covers(old: &Segment, replacements: &[&Segment]) -> Result<bool, LiveError> {
-    let (old_start, old_end) = segment_bounds(old)?;
-    let mut intervals: Vec<(i64, i64)> = replacements
-        .iter()
-        .filter(|candidate| {
-            segment_bounds(candidate)
-                .ok()
-                .is_some_and(|bounds| intersects(bounds, (old_start, old_end)))
-                && successful_coverage(candidate)
-        })
-        .map(|candidate| segment_bounds(candidate).expect("bounds just checked"))
-        .collect();
-    intervals.sort_unstable();
-    let mut cursor = old_start;
-    for (start, end) in intervals {
-        if start > cursor {
-            break;
-        }
-        cursor = cursor.max(end);
-    }
-    Ok(cursor >= old_end)
-}
-
-/// Compare-and-swap a refinement window. Protected rows and stale versions stay put.
-///
-/// Human edits reach `protected_fields` through [`crate::edit::edit_passage`].
-pub fn reconcile_window(
-    document: &Document,
-    window: &OwnershipWindow,
-    expected: &BTreeMap<String, String>,
-    candidates: &[Segment],
-    speakers: Option<&BTreeMap<String, String>>,
-) -> Result<ReconcileOutcome, LiveError> {
-    let owned = (window.start_sample, window.end_sample);
-    let maximum = if window.kind.as_deref() == Some("fast_tail") {
-        FAST_MAX_SAMPLES
-    } else {
-        REFINE_CORE_SAMPLES
-    };
-    if owned.0 < 0 || owned.1 <= owned.0 || owned.1 - owned.0 > maximum {
-        return Err(LiveError::Message("Invalid refinement ownership window."));
-    }
-    let previous: Vec<Segment> = document
+/// Publish one complete canonical candidate without changing row order or identity.
+/// Stale or protected passages remain untouched; candidate timing already carries
+/// its final machine revision before reaching this boundary.
+pub fn publish_saved_passage(
+    document: &mut Document,
+    original: &Segment,
+    candidate: &Segment,
+) -> Result<bool, LiveError> {
+    let Some(current) = document
         .segments
-        .iter()
-        .filter(|segment| {
-            segment_bounds(segment)
-                .ok()
-                .is_some_and(|bounds| intersects(bounds, owned))
-        })
-        .cloned()
-        .collect();
-    let mut proposed = candidates.to_vec();
-    for candidate in &proposed {
-        let (start, end) = segment_bounds(candidate)?;
-        if start < owned.0 || end <= start || end > owned.1 {
-            return Err(LiveError::Message(
-                "Refinement text must belong entirely to its audio window.",
-            ));
-        }
+        .iter_mut()
+        .find(|row| row.id == original.id)
+    else {
+        return Ok(false);
+    };
+    if protected_segment(current) || segment_version(current) != segment_version(original) {
+        return Ok(false);
     }
-    proposed.sort_by_key(|segment| segment_bounds(segment).unwrap_or((0, 0)));
-    if proposed.windows(2).any(|pair| {
-        segment_bounds(&pair[0]).unwrap_or((0, 0)).1 > segment_bounds(&pair[1]).unwrap_or((0, 0)).0
-    }) {
+    let (start, end) = segment_bounds(original)?;
+    let next_revision = original.machine_revision.unwrap_or(0).checked_add(1);
+    let next_canonical = original
+        .rest
+        .get("canonical_machine_revision")
+        .and_then(Value::as_i64)
+        .unwrap_or(original.machine_revision.unwrap_or(0))
+        .checked_add(1);
+    if start < 0
+        || end <= start
+        || end - start > MAX_DECODE_SAMPLES
+        || original.canonical_utterance_id.is_none()
+        || original.rest.get("canonical_state").and_then(Value::as_str) != Some("sealed")
+        || candidate.id != original.id
+        || candidate.start != original.start
+        || candidate.end != original.end
+        || candidate.speaker != original.speaker
+        || candidate.capture_source != original.capture_source
+        || candidate.audio_revision != original.audio_revision
+        || candidate.canonical_utterance_id != original.canonical_utterance_id
+        || [
+            "language_epoch",
+            "language_generation",
+            "language_mode",
+            "canonical_state",
+        ]
+        .iter()
+        .any(|key| candidate.rest.get(*key) != original.rest.get(*key))
+        || next_revision.is_none()
+        || candidate.machine_revision != next_revision
+        || next_canonical.is_none()
+        || candidate
+            .rest
+            .get("canonical_machine_revision")
+            .and_then(Value::as_i64)
+            != next_canonical
+        || candidate.text.trim().is_empty()
+        || candidate.transcription_review.is_some()
+    {
         return Err(LiveError::Message(
-            "Refinement candidates must not duplicate overlapping audio.",
+            "Invalid saved canonical refinement candidate.",
         ));
     }
-    let mut blocked: Vec<Segment> = previous
-        .iter()
-        .filter(|segment| {
-            let bounds = segment_bounds(segment).unwrap_or((0, 0));
-            protected_segment(segment)
-                || expected.get(&segment.id).map(String::as_str)
-                    != Some(segment_version(segment).as_str())
-                || bounds.0 < owned.0
-                || bounds.1 > owned.1
-                || bounds.1 <= bounds.0
-        })
-        .cloned()
-        .collect();
-    for old in &previous {
-        if !old.text.trim().is_empty() && !covers(old, &proposed.iter().collect::<Vec<_>>())? {
-            blocked.push(old.clone());
-        }
-    }
-    let mut blocked_ids: Vec<String> = blocked.iter().map(|segment| segment.id.clone()).collect();
-    let accepted = loop {
-        let accepted: Vec<Segment> = proposed
-            .iter()
-            .filter(|candidate| {
-                !blocked.iter().any(|blocked| {
-                    intersects(
-                        segment_bounds(candidate).unwrap_or((0, 0)),
-                        segment_bounds(blocked).unwrap_or((0, 0)),
-                    )
-                })
-            })
-            .cloned()
-            .collect();
-        let newly: Vec<Segment> = previous
-            .iter()
-            .filter(|segment| {
-                !blocked_ids.iter().any(|id| id == &segment.id)
-                    && !segment.text.trim().is_empty()
-                    && !covers(segment, &accepted.iter().collect::<Vec<_>>()).unwrap_or(false)
-            })
-            .cloned()
-            .collect();
-        if newly.is_empty() {
-            break accepted;
-        }
-        blocked_ids.extend(newly.iter().map(|segment| segment.id.clone()));
-        blocked.extend(newly);
-    };
-    let removed: Vec<String> = previous
-        .iter()
-        .filter(|segment| !blocked_ids.iter().any(|id| id == &segment.id))
-        .map(|segment| segment.id.clone())
-        .collect();
-    let mut output = document.clone();
-    output
-        .segments
-        .retain(|segment| !removed.iter().any(|id| id == &segment.id));
-    let mut used: Vec<String> = output
-        .segments
-        .iter()
-        .map(|segment| segment.id.clone())
-        .collect();
-    let old_ids: Vec<String> = document
-        .segments
-        .iter()
-        .map(|segment| segment.id.clone())
-        .collect();
-    let fast = window.kind.as_deref() == Some("fast_tail");
-    for candidate in &accepted {
-        let mut eligible: Vec<&Segment> = previous
-            .iter()
-            .filter(|segment| {
-                removed.iter().any(|id| id == &segment.id)
-                    && !used.iter().any(|id| id == &segment.id)
-                    && intersects(
-                        segment_bounds(segment).unwrap_or((0, 0)),
-                        segment_bounds(candidate).unwrap_or((0, 0)),
-                    )
-            })
-            .collect();
-        eligible.sort_by(|left, right| {
-            let overlap = |segment: &&Segment| {
-                let (start, end) = segment_bounds(segment).unwrap_or((0, 0));
-                let (candidate_start, candidate_end) = segment_bounds(candidate).unwrap_or((0, 0));
-                (end.min(candidate_end) - start.max(candidate_start)).max(0)
-            };
-            overlap(right).cmp(&overlap(left))
-        });
-        let old = eligible.first().copied();
-        let sid = old.map(|segment| segment.id.clone()).unwrap_or_else(|| {
-            let (start, end) = segment_bounds(candidate).unwrap_or((0, 0));
-            format!(
-                "refined-{}",
-                &sha256_hex(format!("{start}:{end}").as_bytes())[..24]
-            )
-        });
-        if used.iter().any(|id| id == &sid)
-            || (old.is_none() && old_ids.iter().any(|id| id == &sid))
-        {
-            return Err(LiveError::Message("Refinement ID collision."));
-        }
-        let mut written = candidate.clone();
-        written.id = sid.clone();
-        written.machine_revision = Some(
-            old.and_then(|segment| segment.machine_revision)
-                .unwrap_or(0)
-                + 1,
-        );
-        if !fast {
-            written.refinement_state = Some(if successful_coverage(&written) {
-                "refined".to_string()
-            } else {
-                "unresolved".to_string()
-            });
-            written
-                .rest
-                .insert("finalized".to_string(), Value::Bool(true));
-        }
-        let (start, end) = segment_bounds(&written)?;
-        written.rest.insert(
-            "audio_anchor".to_string(),
-            serde_json::json!({"start_sample": start, "end_sample": end}),
-        );
-        written.rest.insert(
-            "refinement_window".to_string(),
-            Value::String(window.id.clone()),
-        );
-        output.segments.push(written);
-        used.push(sid);
-    }
-    if let Some(speakers) = speakers {
-        for (key, name) in speakers {
-            output
-                .speakers
-                .entry(key.clone())
-                .or_insert_with(|| name.clone());
-        }
-    }
-    output.segments.sort_by(|left, right| {
-        left.start
-            .total_cmp(&right.start)
-            .then(left.end.total_cmp(&right.end))
-    });
-    blocked_ids.sort();
-    blocked_ids.dedup();
-    let changed = output != *document;
-    Ok(ReconcileOutcome {
-        document: output,
-        previous_segments: previous,
-        protected_ids: blocked_ids,
-        changed,
-    })
+    let mut written = candidate.clone();
+    written.refinement_state = Some("refined".into());
+    written.rest.insert("finalized".into(), Value::Bool(true));
+    written.rest.insert(
+        "audio_anchor".into(),
+        serde_json::json!({"start_sample":start,"end_sample":end}),
+    );
+    written
+        .rest
+        .insert("refinement_window".into(), Value::from(original.id.clone()));
+    *current = written;
+    Ok(true)
 }
 
 /// A persisted edit to an open passage closes its machine-owned text extent.
@@ -1732,11 +1499,6 @@ pub enum EngineEvent {
         language: String,
         start_sample: i64,
     },
-    RefinementResult {
-        operation_id: String,
-        cancelled: bool,
-        fast_sequence: Option<i64>,
-    },
     Finished {
         duration: f64,
     },
@@ -1932,7 +1694,7 @@ impl<M: Models + 'static> Engine<M> {
     ) -> Result<Self, LiveError> {
         let batch = config.audio_batch_seconds;
         let models = Arc::new(models);
-        let inbox = Arc::new(Mutex::new(Inbox::new(batch, 0)?));
+        let inbox = Arc::new(Mutex::new(Inbox::new(batch)?));
         if let Some(recovery) = &config.recovery {
             recovery.validate()?;
             inbox.lock().expect("inbox").received = recovery.through_sample;
@@ -1978,14 +1740,12 @@ impl<M: Models + 'static> Engine<M> {
                 generation,
                 start_sample,
             } => self.on_language(language, generation, start_sample)?,
-            LiveCommand::Refine(command) => self.on_refine(command)?,
             LiveCommand::Shutdown => {
                 self.close_streams()?;
                 self.events.push(EngineEvent::Finished {
                     duration: self.received as f64 / RATE as f64,
                 });
             }
-            LiveCommand::CancelRefinement { .. } => {}
         }
         Ok(std::mem::take(&mut self.events))
     }
@@ -2282,7 +2042,6 @@ impl<M: Models + 'static> Engine<M> {
             }
         }
         self.capture_finished = true;
-        self.inbox.lock().expect("inbox").capture_finished = true;
         self.commit(true, true)?;
         self.events.push(EngineEvent::Progress {
             processed_seconds: self.received as f64 / RATE as f64,
@@ -2317,24 +2076,6 @@ impl<M: Models + 'static> Engine<M> {
             generation,
             language,
             start_sample,
-        });
-        Ok(())
-    }
-
-    fn on_refine(&mut self, command: RefineCommand) -> Result<(), LiveError> {
-        let cancelled = self
-            .inbox
-            .lock()
-            .expect("inbox")
-            .cancelled_request(&command);
-        self.inbox
-            .lock()
-            .expect("inbox")
-            .finish_refinement(&command.operation_id);
-        self.events.push(EngineEvent::RefinementResult {
-            operation_id: command.operation_id,
-            cancelled,
-            fast_sequence: None,
         });
         Ok(())
     }
@@ -3157,7 +2898,7 @@ impl<M: Models + 'static> SourceRuntime<M> {
         recordings: [RecordingReader; 2],
     ) -> Result<Self, LiveError> {
         let models = Arc::new(models);
-        let inbox = Arc::new(Mutex::new(Inbox::new(config.audio_batch_seconds, 0)?));
+        let inbox = Arc::new(Mutex::new(Inbox::new(config.audio_batch_seconds)?));
         if let Some(recovery) = &config.recovery {
             recovery.validate()?;
             inbox.lock().expect("inbox").received = recovery.through_sample;
@@ -3237,8 +2978,7 @@ impl<M: Models + 'static> SourceRuntime<M> {
         for engine in &mut self.engines {
             for event in engine.handle(message.clone())? {
                 match event {
-                    EngineEvent::CanonicalRevision { .. }
-                    | EngineEvent::RefinementResult { .. } => {
+                    EngineEvent::CanonicalRevision { .. } => {
                         published.push(event);
                     }
                     EngineEvent::Progress { .. } => {
@@ -3446,66 +3186,13 @@ mod tests {
 
     #[test]
     fn inbox_coalesces_same_epoch_audio_and_keeps_epoch_boundaries() {
-        let mut inbox = Inbox::new(6, 0).unwrap();
+        let mut inbox = Inbox::new(6).unwrap();
         inbox.push(notice(0, RATE, 0)).unwrap();
         inbox.push(notice(RATE, 2 * RATE, 0)).unwrap();
         assert_eq!(inbox.queued_audio_span(), Some((0, 2 * RATE, 0)));
         inbox.push(notice(2 * RATE, 3 * RATE, 1)).unwrap();
         assert_eq!(inbox.take().unwrap().map(|command| matches!(command, LiveCommand::Audio(ref audio) if audio.end_sample == 2 * RATE)), Some(true));
         assert_eq!(inbox.queued_audio_span(), Some((2 * RATE, 3 * RATE, 1)));
-    }
-
-    #[test]
-    fn inbox_drops_a_cancelled_refinement_and_a_stale_language_epoch() {
-        let mut inbox = Inbox::new(1, 0).unwrap();
-        let pending = RefineCommand {
-            operation_id: "refine-1".into(),
-            language_epoch: 0,
-            canonical_sealed: false,
-        };
-        inbox.push(LiveCommand::Refine(pending.clone())).unwrap();
-        inbox
-            .push(LiveCommand::CancelRefinement {
-                operation_id: "refine-1".into(),
-            })
-            .unwrap();
-        assert!(inbox.pending_refinement().is_none());
-        assert!(inbox.cancelled_request(&pending));
-        assert!(inbox.take().unwrap().is_none());
-
-        let queued = RefineCommand {
-            operation_id: "refine-2".into(),
-            language_epoch: 0,
-            canonical_sealed: false,
-        };
-        inbox.push(LiveCommand::Refine(queued)).unwrap();
-        inbox
-            .push(LiveCommand::Language {
-                language: "de".into(),
-                generation: 1,
-                start_sample: 0,
-            })
-            .unwrap();
-        assert!(inbox.pending_refinement().is_none());
-        assert!(!inbox.newer_audio_queued(0, 0));
-    }
-
-    #[test]
-    fn inbox_prefers_audio_until_one_batch_has_been_taken() {
-        let mut inbox = Inbox::new(6, 0).unwrap();
-        inbox.push(notice(0, RATE, 0)).unwrap();
-        inbox
-            .push(LiveCommand::Refine(RefineCommand {
-                operation_id: "later".into(),
-                language_epoch: 0,
-                canonical_sealed: false,
-            }))
-            .unwrap();
-        assert!(matches!(inbox.take().unwrap(), Some(LiveCommand::Audio(_))));
-        assert!(matches!(
-            inbox.take().unwrap(),
-            Some(LiveCommand::Refine(_))
-        ));
     }
 
     fn speech_passage(start: f64, end: f64, text: &str, abs_start: i64) -> Passage {
@@ -3751,33 +3438,26 @@ mod tests {
         }
     }
 
-    fn window() -> OwnershipWindow {
-        OwnershipWindow {
-            id: "win".into(),
-            kind: None,
-            start_sample: 0,
-            end_sample: RATE,
-        }
-    }
-
     #[test]
-    fn reconcile_window_checks_segment_version_and_edit_passage_protection() {
-        let original = document_with(sample_segment("hello", 0));
-        let mut expected = BTreeMap::new();
-        expected.insert("seg-1".into(), "stale".into());
-        let mut candidate = sample_segment("replacement", 0);
-        candidate.id = "new".into();
-        let blocked =
-            reconcile_window(&original, &window(), &expected, &[candidate.clone()], None).unwrap();
-        assert_eq!(blocked.document.segments[0].text, "hello");
-        assert!(blocked.protected_ids.iter().any(|id| id == "seg-1"));
-
-        expected.insert("seg-1".into(), segment_version(&original.segments[0]));
-        let replaced =
-            reconcile_window(&original, &window(), &expected, &[candidate], None).unwrap();
-        assert_eq!(replaced.document.segments[0].text, "replacement");
-        assert_eq!(replaced.document.segments[0].id, "seg-1");
-        assert_eq!(replaced.document.segments[0].machine_revision, Some(1));
+    fn saved_publication_preserves_current_edits_and_rejects_invalid_candidates() {
+        let mut old = sample_segment("hello", 0);
+        old.canonical_utterance_id = Some(old.id.clone());
+        old.rest
+            .insert("canonical_state".into(), Value::from("sealed"));
+        old.rest
+            .insert("canonical_machine_revision".into(), Value::from(0));
+        let original = document_with(old.clone());
+        let mut candidate = old.clone();
+        candidate.text = "replacement".into();
+        candidate.machine_revision = Some(1);
+        candidate
+            .rest
+            .insert("canonical_machine_revision".into(), Value::from(1));
+        let mut replaced = original.clone();
+        assert!(publish_saved_passage(&mut replaced, &old, &candidate).unwrap());
+        assert_eq!(replaced.segments[0].text, "replacement");
+        assert_eq!(replaced.segments[0].id, old.id);
+        assert!(!publish_saved_passage(&mut replaced, &old, &candidate).unwrap());
 
         let body = serde_json::json!({
             "segment_revision": 0,
@@ -3793,22 +3473,43 @@ mod tests {
             now: 2.0,
         })
         .unwrap();
-        assert_eq!(
-            edited.segment.protected_fields.as_deref(),
-            Some(["text".to_string()].as_slice())
-        );
-        let mut expected = BTreeMap::new();
-        expected.insert("seg-1".into(), segment_version(&edited.segment));
-        let mut newer = sample_segment("model words", 1);
-        newer.id = "new".into();
-        let kept =
-            reconcile_window(&edited.document, &window(), &expected, &[newer], None).unwrap();
-        assert_eq!(kept.document.segments[0].text, "edited words");
-        assert!(kept.protected_ids.iter().any(|id| id == "seg-1"));
-
-        let mut arriving = sample_segment("model words", 4);
-        arriving.id = edited.segment.id.clone();
-        let applied = apply_canonical_candidate(&edited.document, &arriving);
+        let mut retained = edited.document.clone();
+        assert!(!publish_saved_passage(&mut retained, &old, &candidate).unwrap());
+        assert!(!publish_saved_passage(&mut retained, &edited.segment, &candidate).unwrap());
+        assert_eq!(retained, edited.document);
+        for field in [
+            "id",
+            "bounds",
+            "source",
+            "revision",
+            "canonical",
+            "epoch",
+            "text",
+        ] {
+            let mut bad = candidate.clone();
+            match field {
+                "id" => bad.id = "different".into(),
+                "bounds" => bad.end += 0.1,
+                "source" => bad.capture_source = Some(serde_json::json!({"source_id":"system"})),
+                "revision" => bad.machine_revision = Some(2),
+                "canonical" => {
+                    bad.rest
+                        .insert("canonical_machine_revision".into(), Value::from(2));
+                }
+                "epoch" => {
+                    bad.rest.insert("language_epoch".into(), Value::from(2));
+                }
+                "text" => bad.text.clear(),
+                _ => unreachable!(),
+            }
+            let mut unchanged = original.clone();
+            assert!(
+                publish_saved_passage(&mut unchanged, &old, &bad).is_err(),
+                "{field}"
+            );
+            assert_eq!(unchanged, original);
+        }
+        let applied = apply_canonical_candidate(&edited.document, &candidate);
         assert_eq!(applied.segments[0].text, "edited words");
         assert_eq!(
             applied.segments[0].refinement_state.as_deref(),
@@ -4728,32 +4429,130 @@ mod tests {
             EngineEvent::CaptureFinished { canonical_observed_sample, .. }
                 if *canonical_observed_sample == RATE
         )));
-        let models_calls = engine.models.transcribe_calls.load(Ordering::SeqCst);
-        engine
-            .push(LiveCommand::Refine(RefineCommand {
-                operation_id: "refine-9".into(),
-                language_epoch: 0,
-                canonical_sealed: false,
-            }))
-            .unwrap();
-        let taken = engine.inbox.lock().unwrap().take().unwrap().unwrap();
-        engine
-            .inbox
-            .lock()
-            .unwrap()
-            .push(LiveCommand::CancelRefinement {
-                operation_id: "refine-9".into(),
-            })
-            .unwrap();
-        let result = engine.handle(taken).unwrap();
-        assert!(matches!(
-            &result[0],
-            EngineEvent::RefinementResult { operation_id, cancelled: true, .. }
-                if operation_id == "refine-9"
-        ));
+    }
+
+    #[test]
+    fn saved_canonical_accuracy_keeps_timing_identity_and_blocks_stale_or_incomplete_audio() {
+        let (vocabulary, text, scores) = crate::alignment::tests::live_fixture();
+        let samples = scores.audio_num_samples as usize;
+        let mut models = FakeModels::english();
+        models.alignment = Some((text.clone(), scores));
+        let mut old = sample_segment("Earlier words", 7);
+        old.start = 1.;
+        old.end = 1. + samples as f64 / RATE as f64;
+        old.canonical_utterance_id = Some(old.id.clone());
+        old.audio_revision = Some(11);
+        old.language = Some("en".into());
+        old.capture_source = Some(
+            serde_json::json!({"catalog_sha256":"test-catalog","source_id":"system","source_revision":1}),
+        );
+        old.rest.extend(serde_json::from_value::<Map<String,Value>>(serde_json::json!({"canonical_state":"sealed","language_epoch":3,"language_generation":3,"language_mode":"en","canonical_machine_revision":7})).unwrap());
+        old.speaker_activity = Some(
+            serde_json::json!({"audio_revision":11,"observed_end_sample":16000+samples,"regions":[{"start_sample":16000,"end_sample":16000+samples,"speakers":["speaker_0"]}]}),
+        );
+        let candidate =
+            refine_saved_passage(&models, &old, &loud(samples), Some(&vocabulary)).unwrap();
+        assert_eq!(candidate.text, text);
+        assert_eq!(candidate.machine_revision, Some(8));
+        let mut document = document_with(old.clone());
+        let mut other_source = old.clone();
+        other_source.id = "other-source".into();
+        other_source.capture_source.as_mut().unwrap()["source_id"] =
+            Value::from("microphone_clean");
+        document.segments.push(other_source.clone());
+        document
+            .speakers
+            .insert("speaker_0".into(), "Chosen name".into());
+        let mut accepted = document.clone();
+        assert!(publish_saved_passage(&mut accepted, &old, &candidate).unwrap());
         assert_eq!(
-            engine.models.transcribe_calls.load(Ordering::SeqCst),
-            models_calls
+            accepted.segments.iter().map(|s| &s.id).collect::<Vec<_>>(),
+            document.segments.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+        let row = accepted.segments.iter().find(|s| s.id == old.id).unwrap();
+        assert_eq!(
+            accepted
+                .segments
+                .iter()
+                .find(|s| s.id == other_source.id)
+                .unwrap(),
+            &other_source
+        );
+        assert_eq!(accepted.speakers["speaker_0"], "Chosen name");
+        assert_eq!(row.machine_revision, Some(8));
+        assert_eq!(row.audio_revision, Some(11));
+        assert_eq!(row.rest["canonical_machine_revision"], 8);
+        assert_eq!(
+            row.reading_turn_provenance.as_ref().unwrap()["language_epoch"],
+            3
+        );
+        assert_eq!(
+            row.reading_turn_provenance.as_ref().unwrap()["capture_source"],
+            old.capture_source.clone().unwrap()
+        );
+        assert!(row.reading_turns.is_some());
+        let serialized: Document =
+            serde_json::from_value(serde_json::to_value(&accepted).unwrap()).unwrap();
+        assert!(
+            crate::export::export(&serialized, "srt")
+                .unwrap()
+                .body
+                .contains("Go")
+        );
+        for mutation in ["source", "audio", "epoch", "language", "mode", "edit"] {
+            let mut changed = document.clone();
+            let row = &mut changed.segments[0];
+            match mutation {
+                "source" => {
+                    row.capture_source.as_mut().unwrap()["source_revision"] = Value::from(2)
+                }
+                "audio" => row.audio_revision = Some(12),
+                "epoch" => {
+                    row.rest.insert("language_epoch".into(), Value::from(4));
+                }
+                "language" => row.language = Some("fr".into()),
+                "mode" => {
+                    row.rest.insert("language_mode".into(), Value::from("fr"));
+                }
+                "edit" => {
+                    row.text = "User correction".into();
+                    row.protected_fields = Some(vec!["text".into()]);
+                }
+                _ => unreachable!(),
+            }
+            let before = changed.clone();
+            assert!(
+                !publish_saved_passage(&mut changed, &old, &candidate).unwrap(),
+                "{mutation}"
+            );
+            assert_eq!(changed, before, "{mutation}");
+        }
+        assert_eq!(models.conditioning.lock().unwrap().last(), Some(&None));
+        let mut processed = old.clone();
+        processed.capture_source.as_mut().unwrap()["source_id"] = Value::from("microphone_clean");
+        processed.capture_source.as_mut().unwrap()["catalog_sha256"] = Value::from("a".repeat(64));
+        refine_saved_passage(&models, &processed, &loud(samples), None).unwrap();
+        assert_eq!(
+            models.conditioning.lock().unwrap().last(),
+            Some(&Some(GainPolicy { peak: None }))
+        );
+        let mut auto = old.clone();
+        auto.rest
+            .insert("language_mode".into(), Value::from("auto"));
+        let calls = models.transcribe_calls.load(Ordering::SeqCst);
+        assert!(refine_saved_passage(&models, &auto, &loud(samples), None).is_err());
+        auto.rest.remove("language_mode");
+        assert!(
+            refine_saved_passage(&models, &auto, &loud(samples), None).is_err(),
+            "a detected language does not prove the captured setting"
+        );
+        assert_eq!(models.transcribe_calls.load(Ordering::SeqCst), calls);
+        let mut partial = old;
+        let pcm = [loud(2 * RATE as usize), vec![0.; RATE as usize], loud(160)].concat();
+        partial.end = partial.start + pcm.len() as f64 / RATE as f64;
+        assert!(
+            refine_saved_passage(&FakeModels::english(), &partial, &pcm, None).is_err(),
+            "a small blocked tail cannot replace whole-anchor words"
         );
     }
 

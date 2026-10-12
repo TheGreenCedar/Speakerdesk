@@ -46,6 +46,16 @@ identity; saved documents cannot nominate their own trusted provider.
 
 `Job` and `Document` round-trip the product fields named in `document.rs`. A missing `kind` deserializes as `import`. Job ids are 32 lowercase hex characters. `store::SCHEMA_V1` is the new database. `AppState::open` owns one file-backed store at an explicit root. Migration uses a consistent snapshot, private hot-journal recovery, and no-clobber publication; existing native state wins. Migrated audio remains legacy-owned and read-only. Native writes use copy-on-write media storage. Qualification has used disposable stores only.
 
+Saved canonical accuracy passes use the existing parent operation and serial
+worker. Each candidate owns one original audio anchor and captured language mode;
+publication compares that passage with its current stored version and replaces
+its slot without changing names, neighboring passages or source order. Pause
+invalidates publication before cancellation, and admission remains held until
+the worker exits. Completed passage versions survive restart; history retains
+only the previous words, bounds, identity and speaker. This first saved path
+supports explicit-language anchors up to 24.5 seconds. Automatic language,
+longer anchors and scheduling during capture remain unfinished.
+
 ## Messages and security
 
 User-facing strings live in `speakerdesk_core::messages` and are copied from v0.6.6. The token header, CSP, and host allowlist live in `speakerdesk_core::security`. Do not change them without an owner decision.

@@ -125,7 +125,14 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/api/meetings", post(start))
         .route("/api/meetings/{jid}/{action}", post(control))
         .route("/api/meetings/{jid}/language", patch(language))
-        .route("/api/jobs/{jid}/refinement/{action}", post(refinement))
+        .route(
+            "/api/jobs/{jid}/refinement/{action}",
+            post(crate::routes::refinement::action),
+        )
+        .route(
+            "/api/jobs/{jid}/refinement/revisions/{window}",
+            get(crate::routes::refinement::history),
+        )
 }
 fn error(error: ApiError) -> Response {
     (
@@ -345,11 +352,6 @@ async fn language(State(app): State<AppState>, Path(jid): Path<String>, body: By
         Ok(v) => Json(v).into_response(),
         Err(e) => error(e),
     }
-}
-async fn refinement() -> Response {
-    error(conflict(
-        "Live accuracy refinement is not available yet. Saved words and audio remain editable.",
-    ))
 }
 fn validate_language(app: &AppState, language: &str) -> Result<(), ApiError> {
     if language == languages::AUTOMATIC {

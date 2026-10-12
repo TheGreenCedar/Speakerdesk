@@ -390,9 +390,6 @@ fn publish(
                 finished = true;
             }
             EngineEvent::Finished { .. } => finished = true,
-            EngineEvent::RefinementResult { .. } => {
-                return Err("Unexpected live refinement result".into());
-            }
         }
     }
     Ok(finished)

@@ -332,6 +332,18 @@ pub fn retry_passage<M: Models + ?Sized + 'static>(
     end: f64,
     language: &str,
 ) -> Result<PassageCandidate, ImportError> {
+    retry_passage_source(models, pcm, start, end, language, None)
+}
+
+/// The host supplies a validated catalog only for the qualified processed microphone.
+pub fn retry_passage_source<M: Models + ?Sized + 'static>(
+    models: &M,
+    pcm: &[f32],
+    start: f64,
+    end: f64,
+    language: &str,
+    processed_microphone_catalog: Option<&str>,
+) -> Result<PassageCandidate, ImportError> {
     if language == languages::AUTOMATIC || !languages::is_supported(language) {
         return Err(ImportError::new(messages::RETRY_LANGUAGE));
     }
@@ -351,7 +363,7 @@ pub fn retry_passage<M: Models + ?Sized + 'static>(
         return Err(ImportError::new(messages::RETRY_TOO_LONG));
     }
     let slice = &pcm[origin as usize..stop as usize];
-    let ledger = admit(models, slice)?;
+    let ledger = admit_source(models, slice, processed_microphone_catalog)?;
     let book = canonical_utterances(&ledger, slice.len() as i64)?;
     let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
     let windows = examine_range(&ledger, slice, &spans, 0, slice.len() as i64)?;
@@ -1135,8 +1147,22 @@ fn admit<M: Models + ?Sized + 'static>(
     models: &M,
     pcm: &[f32],
 ) -> Result<SpeechLedger, ImportError> {
-    let handle = models.vad_open(None).map_err(child_err)?;
-    let mut ledger = SpeechLedger::new(0).map_err(speech_err)?;
+    admit_source(models, pcm, None)
+}
+
+fn admit_source<M: Models + ?Sized + 'static>(
+    models: &M,
+    pcm: &[f32],
+    processed_microphone_catalog: Option<&str>,
+) -> Result<SpeechLedger, ImportError> {
+    let mut ledger = match processed_microphone_catalog {
+        Some(catalog) => SpeechLedger::with_processed_microphone(0, catalog),
+        None => SpeechLedger::new(0),
+    }
+    .map_err(speech_err)?;
+    let handle = models
+        .vad_open(processed_microphone_catalog.map(|_| crate::ipc::GainPolicy { peak: None }))
+        .map_err(child_err)?;
     let mut offset = 0usize;
     let mut failed: Option<ImportError> = None;
     while offset < pcm.len() && failed.is_none() {

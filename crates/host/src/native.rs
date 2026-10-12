@@ -59,14 +59,16 @@ impl ApplicationModels for NativeModels {
         &self,
         pcm: &[f32],
         language: &str,
+        processed_microphone_catalog: Option<&str>,
         cancellation: &CancellationToken,
     ) -> Result<speakerdesk_core::import::PassageCandidate, String> {
-        speakerdesk_core::import::retry_passage(
+        speakerdesk_core::import::retry_passage_source(
             &self.supervisor.models(cancellation.clone()),
             pcm,
             0.,
             pcm.len() as f64 / 16000.,
             language,
+            processed_microphone_catalog,
         )
         .map_err(|error| error.to_string())
     }
@@ -692,7 +694,7 @@ async fn setup(State(app): State<AppState>) -> Response {
                 "message":"Supplied-text timing preserves authoritative transcript words. Use Download models below to finish setup for all local models.","phase":progress.phase,"downloaded_bytes":0},
             "voice":{"status":if voice {"ready"}else {"unavailable"},"enabled":enabled,"available":voice,"released":false,
                 "message":if voice {"Native voice enrollment and manual and automatic checks are available."}else {"The native voice model did not initialize. Saved voices and names are kept."}},
-            "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing for imports and supported sealed live passages: {}. Live accuracy refinement is not available yet.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
+            "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing for imports and supported sealed live passages: {}. Saved accuracy passes support explicit-language canonical passages up to 24.5 seconds. Auto, longer passages and rolling live accuracy work are not available yet.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
         })).into_response()
     }).await
 }

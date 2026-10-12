@@ -32,3 +32,23 @@ test('unreadable retained audio is reported as unverified rather than kept or em
   assert.equal(f.document.getElementById('refinement-status').textContent,'Recorded audio could not be verified.');
   assert.equal(f.document.getElementById('refinement-toggle').hidden,true);
 });
+
+test('saved accuracy controls start, pause and retry through the existing routes',async()=>{
+  const f=frontend(root);f.seed(1,'ready');
+  f.run("selected.kind='meeting';selected.saved_refinement_available=true;selected.refinement_status='unavailable';delete selected.rolling_refinement;window.calls=[];api=async(path,options)=>{calls.push({path,method:options.method});return {};};poll=async()=>{};");
+  for(const [status,label,action] of [
+    ['unavailable','Start saved accuracy pass','resume'],
+    ['refining','Pause accuracy pass','pause'],
+    ['unresolved','Retry unresolved phrases','resume'],
+  ]) {
+    f.context.nextStatus=status;
+    f.run("selected.refinement_status=nextStatus;if(nextStatus!=='unavailable')selected.rolling_refinement={mode:'saved'};renderRefinementStatus()");
+    assert.equal(f.document.getElementById('refinement-controls').hidden,false);
+    assert.equal(f.document.getElementById('refinement-toggle').textContent,label);
+    if(status==='refining')assert.equal(f.document.getElementById('refinement-status').textContent,'Rechecking saved passages…');
+    await f.run('toggleRefinement()');
+    assert.equal(f.run('calls.at(-1).path'),`/api/jobs/${'d'.repeat(32)}/refinement/${action}`);
+    assert.equal(f.run('calls.at(-1).method'),'POST');
+    assert.equal(f.document.getElementById('refinement-toggle').disabled,false);
+  }
+});

@@ -1106,3 +1106,312 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
         host.close(root).await;
     }
 }
+
+#[tokio::test]
+async fn saved_accuracy_pass_publishes_child_candidate_and_keeps_history_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let host = Running::open(root, false).await;
+    trigger(root, 1);
+    let id = host.start(json!(["microphone"])).await;
+    let path = format!("api/jobs/{id}");
+    host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
+        .await;
+    let before = host.stop(&id).await;
+    assert_eq!(before["status"], "ready");
+    let old = &before["document"]["segments"][0];
+    assert_eq!(old["text"], "Replay transcript");
+    fs::write(
+        root.join("replay-transcript"),
+        "Revised saved recording words.",
+    )
+    .unwrap();
+    let response = host
+        .post(&format!("{path}/refinement/resume"), json!({}))
+        .await;
+    assert_eq!(response.status(), 202, "{}", response.text().await.unwrap());
+    let after = host
+        .wait(&path, |job| {
+            job["refinement_status"] == "complete" && job["inference_owned"] == false
+        })
+        .await;
+    assert_eq!(after["status"], "ready");
+    let row = &after["document"]["segments"][0];
+    assert_eq!(row["id"], old["id"]);
+    assert_eq!(row["text"], "Revised saved recording words.");
+    assert!(row["machine_revision"].as_i64().unwrap() > old["machine_revision"].as_i64().unwrap());
+    assert_eq!(
+        after["document"]["segments"].as_array().unwrap().len(),
+        before["document"]["segments"].as_array().unwrap().len()
+    );
+    let history = host
+        .get(&format!(
+            "{path}/refinement/revisions/{}",
+            row["refinement_window"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(
+        history["segments"],
+        json!([{
+            "id":old["id"], "start":old["start"], "end":old["end"],
+            "speaker":old["speaker"], "text":old["text"]
+        }]),
+        "history contains previous words, not duplicated acoustic/timing evidence"
+    );
+    host.close(root).await;
+    let reopened = Running::open(root, false).await;
+    let saved = reopened.get(&path).await;
+    assert_eq!(saved["document"], after["document"]);
+    assert_eq!(saved["refinement_status"], "complete");
+    let repeat = reopened
+        .post(&format!("{path}/refinement/resume"), json!({}))
+        .await;
+    assert_eq!(repeat.status(), 202, "{}", repeat.text().await.unwrap());
+    let finished = reopened
+        .wait(&path, |job| {
+            job["refinement_status"] == "complete" && job["inference_owned"] == false
+        })
+        .await;
+    assert_eq!(
+        finished["document"], after["document"],
+        "completed anchors must not publish twice"
+    );
+    reopened.close(root).await;
+}
+
+#[tokio::test]
+async fn saved_accuracy_pause_failure_and_late_candidate_matrix() {
+    for case in [
+        "edit",
+        "pause",
+        "cancel",
+        "failure",
+        "restart",
+        "source",
+        "epoch",
+        "unrelated",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let host = Running::open(root, matches!(case, "source" | "unrelated")).await;
+        trigger(root, 1);
+        let id = host
+            .start(if matches!(case, "source" | "unrelated") {
+                json!(["microphone", "system"])
+            } else {
+                json!(["microphone"])
+            })
+            .await;
+        let path = format!("api/jobs/{id}");
+        host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
+            .await;
+        let before = host.stop(&id).await;
+        assert_eq!(before["status"], "ready", "{case}");
+        let old = &before["document"]["segments"][0];
+        let row_id = old["id"].as_str().unwrap();
+        fs::write(root.join("replay-transcript"), "New accuracy words.").unwrap();
+        if case == "failure" {
+            fs::write(root.join("exit-live-asr-once"), b"fail saved inference").unwrap();
+        } else {
+            fs::write(root.join("hold-live-asr"), b"hold saved inference").unwrap();
+            if case == "pause" {
+                fs::write(root.join("hold-cancel-terminal"), b"hold cleanup").unwrap();
+            }
+        }
+        let begin = host
+            .post(&format!("{path}/refinement/resume"), json!({}))
+            .await;
+        assert_eq!(
+            begin.status(),
+            202,
+            "{case}: {}",
+            begin.text().await.unwrap()
+        );
+        if case == "failure" {
+            let failed = host
+                .wait(&path, |job| {
+                    job["refinement_status"] == "unresolved" && job["inference_owned"] == false
+                })
+                .await;
+            assert_eq!(failed["document"], before["document"]);
+        } else {
+            wait_file(&root.join("edit-asr-started")).await;
+            assert_eq!(
+                host.post(&format!("{path}/refinement/resume"), json!({}))
+                    .await
+                    .status(),
+                409,
+                "{case}: admission remains held"
+            );
+            match case {
+                "edit" => {
+                    let response=host.client.patch(format!("{}{path}/segments/{row_id}",host.url)).header("X-Speakerdesk-Token",&host.token)
+                        .json(&json!({"segment_revision":old["machine_revision"],"changes":{"text":"Protected during accuracy work","start":0.1}})).send().await.unwrap();
+                    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+                    let current = host.get(&path).await;
+                    let name=host.post(&format!("{path}/speakers/{}/identity",old["speaker"].as_str().unwrap()),json!({"revision":current["revision"],"name":"Preserved name","person_id":null})).await;
+                    assert_eq!(name.status(), 200, "{}", name.text().await.unwrap());
+                }
+                "unrelated" => {
+                    let current = host.get(&path).await;
+                    let mut document = current["document"].clone();
+                    assert_eq!(document["segments"].as_array().unwrap().len(), 2);
+                    document["segments"][1]["text"] = json!("Protected unrelated source words");
+                    document["speakers"][old["speaker"].as_str().unwrap()] =
+                        json!("Preserved name");
+                    let saved = host
+                        .client
+                        .put(format!("{}{path}/transcript", host.url))
+                        .header("X-Speakerdesk-Token", &host.token)
+                        .json(&json!({"revision":current["revision"],"document":document}))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+                }
+                "pause" => {
+                    assert_eq!(
+                        host.post(&format!("{path}/refinement/pause"), json!({}))
+                            .await
+                            .status(),
+                        200
+                    );
+                    wait_file(&root.join("asr-cancelled")).await;
+                    assert_eq!(host.get(&path).await["inference_owned"], true);
+                    assert_eq!(
+                        host.post(&format!("{path}/refinement/resume"), json!({}))
+                            .await
+                            .status(),
+                        409,
+                        "cancel acknowledgement is not terminal cleanup"
+                    );
+                    fs::remove_file(root.join("hold-cancel-terminal")).unwrap();
+                }
+                "cancel" => {
+                    assert_eq!(
+                        host.post(&format!("{path}/cancel"), json!({}))
+                            .await
+                            .status(),
+                        200
+                    );
+                }
+                "restart" => {
+                    host.close(root).await;
+                    fs::remove_file(root.join("hold-live-asr")).unwrap();
+                    let reopened = Running::open(root, false).await;
+                    let saved = reopened.get(&path).await;
+                    assert_eq!(saved["refinement_status"], "paused");
+                    assert_eq!(saved["document"], before["document"]);
+                    assert_eq!(
+                        reopened
+                            .post(&format!("{path}/refinement/resume"), json!({}))
+                            .await
+                            .status(),
+                        202
+                    );
+                    reopened
+                        .wait(&path, |job| {
+                            job["refinement_status"] == "complete"
+                                && job["inference_owned"] == false
+                        })
+                        .await;
+                    reopened.close(root).await;
+                    continue;
+                }
+                "source" | "epoch" => {
+                    use speakerdesk_core::{ids::JobId, store::SqliteJobStore};
+                    let mut store =
+                        SqliteJobStore::open(root.join("data/speakerdesk.sqlite")).unwrap();
+                    store
+                        .update_job(&JobId::parse(&id).unwrap(), |job| {
+                            let row = job
+                                .document
+                                .as_mut()
+                                .unwrap()
+                                .segments
+                                .iter_mut()
+                                .find(|s| s.id == row_id)
+                                .unwrap();
+                            if case == "source" {
+                                row.capture_source.as_mut().unwrap()["source_revision"] = json!(2);
+                            } else {
+                                row.rest.insert("language_epoch".into(), json!(99));
+                            }
+                            Ok::<_, speakerdesk_core::error::StoreError>(())
+                        })
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            fs::remove_file(root.join("hold-live-asr")).unwrap();
+            let retained = host
+                .wait(&path, |job| job["inference_owned"] == false)
+                .await;
+            let row = retained["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == old["id"])
+                .unwrap();
+            assert_eq!(
+                row["text"],
+                if case == "unrelated" {
+                    json!("New accuracy words.")
+                } else if case == "edit" {
+                    json!("Protected during accuracy work")
+                } else {
+                    old["text"].clone()
+                },
+                "{case}"
+            );
+            assert_eq!(retained["status"], "ready");
+            if case == "edit" {
+                assert_eq!(row["start"], 0.1);
+                assert_eq!(
+                    retained["document"]["speakers"][old["speaker"].as_str().unwrap()],
+                    "Preserved name"
+                );
+            }
+            if case == "unrelated" {
+                let rows = retained["document"]["segments"].as_array().unwrap();
+                let before_rows = before["document"]["segments"].as_array().unwrap();
+                assert_eq!(
+                    rows.iter().map(|s| &s["id"]).collect::<Vec<_>>(),
+                    before_rows.iter().map(|s| &s["id"]).collect::<Vec<_>>(),
+                    "source rows keep their stored order"
+                );
+                let other_id = &before_rows[1]["id"];
+                assert_eq!(
+                    rows.iter().find(|s| &s["id"] == other_id).unwrap()["text"],
+                    "Protected unrelated source words"
+                );
+                assert_eq!(
+                    retained["document"]["speakers"][old["speaker"].as_str().unwrap()],
+                    "Preserved name"
+                );
+                assert_eq!(retained["refinement_status"], "complete");
+            }
+            if matches!(case, "edit" | "source" | "epoch" | "unrelated") {
+                host.close(root).await;
+                continue;
+            }
+            assert_eq!(retained["refinement_status"], "paused");
+        }
+        assert_eq!(
+            host.post(&format!("{path}/refinement/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        let retried = host
+            .wait(&path, |job| {
+                job["refinement_status"] == "complete" && job["inference_owned"] == false
+            })
+            .await;
+        assert_eq!(
+            retried["document"]["segments"][0]["text"], "New accuracy words.",
+            "{case}"
+        );
+        host.close(root).await;
+    }
+}

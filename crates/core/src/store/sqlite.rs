@@ -614,6 +614,14 @@ fn recover_one(stored: StoredJob, active: &[&str]) -> Option<Job> {
         changed = true;
     }
     if pause_rolling_refinement(&mut job.extra) {
+        if job
+            .extra
+            .get("rolling_refinement")
+            .is_some_and(|plan| plan["mode"] == "saved")
+        {
+            job.revision += 1;
+            job.message = "Saved accuracy pass interrupted. Resume to continue; previous words and audio are retained.".into();
+        }
         changed = true;
     }
     changed.then_some(job)

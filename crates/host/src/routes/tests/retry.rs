@@ -17,6 +17,7 @@ impl ApplicationModels for Replay {
         &self,
         pcm: &[f32],
         language: &str,
+        processed_microphone_catalog: Option<&str>,
         _: &CancellationToken,
     ) -> Result<PassageCandidate, String> {
         assert_eq!(
@@ -24,6 +25,7 @@ impl ApplicationModels for Replay {
             "exact bounded PCM including fractional endpoints"
         );
         assert_eq!(language, "fr");
+        assert_eq!(processed_microphone_catalog, None);
         self.entered.fetch_add(1, Ordering::SeqCst);
         let mut released = self.release.0.lock().unwrap();
         while !*released {

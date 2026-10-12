@@ -36,7 +36,8 @@ Local implementation branch: `codex/python-free-mac`.
    a real-model saved-PCM test, described below.
 5. In progress: native capture coordination, streaming tails, child-loss recovery
    and live-edit continuation pass mounted replays and saved-PCM real-model tests.
-   Sealed live timing and identity pass real-model saved-PCM checks. Accuracy refinement, qualified
+   Sealed live timing, identity and saved explicit-language accuracy passes pass
+   real-model saved-PCM checks. Automatic/long-passage and rolling live refinement, qualified
    Pause/Resume, raw dual-source echo, physical capture and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
@@ -1207,6 +1208,69 @@ the pending Tauri live/setup/long-import workflow, default native startup and ac
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
+
+## Saved canonical accuracy pass
+
+The real refinement routes now recheck saved, sealed, explicit-language passages
+through the resident child and existing serial worker. This first slice supports
+anchors up to 24.5 seconds. Automatic-language and longer passages stay unresolved;
+the UI and readiness describe that limit. Captured language mode must be present:
+a detected language alone cannot silently turn an Auto recording into a manual
+decode. Qualified Apple-processed microphone audio retains unity gain through the
+shared admission/retry path, including ordinary passage retries.
+
+Candidates preserve their original source, speaker, audio anchor and epoch. An
+incomplete decode keeps previous words. Publication compares the current passage
+with its inference snapshot, then replaces exactly that vector slot. It preserves
+current names, protected corrections, unrelated passages, display order and final
+CTC identity. Empty and absent protection lists have the same meaning. History
+stores only the previous ID, bounds, speaker and words. Unused generic window
+reconciliation, ID remapping and no-op live refinement commands were removed.
+
+Pause commits generation invalidation before signalling cancellation. A held
+cancellation acknowledgement does not release admission. Completed passage
+versions survive interruption and restart; resume skips unchanged completed work.
+Model-child failure leaves the Ready transcript and audio intact for retry.
+
+The initial real route test reproduced HTTP 409 from the former unavailable
+handler. Independent checks then reproduced an unrelated whole-document save
+incorrectly blocking publication, and overlapping source rows changing order.
+The corrected candidate passes 162 core, 61 host, nine mounted live-service, one
+service-lifecycle and nine process tests, plus strict all-target core/host Clippy.
+Four tests remain explicitly ignored: the network download and three acoustic
+tests with separately retained proof. The 34 existing editor/updater Node checks
+and four capture-presentation checks pass, including saved Start/Pause/Retry
+controls. Logs are `/tmp/speakerdesk-saved-refinement-{red,unrelated-red,final-tests,clippy,frontend,controls}.log`.
+
+The locked optimized build completed in 23.53 seconds, with the existing upstream
+mlx-sys warnings. Executable SHA-256:
+`11b0e76d21836a5093f5693070aa843f6e417e3d528958c81171b634182796a8`.
+Real MLX/CTC execution on a disposable copy of synthetic job
+`90367b1ffb2e4418b04984619eec5bc7` refines one passage, retains the protected prefix,
+and supplies 36 aligned words. Names, profiles and PCM bytes remain unchanged.
+History, full service restart, export, idempotent resume and stale-save HTTP 409
+pass. The measured 1.306 seconds is diagnostic only, not an equivalent performance
+comparison or proof of improved acoustic accuracy. Evidence and the external
+Python harness are in `/private/tmp/speakerdesk-saved-refinement.eGKZR0/`;
+the application and its inference child do not invoke Python.
+
+The isolated Tauri preview was refreshed only after its previous idle parent and
+children exited. It serves the native setup at `http://127.0.0.1:51180/` and
+correctly reports the saved explicit-language limit. Its signed executable SHA-256
+is `8288b91036e44afa45adca71cb99c3dd5dcb6c48c6568b352d88f83b554dc3a0`;
+`saved-refinement-preview.json` and `app-saved-refinement.log` are retained under
+`/private/tmp/speakerdesk-native-desktop.WJKAde/`. It still uses the development
+library path and synthetic saved-PCM capture helper, not a distributable package.
+
+CUA still reports the Mac locked after the latest unlock reply, so no new actual
+editor claim is made. PR #27 remains open at
+`db9da655b3eeeeef598ba21a21cb54505e6bce21`, base
+`59e7b0c860f72ca94c24e6eab18ac820b144ee24`. The complete replacement remains active:
+finish automatic/long-passage and rolling live refinement, qualified Pause/Resume
+and raw dual-source echo, physical capture and long-session measurements, pending
+Tauri workflows, native default startup and packaging, disposable updater/security
+checks and equivalent 0.6.6 performance gates. No installed app, production data,
+existing model cache or GitHub state was changed. Windows and issue #25 stay deferred.
 
 ## Sealed live timing, voice evidence and original source audio
 

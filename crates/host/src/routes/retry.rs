@@ -122,7 +122,12 @@ fn execute(
         }
         let pcm =
             audio::read_pcm16_range(path, segment.start, segment.end).map_err(|e| e.to_string())?;
-        models.retry_passage(&pcm, language, &operation.cancellation)
+        let processed = segment
+            .capture_source
+            .as_ref()
+            .filter(|s| s["source_id"] == "microphone_clean")
+            .and_then(|s| s["catalog_sha256"].as_str());
+        models.retry_passage(&pcm, language, processed, &operation.cancellation)
     })();
     let mut store = operation.shared.store.lock().expect("jobs");
     let publication = store.update_job(&original.id, |current| {
