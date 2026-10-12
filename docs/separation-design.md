@@ -122,7 +122,7 @@ the pair, asset selection or acceptance rules described above.
 | [`native` source resolution](../crates/host/src/native.rs), [`audio`](../crates/core/src/audio.rs), [`voice`](../crates/core/src/voice.rs) | Original capture-source identity is independent of edited speaker labels. Keep it; add explicit generated-audio selection/origin for playback and retry, confined to owned media. Voice eligibility must reject the generated variant. |
 | [`transcript`](../crates/core/src/transcript.rs), [`alignment`](../crates/core/src/alignment.rs), [`timing`](../crates/core/src/timing.rs), [`export`](../crates/core/src/export.rs) | Validation permits overlapping rows and unique IDs. Add stable channel tie ordering and variant-aware timing provenance/review. Current export renders active rows only; local channel labels must remain distinguishable even while identity is unassigned. |
 | [`app.js`](../speakerdesk/static/app.js), [`live_editor.js`](../speakerdesk/static/live_editor.js), template/style and existing frontend tests | The editor uses whole-transcript PUT, metadata conflict recovery, retained drafts and original-recording playback. Add the comparison/group and explicit server acceptance; retain drafts on structural conflicts. Review both playback modes, keyboard controls and stale acceptance. |
-| [`model setup`](../crates/host/src/setup.rs), [`artifact inventory`](../crates/host/src/model-artifacts.json), [`model setup contract`](model-setup-contract.md), native license collector | Optional pinned model setup after behavior/quality review. Ordinary transcription must still start without separation weights. No setup entry or support claim belongs in the 0.7.0 release. |
+| [`model setup`](../crates/host/src/setup.rs), [`artifact inventory`](../crates/host/src/model-artifacts.json), [model installation](architecture.md#model-installation), native license collector | Optional pinned model setup after behavior/quality review. Ordinary transcription must still start without separation weights. No setup entry or support claim belongs in the 0.7.0 release. |
 
 The trait addition also reaches `UnimplementedModels`, import `Scripted` and live
 `FakeModels`; the application adapter is `ApplicationModels` in
@@ -208,7 +208,7 @@ identities. Pin the exact baseline executable/package when the coordinator selec
 it; the released 0.7.0 artifact may become that baseline once its identity is known.
 Do not substitute the retired episode branch or 0.6.6 for this comparison.
 
-The [#24 implementation record](rust-port/implementation.md) reports real app
+The [#24 implementation record](https://github.com/TheGreenCedar/Speakerdesk/blob/b4ee66f/docs/rust-port/implementation.md) reports real app
 import/edit/restart/export, failure and disposable package tests. Its retained
 7.06-second public import pair measured native 9.051 s from process launch to
 HTTP Ready and 3.478 GB sampled owned footprint; its 82.010-second warm native
