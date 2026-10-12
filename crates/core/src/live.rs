@@ -66,6 +66,8 @@ pub enum LiveError {
     Message(&'static str),
     #[error("{0}")]
     Detail(String),
+    #[error(transparent)]
+    Child(ChildError),
 }
 
 impl From<SpeechError> for LiveError {
@@ -74,9 +76,20 @@ impl From<SpeechError> for LiveError {
     }
 }
 
+impl From<String> for LiveError {
+    fn from(error: String) -> Self {
+        Self::Detail(error)
+    }
+}
+impl From<&str> for LiveError {
+    fn from(error: &str) -> Self {
+        Self::Detail(error.into())
+    }
+}
+
 impl From<ChildError> for LiveError {
     fn from(error: ChildError) -> Self {
-        Self::Detail(error.to_string())
+        Self::Child(error)
     }
 }
 
@@ -474,6 +487,7 @@ struct Utterance {
     speaker_candidates: Vec<String>,
     speaker_activity: Option<timing::SpeakerActivity>,
     text_audio_anchor: Option<timing::AudioAnchor>,
+    text_end_sample: Option<i64>,
 }
 
 /// VAD speech objects. NVIDIA activity is attached separately and does not split words.
@@ -632,6 +646,7 @@ impl UtteranceBook {
                         speaker_candidates: Vec::new(),
                         speaker_activity: None,
                         text_audio_anchor: None,
+                        text_end_sample: None,
                     },
                 );
                 self.order.push(id.clone());
@@ -705,6 +720,7 @@ impl UtteranceBook {
         });
         if complete && !row.protected_fields.iter().any(|field| field == "text") {
             row.text = text.to_string();
+            row.text_end_sample = Some(row.end_sample);
             row.text_audio_anchor = Some(timing::AudioAnchor {
                 start_sample: row.start_sample,
                 end_sample: row.end_sample,
@@ -1539,8 +1555,25 @@ pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Do
             row.refinement_state = Some("edited".to_string());
             row.machine_revision = prior.machine_revision;
         }
+        let kept_text = protected.iter().any(|field| field == "text")
+            || (row.text.trim().is_empty() && !prior.text.trim().is_empty());
         if row.text.trim().is_empty() && !prior.text.trim().is_empty() {
             row.text = prior.text.clone();
+        }
+        if kept_text {
+            // A later decode does not extend the audio represented by preserved words.
+            for key in ["canonical_text_end_sample", "text_audio_anchor"] {
+                row.rest.remove(key);
+                if let Some(value) = prior.rest.get(key) {
+                    row.rest.insert(key.into(), value.clone());
+                }
+            }
+        }
+        if protected
+            .iter()
+            .any(|field| field == "start" || field == "end")
+        {
+            row.rest.remove("text_audio_anchor");
         }
         if let Some(slot) = document
             .segments
@@ -1576,8 +1609,49 @@ pub struct EngineConfig {
     pub source_id: Option<String>,
     /// Validated host catalog identity for source-specific candidates.
     pub capture_catalog_sha256: Option<String>,
+    /// Exceptional restart: rebuild acoustic state through this saved prefix before polling.
+    pub recovery: Option<StreamRecovery>,
     /// Set only after the host verifies the processed microphone's source-bound receipt.
     pub processed_microphone_contract: Option<String>,
+}
+
+/// The host owns replay sequencing and the persisted publication boundary. Historical
+/// PCM is fed with `handle`; the inbox accepts only audio after `through_sample`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamRecovery {
+    pub generation: u32,
+    pub start_sample: i64,
+    pub through_sample: i64,
+    pub language_epoch: i64,
+    /// Independent immutable publication cutoffs for the two retained source files.
+    pub source_boundaries: BTreeMap<String, RecoveryBoundary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryBoundary {
+    pub start_sample: i64,
+    pub language_epoch: i64,
+}
+
+impl StreamRecovery {
+    fn validate(&self) -> Result<(), LiveError> {
+        if self.generation == 0
+            || self.generation.checked_mul(64).is_none()
+            || self.start_sample < 0
+            || self.through_sample < self.start_sample
+            || u32::try_from(self.through_sample).is_err()
+            || self.language_epoch < 0
+            || self.source_boundaries.iter().any(|(source, cut)| {
+                !SOURCE_IDS.contains(&source.as_str())
+                    || cut.start_sample < 0
+                    || cut.start_sample > self.through_sample
+                    || cut.language_epoch < 0
+            })
+        {
+            return Err(LiveError::Message("Invalid recovery publication boundary."));
+        }
+        Ok(())
+    }
 }
 
 impl EngineConfig {
@@ -1590,6 +1664,7 @@ impl EngineConfig {
             fast_sequence: 0,
             source_id: None,
             capture_catalog_sha256: None,
+            recovery: None,
             processed_microphone_contract: None,
         }
     }
@@ -1648,14 +1723,17 @@ impl AcousticEvidence for SharedLedger {
     }
 }
 
-struct ModelDetector<M: Models>(Arc<M>);
+struct ModelDetector<M: Models> {
+    models: Arc<M>,
+    failure: Arc<Mutex<Option<ChildError>>>,
+}
 
 impl<M: Models> LanguageDetector for ModelDetector<M> {
     fn detect(&mut self, pcm: &[f32]) -> Result<Vec<(String, f64)>, crate::language::RouteError> {
-        let probe = self
-            .0
-            .language_probe(pcm)
-            .map_err(|_| crate::language::RouteError::Detector)?;
+        let probe = self.models.language_probe(pcm).map_err(|error| {
+            *self.failure.lock().expect("model failure") = Some(error);
+            crate::language::RouteError::Detector
+        })?;
         if probe.codes.len() != probe.probabilities.len() || probe.codes.is_empty() {
             return Err(crate::language::RouteError::Detector);
         }
@@ -1669,6 +1747,7 @@ impl<M: Models> LanguageDetector for ModelDetector<M> {
 
 struct ModelRecognizer<M: Models> {
     models: Arc<M>,
+    failure: Arc<Mutex<Option<ChildError>>>,
 }
 
 impl<M: Models> Recognizer for ModelRecognizer<M> {
@@ -1680,7 +1759,10 @@ impl<M: Models> Recognizer for ModelRecognizer<M> {
         let text = self
             .models
             .transcribe(pcm, language, (0, 0))
-            .map_err(|_| crate::language::RouteError::Recognition)?;
+            .map_err(|error| {
+                *self.failure.lock().expect("model failure") = Some(error);
+                crate::language::RouteError::Recognition
+            })?;
         let raw = if text.raw_text.is_empty() {
             text.text
         } else {
@@ -1743,15 +1825,37 @@ impl<M: Models + 'static> Engine<M> {
     ) -> Result<Self, LiveError> {
         // shortcut: enable after live publication is wired to the supplied-text adapter.
         let timing_apis = false;
+        let namespace = if let Some(recovery) = &config.recovery {
+            recovery.validate()?;
+            format!("{}:stream:{}", config.job_id, recovery.generation)
+        } else {
+            config.job_id.clone()
+        };
         let namespace = if let Some(source) = &config.source_id {
             if !SOURCE_IDS.contains(&source.as_str()) {
                 return Err(LiveError::Message("Unknown capture input."));
             }
-            format!("{}:{source}", config.job_id)
+            format!("{namespace}:{source}")
         } else {
-            config.job_id.clone()
+            namespace
         };
-        let book = UtteranceBook::new(namespace)?;
+        let mut book = UtteranceBook::new(namespace)?;
+        if let Some(recovery) = &config.recovery {
+            let (start, epoch) = if let Some(source) = &config.source_id {
+                let boundary = recovery
+                    .source_boundaries
+                    .get(source)
+                    .ok_or(LiveError::Message(
+                        "Recovery requires each source publication boundary.",
+                    ))?;
+                (boundary.start_sample, boundary.language_epoch)
+            } else {
+                (recovery.start_sample, recovery.language_epoch)
+            };
+            book.cursor = start;
+            book.epoch_start = start;
+            book.epoch = epoch;
+        }
         let ledger = if let Some(contract) = &config.processed_microphone_contract {
             if config.source_id.as_deref() != Some("microphone_clean") {
                 return Err(LiveError::Message(
@@ -1799,6 +1903,10 @@ impl<M: Models + 'static> Engine<M> {
         let batch = config.audio_batch_seconds;
         let models = Arc::new(models);
         let inbox = Arc::new(Mutex::new(Inbox::new(batch, 0)?));
+        if let Some(recovery) = &config.recovery {
+            recovery.validate()?;
+            inbox.lock().expect("inbox").received = recovery.through_sample;
+        }
         let recording =
             RecordingReader::open(recording).map_err(|e| LiveError::Detail(e.to_string()))?;
         Self::new(config, models, inbox, recording)
@@ -2128,10 +2236,24 @@ impl<M: Models + 'static> Engine<M> {
     }
 
     fn prefix_speaker(&self, local: &str) -> Result<String, LiveError> {
-        match &self.config.source_id {
+        let speaker = match &self.config.source_id {
             Some(source) => speaker_id(source, local),
             None => Ok(local.to_string()),
-        }
+        }?;
+        let Some(recovery) = &self.config.recovery else {
+            return Ok(speaker);
+        };
+        let index = speaker
+            .strip_prefix("speaker_")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v < 64)
+            .ok_or(LiveError::Message("Invalid recovered speaker slot."))?;
+        let offset = recovery
+            .generation
+            .checked_mul(64)
+            .and_then(|v| v.checked_add(index))
+            .ok_or(LiveError::Message("Recovered speaker namespace exhausted."))?;
+        Ok(format!("speaker_{offset}"))
     }
 
     fn language_at(&self, sample: i64) -> LanguageStamp {
@@ -2385,6 +2507,7 @@ impl<M: Models + 'static> Engine<M> {
             {
                 stored.text = text;
                 stored.machine_revision += 1;
+                stored.text_end_sample = Some(stored.end_sample);
                 stored.text_audio_anchor = Some(timing::AudioAnchor {
                     start_sample: stored.start_sample,
                     end_sample: stored.end_sample,
@@ -2473,8 +2596,12 @@ impl<M: Models + 'static> Engine<M> {
         padding: (u32, u32),
     ) -> Result<Vec<Passage>, LiveError> {
         let pcm = self.read_pcm(start, end)?;
+        let failure = Arc::new(Mutex::new(None));
         let detector = if language == languages::AUTOMATIC {
-            Some(Box::new(ModelDetector(Arc::clone(&self.models))) as Box<dyn LanguageDetector>)
+            Some(Box::new(ModelDetector {
+                models: Arc::clone(&self.models),
+                failure: failure.clone(),
+            }) as Box<dyn LanguageDetector>)
         } else {
             None
         };
@@ -2484,11 +2611,12 @@ impl<M: Models + 'static> Engine<M> {
             detector,
             Box::new(ModelRecognizer {
                 models: Arc::clone(&self.models),
+                failure: failure.clone(),
             }),
             None,
         )
         .map_err(|error| LiveError::Detail(error.to_string()))?;
-        transcriber
+        let result = transcriber
             .transcribe(
                 &pcm,
                 limits::SAMPLE_RATE,
@@ -2499,11 +2627,34 @@ impl<M: Models + 'static> Engine<M> {
                     asr_padding: padding,
                 },
             )
-            .map_err(|error| LiveError::Detail(error.to_string()))
+            .map_err(|error| LiveError::Detail(error.to_string()));
+        if let Some(error) = failure.lock().expect("model failure").take() {
+            return Err(error.into());
+        }
+        result
     }
 
     fn publish(&mut self, row: Utterance) -> Result<(), LiveError> {
         let mut candidate = project_segment(&row, &self.language_at(row.start_sample));
+        if self
+            .config
+            .recovery
+            .as_ref()
+            .is_some_and(|recovery| row.start_sample < recovery.through_sample)
+        {
+            // Words recovered from the interrupted prefix may overlap a preserved edited
+            // display boundary. Keep both authoritative edits and this uncertain tail visible.
+            candidate.review = Some(true);
+            candidate.rest.insert(
+                "canonical_unresolved".into(),
+                Value::from("inference_restart_boundary"),
+            );
+            candidate.refinement_state = Some("unresolved".into());
+        }
+        candidate.rest.insert(
+            "stream_generation".into(),
+            Value::from(self.config.recovery.as_ref().map_or(0, |r| r.generation)),
+        );
         if let (Some(source), Some(catalog)) =
             (&self.config.source_id, &self.config.capture_catalog_sha256)
         {
@@ -2596,6 +2747,17 @@ fn project_segment(row: &Utterance, stamp: &LanguageStamp) -> Segment {
         }
     }
     let mut rest = Map::new();
+    if let Some(anchor) = &row.text_audio_anchor {
+        rest.insert(
+            "text_audio_anchor".into(),
+            serde_json::json!({"start_sample":anchor.start_sample,"end_sample":anchor.end_sample}),
+        );
+    }
+    if let Some(end) = row.text_end_sample {
+        // Unlike current audio evidence, this survives audio growth and edited display
+        // bounds. It is not alignment or a claim about edited words' timing.
+        rest.insert("canonical_text_end_sample".into(), Value::from(end));
+    }
     rest.insert(
         "canonical_state".to_string(),
         Value::String(if row.state == UtteranceState::Sealed {
@@ -2745,6 +2907,10 @@ impl<M: Models + 'static> SourceRuntime<M> {
     ) -> Result<Self, LiveError> {
         let models = Arc::new(models);
         let inbox = Arc::new(Mutex::new(Inbox::new(config.audio_batch_seconds, 0)?));
+        if let Some(recovery) = &config.recovery {
+            recovery.validate()?;
+            inbox.lock().expect("inbox").received = recovery.through_sample;
+        }
         let mut engines = Vec::new();
         for (source_id, recording) in SOURCE_IDS.into_iter().zip(recordings) {
             let mut source_config = config.clone();
@@ -3634,6 +3800,120 @@ mod tests {
     }
 
     #[test]
+    fn live_publication_exposes_text_coverage_separately_from_growing_audio() {
+        let mut engine =
+            TestEngine::new(EngineConfig::new("coverage", "en"), FakeModels::english()).unwrap();
+        engine.append_pcm(&loud((7 * RATE) as usize));
+        let first = engine.handle(notice(0, 6 * RATE + 512, 0)).unwrap();
+        let decoded = revisions(&first)
+            .into_iter()
+            .find(|r| !r.text.is_empty())
+            .unwrap()
+            .clone();
+        let decoded_end = decoded.rest["end_sample"].as_i64().unwrap();
+        let growing = engine.handle(notice(6 * RATE + 512, 7 * RATE, 0)).unwrap();
+        let published = revisions(&growing);
+        let row = published.last().unwrap();
+        assert!(row.rest["end_sample"].as_i64().unwrap() > decoded_end);
+        assert_eq!(row.rest["canonical_text_end_sample"], decoded_end);
+        assert!(
+            row.rest.get("text_audio_anchor").is_none(),
+            "stale timing evidence must still be invalidated"
+        );
+        assert_eq!(decoded.rest["text_audio_anchor"]["end_sample"], decoded_end);
+    }
+
+    #[test]
+    fn recovery_rebuilds_acoustics_before_publication_and_keeps_absolute_language_and_eof() {
+        for cut in [0, RATE + 37, 2 * RATE] {
+            for silence in [false, true] {
+                let through = 2 * RATE + 100;
+                let end = 3 * RATE + 159;
+                let mut config = EngineConfig::new("recovered", "en");
+                config.recovery = Some(StreamRecovery {
+                    generation: 1,
+                    start_sample: cut,
+                    through_sample: through,
+                    language_epoch: if cut >= RATE { 1 } else { 0 },
+                    source_boundaries: BTreeMap::new(),
+                });
+                let mut engine = TestEngine::new(config, FakeModels::english()).unwrap();
+                let mut pcm = loud(end as usize);
+                if silence {
+                    pcm[..RATE as usize].fill(0.);
+                }
+                engine.append_pcm(&pcm);
+                let mut events = engine.handle(notice(0, RATE, 0)).unwrap();
+                events.extend(
+                    engine
+                        .handle(LiveCommand::Language {
+                            language: "de".into(),
+                            generation: 1,
+                            start_sample: RATE,
+                        })
+                        .unwrap(),
+                );
+                events.extend(
+                    engine
+                        .handle(LiveCommand::Audio(AudioNotice {
+                            start_sample: RATE,
+                            end_sample: through,
+                            language_epoch: 1,
+                            language: "de".into(),
+                        }))
+                        .unwrap(),
+                );
+                for (start, stop) in [(through, through + RATE), (through + RATE, end)] {
+                    engine
+                        .push(LiveCommand::Audio(AudioNotice {
+                            start_sample: start,
+                            end_sample: stop,
+                            language_epoch: 1,
+                            language: "de".into(),
+                        }))
+                        .unwrap();
+                }
+                engine.push(LiveCommand::Stop).unwrap();
+                while let Some(next) = engine.poll().unwrap() {
+                    events.extend(next);
+                }
+                let mut document = empty_document();
+                for event in &events {
+                    if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                        assert!(candidate.rest["start_sample"].as_i64().unwrap() >= cut);
+                        assert_eq!(candidate.rest["stream_generation"], 1);
+                        assert_ne!(
+                            candidate.id,
+                            utterance_id(
+                                "recovered",
+                                candidate.rest["language_epoch"].as_i64().unwrap(),
+                                candidate.rest["start_sample"].as_i64().unwrap()
+                            )
+                        );
+                        document = apply_canonical_candidate(&document, candidate);
+                    }
+                }
+                assert!(
+                    document
+                        .segments
+                        .iter()
+                        .any(|r| r.text == "eins" && r.speaker == "speaker_64")
+                );
+                assert!(events.iter().any(|e|matches!(e,EngineEvent::CaptureFinished{canonical_observed_sample,..} if *canonical_observed_sample==end)));
+            }
+        }
+        let mut bad = EngineConfig::new("bad", "en");
+        bad.recovery = Some(StreamRecovery {
+            generation: u32::MAX,
+            start_sample: 0,
+            through_sample: 1,
+            language_epoch: 0,
+            source_boundaries: BTreeMap::new(),
+        });
+        assert!(TestEngine::new(bad, FakeModels::english()).is_err());
+    }
+
+    #[test]
     fn saved_audio_replay_handles_packet_splits_and_does_not_revisit_sealed_utterances() {
         let pcm = [loud(16_037), vec![0.; 16_000], loud(8_013)].concat();
         let mut split =
@@ -3959,6 +4239,71 @@ mod tests {
         assert_eq!(last.language.as_deref(), Some("de"));
         assert_eq!(german.models.ctc_calls.load(Ordering::SeqCst), 0);
         assert!(german.models.transcribe_calls.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[test]
+    fn recovery_keeps_independent_source_cutoffs() {
+        let mut inputs = [TestRecording::new(), TestRecording::new()];
+        for input in &mut inputs {
+            input
+                .writer
+                .write_samples(&loud((3 * RATE + 37) as usize))
+                .unwrap();
+        }
+        let mut config = EngineConfig::new("source-recovery", "en");
+        config.processed_microphone_contract = Some("a".repeat(64));
+        config.capture_catalog_sha256 = Some("b".repeat(64));
+        config.recovery = Some(StreamRecovery {
+            generation: 1,
+            start_sample: RATE,
+            through_sample: 3 * RATE + 37,
+            language_epoch: 0,
+            source_boundaries: BTreeMap::from([
+                (
+                    "microphone_clean".into(),
+                    RecoveryBoundary {
+                        start_sample: 2 * RATE,
+                        language_epoch: 0,
+                    },
+                ),
+                (
+                    "system".into(),
+                    RecoveryBoundary {
+                        start_sample: RATE,
+                        language_epoch: 0,
+                    },
+                ),
+            ]),
+        });
+        let mut runtime = SourceRuntime::new(
+            config,
+            FakeModels::english(),
+            inputs
+                .each_ref()
+                .map(|r| RecordingReader::open(&r.path).unwrap()),
+        )
+        .unwrap();
+        let mut events = runtime.handle(notice(0, 3 * RATE + 37, 0)).unwrap();
+        events.extend(runtime.handle(LiveCommand::Stop).unwrap());
+        let mut starts = BTreeMap::new();
+        for candidate in revisions(&events) {
+            let source = candidate.capture_source.as_ref().unwrap()["source_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let start = candidate.rest["start_sample"].as_i64().unwrap();
+            starts
+                .entry(source)
+                .and_modify(|old: &mut i64| *old = (*old).min(start))
+                .or_insert(start);
+        }
+        assert_eq!(
+            starts,
+            BTreeMap::from([
+                ("microphone_clean".into(), 2 * RATE),
+                ("system".into(), RATE)
+            ])
+        );
     }
 
     #[test]

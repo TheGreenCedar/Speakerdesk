@@ -39,21 +39,56 @@ fn main() {
     let mut next_session = 1;
     let mut race: Option<PathBuf> = None;
     let mut race_error = false;
+    let root = PathBuf::from(std::env::args_os().nth(2).unwrap());
+    let mut held_live_feed = false;
     while let Ok(envelope) = read_envelope(&mut std::io::stdin()) {
         let id = envelope.request_id;
         let EnvelopeBody::Request(request) = envelope.body else {
             std::process::exit(2);
         };
+        let hold_eof = matches!(request, Request::VadFeed { last: true, .. })
+            && root.join("fixture-live").exists()
+            && root.join("hold-live-eof").exists();
+        if matches!(request, Request::Transcribe { .. })
+            && root.join("fixture-live").exists()
+            && root.join("exit-live-asr-once").exists()
+        {
+            std::fs::remove_file(root.join("exit-live-asr-once")).unwrap();
+            std::process::exit(19);
+        }
+        let hold_live = matches!(request, Request::VadFeed { .. })
+            && root.join("fixture-live").exists()
+            && root.join("hold-live-feed").exists()
+            && !held_live_feed;
         let result = match request {
-            Request::Hello { build_id } => Ok(Response::Ready {
-                build_id: if build_id == env!("CARGO_PKG_VERSION") {
-                    build_id
-                } else {
-                    "fixture".into()
-                },
-                device: "replay".into(),
-                models: Vec::new(),
-            }),
+            Request::Hello { build_id } => {
+                if root.join("fixture-live").exists() {
+                    std::fs::write(
+                        root.join("fixture-child-pid"),
+                        std::process::id().to_string(),
+                    )
+                    .unwrap();
+                    writeln!(
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(root.join("fixture-child-pids"))
+                            .unwrap(),
+                        "{}",
+                        std::process::id()
+                    )
+                    .unwrap();
+                }
+                Ok(Response::Ready {
+                    build_id: if build_id == env!("CARGO_PKG_VERSION") {
+                        build_id
+                    } else {
+                        "fixture".into()
+                    },
+                    device: "replay".into(),
+                    models: Vec::new(),
+                })
+            }
             Request::SetupCheck { models } => {
                 // Only the native-host lifecycle replay asks for setup; retain its owned PID.
                 let root = PathBuf::from(std::env::args_os().nth(2).unwrap());
@@ -275,6 +310,34 @@ fn main() {
             }
             _ => Err(ChildError::Unimplemented),
         };
+        if hold_live || hold_eof {
+            held_live_feed = true;
+            let flag = Arc::new(AtomicBool::new(false));
+            active = Some((id, flag.clone()));
+            let writer = output.clone();
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let (marker, hold) = if hold_eof {
+                    ("recovery-eof-started", "hold-live-eof")
+                } else {
+                    ("recovery-feed-started", "hold-live-feed")
+                };
+                std::fs::write(root.join(marker), b"started").unwrap();
+                while root.join(hold).exists() && !flag.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                reply(
+                    &writer,
+                    id,
+                    if flag.load(Ordering::Acquire) {
+                        Err(ChildError::Cancelled)
+                    } else {
+                        result
+                    },
+                );
+            });
+            continue;
+        }
         if matches!(
             result,
             Ok(Response::Handle(_) | Response::Vad(_) | Response::Diar(_)) | Err(_)

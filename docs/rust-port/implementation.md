@@ -1069,3 +1069,77 @@ Tauri live/setup/long-import checks, long-session memory/backlog, native default
 startup and packaging, updater/security qualification and equivalent 0.6.6
 measurements remain required. The installed app, production data and existing model
 cache remain untouched; Windows and issue #25 remain follow-ups.
+
+UI follow-up: the old isolated preview process and both children were stopped and
+their exits observed. The same disposable preview bundle now runs the optimized
+728b3c3 executable with the saved-PCM replay helper in its Resources directory.
+This is deliberately a UI qualification fixture, not a distributable capture bundle.
+Native service `http://127.0.0.1:56552/` reports models ready and capture available;
+process IDs at launch were 97307/97339/97340. Log and state:
+`/private/tmp/speakerdesk-native-desktop.WJKAde/app-live-join.log` and
+`live-join-preview.json`. The editor check awaits the latest unlock request. A
+retained-output check also confirms the live result contains exactly the two
+expected utterances on distinct speaker tracks, with both passages sealed.
+
+## Exceptional live inference recovery
+
+Live child loss now has a typed error through VAD, diarization, ASR and language
+adapters. The failed worker is joined before SQLite advances the stream generation.
+Capture keeps writing while a replacement worker rebuilds acoustic state from
+bounded reads of committed WAV data. Normal processing does not replay history.
+Each source has its own publication cutoff, independent of edited speaker IDs;
+new utterance/track IDs use the new stream generation without changing the capture
+catalog revision or earlier names. Publication checks operation and stream
+generations. Recovery also covers a child lost during final EOF processing.
+
+Independent review reproduced a skipped-tail defect: a passage published through
+seven seconds could still contain only words decoded through six. The failing
+regression observed a 112,000-sample restart instead of 96,000. Publication now
+persists the represented text endpoint separately from growing audio and stale
+timing evidence; protected text and blank-result fallback retain that endpoint.
+Recovery preserves exact saved words/bounds and marks the interrupted boundary
+for review. It makes one automatic attempt per recording. A failed replacement
+leaves audio capture running and records an explicit inference failure.
+
+Validation: 157 core and 59 host tests pass, plus five mounted live-service tests,
+one native-service lifecycle test and nine process tests. Coverage includes
+asymmetric source cutoffs, language history, protected edits, stale publication,
+pause/resume during held recovery, child loss in ASR and EOF, replacement failure,
+shutdown, restart/export and process reaping. Strict all-target core/host Clippy
+passes. The setup network test and three separate model qualification tests were
+not repeated. Retained red/green evidence is in
+`/tmp/speakerdesk-recovery-coverage-{core-red,host-red,host-green}.log`; other logs
+are `/tmp/speakerdesk-recovery-{final-tests,integrations,clippy,release}.log`.
+The final unit log contains the earlier incomplete fixture failure; its corrected
+host case passed in the focused green log. Reusing the other unchanged passing
+tests gives the totals above.
+
+The optimized desktop build passed with the existing upstream mlx-sys warnings;
+binary SHA-256 is
+`29716bc3b27e5b6dd1922139267364a12b54034c8322e3eb11f1ce95de8f385a`.
+The real-model replay in `/private/tmp/speakerdesk-real-recovery.3iHE4V/` records
+job `1b646ebf0c7c48c7a86dd39c92626a91`: pause, edit words/boundary/name, kill owned
+child 15175, resume saved synthetic PCM, replacement child 15293, Stop, whole-host
+restart and TXT export all passed. Both expected post-recovery utterances reached
+the store; all 290,890 retained PCM samples match the two source clips exactly.
+The final observation reaches sample 290,890 and earlier edits remain unchanged.
+Both qualification hosts and their children exited. The shell helper reads only
+the retained synthetic fixture. Python is used by the external qualification
+harness, not by the application or helper.
+
+One unpaced run took 4.753 seconds from resume after child loss to terminal state;
+the recorded 4,105 ms recovery interval covers prefix replay/lazy initialization
+and uncovered-tail decoding, excluding the old-worker join and SQLite transition.
+These are diagnostics, not sustained-live, device, desktop or 0.6.6 performance
+acceptance. Recovery deliberately uses new speaker tracks and flags uncertainty.
+
+The accepted complete replacement remains active and unfinished. Next address
+ordinary live publication after editing an open passage: protecting its text can
+currently suppress later words while its audio grows. A single restart frontier
+cannot repair older coverage gaps once later passages exist; this recovery slice
+does not claim general gap repair. Then complete live timing/refinement/identity,
+qualified Pause/Resume and raw dual-source echo, physical capture/long-session
+measurements, the pending Tauri live/setup/long-import workflow, default native
+startup/packaging, updater/security qualification and equivalent 0.6.6 gates.
+The installed app, production data and existing model cache remain untouched;
+Windows and issue #25 remain follow-ups.

@@ -40,6 +40,8 @@ const SERVER_REST_KEYS: &[&str] = &[
     "end_sample",
     "capture_audio",
     "text_audio_anchor",
+    "canonical_text_end_sample",
+    "stream_generation",
     "reading_alignment",
     "decode_context",
     "speech_regions",

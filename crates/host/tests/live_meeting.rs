@@ -17,6 +17,7 @@ struct Running {
 }
 impl Running {
     async fn open(root: &Path, dual: bool) -> Self {
+        fs::write(root.join("fixture-live"), b"native-host protocol replay").unwrap();
         let helper = root.join("capture-helper");
         let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
         fs::write(
@@ -167,10 +168,293 @@ impl Running {
                 "owned process {pid} survived host cleanup"
             );
         }
+        if let Ok(pids) = fs::read_to_string(root.join("fixture-child-pids")) {
+            for pid in pids.lines().map(|s| s.parse::<i32>().unwrap()) {
+                assert_eq!(
+                    unsafe { libc::kill(pid, 0) },
+                    -1,
+                    "owned recovery child survived cleanup"
+                );
+            }
+        }
     }
 }
 fn trigger(root: &Path, stage: u32) {
     fs::write(root.join(format!("stage-{stage}")), b"replay").unwrap();
+}
+
+async fn wait_file(path: &Path) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_or_shutdown() {
+    for mode in [
+        "recover",
+        "dual-recover",
+        "fail-recovery",
+        "shutdown-recovery",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let dual = mode == "dual-recover";
+        let host = Running::open(root, dual).await;
+        trigger(root, 1);
+        let id = host
+            .start(if dual {
+                json!(["microphone", "system"])
+            } else {
+                json!(["microphone"])
+            })
+            .await;
+        let path = format!("api/jobs/{id}");
+        let first = host
+            .wait(&path, |v| {
+                v["document"]["segments"]
+                    .as_array()
+                    .is_some_and(|rows| rows.iter().any(|r| r["text"] == "Replay transcript"))
+                    && v["duration"].as_f64().unwrap_or(0.) >= 6.5
+            })
+            .await;
+        let row = &first["document"]["segments"][0];
+        let old_id = row["id"].clone();
+        let old_speaker = row["speaker"].as_str().unwrap().to_owned();
+        let save=host.client.patch(format!("{}{path}/segments/{}",host.url,old_id.as_str().unwrap())).header("X-Speakerdesk-Token",&host.token)
+            .json(&json!({"segment_revision":row["machine_revision"],"changes":{"text":"Protected before child loss","start":0.1}})).send().await.unwrap();
+        assert_eq!(save.status(), 200, "{}", save.text().await.unwrap());
+        let current = host.get(&path).await;
+        let named = host
+            .post(
+                &format!("{path}/speakers/{old_speaker}/identity"),
+                json!({"revision":current["revision"],"name":"Casey","person_id":null}),
+            )
+            .await;
+        assert_eq!(named.status(), 200, "{}", named.text().await.unwrap());
+        // Persist a real pre-loss language boundary; replay must reconstruct it.
+        let changed = host
+            .client
+            .patch(format!("{}api/meetings/{id}/language", host.url))
+            .header("X-Speakerdesk-Token", &host.token)
+            .json(&json!({"language":"fr","language_revision":0}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(changed.status(), 200);
+        host.wait("api/meeting", |v| v["language_acknowledged_revision"] == 1)
+            .await;
+        let old = host.get(&path).await;
+        let history = old["language_history"].clone();
+        let old_pid: i32 = fs::read_to_string(root.join("fixture-child-pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        fs::write(root.join("hold-live-feed"), b"block recovered worker only").unwrap();
+        assert_eq!(unsafe { libc::kill(old_pid, libc::SIGKILL) }, 0);
+        trigger(root, 2);
+        wait_file(&root.join("recovery-feed-started")).await;
+        let replay = host
+            .wait(&path, |v| v["live_recovery"]["status"] == "replaying")
+            .await;
+        assert_eq!(replay["live_stream_generation"], 1);
+        assert_eq!(replay["language_history"], history);
+        let new_pid: i32 = fs::read_to_string(root.join("fixture-child-pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_ne!(new_pid, old_pid);
+        assert_eq!(unsafe { libc::kill(old_pid, 0) }, -1);
+        let before = replay["document"].clone();
+        trigger(root, 3);
+        host.wait("api/meeting", |v| {
+            v["duration"].as_f64().unwrap_or(0.) >= 20.5
+        })
+        .await;
+        if mode == "recover" {
+            assert_eq!(
+                host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            host.wait("api/meeting", |v| {
+                v["status"] == "paused" && v["pause_flush"]["status"] == "pending"
+            })
+            .await;
+            assert_eq!(
+                host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                    .await
+                    .status(),
+                409
+            );
+        }
+        match mode {
+            "shutdown-recovery" => {
+                host.close(root).await;
+                fs::remove_file(root.join("hold-live-feed")).unwrap();
+                let reopened = Running::open(root, dual).await;
+                let stored = reopened.get(&path).await;
+                assert_eq!(stored["status"], "failed");
+                assert_eq!(stored["document"], before);
+                reopened.close(root).await;
+            }
+            "fail-recovery" => {
+                assert_eq!(unsafe { libc::kill(new_pid, libc::SIGKILL) }, 0);
+                host.wait(&path, |v| v["live_recovery"]["status"] == "failed")
+                    .await;
+                trigger(root, 4);
+                host.wait("api/meeting", |v| {
+                    v["duration"].as_f64().unwrap_or(0.) >= 27.5
+                })
+                .await;
+                let failed = host.stop(&id).await;
+                assert_eq!(failed["status"], "failed");
+                assert_eq!(failed["document"], before);
+                assert_eq!(
+                    fs::read_to_string(root.join("fixture-child-pids"))
+                        .unwrap()
+                        .lines()
+                        .count(),
+                    2,
+                    "failure spun up another child"
+                );
+                host.close(root).await;
+            }
+            _ => {
+                fs::remove_file(root.join("hold-live-feed")).unwrap();
+                host.wait(&path, |v| v["live_recovery"]["status"] == "recovered")
+                    .await;
+                if mode == "recover" {
+                    let paused = host
+                        .wait("api/meeting", |v| v["pause_flush"]["status"] == "complete")
+                        .await;
+                    assert_eq!(paused["pause_flush"]["received_sample"], 336000);
+                    assert_eq!(
+                        host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                            .await
+                            .status(),
+                        202
+                    );
+                }
+                let final_job = host.stop(&id).await;
+                assert_eq!(final_job["status"], "ready", "{final_job}");
+                assert_eq!(final_job["canonical_observed_sample"], 336513);
+                assert_eq!(final_job["language_history"], history);
+                let rows = final_job["document"]["segments"].as_array().unwrap();
+                let ids: std::collections::HashSet<_> =
+                    rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+                assert_eq!(ids.len(), rows.len());
+                let old = rows.iter().find(|r| r["id"] == old_id).unwrap();
+                assert_eq!(old["text"], "Protected before child loss");
+                assert_eq!(old["start"], 0.1);
+                assert_eq!(old["speaker"], old_speaker);
+                assert_eq!(old["canonical_state"], "sealed");
+                assert_eq!(old["review"], true);
+                assert_eq!(final_job["document"]["speakers"][&old_speaker], "Casey");
+                let boundary = final_job["live_recovery"]["from_sample"].as_i64().unwrap();
+                let new: Vec<_> = rows
+                    .iter()
+                    .filter(|r| r["stream_generation"] == 1)
+                    .collect();
+                assert!(!new.is_empty());
+                for row in new {
+                    assert!(row["start_sample"].as_i64().unwrap() >= boundary);
+                    assert_ne!(row["speaker"], old_speaker);
+                    if dual {
+                        assert!(row["capture_source"]["catalog_sha256"].is_string());
+                        assert_eq!(row["capture_source"]["source_revision"], 1);
+                    }
+                }
+                assert!(
+                    final_job["document"]["speakers"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .all(|v| v != "Speaker 65" && v != "Speaker 97")
+                );
+                assert!(final_job["live_recovery"]["elapsed_ms"].is_u64());
+                host.close(root).await;
+                let reopened = Running::open(root, dual).await;
+                assert_eq!(reopened.get(&path).await["document"], final_job["document"]);
+                let export = reopened
+                    .client
+                    .get(format!("{}{path}/export/txt", reopened.url))
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                assert!(export.contains("Protected before child loss") && export.contains("Casey"));
+                reopened.close(root).await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn recovery_covers_asr_and_final_eof_child_loss() {
+    for eof in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let host = Running::open(root, false).await;
+        trigger(root, 1);
+        let id = host.start(json!(["microphone"])).await;
+        let path = format!("api/jobs/{id}");
+        host.wait(&path, |v| {
+            v["document"]["segments"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|r| r["text"] == "Replay transcript"))
+        })
+        .await;
+        let old_pid: i32 = fs::read_to_string(root.join("fixture-child-pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let final_job = if eof {
+            fs::write(root.join("hold-live-eof"), b"block final model flush").unwrap();
+            assert_eq!(
+                host.post(&format!("api/meetings/{id}/stop"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            wait_file(&root.join("recovery-eof-started")).await;
+            assert_eq!(unsafe { libc::kill(old_pid, libc::SIGKILL) }, 0);
+            fs::remove_file(root.join("hold-live-eof")).unwrap();
+            host.wait(&path, |v| {
+                ["ready", "failed"].contains(&v["status"].as_str().unwrap_or(""))
+                    && v["inference_owned"] == false
+            })
+            .await
+        } else {
+            fs::write(root.join("exit-live-asr-once"), b"fail inside recognizer").unwrap();
+            trigger(root, 2);
+            host.wait(&path, |v| v["live_recovery"]["status"] == "recovered")
+                .await;
+            host.stop(&id).await
+        };
+        assert_eq!(final_job["status"], "ready", "{final_job}");
+        assert_eq!(final_job["live_recovery"]["status"], "recovered");
+        assert_eq!(
+            final_job["canonical_observed_sample"],
+            if eof { 112513 } else { 224513 }
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("fixture-child-pids"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        assert_eq!(unsafe { libc::kill(old_pid, 0) }, -1);
+        host.close(root).await;
+    }
 }
 
 #[tokio::test]
@@ -446,7 +730,7 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
                     .unwrap();
                 assert_eq!(unsafe { libc::kill(child, libc::SIGKILL) }, 0);
                 trigger(root, 2);
-                host.wait(&path, |v| v["live_inference_error"].is_string())
+                host.wait(&path, |v| v["live_recovery"]["status"] == "recovered")
                     .await;
                 trigger(root, 3);
                 host.wait("api/meeting", |v| {
@@ -454,7 +738,7 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
                 })
                 .await;
                 let failed = host.stop(&id).await;
-                assert_eq!(failed["status"], "failed");
+                assert_eq!(failed["status"], "ready");
                 assert!(
                     !failed["document"]["segments"]
                         .as_array()

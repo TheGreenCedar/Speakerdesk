@@ -1,5 +1,6 @@
 //! Disk-backed live recording. SQLite owns jobs; this manager owns only runtime handles.
 mod runtime;
+mod worker;
 
 use crate::{
     admission::Activity,
@@ -50,6 +51,7 @@ struct Progress {
     processed: f64,
     levels: BTreeMap<String, f32>,
     error: Option<String>,
+    recovering: bool,
 }
 struct Control {
     action: Action,

@@ -1,224 +1,19 @@
+use super::worker::{RecoveryPlan, Worker, worker};
 use super::{Action, Control, Progress, conflict, number, update};
 use crate::{
     admission::ActivityLease,
     capture::{CaptureConfig, CapturePhase, CaptureSnapshot, CaptureSupervisor, Command},
-    inference::ChildModels,
     routes::{AppState, OperationGuard, stored_job_json},
 };
 use serde_json::{Value, json};
 use speakerdesk_core::{
-    audio::RecordingReader,
-    error::{ApiError, StoreError},
+    error::{ApiError, ChildError, StoreError},
     ids::JobId,
-    live::{
-        AudioNotice, Engine, EngineConfig, EngineEvent, Inbox, LiveCommand, SourceRuntime,
-        apply_canonical_candidate,
-    },
+    live::{AudioNotice, LiveCommand, LiveError},
     store::JobStore,
 };
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
-use tokio::sync::{mpsc, oneshot, watch};
-
-enum Engines {
-    Single(Box<Engine<ChildModels>>),
-    Sources(SourceRuntime<ChildModels>),
-}
-impl Engines {
-    fn inbox(&self) -> Arc<Mutex<Inbox>> {
-        match self {
-            Self::Single(e) => e.inbox(),
-            Self::Sources(e) => e.inbox(),
-        }
-    }
-    fn poll(&mut self) -> Result<Option<Vec<EngineEvent>>, String> {
-        match self {
-            Self::Single(e) => e.poll(),
-            Self::Sources(e) => e.poll(),
-        }
-        .map_err(|e| e.to_string())
-    }
-}
-struct Worker {
-    inbox: Arc<Mutex<Inbox>>,
-    wake: mpsc::Sender<()>,
-    result: watch::Receiver<Option<Result<(), String>>>,
-    task: tokio::task::JoinHandle<()>,
-}
-impl Worker {
-    fn push(&self, command: LiveCommand) -> Result<(), String> {
-        self.inbox
-            .lock()
-            .expect("live inbox")
-            .push(command)
-            .map_err(|e| e.to_string())?;
-        let _ = self.wake.try_send(());
-        Ok(())
-    }
-    fn failed(&self) -> Option<String> {
-        self.result
-            .borrow()
-            .as_ref()
-            .and_then(|r| r.as_ref().err())
-            .cloned()
-    }
-    async fn join(self) -> Result<Result<(), String>, StoreError> {
-        self.task
-            .await
-            .map_err(|e| StoreError::message(format!("Live worker cleanup failed: {e}")))?;
-        self.result
-            .borrow()
-            .clone()
-            .ok_or_else(|| StoreError::message("Live worker exited without a cleanup result"))
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn worker(
-    app: AppState,
-    id: JobId,
-    language: String,
-    dual: bool,
-    receipt: Option<crate::capture::ProcessingReceipt>,
-    operation: Arc<OperationGuard>,
-    progress: watch::Sender<Progress>,
-) -> Result<Worker, String> {
-    let models = app
-        .models()
-        .live_models(&operation.cancellation)
-        .ok_or("Live models are unavailable")?;
-    let (init_tx, init_rx) = oneshot::channel();
-    let (wake, mut receiver) = mpsc::channel(1);
-    let (result_tx, result) = watch::channel(None);
-    let task = tokio::task::spawn_blocking(move || {
-        let run = (|| {
-            let mut config = EngineConfig::new(id.as_str(), language);
-            let folder = app.data_dir().join(id.as_str());
-            if let Some(receipt) = receipt {
-                config.processed_microphone_contract = Some(receipt.sha256);
-                config.capture_catalog_sha256 =
-                    receipt.metadata["capture_source"]["catalog_sha256"]
-                        .as_str()
-                        .map(str::to_owned);
-            }
-            let mut engine = if dual {
-                let mic = RecordingReader::open(folder.join("microphone_clean.wav"))
-                    .map_err(|e| e.to_string())?;
-                let system =
-                    RecordingReader::open(folder.join("system.wav")).map_err(|e| e.to_string())?;
-                Engines::Sources(
-                    SourceRuntime::new(config, models, [mic, system]).map_err(|e| e.to_string())?,
-                )
-            } else {
-                Engines::Single(Box::new(
-                    Engine::single(config, models, folder.join("audio.wav"))
-                        .map_err(|e| e.to_string())?,
-                ))
-            };
-            init_tx
-                .send(engine.inbox())
-                .map_err(|_| "Live owner stopped during initialization".to_string())?;
-            while receiver.blocking_recv().is_some() {
-                if operation.cancellation.is_cancelled() {
-                    return Err(
-                        "Live transcription interrupted; saved audio and edits are retained."
-                            .into(),
-                    );
-                }
-                while let Some(events) = engine.poll()? {
-                    let mut finished = false;
-                    for event in events {
-                        match event {
-                            EngineEvent::CanonicalRevision { candidate, .. } => {
-                                update(&app, &id, &operation, |job| {
-                                    let document = job
-                                        .document
-                                        .as_ref()
-                                        .ok_or_else(|| conflict("Meeting document is missing."))?;
-                                    job.document =
-                                        Some(apply_canonical_candidate(document, &candidate));
-                                    Ok(())
-                                })
-                                .map_err(|e| e.message)?;
-                            }
-                            EngineEvent::Progress {
-                                processed_seconds, ..
-                            } => {
-                                progress.send_modify(|p| p.processed = processed_seconds);
-                            }
-                            EngineEvent::FlushAck {
-                                request_id,
-                                received_sample,
-                                available_sample,
-                                speech_observed_sample,
-                                fast_sequence,
-                            } => {
-                                update(&app,&id,&operation,|job|{job.extra.insert("pause_flush".into(),json!({"request_id":request_id,"status":"complete","received_sample":received_sample,"available_sample":available_sample,"speech_observed_sample":speech_observed_sample,"fast_sequence":fast_sequence}));Ok(())}).map_err(|e|e.message)?;
-                            }
-                            EngineEvent::LanguageRegistered { generation, .. } => {
-                                update(&app, &id, &operation, |job| {
-                                    job.extra.insert(
-                                        "language_acknowledged_revision".into(),
-                                        json!(generation),
-                                    );
-                                    Ok(())
-                                })
-                                .map_err(|e| e.message)?;
-                            }
-                            EngineEvent::CaptureFinished {
-                                canonical_observed_sample,
-                                canonical_uncertain_samples,
-                                ..
-                            } => {
-                                update(&app, &id, &operation, |job| {
-                                    job.extra.insert(
-                                        "canonical_observed_sample".into(),
-                                        json!(canonical_observed_sample),
-                                    );
-                                    job.extra.insert(
-                                        "canonical_uncertain_samples".into(),
-                                        json!(canonical_uncertain_samples),
-                                    );
-                                    Ok(())
-                                })
-                                .map_err(|e| e.message)?;
-                                finished = true;
-                            }
-                            EngineEvent::Finished { .. } => finished = true,
-                            EngineEvent::RefinementResult { .. } => {
-                                return Err("Unexpected live refinement result".into());
-                            }
-                        }
-                    }
-                    if finished {
-                        return Ok(());
-                    }
-                }
-            }
-            Err("Live command owner disappeared".into())
-        })();
-        result_tx.send_replace(Some(run));
-    });
-    match init_rx.await {
-        Ok(inbox) => Ok(Worker {
-            inbox,
-            wake,
-            result,
-            task,
-        }),
-        Err(_) => {
-            task.await.map_err(|e| e.to_string())?;
-            Err(result
-                .borrow()
-                .as_ref()
-                .and_then(|r| r.as_ref().err())
-                .cloned()
-                .unwrap_or_else(|| "Live worker could not initialize".into()))
-        }
-    }
-}
+use std::{path::PathBuf, sync::Arc};
+use tokio::sync::{mpsc, watch};
 
 struct Recording {
     app: AppState,
@@ -233,6 +28,8 @@ struct Recording {
     phase: CapturePhase,
     pause_pending: bool,
     stopping: bool,
+    recovery_attempted: bool,
+    cleanup_error: Option<String>,
 }
 impl Recording {
     async fn mutate(
@@ -250,7 +47,7 @@ impl Recording {
         .await
         .map_err(|e| ApiError::new(500, e.to_string()))?
     }
-    fn feed(&mut self, end: u32) -> Result<(), String> {
+    fn feed(&mut self, end: u32) -> Result<(), LiveError> {
         if let Some(worker) = &self.worker {
             if worker.result.borrow().is_some() {
                 return Err(worker
@@ -275,8 +72,79 @@ impl Recording {
             self.failure = Some(message.clone());
             self.progress
                 .send_modify(|p| p.error = Some(message.clone()));
-            let _=self.mutate(move|job|{job.message=format!("Live transcription stopped: {message}. Audio is still being recorded. Stop to retain the recording.");job.extra.insert("live_inference_error".into(),json!(message));Ok(())}).await;
+            self.progress.send_modify(|p| p.recovering = false);
+            let _=self.mutate(move|job|{job.message=format!("Live transcription stopped: {message}. Audio is still being recorded. Stop to retain the recording.");job.extra.insert("live_inference_error".into(),json!(message));if let Some(recovery)=job.extra.get_mut("live_recovery"){recovery["status"]=json!("failed");}Ok(())}).await;
         }
+    }
+    async fn recover(
+        &mut self,
+        error: LiveError,
+        snapshot: &CaptureSnapshot,
+        dual: bool,
+    ) -> Result<(), ApiError> {
+        if self.recovery_attempted
+            || !matches!(
+                error,
+                LiveError::Child(ChildError::ProcessLost { .. } | ChildError::Timeout)
+            )
+            || self.operation.cancellation.is_cancelled()
+        {
+            self.fail(error.to_string()).await;
+            return Ok(());
+        }
+        self.recovery_attempted = true;
+        if let Some(worker) = self.worker.take()
+            && let Err(error) = worker.join().await
+        {
+            self.cleanup_error = Some(error.to_string());
+            self.fail(error.to_string()).await;
+            return Ok(());
+        }
+        let app = self.app.clone();
+        let id = self.id.clone();
+        let op = self.operation.clone();
+        let through = i64::from(snapshot.committed_sample);
+        let plan = tokio::task::spawn_blocking(move || {
+            app.store()
+                .update_job(&id, |job| {
+                    if !op.current(job) {
+                        return Err(conflict("Recording was cancelled before recovery."));
+                    }
+                    RecoveryPlan::prepare(job, through)
+                })?
+                .map(|(_, plan)| plan)
+                .ok_or_else(|| conflict("Recording disappeared before recovery."))
+        })
+        .await
+        .map_err(|e| ApiError::new(500, e.to_string()))?;
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.fail(error.message).await;
+                return Ok(());
+            }
+        };
+        self.received = through;
+        self.progress.send_modify(|p| {
+            p.recovering = true;
+            p.error = None;
+        });
+        match worker(
+            self.app.clone(),
+            self.id.clone(),
+            self.language.clone(),
+            dual,
+            snapshot.processing.clone(),
+            self.operation.clone(),
+            self.progress.clone(),
+            Some(plan),
+        )
+        .await
+        {
+            Ok(worker) => self.worker = Some(worker),
+            Err(error) => self.fail(error.to_string()).await,
+        }
+        Ok(())
     }
     async fn snapshot(&mut self, snapshot: &CaptureSnapshot, dual: bool) -> Result<(), ApiError> {
         self.progress
@@ -311,17 +179,18 @@ impl Recording {
                 snapshot.processing.clone(),
                 self.operation.clone(),
                 self.progress.clone(),
+                None,
             )
             .await
             {
                 Ok(worker) => self.worker = Some(worker),
-                Err(e) => self.fail(e).await,
+                Err(e) => self.fail(e.to_string()).await,
             }
         }
         if self.failure.is_none()
             && let Err(e) = self.feed(snapshot.committed_sample)
         {
-            self.fail(e).await;
+            self.recover(e, snapshot, dual).await?;
         }
         if self.phase != snapshot.phase {
             self.phase = snapshot.phase;
@@ -364,7 +233,7 @@ impl Recording {
                             request_id: Some("pause".into()),
                             through_sample: Some(self.received),
                         })
-                        .map_err(conflict)?;
+                        .map_err(|e| conflict(e.to_string()))?;
                 }
             }
         }
@@ -433,6 +302,7 @@ impl Recording {
             }
             Action::Language { language, revision } => {
                 if self.failure.is_some()
+                    || self.progress.borrow().recovering
                     || self.worker.is_none()
                     || !matches!(self.phase, CapturePhase::Recording | CapturePhase::Paused)
                 {
@@ -461,7 +331,7 @@ impl Recording {
                         generation: next,
                         start_sample: sample,
                     })
-                    .map_err(conflict)?;
+                    .map_err(|e| conflict(e.to_string()))?;
                 self.language = language;
                 self.epoch = next;
                 let app = self.app.clone();
@@ -508,6 +378,8 @@ pub(super) async fn record(
         phase: CapturePhase::Starting,
         pause_pending: false,
         stopping: false,
+        recovery_attempted: false,
+        cleanup_error: None,
     };
     let config = CaptureConfig {
         job_id: id.as_str().into(),
@@ -517,6 +389,7 @@ pub(super) async fn record(
     };
     let capture = CaptureSupervisor::spawn(helper, config).await;
     let mut cleanup = Ok(());
+    let mut retained_snapshot = None;
     let result = match capture {
         Err(error) => Err(error.to_string()),
         Ok(capture) => {
@@ -538,7 +411,7 @@ pub(super) async fn record(
                             let _=request.reply.send(response);
                         }
                         _=async{match &mut state.worker {Some(w)=>{let _=w.result.changed().await;},None=>std::future::pending::<()>().await}}, if state.failure.is_none()=>{
-                            if let Some(error)=state.worker.as_ref().and_then(Worker::failed){state.fail(error).await;}
+                            if let Some(error)=state.worker.as_ref().and_then(Worker::failed){let snapshot=updates.borrow().clone();state.recover(error,&snapshot,dual).await.map_err(|e|e.message)?;}
                             else if state.worker.as_ref().is_some_and(|w|w.result.has_changed().is_err()){state.fail("Live worker ended unexpectedly".into()).await;}
                         }
                     }
@@ -547,6 +420,7 @@ pub(super) async fn record(
             // A capture failure is a product failure; a failed join is a cleanup failure.
             match capture.finish().await {
                 Ok(final_snapshot) => {
+                    retained_snapshot = Some(final_snapshot.clone());
                     if !operation.cancellation.is_cancelled() {
                         if let Err(e) = state.snapshot(&final_snapshot, dual).await {
                             state.failure.get_or_insert(e.message);
@@ -583,7 +457,10 @@ pub(super) async fn record(
             }
         }
     };
-    if let Some(worker) = state.worker.take() {
+    if state.worker.is_none() && result.is_ok() && state.failure.is_none() {
+        state.failure = Some("Capture ended before live inference could initialize".into());
+    }
+    while let Some(worker) = state.worker.take() {
         if worker.result.borrow().is_none() {
             let command = if operation.cancellation.is_cancelled() {
                 LiveCommand::Shutdown
@@ -591,20 +468,26 @@ pub(super) async fn record(
                 LiveCommand::Stop
             };
             if let Err(e) = worker.push(command) {
-                state.failure.get_or_insert(e);
+                state.failure.get_or_insert(e.to_string());
             }
         }
         match worker.join().await {
-            Ok(Err(e)) => {
-                state.failure.get_or_insert(e);
+            Ok(Err(error)) => {
+                if state.failure.is_none()
+                    && let Some(snapshot) = &retained_snapshot
+                {
+                    // EOF may be the first operation to observe a dead child. The capture
+                    // writer is already drained; reconstruct its final saved prefix once.
+                    if let Err(e) = state.recover(error, snapshot, dual).await {
+                        state.failure.get_or_insert(e.message);
+                    }
+                } else {
+                    state.failure.get_or_insert(error.to_string());
+                }
             }
             Err(e) => cleanup = Err(e),
             Ok(Ok(())) => {}
         }
-    } else if result.is_ok() {
-        state
-            .failure
-            .get_or_insert("Capture ended before live inference could initialize".into());
     }
     if let Err(e) = result {
         state.failure.get_or_insert(e);
@@ -613,6 +496,9 @@ pub(super) async fn record(
         state
             .failure
             .get_or_insert("Live worker cleanup could not be confirmed".into());
+    }
+    if let Some(error) = state.cleanup_error.take() {
+        cleanup = Err(StoreError::message(error));
     }
     if !operation.cancellation.is_cancelled() {
         let failure = state.failure.clone();

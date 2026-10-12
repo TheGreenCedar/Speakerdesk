@@ -35,6 +35,8 @@ pub enum ChildError {
     Timeout,
     #[error("metal unavailable")]
     MetalUnavailable,
+    #[error("inference process lost: {message}")]
+    ProcessLost { message: String },
 }
 
 impl ChildError {

@@ -390,6 +390,20 @@ async fn run(
             continue;
         };
         if process.is_none() {
+            // Releasing a lost session must not create another child just to close it.
+            if matches!(
+                request,
+                Request::VadClose { .. } | Request::DiarClose { .. }
+            ) {
+                let _ = call.reply.send(Ok(Response::Ack));
+                continue;
+            }
+            if request_handle(&mut request).is_some() {
+                let _ = call.reply.send(Err(ChildError::ProcessLost {
+                    message: "stale model session after child restart".into(),
+                }));
+                continue;
+            }
             generation += 1;
             let started = Process::start(&executable, generation, &model_root).await;
             match started {
@@ -416,9 +430,9 @@ async fn run(
                         _ => {
                             child.reap().await;
                             pid.store(0, Ordering::Release);
-                            let _ = call
-                                .reply
-                                .send(Err(ChildError::failed("inference handshake failed", true)));
+                            let _ = call.reply.send(Err(ChildError::ProcessLost {
+                                message: "inference handshake failed".into(),
+                            }));
                             continue;
                         }
                     }
@@ -432,10 +446,9 @@ async fn run(
         let child = process.as_mut().expect("started child");
         if let Some(handle) = request_handle(&mut request) {
             if handle.generation != child.generation {
-                let _ = call.reply.send(Err(ChildError::failed(
-                    "stale model session after child restart",
-                    false,
-                )));
+                let _ = call.reply.send(Err(ChildError::ProcessLost {
+                    message: "stale model session after child restart".into(),
+                }));
                 continue;
             }
             handle.generation = 0;
@@ -456,7 +469,14 @@ async fn run(
             Err(error) => {
                 process.take().expect("child").reap().await;
                 pid.store(0, Ordering::Release);
-                Err(error)
+                Err(match error {
+                    ChildError::Cancelled
+                    | ChildError::Timeout
+                    | ChildError::ProcessLost { .. } => error,
+                    other => ChildError::ProcessLost {
+                        message: other.to_string(),
+                    },
+                })
             }
         };
         let _ = call.reply.send(result);
@@ -560,5 +580,7 @@ fn unexpected(response: &Response) -> ChildError {
     )
 }
 fn io_to_child(error: io::Error) -> ChildError {
-    ChildError::failed(error.to_string(), true)
+    ChildError::ProcessLost {
+        message: error.to_string(),
+    }
 }
