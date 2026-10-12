@@ -100,17 +100,37 @@ impl Running {
             .unwrap()
     }
     async fn wait(&self, path: &str, predicate: impl Fn(&Value) -> bool) -> Value {
+        let mut last = Value::Null;
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let value = self.get(path).await;
                 if predicate(&value) {
                     return value;
                 }
+                last = value;
                 tokio::time::sleep(Duration::from_millis(15)).await;
             }
         })
         .await
-        .unwrap_or_else(|_| panic!("timed out at {path}"))
+        .unwrap_or_else(|_| {
+            let rows = last["document"]["segments"].as_array().into_iter().flatten().take(8)
+                .map(|row| json!({
+                    "id":row["id"],"canonical_state":row["canonical_state"],
+                    "start_sample":row["start_sample"],"end_sample":row["end_sample"],
+                    "text_end_sample":row["canonical_text_end_sample"],
+                    "text_bytes":row["text"].as_str().map(str::len),
+                    "language_epoch":row["language_epoch"],"machine_revision":row["machine_revision"],
+                    "review":row["review"],"source":row["capture_source"],
+                })).collect::<Vec<_>>();
+            panic!("timed out at {path}; last state: {}", json!({
+                "id":last["id"],"status":last["status"],"duration":last["duration"],
+                "configured":last["readiness"]["configured"],"inference_owned":last["inference_owned"],
+                "language_acknowledged_revision":last["language_acknowledged_revision"],
+                "pause_flush":last["pause_flush"],"live_recovery":last["live_recovery"],
+                "message":last["message"].as_str().map(|message|message.chars().take(200).collect::<String>()),
+                "rows":rows,
+            }));
+        })
     }
     async fn post(&self, path: &str, body: Value) -> reqwest::Response {
         self.client
@@ -263,15 +283,60 @@ async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_o
         assert_eq!(changed.status(), 200);
         host.wait("api/meeting", |v| v["language_acknowledged_revision"] == 1)
             .await;
-        let old = host.get(&path).await;
-        let history = old["language_history"].clone();
+        // Finish edit feedback before killing the child. The already sealed
+        // protected prefix must stay unchanged; a different open French tail
+        // is what recovery interrupts and marks for review.
+        trigger(root, 2);
+        // Two seven-second stages, less the writer's half-second watermark,
+        // rounded down to a complete Silero frame: no later PCM is committed.
+        let pre_loss_observed = (14 * 16_000 - 8_000) / 512 * 512;
+        let pre_loss = host
+            .wait(&path, |job| {
+                let Some(rows) = job["document"]["segments"].as_array() else {
+                    return false;
+                };
+                job["duration"].as_f64().unwrap_or(0.) >= 13.5
+                    && rows
+                        .iter()
+                        .any(|row| row["id"] == old_id && row["canonical_state"] == "sealed")
+                    && rows
+                        .iter()
+                        .filter(|row| {
+                            row["language_epoch"] == 1
+                                && row["canonical_state"] == "open"
+                                && row["text"] == "Replay transcript"
+                                && row["end_sample"].as_i64() == Some(pre_loss_observed)
+                                && row["canonical_text_end_sample"]
+                                    .as_i64()
+                                    .zip(row["start_sample"].as_i64())
+                                    .is_some_and(|(text_end, start)| text_end > start)
+                        })
+                        .count()
+                        == if dual { 2 } else { 1 }
+            })
+            .await;
+        let pre_loss_rows = pre_loss["document"]["segments"].as_array().unwrap();
+        let protected_before = pre_loss_rows
+            .iter()
+            .find(|row| row["id"] == old_id)
+            .unwrap()
+            .clone();
+        let interrupted = pre_loss_rows
+            .iter()
+            .filter(|row| {
+                row["canonical_state"] == "open" && !row["text"].as_str().unwrap_or("").is_empty()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!interrupted.is_empty());
+        let history = pre_loss["language_history"].clone();
         let old_pid: i32 = fs::read_to_string(root.join("fixture-child-pid"))
             .unwrap()
             .parse()
             .unwrap();
         fs::write(root.join("hold-live-feed"), b"block recovered worker only").unwrap();
         assert_eq!(unsafe { libc::kill(old_pid, libc::SIGKILL) }, 0);
-        trigger(root, 2);
+        trigger(root, 3);
         wait_file(&root.join("recovery-feed-started")).await;
         let replay = host
             .wait(&path, |v| v["live_recovery"]["status"] == "replaying")
@@ -285,9 +350,37 @@ async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_o
         assert_ne!(new_pid, old_pid);
         assert_eq!(unsafe { libc::kill(old_pid, 0) }, -1);
         let before = replay["document"].clone();
-        trigger(root, 3);
+        let replay_rows = before["segments"].as_array().unwrap();
+        assert_eq!(
+            replay_rows.iter().find(|row| row["id"] == old_id).unwrap(),
+            &protected_before,
+            "{mode}: recovery must preserve an already sealed protected prefix"
+        );
+        for prior in &interrupted {
+            let row = replay_rows
+                .iter()
+                .find(|row| row["id"] == prior["id"])
+                .unwrap();
+            assert_eq!(row["canonical_state"], "sealed", "{mode}: {row}");
+            assert_eq!(row["review"], true, "{mode}: {row}");
+            assert_eq!(row["canonical_unresolved"], "inference_restart_boundary");
+            for key in [
+                "text",
+                "start",
+                "end",
+                "speaker",
+                "machine_revision",
+                "capture_source",
+            ] {
+                assert_eq!(
+                    row[key], prior[key],
+                    "{mode}: interrupted passage field {key}"
+                );
+            }
+        }
+        trigger(root, 4);
         host.wait("api/meeting", |v| {
-            v["duration"].as_f64().unwrap_or(0.) >= 20.5
+            v["duration"].as_f64().unwrap_or(0.) >= 27.5
         })
         .await;
         if mode == "recover" {
@@ -322,9 +415,9 @@ async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_o
                 assert_eq!(unsafe { libc::kill(new_pid, libc::SIGKILL) }, 0);
                 host.wait(&path, |v| v["live_recovery"]["status"] == "failed")
                     .await;
-                trigger(root, 4);
+                trigger(root, 5);
                 host.wait("api/meeting", |v| {
-                    v["duration"].as_f64().unwrap_or(0.) >= 27.5
+                    v["duration"].as_f64().unwrap_or(0.) >= 34.5
                 })
                 .await;
                 let failed = host.stop(&id).await;
@@ -348,7 +441,7 @@ async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_o
                     let paused = host
                         .wait("api/meeting", |v| v["pause_flush"]["status"] == "complete")
                         .await;
-                    assert_eq!(paused["pause_flush"]["received_sample"], 336000);
+                    assert_eq!(paused["pause_flush"]["received_sample"], 448000);
                     assert_eq!(
                         host.post(&format!("api/meetings/{id}/resume"), json!({}))
                             .await
@@ -358,7 +451,7 @@ async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_o
                 }
                 let final_job = host.stop(&id).await;
                 assert_eq!(final_job["status"], "ready", "{final_job}");
-                assert_eq!(final_job["canonical_observed_sample"], 336513);
+                assert_eq!(final_job["canonical_observed_sample"], 448513);
                 assert_eq!(final_job["language_history"], history);
                 let rows = final_job["document"]["segments"].as_array().unwrap();
                 let ids: std::collections::HashSet<_> =
@@ -369,7 +462,10 @@ async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_o
                 assert_eq!(old["start"], 0.1);
                 assert_eq!(old["speaker"], old_speaker);
                 assert_eq!(old["canonical_state"], "sealed");
-                assert_eq!(old["review"], true);
+                assert_eq!(
+                    old, &protected_before,
+                    "{mode}: later recovery publication must preserve the sealed edited prefix"
+                );
                 assert_eq!(final_job["document"]["speakers"][&old_speaker], "Casey");
                 let boundary = final_job["live_recovery"]["from_sample"].as_i64().unwrap();
                 let new: Vec<_> = rows
@@ -1200,13 +1296,21 @@ async fn ordinary_live_language_evidence_survives_routing_edits_and_restart() {
             }
         }
         if case == "mixed" {
-            let en = json!({"probabilities":[0.99,0.01],"codes":["en","de"]});
-            let de = json!({"probabilities":[0.01,0.99],"codes":["en","de"]});
-            // Final 28s decode has two disjoint cores; each core gets its own
-            // confident language. It must not become one confident 'auto' row.
+            // The acknowledged pause has already published the long English
+            // prefix. Final EOF decodes its remaining tail in German, regardless
+            // of how many probes or balanced cuts were needed before the pause.
+            assert_eq!(prefix["language"], "en");
+            assert!(prefix["canonical_text_end_sample"].as_i64().unwrap() > 392000);
+            assert!(
+                prefix["language_detection"]["probes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|probe| probe["language"] == "en")
+            );
             fs::write(
-                root.join("replay-probe-sequence.json"),
-                json!([en, en, en, en, en, de]).to_string(),
+                root.join("replay-probe.json"),
+                json!({"probabilities":[0.01,0.99],"codes":["en","de"]}).to_string(),
             )
             .unwrap();
         }
@@ -1263,6 +1367,25 @@ async fn ordinary_live_language_evidence_survives_routing_edits_and_restart() {
             assert!(
                 probes.iter().any(|p| p["language"] == "en")
                     && probes.iter().any(|p| p["language"] == "de")
+            );
+            let retained = probes
+                .iter()
+                .take_while(|p| p["language"] == "en")
+                .cloned()
+                .collect::<Vec<_>>();
+            let original = prefix["language_detection"]["probes"].as_array().unwrap();
+            assert!(!retained.is_empty() && retained.len() < original.len());
+            assert_eq!(
+                retained.as_slice(),
+                &original[..retained.len()],
+                "accepted prefix keeps the actual previous language decisions"
+            );
+            let cutoff = retained.last().unwrap()["end_sample"].as_i64().unwrap();
+            assert!(
+                probes[retained.len()..]
+                    .iter()
+                    .all(|probe| probe["language"] == "de"
+                        && probe["start_sample"].as_i64().unwrap() >= cutoff)
             );
         } else if case == "uncertain" {
             assert_eq!(rows[0]["review"], true);

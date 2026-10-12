@@ -39,7 +39,8 @@ Local implementation branch: `codex/python-free-mac`.
    Sealed live timing, identity and saved Auto/explicit-language accuracy passes pass
    real-model saved-PCM checks, including long English context assembly and live
    language-decision persistence across protected continuation and restart. Long
-   non-English accuracy, rolling live refinement, qualified Pause/Resume, raw
+   growing rows retain accepted cores instead of re-decoding completed audio.
+   Non-English accuracy, rolling live refinement, qualified Pause/Resume, raw
    dual-source echo, physical capture and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
@@ -1210,6 +1211,55 @@ the pending Tauri live/setup/long-import workflow, default native startup and ac
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
+
+## Bounded repeated live decoding
+
+The existing decode-progress owner now retains accepted disjoint-core text,
+language decisions and the completed sample endpoint. Growing audio replans only
+the unaccepted suffix. The last core remains replaceable, incomplete results stay
+retryable without erasing published words, and protected continuation and sealed
+cleanup release the associated progress. No PCM history or second document store
+was added. Whole-open activity/projection scans are not bounded by this change.
+
+The counted-model replay failed before the change: at 36 seconds it decoded two
+18-second crops, including the already accepted origin. Three focused tests now
+pass for 30/36/42-second growth, unique acoustic ownership markers, incomplete
+prefix/tail retry, split EOF, retained mixed-language decisions, source identity,
+protected edits and language boundaries. Fixtures distinguish received audio from
+Silero's complete-frame observed endpoint. The mounted mixed-language replay also
+checks that retained English probes are exactly the original values while only
+the final tail receives new German decisions. The recovery matrix was corrected
+to distinguish an already sealed protected prefix from an interrupted open tail;
+its former unconditional review flag assumption failed deterministically.
+
+The final gate passes 172 core, 61 host, 13 mounted live-service, one service
+lifecycle and nine process tests, plus strict all-target core/host Clippy. Four
+existing explicit Rust ignores remain. Logs are
+`/tmp/speakerdesk-live-growth-{red,green,recovery-red,recovery-green,tests,clippy,release}.log`.
+The unused language-probe sequence fixture branch was removed.
+
+The locked optimized executable built in 23.46 seconds with the existing upstream
+mlx-sys warnings. SHA-256:
+`123b0fbd465cdaeeb7e316dacdaed97c46c1c97c72c5facae4fc253d1c293f33`.
+The retained 34.9135625-second synthetic speech passed paced capture through real
+MLX models with all 114 independently authored words in exact order. All 558,617
+PCM samples remain byte-exact. Manual-language evidence, the single canonical
+identity, full host restart and TXT/SRT/VTT/JSON exports pass. The successful job
+is `cf11d9e804e547d9ae287fcf8ccaeae8`, canonical row
+`utterance-6ed1f93802b38185db42b85f`. Evidence is in
+`/private/tmp/speakerdesk-long-refinement.USlLQY/growth-after/`, the external
+qualification harness is `growth.py`, and its log is `growth-after.log` in the
+parent directory. All qualification hosts, children and replay helpers exited.
+This proves real-model service behavior with saved synthetic audio, not physical
+capture, Tauri interaction or an equivalent performance measurement.
+
+The complete replacement remains active and unfinished. The isolated Tauri
+preview remains the preceding long-context candidate; no new UI claim is made
+while CUA reports the Mac locked. Rolling accuracy, affected-history work,
+qualified Pause/Resume and raw dual-source echo, physical capture and long-session
+gates, pending Tauri workflows, native startup/package, disposable updater/security
+qualification and equivalent 0.6.6 measurements remain. Installed app, production
+data, model cache and GitHub are untouched; Windows and issue #25 are deferred.
 
 ## Ordinary live language publication
 

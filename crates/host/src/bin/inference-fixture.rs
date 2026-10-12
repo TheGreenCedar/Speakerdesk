@@ -41,7 +41,6 @@ fn main() {
     let mut race_error = false;
     let root = PathBuf::from(std::env::args_os().nth(2).unwrap());
     let mut context_index = 0usize;
-    let mut probe_index = 0usize;
     let mut held_live_feed = false;
     let mut held_live_asr = false;
     while let Ok(envelope) = read_envelope(&mut std::io::stdin()) {
@@ -311,24 +310,12 @@ fn main() {
                     pcm.len()
                 )
                 .unwrap();
-                let scores =
-                    if let Ok(bytes) = std::fs::read(root.join("replay-probe-sequence.json")) {
-                        let sequence: Vec<speakerdesk_core::ipc::LanguageProbeOut> =
-                            serde_json::from_slice(&bytes).unwrap();
-                        let scores = sequence
-                            .get(probe_index)
-                            .unwrap_or_else(|| sequence.last().unwrap())
-                            .clone();
-                        probe_index += 1;
-                        scores
-                    } else {
-                        std::fs::read(root.join("replay-probe.json"))
-                            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
-                            .unwrap_or_else(|_| speakerdesk_core::ipc::LanguageProbeOut {
-                                probabilities: vec![0.99, 0.01],
-                                codes: vec!["en".into(), "de".into()],
-                            })
-                    };
+                let scores = std::fs::read(root.join("replay-probe.json"))
+                    .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+                    .unwrap_or_else(|_| speakerdesk_core::ipc::LanguageProbeOut {
+                        probabilities: vec![0.99, 0.01],
+                        codes: vec!["en".into(), "de".into()],
+                    });
                 Ok(Response::Probe(scores))
             }
             Request::Transcribe { language, pcm, .. } => {

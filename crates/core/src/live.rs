@@ -1593,9 +1593,20 @@ impl<M: Models> Recognizer for ModelRecognizer<M> {
     }
 }
 
-struct CorePart {
+#[derive(Default)]
+struct DecodeProgress {
+    end_sample: i64,
+    audio_revision: i64,
+    completed: Option<CompletedCores>,
+}
+
+/// Accepted disjoint cores of the currently growing utterance. The final core
+/// remains an active tail until later audio requires another bounded cut.
+struct CompletedCores {
+    end_sample: i64,
     text: String,
-    complete: bool,
+    decisions: Vec<crate::language::ProbeEvent>,
+    review: bool,
 }
 
 /// Canonical resident engine. PCM stays on disk; weights stay behind `M`.
@@ -1612,7 +1623,7 @@ pub struct Engine<M: Models> {
     capture_finished: bool,
     fast_sequence: i64,
     book: UtteranceBook,
-    last_decoded: HashMap<String, (i64, i64)>,
+    last_decoded: HashMap<String, DecodeProgress>,
     published: HashMap<String, Segment>,
     next_utterance: usize,
     vad: Option<Handle>,
@@ -2242,8 +2253,8 @@ impl<M: Models + 'static> Engine<M> {
                 continue;
             }
             self.attach(&identity)?;
-            let last = self.last_decoded.get(&identity).copied();
-            let changed = last.is_none_or(|(_, revision)| revision != row.audio_revision);
+            let last = self.last_decoded.get(&identity);
+            let changed = last.is_none_or(|last| last.audio_revision != row.audio_revision);
             let length = row.end_sample - row.start_sample;
             let stamp = self.language_at(row.start_sample);
             let authoritative = self.english_timing(&stamp.language, row.language.as_deref());
@@ -2256,11 +2267,13 @@ impl<M: Models + 'static> Engine<M> {
                 || row.state == UtteranceState::Sealed
                 || (length >= 6 * RATE
                     && (last.is_none()
-                        || (decode_open && row.end_sample - last.expect("decoded").0 >= 3 * RATE)));
+                        || (decode_open
+                            && row.end_sample - last.expect("decoded").end_sample >= 3 * RATE)));
             let long_unaligned = length > limit && !authoritative;
             if long_unaligned && row.state == UtteranceState::Open && !final_pass {
                 due = last.is_none()
-                    || (decode_open && row.end_sample - last.expect("decoded").0 >= 6 * RATE);
+                    || (decode_open
+                        && row.end_sample - last.expect("decoded").end_sample >= 6 * RATE);
             }
             if changed && due && !row.protected_fields.iter().any(|field| field == "text") {
                 self.decode(&identity)?;
@@ -2321,16 +2334,18 @@ impl<M: Models + 'static> Engine<M> {
         } else {
             MAX_DECODE_SAMPLES
         };
+        let mut progress = self.last_decoded.remove(identity).unwrap_or_default();
         if length <= limit {
             self.decode_short(&row, &stamp.language)?;
         } else if authoritative {
             self.decode_authoritative(&row, &stamp.language)?;
         } else {
-            self.decode_cores(&row, &stamp.language)?;
+            self.decode_cores(&row, &stamp.language, &mut progress)?;
         }
         let row = self.book.rows.get(identity).expect("row");
-        self.last_decoded
-            .insert(identity.to_string(), (row.end_sample, row.audio_revision));
+        progress.end_sample = row.end_sample;
+        progress.audio_revision = row.audio_revision;
+        self.last_decoded.insert(identity.to_string(), progress);
         Ok(())
     }
 
@@ -2440,36 +2455,62 @@ impl<M: Models + 'static> Engine<M> {
         Ok(())
     }
 
-    fn decode_cores(&mut self, row: &Utterance, language: &str) -> Result<(), LiveError> {
-        let core_row = CoreAnchor {
-            id: row.id.clone(),
-            start_sample: row.start_sample,
-            end_sample: row.end_sample,
-            machine_revision: row.machine_revision,
-            audio_revision: row.audio_revision,
-            language_epoch: row.language_epoch,
-            speech_regions: row.speech_regions.clone(),
-        };
-        let plan = {
+    fn decode_cores(
+        &mut self,
+        row: &Utterance,
+        language: &str,
+        progress: &mut DecodeProgress,
+    ) -> Result<(), LiveError> {
+        let start = progress
+            .completed
+            .as_ref()
+            .map_or(row.start_sample, |part| part.end_sample);
+        let edges = if row.end_sample - start <= MAX_DECODE_SAMPLES {
+            vec![start, row.end_sample]
+        } else {
+            // Only the unaccepted suffix can move. Do not search or validate gaps
+            // behind a completed boundary on subsequent capture notifications.
+            let first = row
+                .speech_regions
+                .partition_point(|span| span.end_sample <= start);
+            let core_row = CoreAnchor {
+                id: row.id.clone(),
+                start_sample: start,
+                end_sample: row.end_sample,
+                machine_revision: row.machine_revision,
+                audio_revision: row.audio_revision,
+                language_epoch: row.language_epoch,
+                speech_regions: row.speech_regions[first..]
+                    .iter()
+                    .map(|span| SampleSpan {
+                        start_sample: span.start_sample.max(start),
+                        end_sample: span.end_sample,
+                    })
+                    .collect(),
+            };
             let ledger = Arc::clone(&self.ledger);
-            plan_cores(&core_row, |start, end| {
+            let plan = plan_cores(&core_row, |start, end| {
                 ledger
                     .lock()
                     .expect("speech ledger")
                     .admission(start, end)
                     .unwrap_or_else(|_| pending_admission(start, end))
-            })
+            });
+            validate_core_plan(&plan, &core_row)?
         };
-        let edges = validate_core_plan(&plan, &core_row)?;
         let anchor = anchor_from(row);
-        let mut requests = Vec::new();
+        let mut text = progress
+            .completed
+            .as_ref()
+            .map_or_else(String::new, |part| part.text.clone());
+        let mut decisions = progress
+            .completed
+            .as_ref()
+            .map_or_else(Vec::new, |part| part.decisions.clone());
+        let mut review = progress.completed.as_ref().is_some_and(|part| part.review);
+        let mut complete = true;
         for pair in edges.windows(2) {
-            requests.push(request_for(&anchor, pair[0], pair[1], pair[0], pair[1]));
-        }
-        let mut parts = Vec::new();
-        let mut decisions = Vec::new();
-        let mut review = false;
-        for request in &requests {
+            let request = request_for(&anchor, pair[0], pair[1], pair[0], pair[1]);
             let passages = self.transcribe_span(
                 request.start_sample,
                 request.end_sample,
@@ -2483,18 +2524,26 @@ impl<M: Models + 'static> Engine<M> {
                 request.start_sample,
             );
             review |= passages.iter().any(|passage| passage.review);
-            let tail = tail_part(request, &passages, false);
-            parts.push(CorePart {
-                text: tail.text,
-                complete: tail.complete,
-            });
+            let tail = tail_part(&request, &passages, false);
+            if !tail.complete {
+                // The first unowned core stays retryable. Never freeze an
+                // incomplete prefix or publish later words across this hole.
+                complete = false;
+                break;
+            }
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&tail.text);
+            if request.end_sample < row.end_sample {
+                progress.completed = Some(CompletedCores {
+                    end_sample: request.end_sample,
+                    text: text.clone(),
+                    decisions: decisions.clone(),
+                    review,
+                });
+            }
         }
-        let complete = parts.iter().all(|part| part.complete);
-        let text = parts
-            .iter()
-            .map(|part| part.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
         self.book
             .apply_model(&row.id, &text, DecodeStage::Live, complete)?;
         let stored = self.book.rows.get_mut(&row.id).expect("row");
@@ -2510,7 +2559,6 @@ impl<M: Models + 'static> Engine<M> {
         } else {
             stored.canonical_unresolved = Some("incomplete_cohere_revision".to_string());
         }
-        let _ = plan;
         Ok(())
     }
 
@@ -3729,6 +3777,9 @@ mod tests {
         probe_calls: AtomicUsize,
         probe_scores: Mutex<VecDeque<Result<LanguageProbeOut, ChildError>>>,
         transcription_languages: Mutex<Vec<String>>,
+        transcription_crops: Mutex<Vec<(f32, usize)>>,
+        clock_text: AtomicBool,
+        transcription_results: Mutex<VecDeque<AsrText>>,
         vad_sessions: Mutex<BTreeMap<u64, (u64, Vec<f32>)>>,
         next_session: AtomicUsize,
         fail_diar_open: AtomicBool,
@@ -3750,6 +3801,9 @@ mod tests {
                 probe_calls: AtomicUsize::new(0),
                 probe_scores: Mutex::new(VecDeque::new()),
                 transcription_languages: Mutex::new(Vec::new()),
+                transcription_crops: Mutex::new(Vec::new()),
+                clock_text: AtomicBool::new(false),
+                transcription_results: Mutex::new(VecDeque::new()),
                 vad_sessions: Mutex::new(BTreeMap::new()),
                 next_session: AtomicUsize::new(1),
                 fail_diar_open: AtomicBool::new(false),
@@ -3893,15 +3947,41 @@ mod tests {
         }
         fn transcribe(
             &self,
-            _pcm: &[f32],
+            pcm: &[f32],
             language: &str,
             _padding: (u32, u32),
         ) -> Result<AsrText, ChildError> {
             self.transcribe_calls.fetch_add(1, Ordering::SeqCst);
+            self.transcription_crops
+                .lock()
+                .unwrap()
+                .push((pcm[0].abs(), pcm.len()));
             self.transcription_languages
                 .lock()
                 .unwrap()
                 .push(language.into());
+            if let Some(result) = self.transcription_results.lock().unwrap().pop_front() {
+                return Ok(result);
+            }
+            if self.clock_text.load(Ordering::Relaxed) {
+                // Replay ownership markers at quarter-second offsets. Quantized
+                // crop origins remain far from these points at bounded core cuts.
+                let start = ((pcm[0].abs() - 0.125) * (128 * RATE) as f32).round() as i64;
+                let end = start + pcm.len() as i64;
+                let text = (0..60)
+                    .filter(|second| {
+                        let sample = second * RATE + RATE / 4;
+                        start <= sample && sample < end
+                    })
+                    .map(|second| format!("word{second}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return Ok(AsrText {
+                    text: text.clone(),
+                    raw_text: text,
+                    token_count: 1,
+                });
+            }
             let text = self
                 .alignment
                 .as_ref()
@@ -3958,6 +4038,19 @@ mod tests {
     fn loud(samples: usize) -> Vec<f32> {
         (0..samples)
             .map(|index| if index % 2 == 0 { 0.2 } else { -0.1 })
+            .collect()
+    }
+
+    fn clock_pcm(samples: i64) -> Vec<f32> {
+        (0..samples)
+            .map(|sample| {
+                let amplitude = 0.125 + sample as f32 / (128 * RATE) as f32;
+                if sample % 2 == 0 {
+                    amplitude
+                } else {
+                    -amplitude
+                }
+            })
             .collect()
     }
 
@@ -4460,6 +4553,308 @@ mod tests {
         assert_eq!(content(&split_document), content(&replay_document));
         assert_eq!(replay.ledger.lock().unwrap().end_sample(), pcm.len() as i64);
         assert_eq!(replay.diar_observed, pcm.len() as i64 / 160 * 160);
+    }
+
+    #[test]
+    fn growing_live_utterance_does_not_decode_completed_audio_again() {
+        // Counted model replay over retained PCM, not an elapsed-time benchmark.
+        // Monotone amplitudes identify crop origins after PCM16 round-tripping.
+        let final_end = 42 * RATE + 1025;
+        let pcm = clock_pcm(final_end);
+        let mut engine = TestEngine::new(
+            EngineConfig::new("growing-work", "en"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        engine.models.clock_text.store(true, Ordering::Relaxed);
+        engine.append_pcm(&pcm);
+        let mut document = empty_document();
+        for event in engine.handle(notice(0, 30 * RATE, 0)).unwrap() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                document = apply_canonical_candidate(&document, &candidate);
+            }
+        }
+        assert_eq!(document.segments.len(), 1);
+        let identity = document.segments[0].id.clone();
+        let crops = engine.models.transcription_crops.lock().unwrap().clone();
+        let completed_end = crops.last().unwrap().0;
+        assert!(
+            completed_end > crops[0].0,
+            "initial bounded cores own a prefix"
+        );
+        let mut previous_calls = crops.len();
+        // At exactly 42s Silero has observed only 41.984s, less than six
+        // seconds since the 36s decode. Include the next real VAD frame.
+        for (start, end) in [(30 * RATE, 36 * RATE), (36 * RATE, 42 * RATE + 512)] {
+            for event in engine.handle(notice(start, end, 0)).unwrap() {
+                if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                    document = apply_canonical_candidate(&document, &candidate);
+                }
+            }
+            let crops = engine.models.transcription_crops.lock().unwrap();
+            let next = &crops[previous_calls..];
+            assert!(
+                !next.is_empty(),
+                "new speech must still be decoded at received {end}, observed {}",
+                engine.ledger.lock().unwrap().end_sample()
+            );
+            assert!(
+                next.iter().all(|(first, _)| *first >= completed_end),
+                "accepted historical prefix was decoded again at {end}: {next:?}"
+            );
+            assert!(
+                next.iter()
+                    .all(|(_, count)| *count as i64 <= MAX_DECODE_SAMPLES)
+            );
+            assert!(
+                next.iter().map(|(_, count)| *count as i64).sum::<i64>()
+                    <= MAX_DECODE_SAMPLES + end - start,
+                "growth must decode only a bounded active tail and new samples"
+            );
+            previous_calls = crops.len();
+            assert_eq!(document.segments.len(), 1);
+            assert_eq!(document.segments[0].id, identity);
+            let expected = (0..end / RATE)
+                .map(|i| format!("word{i}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(
+                document.segments[0].text, expected,
+                "exact disjoint acoustic ownership"
+            );
+        }
+        for end in [42 * RATE + 513, 42 * RATE + 1023, final_end] {
+            let start = engine.received;
+            for event in engine.handle(notice(start, end, 0)).unwrap() {
+                if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                    document = apply_canonical_candidate(&document, &candidate);
+                }
+            }
+        }
+        for event in engine.handle(LiveCommand::Stop).unwrap() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                document = apply_canonical_candidate(&document, &candidate);
+            }
+        }
+        assert_eq!(document.segments.len(), 1);
+        assert_eq!(document.segments[0].id, identity);
+        assert_eq!(document.segments[0].end, final_end as f64 / RATE as f64);
+        assert_eq!(document.segments[0].text.split_whitespace().count(), 42);
+        assert!(
+            engine.models.transcription_crops.lock().unwrap()[previous_calls..]
+                .iter()
+                .all(|(first, _)| *first >= completed_end)
+        );
+        assert!(
+            engine.last_decoded.is_empty(),
+            "sealed progress is released"
+        );
+    }
+
+    #[test]
+    fn growing_live_cores_retry_incomplete_results_without_freezing_or_erasing_words() {
+        for failed_prefix in [true, false] {
+            let mut engine = TestEngine::new(
+                EngineConfig::new("incomplete-core", "en"),
+                FakeModels::english(),
+            )
+            .unwrap();
+            engine.models.clock_text.store(true, Ordering::Relaxed);
+            let retry_end = 42 * RATE + 512;
+            engine.append_pcm(&clock_pcm(retry_end));
+            let initial = if failed_prefix { 8 * RATE } else { 30 * RATE };
+            let mut document = empty_document();
+            for event in engine.handle(notice(0, initial, 0)).unwrap() {
+                if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                    document = apply_canonical_candidate(&document, &candidate);
+                }
+            }
+            let previous_text = document.segments[0].text.clone();
+            assert!(!previous_text.is_empty());
+            engine
+                .models
+                .transcription_results
+                .lock()
+                .unwrap()
+                .push_back(AsrText {
+                    text: "incomplete words".into(),
+                    raw_text: "incomplete words".into(),
+                    token_count: 448,
+                });
+            let failed_end = if failed_prefix { 30 * RATE } else { 36 * RATE };
+            for event in engine.handle(notice(initial, failed_end, 0)).unwrap() {
+                if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                    document = apply_canonical_candidate(&document, &candidate);
+                }
+            }
+            assert_eq!(document.segments[0].text, previous_text);
+            assert_eq!(
+                document.segments[0].rest["canonical_unresolved"],
+                "incomplete_cohere_revision"
+            );
+            let count = engine.models.transcription_crops.lock().unwrap().len();
+            for event in engine.handle(notice(failed_end, retry_end, 0)).unwrap() {
+                if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                    document = apply_canonical_candidate(&document, &candidate);
+                }
+            }
+            assert_eq!(
+                document.segments[0].text,
+                (0..42)
+                    .map(|i| format!("word{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let crops = engine.models.transcription_crops.lock().unwrap();
+            assert_eq!(
+                crops[count].0 == crops[0].0,
+                failed_prefix,
+                "only an incomplete first core must be retried from the origin"
+            );
+            assert_eq!(document.segments.len(), 1);
+        }
+    }
+
+    #[test]
+    fn growing_live_cores_keep_decisions_and_reset_at_edit_source_and_language_boundaries() {
+        for source in SOURCE_IDS {
+            let mut config = EngineConfig::new("growing-source", "auto");
+            config.source_id = Some(source.into());
+            config.capture_catalog_sha256 = Some("a".repeat(64));
+            let mut engine = TestEngine::new(config, FakeModels::english()).unwrap();
+            engine.models.clock_text.store(true, Ordering::Relaxed);
+            let end = 49 * RATE + 137;
+            engine.append_pcm(&clock_pcm(end));
+            let mut document = empty_document();
+            let events = engine.handle(notice(0, 30 * RATE, 0)).unwrap();
+            accept_live_events(&mut document, events, |b| {
+                engine.continue_edited(b).unwrap()
+            });
+            let original = document.segments[0].clone();
+            let initial_probes = original.language_detection.as_ref().unwrap()["probes"]
+                .as_array()
+                .unwrap();
+            let retained_probes = initial_probes
+                .iter()
+                .filter(|p| p["end_sample"].as_i64().unwrap() <= 15 * RATE)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(!retained_probes.is_empty());
+            engine
+                .models
+                .probe_scores
+                .lock()
+                .unwrap()
+                .extend((0..7).map(|_| {
+                    Ok(LanguageProbeOut {
+                        probabilities: vec![0.99, 0.01],
+                        codes: vec!["de".into(), "en".into()],
+                    })
+                }));
+            let events = engine.handle(notice(30 * RATE, 36 * RATE, 0)).unwrap();
+            accept_live_events(&mut document, events, |b| {
+                engine.continue_edited(b).unwrap()
+            });
+            let mixed = document.segments[0].clone();
+            assert_eq!(mixed.id, original.id);
+            assert_eq!(mixed.language, None);
+            let detection = mixed.language_detection.as_ref().unwrap();
+            assert_eq!(detection["reason"], "mixed");
+            assert_eq!(
+                &detection["probes"].as_array().unwrap()[..retained_probes.len()],
+                retained_probes.as_slice()
+            );
+            assert!(
+                detection["probes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["language"] == "de"
+                        && p["start_sample"].as_i64().unwrap() >= 15 * RATE)
+            );
+            document = edit_passage(PassageEditInput {
+                status: "recording",
+                duration: 36.,
+                revision: 1,
+                document: Some(&document),
+                segment_id: &mixed.id,
+                body: &serde_json::json!({
+                    "segment_revision": mixed.machine_revision,
+                    "changes": {"text": "Exact edited prefix", "start": 0.1}
+                }),
+                now: 1.,
+            })
+            .unwrap()
+            .document;
+            document
+                .speakers
+                .insert(mixed.speaker.clone(), "Saved name".into());
+            for (start, stop) in [(36 * RATE, 42 * RATE), (42 * RATE, 48 * RATE)] {
+                let events = engine.handle(notice(start, stop, 0)).unwrap();
+                accept_live_events(&mut document, events, |b| {
+                    engine.continue_edited(b).unwrap()
+                });
+            }
+            let events = engine
+                .handle(LiveCommand::Language {
+                    language: "fr".into(),
+                    generation: 1,
+                    start_sample: 48 * RATE,
+                })
+                .unwrap();
+            accept_live_events(&mut document, events, |b| {
+                engine.continue_edited(b).unwrap()
+            });
+            let events = engine
+                .handle(LiveCommand::Audio(AudioNotice {
+                    start_sample: 48 * RATE,
+                    end_sample: end,
+                    language_epoch: 1,
+                    language: "fr".into(),
+                }))
+                .unwrap();
+            accept_live_events(&mut document, events, |b| {
+                engine.continue_edited(b).unwrap()
+            });
+            let events = engine.handle(LiveCommand::Stop).unwrap();
+            accept_live_events(&mut document, events, |b| {
+                engine.continue_edited(b).unwrap()
+            });
+            assert_eq!(document.segments.len(), 3);
+            assert_eq!(document.segments[0].text, "Exact edited prefix");
+            assert_eq!(document.segments[0].start, 0.1);
+            assert_eq!(
+                document.segments[0].language_detection,
+                mixed.language_detection
+            );
+            assert_eq!(document.speakers[&mixed.speaker], "Saved name");
+            assert_eq!(
+                document.segments[1].text,
+                (36..48)
+                    .map(|i| format!("word{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            assert_eq!(document.segments[1].rest["language_mode"], "auto");
+            assert_eq!(document.segments[1].language.as_deref(), Some("en"));
+            assert!(
+                document.segments[1].language_detection.as_ref().unwrap()["probes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|p| p["start_sample"].as_i64().unwrap() >= 36 * RATE)
+            );
+            assert_eq!(document.segments[2].text, "word48");
+            assert_eq!(document.segments[2].language.as_deref(), Some("fr"));
+            assert_eq!(document.segments[2].rest["language_epoch"], 1);
+            assert!(
+                document
+                    .segments
+                    .iter()
+                    .all(|row| row.capture_source.as_ref().unwrap()["source_id"] == source)
+            );
+            assert!(engine.last_decoded.is_empty());
+        }
     }
 
     #[test]

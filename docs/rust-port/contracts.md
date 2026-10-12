@@ -71,6 +71,13 @@ non-speech does not erase a supported spoken-language decision. Protected words
 retain their existing decision evidence. GET, export and reopen do not run models
 to reconstruct metadata.
 
+For long growing live rows, accepted disjoint cores retain their raw text,
+language decisions and final sample boundary. Later decoding reads and plans
+only the unaccepted suffix; the last core stays replaceable as audio arrives.
+Incomplete cores stay retryable and cannot erase previously published words.
+Edited continuation and sealed-row cleanup discard the corresponding progress.
+This bounds repeated model decoding, not every activity or projection scan.
+
 ## Messages and security
 
 User-facing strings live in `speakerdesk_core::messages` and are copied from v0.6.6. The token header, CSP, and host allowlist live in `speakerdesk_core::security`. Do not change them without an owner decision.
