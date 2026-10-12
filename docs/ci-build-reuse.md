@@ -32,9 +32,10 @@ native CI unless explicitly set). The dependency contract covers the vendored ML
 and echo source/build guard. The maintained action additionally binds Cargo
 configuration, manifests/lockfiles and Rust environment. Application, UI, CI
 and documentation edits preserve unchanged dependency outputs. Native contract
-or tool changes block dependency fallback. The sccache contract separately
-binds workflow/build scripts, Tauri configuration and embedded web/model
-metadata as before.
+or tool changes block dependency fallback. The sccache compatible prefix
+separately binds workflow/build scripts and Tauri configuration. Embedded
+frontend and model resources under `speakerdesk/` select a new exact compiler
+key while preserving this compatible prefix.
 The pinned MLX 0.32.2 runtime is prepared and checked by its existing script at
 `.cache/native/mlx-0.32.2`, outside Cargo's pruned `target` tree. This prepared
 dependency is reused intact locally and is not included in the persisted cache
@@ -44,9 +45,9 @@ still fetch and verify the pinned source through the guarded build. Native
 runtime downloads and echo source/build trees are not persisted. Notice
 generation fetches verified echo source notices even when the library is a hit.
 
-Rust source, Cargo manifest/lock/version and job profile changes select a new
-exact compiler key. If the native contract is unchanged, the compatible prefix
-can retain unchanged dependency objects;
+Rust source, Cargo manifest/lock/version, embedded frontend/model resources
+and job profile changes select a new exact compiler key. If the native contract
+is unchanged, the compatible prefix can retain unchanged dependency objects;
 sccache checks the actual rustc flags, source, dependencies and environment.
 The two native CI jobs identify their test profiles separately from the Apple
 producer's release profile. Python/Node versions do not split the Rust object

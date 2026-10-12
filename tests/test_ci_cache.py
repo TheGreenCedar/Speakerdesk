@@ -19,7 +19,9 @@ class IdentityTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.paths = ['Cargo.toml', 'crates/core/src/live.rs', 'scripts/fetch_mlx_runtime.sh', 'scripts/native_licenses.py',
-                      'speakerdesk/static/app.js',
+                      'speakerdesk/static/app.js', 'speakerdesk/static/style.css',
+                      'speakerdesk/templates/index.html', 'speakerdesk/voice_calibration.json',
+                      'speakerdesk/alignment-mlx/manifest.json',
                       'scripts/build_macos.sh', 'scripts/ci_cache.py',
                       'scripts/component_cache.py', 'Cargo.lock',
                       'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/main.rs',
@@ -40,7 +42,6 @@ class IdentityTests(unittest.TestCase):
 
     def test_changed_input_invalidates_owning_component(self):
         cases = [('crates/core/src/live.rs', 'compiler-key'),
-                 ('speakerdesk/static/app.js', 'compiler-key'),
                  ('scripts/fetch_mlx_runtime.sh', 'compiler-key'),
                  ('scripts/native_licenses.py', 'compiler-key'),
                  ('desktop/capture/Info.plist', 'capture-key'),
@@ -79,13 +80,26 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(baseline['compiler-prefix'], current['compiler-prefix'])
         self.assertNotEqual(baseline['compiler-key'], current['compiler-key'])
 
-    def test_native_contract_and_embedded_files_block_compiler_fallback(self):
+    def test_embedded_resources_change_exact_key_without_discarding_compatible_objects(self):
+        baseline = keys(self.root, self.paths, self.tools)
+        for name in ['speakerdesk/static/app.js', 'speakerdesk/static/style.css',
+                     'speakerdesk/templates/index.html', 'speakerdesk/voice_calibration.json',
+                     'speakerdesk/alignment-mlx/manifest.json']:
+            with self.subTest(input=name):
+                (self.root / name).write_text('changed')
+                try:
+                    current = keys(self.root, self.paths, self.tools)
+                    self.assertEqual(baseline['compiler-prefix'], current['compiler-prefix'])
+                    self.assertNotEqual(baseline['compiler-key'], current['compiler-key'])
+                finally:
+                    (self.root / name).write_text('original')
+
+    def test_native_contract_blocks_compiler_fallback(self):
         baseline = keys(self.root, self.paths, self.tools)
         for name in ['.cargo/config.toml', 'rust-toolchain.toml', 'vendor/mlx-sys/build.rs',
                      'scripts/fetch_mlx_runtime.sh', 'scripts/native_licenses.py',
                      'scripts/setup_echo.py', 'scripts/echo_compile_guard.py',
-                     'desktop/capture/echo/source-lock.json', 'desktop/capture/echo/speakerdesk_echo.cc',
-                     'speakerdesk/static/app.js']:
+                     'desktop/capture/echo/source-lock.json', 'desktop/capture/echo/speakerdesk_echo.cc']:
             with self.subTest(input=name):
                 (self.root / name).write_text('changed')
                 current = keys(self.root, self.paths, self.tools)

@@ -25,9 +25,9 @@ def keys(root, tracked, tools):
 
     environment = fingerprint(root, [], tools)
     prefix = f"speakerdesk-native-v1-{environment}"
-    rust_inputs = files('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/', 'vendor/mlx-sys/', 'desktop/src-tauri/', 'speakerdesk/static/', 'speakerdesk/templates/')
+    rust_inputs = files('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/', 'vendor/mlx-sys/', 'desktop/src-tauri/', 'speakerdesk/')
     rust_contract = files('.cargo/', 'rust-toolchain.toml', '.github/workflows/',
-                          'vendor/mlx-sys/', 'speakerdesk/',
+                          'vendor/mlx-sys/',
                           'desktop/src-tauri/tauri.conf.json', 'desktop/src-tauri/Info.plist',
                           'desktop/src-tauri/Entitlements.plist', 'desktop/capture/echo/',
                           'scripts/build_macos.sh', 'scripts/fetch_mlx_runtime.sh',
