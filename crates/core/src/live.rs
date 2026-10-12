@@ -372,9 +372,15 @@ impl UtteranceBook {
         if row.end_sample == end {
             return;
         }
+        let shrinking = end < row.end_sample;
         row.end_sample = end;
         row.audio_revision += 1;
-        row.speaker_activity = None;
+        // New observations cannot revise the already-observed activity prefix.
+        // A shortened edited/sealed span keeps only its own retained evidence.
+        if shrinking {
+            let activity = row.speaker_activity.take();
+            clip_retained_activity(row, activity.as_ref());
+        }
         row.text_audio_anchor = None;
     }
 
@@ -639,6 +645,8 @@ pub fn routed_short_revision(passages: &[Passage], start: i64, end: i64) -> Opti
 }
 
 pub fn activity_regions(turns: &[Turn], start: i64, end: i64) -> Vec<timing::ActivityRegion> {
+    #[cfg(test)]
+    tests::record_activity_sweep(start, end, turns.len());
     if start >= end {
         return Vec::new();
     }
@@ -1991,7 +1999,11 @@ impl<M: Models + 'static> Engine<M> {
     ) -> Result<(), LiveError> {
         feed.validate(received as u64, self.diar_observed as u64)?;
         self.diar_observed = feed.observed as i64;
-        for turn in feed.turns {
+        // Validation confines this batch to [previous observed, new observed).
+        // End ordering therefore holds across batches as well as within one.
+        let mut turns = feed.turns;
+        turns.sort_by_key(|turn| turn.end);
+        for turn in turns {
             let speaker = self.prefix_speaker(&turn.speaker)?;
             self.turns.push(Turn {
                 start: turn.start as f64 / RATE as f64,
@@ -2253,7 +2265,7 @@ impl<M: Models + 'static> Engine<M> {
             if !self.book.rows.contains_key(&identity) {
                 continue;
             }
-            let row = self.book.rows.get(&identity).expect("row").clone();
+            let row = self.book.rows.get(&identity).expect("row");
             let previous = self.published.get(&identity);
             if row.state == UtteranceState::Sealed
                 && previous
@@ -2264,7 +2276,6 @@ impl<M: Models + 'static> Engine<M> {
             {
                 continue;
             }
-            self.attach(&identity)?;
             let last = self.last_decoded.get(&identity);
             let changed = last.is_none_or(|last| last.audio_revision != row.audio_revision);
             let length = row.end_sample - row.start_sample;
@@ -2280,7 +2291,10 @@ impl<M: Models + 'static> Engine<M> {
                     || (decode_open
                         && row.end_sample - last.expect("decoded").end_sample >= 6 * RATE);
             }
-            if changed && due && !row.protected_fields.iter().any(|field| field == "text") {
+            let decode =
+                changed && due && !row.protected_fields.iter().any(|field| field == "text");
+            self.attach(&identity)?;
+            if decode {
                 self.decode(&identity)?;
             }
             let row = self.book.rows.get(&identity).expect("row").clone();
@@ -2294,38 +2308,66 @@ impl<M: Models + 'static> Engine<M> {
             self.last_decoded.remove(identity);
             self.next_utterance += 1;
         }
-        let earliest = self.book.active.as_ref().map_or(
-            self.book.cursor().saturating_sub(UTTERANCE_CONTEXT_SAMPLES),
-            |id| self.book.rows[id].start_sample,
-        );
-        self.turns.retain(|turn| round_samples(turn.end) > earliest);
+        let mut earliest = self.book.cursor().saturating_sub(UTTERANCE_CONTEXT_SAMPLES);
+        if let Some(id) = &self.book.active {
+            let row = &self.book.rows[id];
+            let tail = row
+                .speaker_activity
+                .as_ref()
+                .and_then(|activity| activity.regions.last())
+                .map_or(row.start_sample, |region| region.start_sample);
+            earliest = earliest.min(tail);
+        }
+        let expired = self
+            .turns
+            .partition_point(|turn| round_samples(turn.end) <= earliest);
+        self.turns.drain(..expired);
         Ok(())
     }
 
     fn attach(&mut self, identity: &str) -> Result<(), LiveError> {
-        let row = self.book.rows.get(identity).expect("row").clone();
-        let regions = activity_regions(
-            &self.turns,
-            row.start_sample,
-            row.end_sample.min(self.diar_observed),
-        );
-        let activity = timing::SpeakerActivity {
-            audio_revision: row.audio_revision,
-            observed_end_sample: Some(row.end_sample.min(self.diar_observed)),
-            regions: regions.clone(),
-        };
-        let mut owners = Vec::new();
+        let row = self.book.rows.get_mut(identity).expect("row");
+        let observed = row.end_sample.min(self.diar_observed);
+        let activity = row
+            .speaker_activity
+            .get_or_insert_with(|| timing::SpeakerActivity {
+                audio_revision: row.audio_revision,
+                observed_end_sample: Some(row.start_sample),
+                regions: Vec::new(),
+            });
+        activity.audio_revision = row.audio_revision;
+        if observed <= row.start_sample {
+            activity.observed_end_sample = Some(observed);
+            activity.regions.clear();
+            row.speaker_candidates.clear();
+            return Ok(());
+        }
+        if activity
+            .observed_end_sample
+            .is_some_and(|end| end >= observed)
+        {
+            return Ok(());
+        }
+        // The last region may have ended at a temporary VAD watermark inside a
+        // diarization turn. Rebuild it with the new suffix, preserving exact turn
+        // boundaries rather than introducing a boundary on every audio packet.
+        let start = activity
+            .regions
+            .pop()
+            .map_or(row.start_sample, |region| region.start_sample);
+        let first = self
+            .turns
+            .partition_point(|turn| round_samples(turn.end) <= start);
+        let regions = activity_regions(&self.turns[first..], start, observed);
         for region in &regions {
             for speaker in &region.speakers {
-                if !owners.contains(speaker) {
-                    owners.push(speaker.clone());
+                if let Err(index) = row.speaker_candidates.binary_search(speaker) {
+                    row.speaker_candidates.insert(index, speaker.clone());
                 }
             }
         }
-        owners.sort();
-        let row = self.book.rows.get_mut(identity).expect("row");
-        row.speaker_activity = Some(activity);
-        row.speaker_candidates = owners;
+        activity.regions.extend(regions);
+        activity.observed_end_sample = Some(observed);
         Ok(())
     }
 
@@ -3160,6 +3202,17 @@ mod tests {
     use crate::language::{DetectionMode, DetectionReason, LanguageDetection};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    thread_local! {
+        static ACTIVITY_SWEEPS: std::cell::RefCell<Option<Vec<(i64, i64, usize)>>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn record_activity_sweep(start: i64, end: i64, turns: usize) {
+        ACTIVITY_SWEEPS.with_borrow_mut(|calls| {
+            if let Some(calls) = calls {
+                calls.push((start, end, turns));
+            }
+        });
+    }
+
     struct TestRecording {
         path: std::path::PathBuf,
         writer: crate::audio::RecordingWriter,
@@ -3869,6 +3922,8 @@ mod tests {
         diar_progress: Mutex<BTreeMap<u64, (u64, u64)>>,
         delayed_diar: AtomicBool,
         speaker_switch: AtomicUsize,
+        overlapping_diar: bool,
+        diar_emitted: Mutex<Vec<Turn>>,
         alignment: Option<(String, CtcScoresOut)>,
         ctc_error: Option<ChildError>,
     }
@@ -3893,6 +3948,8 @@ mod tests {
                 diar_progress: Mutex::new(BTreeMap::new()),
                 delayed_diar: AtomicBool::new(false),
                 speaker_switch: AtomicUsize::new(usize::MAX),
+                overlapping_diar: false,
+                diar_emitted: Mutex::new(Vec::new()),
                 alignment: None,
                 ctc_error: None,
             }
@@ -3977,30 +4034,51 @@ mod tests {
             *received += pcm.len() as u64;
             let received = *received;
             let observed = if !last && self.delayed_diar.load(Ordering::Relaxed) {
-                0
+                *previous
             } else {
                 received / 160 * 160
             };
             let start = *previous;
             *previous = observed;
+            let mut turns: Vec<_> = if observed > start {
+                let split = self.speaker_switch.load(Ordering::Relaxed) as u64;
+                [
+                    (start, observed.min(split), "speaker_0"),
+                    (start.max(split), observed, "speaker_1"),
+                ]
+                .into_iter()
+                .filter(|(start, end, _)| start < end)
+                .map(|(start, end, speaker)| crate::ipc::DiarTurn {
+                    start,
+                    end,
+                    speaker: speaker.into(),
+                })
+                .collect()
+            } else {
+                Vec::new()
+            };
+            if self.overlapping_diar
+                && let Some(first) = turns.first().cloned()
+            {
+                turns.push(first);
+                // Deliberately not sorted by end: a duplicate full turn precedes
+                // a shorter overlapping speaker observation in the same batch.
+                turns.push(crate::ipc::DiarTurn {
+                    start,
+                    end: start + (observed - start).div_ceil(2),
+                    speaker: "speaker_2".into(),
+                });
+            }
+            self.diar_emitted
+                .lock()
+                .unwrap()
+                .extend(turns.iter().map(|turn| Turn {
+                    start: turn.start as f64 / RATE as f64,
+                    end: turn.end as f64 / RATE as f64,
+                    speaker: turn.speaker.clone(),
+                }));
             Ok(DiarFeedOut {
-                turns: if observed > start {
-                    let split = self.speaker_switch.load(Ordering::Relaxed) as u64;
-                    [
-                        (start, observed.min(split), "speaker_0"),
-                        (start.max(split), observed, "speaker_1"),
-                    ]
-                    .into_iter()
-                    .filter(|(start, end, _)| start < end)
-                    .map(|(start, end, speaker)| crate::ipc::DiarTurn {
-                        start,
-                        end,
-                        speaker: speaker.into(),
-                    })
-                    .collect()
-                } else {
-                    Vec::new()
-                },
+                turns,
                 received,
                 observed,
             })
@@ -4634,6 +4712,96 @@ mod tests {
         assert_eq!(content(&split_document), content(&replay_document));
         assert_eq!(replay.ledger.lock().unwrap().end_sample(), pcm.len() as i64);
         assert_eq!(replay.diar_observed, pcm.len() as i64 / 160 * 160);
+    }
+
+    #[test]
+    fn growing_activity_only_revisits_the_affected_observation_tail() {
+        // Counted replay, not a timing benchmark. Full input turns remain only
+        // in the fake model so its independent full sweep can check every prefix.
+        let mut models = FakeModels::english();
+        models.overlapping_diar = true;
+        models
+            .speaker_switch
+            .store(32 * RATE as usize, Ordering::Relaxed);
+        let mut engine =
+            TestEngine::new(EngineConfig::new("activity-growth", "en"), models).unwrap();
+        let end = 35 * RATE + 513;
+        engine.append_pcm(&loud(end as usize));
+        engine.handle(notice(0, 30 * RATE, 0)).unwrap();
+        let identity = engine.book.order[0].clone();
+        let initial = &engine.book.rows[&identity];
+        let affected_start = initial
+            .speaker_activity
+            .as_ref()
+            .unwrap()
+            .regions
+            .last()
+            .unwrap()
+            .start_sample;
+        let historical_turns = engine.models.diar_emitted.lock().unwrap().len();
+        let decoded = engine.models.transcribe_calls.load(Ordering::Relaxed);
+        ACTIVITY_SWEEPS.with_borrow_mut(|calls| *calls = Some(Vec::new()));
+        for next in [31 * RATE, 32 * RATE, 33 * RATE, 34 * RATE, 35 * RATE, end] {
+            // One missing observation batch then catch-up must preserve the
+            // previously observed prefix and not claim the received gap as known.
+            engine
+                .models
+                .delayed_diar
+                .store(next == 31 * RATE, Ordering::Relaxed);
+            let start = engine.received;
+            engine.handle(notice(start, next, 0)).unwrap();
+            let calls = ACTIVITY_SWEEPS.with_borrow_mut(Option::take);
+            let row = &engine.book.rows[&identity];
+            let observed = row.end_sample.min(engine.diar_observed);
+            let reference = activity_regions(
+                &engine.models.diar_emitted.lock().unwrap(),
+                row.start_sample,
+                observed,
+            );
+            assert_eq!(
+                row.speaker_activity.as_ref().unwrap().regions,
+                reference,
+                "prefix {next}"
+            );
+            let owners: std::collections::BTreeSet<_> = reference
+                .iter()
+                .flat_map(|r| r.speakers.iter().cloned())
+                .collect();
+            assert_eq!(
+                row.speaker_candidates,
+                owners.into_iter().collect::<Vec<_>>()
+            );
+            ACTIVITY_SWEEPS.with_borrow_mut(|slot| *slot = calls);
+        }
+        let calls = ACTIVITY_SWEEPS.with_borrow_mut(Option::take).unwrap();
+        assert_eq!(
+            engine.models.transcribe_calls.load(Ordering::Relaxed),
+            decoded,
+            "these observations precede the next long ASR deadline"
+        );
+        let final_events = engine.handle(LiveCommand::Stop).unwrap();
+        let rows = revisions(&final_events);
+        let row = rows.last().unwrap();
+        let activity: timing::SpeakerActivity =
+            serde_json::from_value(row.speaker_activity.clone().unwrap()).unwrap();
+        let observed = end / 160 * 160;
+        assert_eq!(activity.observed_end_sample, Some(observed));
+        assert!(
+            observed < end,
+            "the sub-hop EOF tail is still unobserved by diarization"
+        );
+        assert_eq!(
+            activity.regions,
+            activity_regions(&engine.models.diar_emitted.lock().unwrap(), 0, observed)
+        );
+        assert!(
+            calls.iter().all(|(start, _, _)| *start >= affected_start),
+            "unchanged activity prefix was rebuilt: {calls:?}"
+        );
+        assert!(
+            calls.iter().map(|(_, _, turns)| turns).sum::<usize>() < historical_turns,
+            "new observations must not repeatedly inspect all historical turns: {calls:?}"
+        );
     }
 
     #[test]

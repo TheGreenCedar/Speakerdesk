@@ -27,8 +27,8 @@ Local implementation branch: `codex/python-free-mac`.
    The actual editor import/edit/name/boundary/save/reopen/export/stale-save path
    passes, including Auto language and CTC. Short synthetic/public recordings have
    equivalent warm application measurements. Long Nemotron execution has an
-   independent numerical reference; full long-import product/performance gates
-   remain pending.
+   independent numerical reference. An 82-second import now passes the actual
+   editor, tail edit, save and full restart; long-session performance remains pending.
 4. In progress: automatic language, supplied-text CTC and native Core ML ReDimNet
    extraction work. Manual voice enrollment/checking now passes the actual editor
    and full restart (below). Automatic import recognition and native model setup
@@ -44,8 +44,9 @@ Local implementation branch: `codex/python-free-mac`.
    Raw dual-source echo passes independent baseline DSP and mounted failure
    replays. Saved long non-English accuracy passes functional timing/publication
    tests and a real-model German recording. Rolling live refinement passes mounted
-   lifecycle replays and real-model retained-audio checks. Physical capture,
-   the pending Tauri workflows and long-session gates remain.
+   lifecycle replays and real-model retained-audio checks. Actual Tauri live
+   controls, editing, playback, four exports and restart pass with a synthetic
+   PCM helper. Physical capture, setup UI and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
 All validation uses disposable storage and synthetic/public audio. No installed
@@ -1215,6 +1216,66 @@ the pending Tauri live/setup/long-import workflow, default native startup and ac
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
+
+## Incremental activity and the live/long desktop workflows
+
+The growing-utterance activity path previously rebuilt its complete history on
+every observation, even before another ASR request was due. A retained failing
+test records six scans beginning at sample zero and visiting 90 through 105
+turns while a recording grows from 30 to 35 seconds. The implementation now
+reuses each utterance's observed activity prefix, recomputes its last interval
+and new suffix, and selects overlapping turns from end-sorted validated batches.
+Growing an utterance retains activity; shrinking clips it. Observations delayed
+past a new EOF row retain their truthful watermark. Publication and ASR cadence
+are unchanged. Whole growing-document serialization is outside this claim.
+
+The regression compares every prefix and the partial EOF with the unchanged
+full-sweep implementation using overlapping and duplicate speakers, delayed
+observations and original emitted turns. It also checks bounded historical
+visits before the next ASR deadline. Independent coordinator checks pass:
+177 core tests, 18 mounted live tests (one existing native-echo test excluded
+from the ordinary run), and strict all-target core/host Clippy. The native-echo
+gate and unchanged host/process/frontend proof from the preceding slice are
+reused. Logs are `/tmp/speakerdesk-growing-activity-{red,core-tests,live-tests,clippy}.log`.
+
+The optimized Mac build completed in 35.61 seconds with the existing upstream
+mlx-sys warnings. Executable SHA-256 is
+`5bd0a2f1185998678366402419d461fde236161d3312986366c720c64d10560c`;
+the isolated, ad-hoc signed preview executable is
+`b6677b0559fae1b32665255ed5431a66acda8d72f5da5129466424257781ac17`.
+The following actual Tauri checks use this candidate:
+
+- Live job `b376906fe0524060bcb55bfb2208f722`: Start, independent capture and
+  accuracy Pause/Resume, edit passage words, apply the name Taylor Native without
+  enrollment, Stop, adjust the first boundary to 0.010 seconds, save and play.
+  All four native export dialogs wrote the corrected words/name. A stale HTTP
+  save returns 409. Full Cmd-Q reaped the shell, host and inference child;
+  reopening the meeting visibly restores the correction, name and boundary.
+  Its canonical document and people catalog are exactly unchanged after restart.
+  The retained recording contains all 145445 input samples byte-for-byte.
+- Long import `bd0a9e4c9aee4c4dbca4b9b2595e87ca`: the native Open dialog imported
+  `three-windows.wav` (82.0099375 seconds, 1312159 samples). Real models produced
+  ten visible passages, including the final partial frame. Editing the last
+  passage, saving, quitting the complete app and reopening preserves the exact
+  canonical document and displays the correction. Saved PCM is exact. There are
+  twenty canonical rows including silence; the UI correctly counts ten passages.
+
+Evidence is retained in `/private/tmp/speakerdesk-native-desktop.WJKAde/`:
+`live-ui-result.json`, `live-ui-saved.json`, `long-ui-result.json`,
+`long-ui-saved.json`, the four `Native_live_editor_qualification` exports, and
+the corresponding app logs. The long source WAV SHA-256 is
+`3297950fe04a7a7310436f2afaa2f6a0f49163c6c5a176871a3337a90d70f6a8`.
+
+These are real model and editor checks with synthetic audio. The live helper
+replays saved PCM and supplies its entire nine-second input before Pause; it
+does not prove physical capture, continued input during Resume or realtime
+performance. The repeated long fixture does not establish diarization quality.
+The preview still uses a development MLX library path and resources-disabled
+build; default startup/packaging still uses Python. The accepted replacement
+outcome remains active: physical capture, setup UI, long-session and equivalent
+performance gates, native default packaging and disposable updater/security
+qualification remain. No installed app, production data or existing model cache
+was changed; nothing was pushed or published.
 
 ## Rolling accuracy during capture
 
