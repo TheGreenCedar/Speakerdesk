@@ -12,7 +12,7 @@ Local implementation branch: `codex/python-free-mac`.
 
 ## Delivery status after migration testing
 
-The native Mac workflow is implemented and has passed the retained actual-app
+The main native Mac workflows are implemented and have passed the retained actual-app
 tests: import and live capture, editing and revision conflicts, save/reopen and
 export, model setup, language/alignment/voice paths, child/helper failure and
 disposable updater replacement. The canonical signed package runs without a
@@ -22,7 +22,12 @@ migration acceptance criteria.
 The accepted replacement is not complete: Stop remains slower than 0.6.6,
 qualified by native final-passage timing absent from the measured baseline.
 Equivalent-quality long-import and comparative cancellation/recovery performance
-also remain unqualified. Windows and issue 25 remain deliberate follow-ups.
+also remain unqualified. A later format check reproduced an accepted Ogg/Opus
+upload failing native preparation while the unchanged legacy normalization path
+succeeds through system `afconvert`. Existing legacy voice profiles are preserved
+but incompatible model identities do not participate in native recognition;
+new native enrollment/recognition does not qualify historical profile reuse.
+Windows and issue 25 remain deliberate follow-ups.
 
 Legacy Python application sources remain test/oracle references, not package
 inputs. Current CI, reference generators and source-boundary checks still depend
@@ -423,8 +428,38 @@ attribution or full-fixture transcription accuracy for this interrupted capture.
 
 The full replacement remains active and unfinished. Stop-to-Ready parity,
 equivalent-quality long-import comparison, and comparative cancellation/recovery
-performance remain open; no additional cache, scheduler, concurrent preparation
+performance remain open, alongside the format/profile limits above; no additional cache, scheduler, concurrent preparation
 or heavyweight GPU-overlap experiment is justified by the current measurements.
+
+## Push closeout and format compatibility check
+
+The reviewed implementation was pushed to PR 27 at
+`bff6074d987aa6deef892ab268332cbb436b6473`, without rewriting the existing branch.
+Its source CI ran 797 tests and found one stale workflow-mutation fixture that
+still targeted the removed `.cache/uv` entry. The test now targets `.cache/npm`
+while retaining the same forbidden Hugging Face cache substitution and exact
+checker rejection. The focused two-test suite passes; production policy is unchanged.
+
+The follow-up read-only compatibility review found that the pinned Symphonia
+registry has no Opus decoder, while import routes accept `.ogg` and `.webm`.
+A public Opus sample from the codec project's examples, renamed to `.ogg`, was
+accepted by the actual signed native host and persisted as failed with
+“Could not decode this recording. Supply a supported audio file.” The unchanged
+legacy `audio.normalize` function succeeds on the same bytes using this Mac's
+system `afconvert`, producing 228.107 seconds of canonical PCM. This reproduces
+an import-preparation compatibility defect; no models or private data were used.
+The file is the public `ehren-paper_lights-96.opus` example, SHA-256
+`997f5aaa2528de8392bac3f59140e1ab24b491a70048697c8d3dc91cb4300df3`.
+It remains outside Git with the two boundary results under
+`/private/tmp/speakerdesk-opus-import-wbllqn5f/`.
+
+The first native driver uploaded during initialization and received 409; a later
+driver mistakenly expected 200 instead of the correct 201 creation response.
+The accepted job's persisted decode failure was then read through the native
+service after restart, without another upload. Every owned host exited normally.
+The synthetic Ogg encoder attempt failed before producing a qualifying fixture;
+only the valid public sample supports the decoder finding. The legacy result is
+a direct normalization-function test, not a new full baseline desktop run.
 
 ## Earlier foundation proof
 
