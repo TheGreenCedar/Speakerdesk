@@ -486,6 +486,7 @@ async fn serve(
     crate::meeting::configure_capture(
         &app,
         std::env::var_os("SPEAKERDESK_CAPTURE_HELPER").map(PathBuf::from),
+        std::env::var_os("SPEAKERDESK_ECHO_LIBRARY").map(PathBuf::from),
     )
     .await;
     let stop = CancellationToken::new();

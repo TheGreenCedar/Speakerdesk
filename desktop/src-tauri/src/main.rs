@@ -1,15 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicU16, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU16, Ordering},
 };
 use tauri::webview::DownloadEvent;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::{
-    process::{CommandChild, CommandEvent},
     ShellExt,
+    process::{CommandChild, CommandEvent},
 };
 mod exports;
 #[cfg(target_os = "macos")]
@@ -140,6 +140,12 @@ fn start_runtime(app: &tauri::AppHandle) -> Result<(), String> {
     let (mut rx, child) = command
         .env("SPEAKERDESK_HOME", &settings.storage)
         .env("SPEAKERDESK_CAPTURE_HELPER", &settings.capture_helper)
+        .env(
+            "SPEAKERDESK_ECHO_LIBRARY",
+            settings
+                .capture_helper
+                .with_file_name("libspeakerdesk_echo.dylib"),
+        )
         .set_raw_out(true)
         .spawn()
         .map_err(|e| e.to_string())?;

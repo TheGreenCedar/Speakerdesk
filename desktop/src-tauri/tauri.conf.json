@@ -45,7 +45,8 @@
     ],
     "resources": {
       "../capture/speakerdesk-capture": "speakerdesk-capture",
-      "../capture/speakerdesk-capture.capability.json": "speakerdesk-capture.capability.json"
+      "../capture/speakerdesk-capture.capability.json": "speakerdesk-capture.capability.json",
+      "../capture/echo/libspeakerdesk_echo.dylib": "libspeakerdesk_echo.dylib"
     }
   }
 }

@@ -41,8 +41,9 @@ Local implementation branch: `codex/python-free-mac`.
    language-decision persistence across protected continuation and restart. Long
    growing rows retain accepted cores instead of re-decoding completed audio.
    Qualified Pause/Resume passes native controls and mounted process replays.
-   Non-English accuracy, rolling live refinement, raw dual-source echo, physical
-   capture and long-session gates remain.
+   Raw dual-source echo passes independent baseline DSP and mounted failure
+   replays. Non-English accuracy, rolling live refinement, physical capture and
+   long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
 All validation uses disposable storage and synthetic/public audio. No installed
@@ -1211,6 +1212,69 @@ Pause/Resume and raw dual-source echo, physical capture and long-session behavio
 the pending Tauri live/setup/long-import workflow, default native startup and actual
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
+remain untouched. Windows and issue #25 remain deferred.
+
+## Raw dual-source echo and recoverable capture failures
+
+Raw dual-source capture now loads the existing pinned ABI-3 WebRTC component from
+an explicit canonical path. Rust owns its bounded frame queues, reference clock
+and routing policy. Native state is created, called and destroyed on the recording
+writer's blocking thread; no unsafe Send implementation or C++ model code was
+added. Qualified Apple voice processing bypasses this component. Its receipt stays
+distinct from the raw capture source catalog.
+
+Original microphone, system and stereo reference tracks commit before DSP. Only
+completed clean audio advances inference and playback. Process/reset failures
+terminate that DSP instance while draining accepted original packets; persisted
+raw and clean sample endpoints survive reopening. Missing, incompatible or
+untrusted runtime files fail before PCM creation. Pause and format changes drain
+partial frames and reset the existing native state. Tauri supplies its bundled
+dylib path; the Mac CI job builds it through the existing script and runs the
+focused native boundary tests.
+
+The pre-change raw 513-sample test failed at writer creation. Independent replay
+now compares eight cases with the actual v0.6.6 SourceMixer and echo wrapper:
+echo, latency, drift, absent echo, near-only speech, stereo paths, inverted
+uncorrelated paths and a partial Pause/Resume tail. Original track bytes match
+exactly in all eight; clean/mixed bytes match exactly in the four non-echo cases.
+Echo outputs are numerically close, not bit-identical: maximum PCM16 differences
+are 1, 2, 1 and 170 units respectively for echo, latency, drift and stereo paths.
+All unchanged 0.6.6 acoustic quality gates pass. Stereo clean RMS difference is
+3.0474 PCM16 units; its native ERLE is 20.51355 dB and near-speech SNR 21.94628 dB.
+
+The native queue test feeds 500 arbitrary splits and verifies bounded held input,
+exact final draining and a fresh 513-sample resume. A mounted router/SQLite/owned
+process test covers raw Pause/Resume/Stop, missing library, ABI mismatch, process
+failure and reset failure. Raw sources, clean-only playback, retained failure
+endpoints, restart and owned-process cleanup pass. Model output in these mounted
+tests is explicitly replayed. The small fault-injection C library is test-only.
+
+The full gate passes 172 core, 16 echo, 64 host, 14 mounted live, one service and
+nine process tests. Four new native gates were run explicitly; the unchanged
+network and three separately qualified model tests remain ignored. Strict
+all-target core/host/echo Clippy, workflow lint and diff whitespace checks pass.
+Logs are `/tmp/speakerdesk-raw-echo-{red,green,artifacts,reference,queues,mounted,tests,clippy}.log`.
+The independent inputs, baseline extraction, outputs and metric comparisons are
+retained under `/private/tmp/speakerdesk-raw-echo-reference.PYKutc/`. These are
+correctness and acoustic quality replays, not application performance measurements.
+
+The existing DSP build uses WebRTC revision
+`852150686748f5cce0c1c96f4fde50e6be43ef73`; its source lock and C++ implementation
+are unchanged from v0.6.6. Dylib SHA256:
+`09f3673e48c2256d25f671118922c078341035c7f5a69e66c2c2a77121e2a815`.
+Its loaded dependencies are Apple/system libraries, with no Python runtime.
+Building this component does not establish the complete Python-free package.
+The locked optimized desktop build passes in 25.02 seconds with the two unchanged
+upstream mlx-sys warnings. Binary SHA256:
+`0d468bb1efc1f7fa8dcedd0329c674d7a8dd622020e1e15bab982eb886d60308`.
+The compile check disables bundle resources; packaging remains a separate gate.
+
+The UI tool still reports the Mac locked after the latest unlock reply. Physical
+capture, actual editor checks for these changes and sustained performance remain
+unverified. The accepted full replacement remains active: finish non-English and
+rolling accuracy, long-session behavior, actual desktop/capture gates, native
+default startup and packaging, disposable updater/security checks and equivalent
+0.6.6 performance. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
 
 ## Qualified capture Pause/Resume

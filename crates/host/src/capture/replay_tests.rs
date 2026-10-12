@@ -17,6 +17,162 @@ use super::{
 
 const JOB: &str = "0123456789abcdef0123456789abcdef";
 
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "Requires the pinned native echo component built by scripts/setup_echo.py"]
+fn raw_dual_capture_opens_and_preserves_partial_pause_tail() {
+    let folder = TempDir::new().unwrap();
+    let path = helper(
+        folder.path(),
+        false,
+        "Raw helper protocol replay; no devices",
+    );
+    let mut cfg = config(folder.path(), true);
+    cfg.echo_library = Some(native_echo_library());
+    let mut writer = SourceWriter::create(cfg, Helper::inspect(&path).unwrap())
+        .expect("raw dual-source capture must use the native echo component");
+    accept(&mut writer, &json!({"type":"recording"})).unwrap();
+    accept(&mut writer, &audio("microphone", 0., &[0.25; 513], 1)).unwrap();
+    accept(&mut writer, &audio("system", 0., &[0.; 1026], 2)).unwrap();
+    accept(&mut writer, &json!({"type":"paused","time":513./16000.})).unwrap();
+    accept(&mut writer, &json!({"type":"stopped","time":513./16000.})).unwrap();
+    let result = writer.finish();
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert_eq!(result.committed_sample, 513);
+    assert!(
+        result.processing.is_none(),
+        "raw AEC must not acquire Apple qualification"
+    );
+    for name in ["audio.wav", "microphone.wav", "microphone_clean.wav"] {
+        assert_eq!(
+            pcm(&folder.path().join(name)),
+            [0, 32].repeat(513),
+            "{name}"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_echo_library() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../desktop/capture/echo/libspeakerdesk_echo.dylib")
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "Requires independent v0.6.6 echo replay root in SPEAKERDESK_ECHO_REFERENCE"]
+fn raw_echo_matches_independent_v066_retention() {
+    use std::io::BufRead;
+    let reference = PathBuf::from(
+        std::env::var_os("SPEAKERDESK_ECHO_REFERENCE").expect("independent replay root"),
+    );
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(reference.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["revision"],
+        "91f7593fc9c890c69befd6663cdcdeb0072d5f70"
+    );
+    let library = native_echo_library();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(fs::read(&library).unwrap())),
+        manifest["library_sha256"].as_str().unwrap()
+    );
+    // Retain output alongside the independently generated reference for the DSP
+    // comparison. This test asserts exact raw/no-echo retention, not echo quality.
+    let output = tempfile::Builder::new()
+        .prefix("native-")
+        .tempdir_in(&reference)
+        .unwrap()
+        .keep();
+    eprintln!("Native capture replay output: {}", output.display());
+    for case in manifest["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let folder = output.join(name);
+        fs::create_dir(&folder).unwrap();
+        let path = helper(
+            &folder,
+            false,
+            "Independent raw capture protocol replay; no devices",
+        );
+        let mut cfg = config(&folder, true);
+        cfg.echo_library = Some(library.clone());
+        let mut writer = SourceWriter::create(cfg, Helper::inspect(&path).unwrap()).unwrap();
+        let events = fs::File::open(reference.join(case["events"].as_str().unwrap())).unwrap();
+        for line in std::io::BufReader::new(events).lines() {
+            let event: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if event["type"] == "resume" {
+                writer.resume().unwrap();
+            } else {
+                accept(&mut writer, &event).unwrap();
+            }
+        }
+        let result = writer.finish();
+        assert!(result.error.is_none(), "{name}: {:?}", result.error);
+        assert_eq!(
+            u64::from(result.raw_sample),
+            case["samples"].as_u64().unwrap(),
+            "{name}"
+        );
+        assert_eq!(result.committed_sample, result.raw_sample, "{name}");
+        assert!(result.processing.is_none());
+        assert!(result.source_catalog.is_some());
+        for (track, expected) in case["expected"].as_object().unwrap() {
+            let path = folder.join(format!("{track}.wav"));
+            let audio = hound::WavReader::open(&path).unwrap();
+            assert_eq!(
+                u64::from(audio.spec().channels),
+                expected["channels"].as_u64().unwrap()
+            );
+            assert_eq!(
+                u64::from(audio.duration()),
+                case["samples"].as_u64().unwrap()
+            );
+            if matches!(track.as_str(), "microphone" | "system" | "system_reference")
+                || matches!(
+                    name,
+                    "no_echo" | "near_only" | "inverted_no_echo" | "partial_pause"
+                )
+            {
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(pcm(&path))),
+                    expected["pcm16_sha256"].as_str().unwrap(),
+                    "{name}/{track}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn runtime_artifacts_reject_untrusted_files_and_missing_echo() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = TempDir::new().unwrap();
+    let path = helper(folder.path(), true, "Owned capability replay");
+    let manifest = folder.path().join("capture-helper.capability.json");
+    fs::set_permissions(&manifest, fs::Permissions::from_mode(0o664)).unwrap();
+    assert!(
+        Helper::inspect(&path).is_err(),
+        "group-writable qualification must be rejected"
+    );
+    let library = folder.path().join("echo.dylib");
+    fs::write(&library, b"not a native library").unwrap();
+    fs::set_permissions(&library, fs::Permissions::from_mode(0o664)).unwrap();
+    assert!(matches!(
+        speakerdesk_echo::EchoMixer::start(&library),
+        Err(speakerdesk_echo::EchoError::IncompatibleVersion)
+    ));
+    fs::set_permissions(&library, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(
+        speakerdesk_echo::EchoMixer::start(&library),
+        Err(speakerdesk_echo::EchoError::IncompatibleVersion)
+    ));
+    assert!(matches!(
+        speakerdesk_echo::EchoMixer::start(&folder.path().join("missing.dylib")),
+        Err(speakerdesk_echo::EchoError::Missing)
+    ));
+}
+
 fn helper(folder: &Path, qualified: bool, script: &str) -> PathBuf {
     #[cfg(unix)]
     {
@@ -49,6 +205,7 @@ fn config(folder: &Path, dual: bool) -> CaptureConfig {
         folder: folder.into(),
         microphone: true,
         system: dual,
+        echo_library: None,
     }
 }
 
@@ -661,14 +818,20 @@ async fn real_wav_write_failure_reaps_helper_and_retains_last_commit() {
     let path = helper(folder.path(), false, &script);
     let cfg = config(folder.path(), false);
     let helper = Helper::inspect(&path).unwrap();
-    let mut writer = SourceWriter::create(cfg.clone(), helper.clone()).unwrap();
-    accept(&mut writer, &audio("microphone", 0., &[0.25; 4000], 1)).unwrap();
-    accept(&mut writer, &json!({"type":"clock","time":0.75})).unwrap();
-    assert_eq!(writer.snapshot.committed_sample, 4000);
-    writer.make_audio_read_only();
+    let writer_config = cfg.clone();
+    let writer_helper = helper.clone();
+    let make_writer = move || {
+        let mut writer = SourceWriter::create(writer_config, writer_helper)?;
+        accept(&mut writer, &audio("microphone", 0., &[0.25; 4000], 1))?;
+        accept(&mut writer, &json!({"type":"clock","time":0.75}))?;
+        assert_eq!(writer.snapshot.committed_sample, 4000);
+        writer.make_audio_read_only();
+        Ok(writer)
+    };
     let log = super::processing::private_create(&folder.path().join("capture.log")).unwrap();
-    let session =
-        CaptureSupervisor::start(helper, writer, log, cfg, Duration::from_secs(2)).unwrap();
+    let session = CaptureSupervisor::start(helper, make_writer, log, cfg, Duration::from_secs(2))
+        .await
+        .unwrap();
     let pid = session.pid;
     let result = tokio::time::timeout(Duration::from_secs(4), session.finish())
         .await

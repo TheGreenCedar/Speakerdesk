@@ -10,7 +10,8 @@ Rust **1.99.0** (`rust-toolchain.toml`), edition 2024. This is the stable 1.99 r
 
 - `speakerdesk-core` — domain types, `Models`, IPC payloads, messages, schema SQL.
 - `speakerdesk-models` — inference child. Linux builds the protocol stub. mlx-rs 0.32.0 is a macOS dependency.
-- `speakerdesk-echo` — AEC3 stub off macOS.
+- `speakerdesk-echo` — Rust buffering and reference clock with the pinned native
+  WebRTC ABI 3 DSP. Mac packaging includes the dylib; other platforms are unqualified.
 - `speakerdesk-host` — axum process. `speakerdesk-dev` is behind the `fixtures` feature.
 - `xtask` — `cargo xtask ledger --check` and `cargo xtask ownership --check`.
 
@@ -88,6 +89,16 @@ remain authoritative. A repeated Resume conflicts; Stop keeps ownership through
 drain/reap and cannot revert from finishing on a late Recording acknowledgement.
 These boundaries have replay and native control tests; physical graph restart
 remains a hardware acceptance gate.
+
+Raw dual-source capture uses the explicit bundled echo library. The blocking
+writer constructs, calls and destroys its native state on one thread. Original
+tracks flush before DSP; only completed clean/mixed output advances the inference
+endpoint. Final `capture_audio_coverage` retains both raw and clean sample counts,
+including failure and reopen. A failed native instance cannot be reused. Pause
+and format boundaries drain the 160-sample frames and compensate the 64-sample
+native delay before resetting. No independently detected echo means exact
+microphone retention. A raw AEC source catalog does not claim Apple qualification;
+qualified Apple processing bypasses this library entirely.
 
 ## Messages and security
 

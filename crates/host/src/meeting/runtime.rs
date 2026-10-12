@@ -134,7 +134,7 @@ impl Recording {
             self.id.clone(),
             self.language.clone(),
             dual,
-            snapshot.processing.clone(),
+            snapshot.clone(),
             self.operation.clone(),
             self.progress.clone(),
             Some(plan),
@@ -157,16 +157,21 @@ impl Recording {
             .map_err(|e| ApiError::new(500, e.to_string()))??;
         if self.worker.is_none()
             && self.failure.is_none()
-            && (!dual || snapshot.processing.is_some())
+            && (!dual || snapshot.source_catalog.is_some())
         {
-            if let Some(receipt) = snapshot.processing.clone() {
+            let catalog = snapshot.source_catalog.clone();
+            let receipt = snapshot.processing.clone();
+            if catalog.is_some() {
                 self.mutate(move |job| {
-                    job.extra.insert(
-                        "capture_processing".into(),
-                        json!({"basename":"capture-processing.json","sha256":receipt.sha256}),
-                    );
-                    job.extra
-                        .insert("capture_source_catalog".into(), receipt.catalog);
+                    if let Some(receipt) = receipt {
+                        job.extra.insert(
+                            "capture_processing".into(),
+                            json!({"basename":"capture-processing.json","sha256":receipt.sha256}),
+                        );
+                    }
+                    if let Some(catalog) = catalog {
+                        job.extra.insert("capture_source_catalog".into(), catalog);
+                    }
                     Ok(())
                 })
                 .await?;
@@ -176,7 +181,7 @@ impl Recording {
                 self.id.clone(),
                 self.language.clone(),
                 dual,
-                snapshot.processing.clone(),
+                snapshot.clone(),
                 self.operation.clone(),
                 self.progress.clone(),
                 None,
@@ -394,6 +399,12 @@ pub(super) async fn record(
         folder: app.data_dir().join(id.as_str()),
         microphone: sources.iter().any(|s| s == "microphone"),
         system: sources.iter().any(|s| s == "system"),
+        echo_library: app
+            .meeting_manager()
+            .lock()
+            .expect("meeting")
+            .echo_library
+            .clone(),
     };
     let capture = CaptureSupervisor::spawn(helper, config).await;
     let mut cleanup = Ok(());
@@ -441,6 +452,20 @@ pub(super) async fn record(
                             app.store().checkpoint_duration(&id, duration)
                         })
                         .await;
+                    }
+                    let app = app.clone();
+                    let id = id.clone();
+                    let raw = final_snapshot.raw_sample;
+                    let clean = final_snapshot.committed_sample;
+                    let coverage=tokio::task::spawn_blocking(move||app.store().update_job(&id,|job| {
+                        job.extra.insert("capture_audio_coverage".into(),json!({"raw_samples":raw,"clean_samples":clean,"sample_rate":16000}));
+                        Ok::<_,StoreError>(())
+                    })).await;
+                    if let Err(error) = coverage
+                        .map_err(|e| StoreError::message(e.to_string()))
+                        .and_then(|r| r)
+                    {
+                        cleanup = Err(error);
                     }
                     running.and_then(|()| final_snapshot.error.map_or(Ok(()), Err))
                 }

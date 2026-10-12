@@ -3,7 +3,7 @@ use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command as Process,
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, sleep_until, timeout},
 };
@@ -42,30 +42,72 @@ impl CaptureSupervisor {
     ) -> Result<CaptureSession, CaptureError> {
         let path = path.to_path_buf();
         let prepared_config = config.clone();
-        let (helper, writer, log) = tokio::task::spawn_blocking(move || {
+        let (helper, log) = tokio::task::spawn_blocking(move || {
             let helper = Helper::inspect(&path)?;
-            let writer = SourceWriter::create(prepared_config.clone(), helper.clone())?;
             let log = private_create(&prepared_config.folder.join("capture.log"))?;
-            Ok::<_, CaptureError>((helper, writer, log))
+            Ok::<_, CaptureError>((helper, log))
         })
         .await
         .map_err(|e| invalid(e.to_string()))??;
-        Self::start(helper, writer, log, config, stop_bound)
+        let writer_helper = helper.clone();
+        let writer_config = config.clone();
+        Self::start(
+            helper,
+            move || SourceWriter::create(writer_config, writer_helper),
+            log,
+            config,
+            stop_bound,
+        )
+        .await
     }
 
-    pub(super) fn start(
+    pub(super) async fn start(
         helper: Helper,
-        writer: SourceWriter,
+        make_writer: impl FnOnce() -> Result<SourceWriter, CaptureError> + Send + 'static,
         log: std::fs::File,
         config: CaptureConfig,
         stop_bound: Duration,
     ) -> Result<CaptureSession, CaptureError> {
-        let mut child = Process::new(&helper.path)
+        let qualified = config.microphone && config.system && helper.qualified();
+        let (packets_tx, packets_rx) = mpsc::channel(PACKETS);
+        let (snapshots_tx, snapshots_rx) = watch::channel(CaptureSnapshot::default());
+        let writer_output = snapshots_tx.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        // Construction and every native DSP call stay on this same owner thread.
+        let writer_task = tokio::task::spawn_blocking(move || match make_writer() {
+            Ok(writer) => {
+                writer_output.send_replace(writer.snapshot.clone());
+                let _ = ready_tx.send(Ok(()));
+                run_writer(writer, packets_rx, writer_output)
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let _ = ready_tx.send(Err(message.clone()));
+                CaptureSnapshot {
+                    error: Some(message),
+                    ..CaptureSnapshot::default()
+                }
+            }
+        });
+        if let Err(error) = ready_rx.await.map_err(|e| invalid(e.to_string()))? {
+            drop(packets_tx);
+            let _ = writer_task.await;
+            return Err(invalid(error));
+        }
+        let child = Process::new(&helper.path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .spawn()?;
+            .spawn();
+        let mut child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                drop(packets_tx);
+                let _ = writer_task.await;
+                return Err(error.into());
+            }
+        };
         let pid = child
             .id()
             .ok_or_else(|| invalid("Capture helper has no process identity."))?;
@@ -73,20 +115,15 @@ impl CaptureSupervisor {
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         let (commands_tx, commands_rx) = mpsc::channel(8);
-        let (snapshots_tx, snapshots_rx) = watch::channel(writer.snapshot.clone());
         let stop = CancellationToken::new();
         let actor_stop = stop.clone();
         let start = Command::Start {
             microphone: config.microphone,
             system: config.system,
-            job_id: (config.microphone && config.system).then_some(config.job_id),
-            capture_export_contract: (config.microphone && config.system).then(|| EXPORT.into()),
+            job_id: qualified.then_some(config.job_id),
+            capture_export_contract: qualified.then(|| EXPORT.into()),
         };
         let task = tokio::spawn(async move {
-            let (packets_tx, packets_rx) = mpsc::channel(PACKETS);
-            let writer_output = snapshots_tx.clone();
-            let writer_task =
-                tokio::task::spawn_blocking(move || run_writer(writer, packets_rx, writer_output));
             let (stdin_tx, mut stdin_rx) = mpsc::channel::<Command>(8);
             // A blocked stdin write cannot block stdout, cancellation, or the stop deadline.
             let mut stdin_task = tokio::spawn(async move {

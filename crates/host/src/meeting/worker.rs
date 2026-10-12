@@ -1,7 +1,7 @@
 //! One serial live engine, including exceptional disk-backed state reconstruction.
 use super::{Progress, conflict, update};
 use crate::{
-    capture::ProcessingReceipt,
+    capture::CaptureSnapshot,
     inference::ChildModels,
     routes::{AppState, OperationGuard},
 };
@@ -401,7 +401,7 @@ pub(super) async fn worker(
     id: JobId,
     language: String,
     dual: bool,
-    receipt: Option<ProcessingReceipt>,
+    capture: CaptureSnapshot,
     operation: Arc<OperationGuard>,
     progress: watch::Sender<Progress>,
     recovery: Option<RecoveryPlan>,
@@ -423,12 +423,15 @@ pub(super) async fn worker(
             let mut config = EngineConfig::new(id.as_str(), initial_language);
             config.recovery = recovery.as_ref().map(|r| r.boundary.clone());
             let folder = app.data_dir().join(id.as_str());
-            if let Some(receipt) = receipt {
+            if let Some(receipt) = capture.processing {
                 config.processed_microphone_contract = Some(receipt.sha256);
-                config.capture_catalog_sha256 =
-                    receipt.metadata["capture_source"]["catalog_sha256"]
-                        .as_str()
-                        .map(str::to_owned);
+            }
+            if let Some(catalog) = capture.source_catalog {
+                use sha2::{Digest, Sha256};
+                config.capture_catalog_sha256 = Some(format!(
+                    "{:x}",
+                    Sha256::digest(serde_json::to_vec(&catalog).expect("catalog JSON"))
+                ));
             }
             let mut engine = if dual {
                 let mic = RecordingReader::open(folder.join("microphone_clean.wav"))

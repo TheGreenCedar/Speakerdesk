@@ -61,7 +61,9 @@ impl Helper {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::MetadataExt;
-                    if metadata.uid() != unsafe { libc::getuid() } {
+                    if (metadata.uid() != 0 && metadata.uid() != unsafe { libc::getuid() })
+                        || metadata.mode() & 0o022 != 0
+                    {
                         return Err(invalid("Capture capability is not application owned."));
                     }
                 }
@@ -100,10 +102,7 @@ impl Helper {
         let parsed: Packet = serde_json::from_value(packet.clone())
             .map_err(|_| invalid("Malformed capture processing receipt."))?;
         parsed.validate(job_id, &self.sha256)?;
-        let catalog = json!({"schema_version":1,"job_id":job_id,"sample_rate":16000,
-            "clock":"recording_samples","policy":"aligned_aec_microphone_and_original_system_v1",
-            "sources":[{"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1},
-                       {"source_id":"system","basename":"system.wav","revision":1}]});
+        let catalog = source_catalog(job_id);
         let catalog_sha256 = digest(&serde_json::to_vec(&catalog).expect("JSON value"));
         let metadata = json!({"schema_version":1,"job_id":job_id,
             "capture_source":{"catalog_sha256":catalog_sha256,"source_id":"microphone_clean","source_revision":1},
@@ -122,6 +121,13 @@ impl Helper {
             sha256,
         })
     }
+}
+
+pub(super) fn source_catalog(job_id: &str) -> Value {
+    json!({"schema_version":1,"job_id":job_id,"sample_rate":16000,
+        "clock":"recording_samples","policy":"aligned_aec_microphone_and_original_system_v1",
+        "sources":[{"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1},
+                   {"source_id":"system","basename":"system.wav","revision":1}]})
 }
 
 /// Immutable server receipt. Its digest is the production unity input contract.

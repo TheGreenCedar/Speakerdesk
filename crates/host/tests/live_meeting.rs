@@ -17,6 +17,9 @@ struct Running {
 }
 impl Running {
     async fn open(root: &Path, dual: bool) -> Self {
+        Self::open_capture(root, dual, None).await
+    }
+    async fn open_capture(root: &Path, dual: bool, echo: Option<(&Path, &str)>) -> Self {
         fs::write(root.join("fixture-live"), b"native-host protocol replay").unwrap();
         let helper = root.join("capture-helper");
         let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
@@ -30,7 +33,7 @@ impl Running {
         )
         .unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
-        if dual {
+        if dual && echo.is_none() {
             let digest = format!("{:x}", Sha256::digest(fs::read(&helper).unwrap()));
             fs::write(root.join("capture-helper.capability.json"),json!({"helper_sha256":digest,"export_contract":"apple_processed_mono16k_v1","capability_version":"apple_input_node_output_route_v1"}).to_string()).unwrap();
             let format = json!({"sample_rate":48000,"channels":1,"layout":"mono"});
@@ -40,7 +43,8 @@ impl Running {
                 "route":{"node":"inputNode","bus":0,"tap_scope":"output"},"state_phase":"after_start","channel_mapping":"mono_direct","callback_format":format,"io_formats":{"input_output":format,"output_input":format},
                 "readbacks":{"input_enabled":true,"output_enabled":true,"engine_running":true,"bypassed":false,"manual_rendering":false,"input_muted":false,"agc_enabled":false}}).to_string()).unwrap();
         }
-        let mut child = Command::new(env!("CARGO_BIN_EXE_inference-fixture"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_inference-fixture"));
+        command
             .arg("--native-host")
             .arg(root.join("data"))
             .arg(root)
@@ -49,8 +53,14 @@ impl Running {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
-            .spawn()
-            .unwrap();
+            .env_remove("SPEAKERDESK_TEST_ECHO_FAILURE");
+        if let Some((library, mode)) = echo {
+            command.env("SPEAKERDESK_ECHO_LIBRARY", library);
+            if mode != "real" {
+                command.env("SPEAKERDESK_TEST_ECHO_FAILURE", mode);
+            }
+        }
+        let mut child = command.spawn().unwrap();
         let input = child.stdin.take().unwrap();
         let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
         let line = tokio::time::timeout(Duration::from_secs(10), output.next_line())
@@ -901,6 +911,216 @@ async fn live_saved_audio_candidates_preserve_edits_language_eof_and_reopen() {
     assert_eq!(stale.status(), 409);
     assert_eq!(reopened.get(&path).await["document"], after["document"]);
     reopened.close(root).await;
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+#[ignore = "Requires pinned echo component and test ABI fixture in SPEAKERDESK_ECHO_FAULT_LIBRARY"]
+async fn raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen() {
+    let native = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../desktop/capture/echo/libspeakerdesk_echo.dylib");
+    let fault = std::path::PathBuf::from(
+        std::env::var_os("SPEAKERDESK_ECHO_FAULT_LIBRARY").expect("test-only ABI fixture"),
+    );
+    for case in ["real", "process", "reset", "abi", "missing"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let missing = root.join("missing-echo.dylib");
+        let library = match case {
+            "real" => &native,
+            "missing" => &missing,
+            _ => &fault,
+        };
+        let host = Running::open_capture(root, true, Some((library, case))).await;
+        let response = host
+            .post(
+                "api/meetings",
+                json!({"name":"Raw DSP replay","language":"en","sources":["microphone","system"]}),
+            )
+            .await;
+        assert_eq!(
+            response.status(),
+            202,
+            "{case}: {}",
+            response.text().await.unwrap()
+        );
+        let started: Value = response.json().await.unwrap();
+        let id = started["id"].as_str().unwrap();
+        let path = format!("api/jobs/{id}");
+        let finished = if matches!(case, "abi" | "missing") {
+            host.wait(&path, |v| {
+                v["status"] == "failed" && v["inference_owned"] == false
+            })
+            .await
+        } else {
+            trigger(root, 1);
+            if case == "process" {
+                host.wait(&path, |v| {
+                    v["status"] == "failed" && v["inference_owned"] == false
+                })
+                .await
+            } else {
+                // Includes the native lookahead; pause must flush the full raw endpoint.
+                host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 5.9)
+                    .await;
+                assert_eq!(
+                    host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                        .await
+                        .status(),
+                    202
+                );
+                if case == "reset" {
+                    host.wait(&path, |v| {
+                        v["status"] == "failed" && v["inference_owned"] == false
+                    })
+                    .await
+                } else {
+                    host.wait(&path, |v| {
+                        v["status"] == "paused" && v["pause_flush"]["status"] == "complete"
+                    })
+                    .await;
+                    assert_eq!(
+                        host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                            .await
+                            .status(),
+                        202
+                    );
+                    host.wait(&path, |v| v["status"] == "recording").await;
+                    trigger(root, 2);
+                    host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 12.9)
+                        .await;
+                    host.stop(id).await
+                }
+            }
+        };
+        let folder = root.join("data").join(id);
+        assert!(
+            finished["capture_processing"].is_null(),
+            "raw AEC is not Apple processing"
+        );
+        assert!(!folder.join("capture-processing.json").exists());
+        if matches!(case, "abi" | "missing") {
+            assert!(
+                !folder.join("audio.wav").exists(),
+                "runtime rejection precedes PCM creation"
+            );
+            let expected = if case == "abi" {
+                speakerdesk_core::messages::ECHO_INCOMPATIBLE
+            } else {
+                speakerdesk_core::messages::ECHO_MISSING
+            };
+            assert!(
+                finished["message"].as_str().unwrap().contains(expected),
+                "{finished}"
+            );
+        } else {
+            let coverage = &finished["capture_audio_coverage"];
+            let raw = coverage["raw_samples"].as_u64().unwrap();
+            let clean = coverage["clean_samples"].as_u64().unwrap();
+            assert_eq!(
+                finished["duration"].as_f64().unwrap(),
+                clean as f64 / 16000.
+            );
+            assert_eq!(
+                finished["capture_source_catalog"]["policy"],
+                "aligned_aec_microphone_and_original_system_v1"
+            );
+            for track in [
+                "microphone",
+                "system",
+                "system_reference",
+                "microphone_clean",
+                "audio",
+            ] {
+                let wav = hound::WavReader::open(folder.join(format!("{track}.wav"))).unwrap();
+                let frames = if matches!(track, "audio" | "microphone_clean") {
+                    clean
+                } else {
+                    raw
+                };
+                assert_eq!(u64::from(wav.duration()), frames, "{case}/{track}");
+            }
+            // Original tracks remain exact even if native processing or reset consumes
+            // input and then fails. Neither is relabelled as cleaned playback.
+            for track in ["microphone", "system"] {
+                for (i, sample) in hound::WavReader::open(folder.join(format!("{track}.wav")))
+                    .unwrap()
+                    .into_samples::<i16>()
+                    .enumerate()
+                {
+                    let value = 0.2_f32 * (i as f32 * 0.071).sin();
+                    let expected = (f64::from(value) * 32768.)
+                        .round_ties_even()
+                        .clamp(-32768., 32767.) as i16;
+                    assert_eq!(sample.unwrap(), expected, "{case}/{track}/{i}");
+                }
+            }
+            if case == "real" {
+                assert_eq!(finished["status"], "ready");
+                assert_eq!(
+                    raw, 224513,
+                    "Pause/Resume and final partial frame retain each sample once"
+                );
+                assert_eq!(clean, raw);
+                assert_eq!(
+                    fs::read(folder.join("microphone.wav")).unwrap(),
+                    fs::read(folder.join("microphone_clean.wav")).unwrap(),
+                    "tonal no-echo fallback preserves microphone"
+                );
+                let owners: std::collections::BTreeSet<_> = finished["document"]["segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["capture_source"]["source_id"].as_str().unwrap())
+                    .collect();
+                assert_eq!(
+                    owners,
+                    std::collections::BTreeSet::from(["microphone_clean", "system"])
+                );
+            } else {
+                assert!(raw > clean && clean > 0, "{case}: {coverage}");
+                let expected = if case == "process" {
+                    "rejected an audio frame"
+                } else {
+                    "could not reset"
+                };
+                assert!(
+                    finished["message"].as_str().unwrap().contains(expected),
+                    "{finished}"
+                );
+            }
+            let playback = host
+                .client
+                .get(format!("{}api/jobs/{id}/audio", host.url))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            assert_eq!(
+                playback.as_ref(),
+                fs::read(folder.join("audio.wav")).unwrap()
+            );
+        }
+        host.close(root).await;
+        let reopened = Running::open_capture(root, true, Some((library, case))).await;
+        let saved = reopened.get(&path).await;
+        assert_eq!(saved["status"], finished["status"], "{case}");
+        assert_eq!(saved["duration"], finished["duration"]);
+        assert_eq!(
+            saved["capture_audio_coverage"],
+            finished["capture_audio_coverage"]
+        );
+        assert_eq!(
+            saved["capture_source_catalog"],
+            finished["capture_source_catalog"]
+        );
+        assert_eq!(saved["document"], finished["document"]);
+        reopened.close(root).await;
+    }
 }
 
 #[tokio::test]

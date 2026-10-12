@@ -4677,8 +4677,8 @@ dependencies = [
 name = "speakerdesk-echo"
 version = "0.6.6"
 dependencies = [
- "cmake",
  "libc",
+ "libloading 0.8.9",
  "realfft",
  "speakerdesk-core",
 ]
@@ -4699,6 +4699,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "speakerdesk-core",
+ "speakerdesk-echo",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

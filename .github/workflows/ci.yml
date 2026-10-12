@@ -96,6 +96,14 @@ jobs:
           bash scripts/fetch_mlx_runtime.sh
       - name: Test native crates with locked dependencies
         run: cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p speakerdesk-models -p speakerdesk-echo -p xtask
+      - name: Build pinned native echo component
+        run: python3 scripts/setup_echo.py
+      - name: Test native raw capture DSP boundary
+        run: |
+          cargo test --locked -p speakerdesk-host raw_dual_capture_opens_and_preserves_partial_pause_tail -- --ignored
+          cargo test --locked -p speakerdesk-echo native_echo_bounds_queues_and_drains_partial_frames_exactly -- --ignored
+          cc -dynamiclib -o "$RUNNER_TEMP/speakerdesk-echo-failure.dylib" crates/host/tests/testdata/echo-failure.c
+          SPEAKERDESK_ECHO_FAULT_LIBRARY="$RUNNER_TEMP/speakerdesk-echo-failure.dylib" cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-host raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen -- --ignored
       - name: Compile desktop boundary without packaging resources
         env:
           TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'

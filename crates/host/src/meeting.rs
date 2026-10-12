@@ -36,6 +36,7 @@ use tokio_util::sync::CancellationToken;
 pub struct MeetingManager {
     start_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     helper: Option<PathBuf>,
+    echo_library: Option<PathBuf>,
     helper_error: Option<String>,
     cleanup_error: Option<String>,
     active: Option<Active>,
@@ -70,7 +71,11 @@ impl MeetingManager {
     }
 }
 
-pub(crate) async fn configure_capture(app: &AppState, helper: Option<PathBuf>) {
+pub(crate) async fn configure_capture(
+    app: &AppState,
+    helper: Option<PathBuf>,
+    echo_library: Option<PathBuf>,
+) {
     let checked = tokio::task::spawn_blocking(move || {
         helper.map(|path| {
             CaptureSupervisor::check_helper(&path)
@@ -81,6 +86,7 @@ pub(crate) async fn configure_capture(app: &AppState, helper: Option<PathBuf>) {
     .await;
     let manager = app.meeting_manager();
     let mut manager = manager.lock().expect("meeting");
+    manager.echo_library = echo_library;
     match checked {
         Ok(Some(Ok(path))) => {
             manager.helper = Some(path);

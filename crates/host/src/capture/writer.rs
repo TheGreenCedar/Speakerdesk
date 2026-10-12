@@ -8,6 +8,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::Value;
 use speakerdesk_core::audio::pcm16_bytes;
+use speakerdesk_echo::EchoMixer;
 use tokio::sync::{mpsc, watch};
 
 use super::processing::{Helper, invalid, private_create};
@@ -23,6 +24,7 @@ pub struct CaptureConfig {
     pub folder: PathBuf,
     pub microphone: bool,
     pub system: bool,
+    pub echo_library: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,9 +44,12 @@ pub enum CapturePhase {
 pub struct CaptureSnapshot {
     pub phase: CapturePhase,
     pub committed_sample: u32,
+    /// Original aligned tracks may extend beyond failed or buffered DSP output.
+    pub raw_sample: u32,
     pub late_samples: u64,
     pub levels: BTreeMap<String, f32>,
     pub processing: Option<ProcessingReceipt>,
+    pub source_catalog: Option<Value>,
     pub error: Option<String>,
 }
 impl Default for CaptureSnapshot {
@@ -52,9 +57,11 @@ impl Default for CaptureSnapshot {
         Self {
             phase: CapturePhase::Starting,
             committed_sample: 0,
+            raw_sample: 0,
             late_samples: 0,
             levels: BTreeMap::new(),
             processing: None,
+            source_catalog: None,
             error: None,
         }
     }
@@ -70,6 +77,9 @@ pub(super) struct SourceWriter {
     stopped: bool,
     write_failed: bool,
     resume_qualified: bool,
+    echo: Option<EchoMixer>,
+    clean_failed: bool,
+    reset_points: Vec<u32>,
     pub snapshot: CaptureSnapshot,
 }
 
@@ -91,11 +101,15 @@ impl SourceWriter {
         {
             return Err(invalid("Invalid capture recording or source selection."));
         }
-        if config.microphone && config.system && !helper.qualified() {
-            return Err(invalid(
-                "Raw dual-source capture requires the echo canceller; this helper is not qualified.",
-            ));
-        }
+        let echo = if config.microphone && config.system && !helper.qualified() {
+            let path = config
+                .echo_library
+                .as_deref()
+                .ok_or_else(|| invalid(speakerdesk_core::messages::ECHO_MISSING))?;
+            Some(EchoMixer::start(path).map_err(|e| invalid(e.to_string()))?)
+        } else {
+            None
+        };
         let metadata = fs::symlink_metadata(&config.folder)?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err(invalid("Capture requires a private recording directory."));
@@ -143,6 +157,9 @@ impl SourceWriter {
             files.insert(name, wav);
         }
         let mut snapshot = CaptureSnapshot::default();
+        if echo.is_some() {
+            snapshot.source_catalog = Some(super::processing::source_catalog(&config.job_id));
+        }
         if config.microphone {
             snapshot.levels.insert("microphone".into(), 0.);
         }
@@ -159,6 +176,9 @@ impl SourceWriter {
             stopped: false,
             write_failed: false,
             resume_qualified: false,
+            echo,
+            clean_failed: false,
+            reset_points: Vec::new(),
             snapshot,
         })
     }
@@ -169,6 +189,7 @@ impl SourceWriter {
         }
         if self.config.microphone
             && self.config.system
+            && self.echo.is_none()
             && self.snapshot.processing.is_none()
             && !matches!(
                 event.kind(),
@@ -216,11 +237,17 @@ impl SourceWriter {
                     value,
                     &self.config.folder,
                 )?);
+                self.snapshot.source_catalog = self
+                    .snapshot
+                    .processing
+                    .as_ref()
+                    .map(|receipt| receipt.catalog.clone());
             }
             EventKind::Audio => {
                 self.require_active_input()?;
                 if self.config.microphone
                     && self.config.system
+                    && self.echo.is_none()
                     && self.snapshot.processing.is_none()
                 {
                     return Err(invalid(
@@ -252,12 +279,26 @@ impl SourceWriter {
                 }
                 self.source(value.get("source").and_then(Value::as_str).unwrap_or(""))?;
                 self.position(seconds(value)?)?;
-                // Raw single-source has no AEC state to reset; Swift already drained its converter.
+                if self.echo.is_some() {
+                    let point = self
+                        .position(seconds(value)?)?
+                        .max(self.snapshot.raw_sample);
+                    if !self.reset_points.contains(&point) {
+                        if self.reset_points.len() >= 8 {
+                            return Err(invalid(
+                                "Audio format changed too frequently. Original audio is preserved.",
+                            ));
+                        }
+                        self.reset_points.push(point);
+                        self.reset_points.sort_unstable();
+                    }
+                }
             }
             EventKind::Recording => {
                 self.require_active_input()?;
                 if self.config.microphone
                     && self.config.system
+                    && self.echo.is_none()
                     && self.snapshot.processing.is_none()
                 {
                     return Err(invalid(
@@ -326,7 +367,7 @@ impl SourceWriter {
             return Err(invalid("Invalid capture timestamp."));
         }
         let position = (seconds * f64::from(RATE)).round_ties_even() as u32;
-        if position > self.snapshot.committed_sample.saturating_add(RATE * 5) {
+        if position > self.snapshot.raw_sample.saturating_add(RATE * 5) {
             return Err(invalid(
                 "Audio capture timing jumped; recording stopped to preserve its timeline.",
             ));
@@ -420,7 +461,7 @@ impl SourceWriter {
             self.last_packet[source].max(packet.time + frames as f64 / f64::from(RATE));
         let mut offset = self
             .snapshot
-            .committed_sample
+            .raw_sample
             .saturating_sub(position)
             .min(frames as u32) as usize;
         self.snapshot.late_samples += offset as u64;
@@ -466,72 +507,119 @@ impl SourceWriter {
                 *level = 0.;
             }
         }
-        while self.snapshot.committed_sample < target {
-            let cursor = self.snapshot.committed_sample;
+        while self.snapshot.raw_sample < target {
+            self.reset_at_cursor()?;
+            let cursor = self.snapshot.raw_sample;
             let within = (cursor % TILE) as usize;
-            let count = (TILE as usize - within).min((target - cursor) as usize);
+            let mut count = (TILE as usize - within).min((target - cursor) as usize);
+            if let Some(point) = self.reset_points.first() {
+                count = count.min((*point - cursor) as usize);
+            }
             let tile = self.tiles.entry(cursor / TILE).or_default();
-            let silence = vec![0.; count];
             let microphone = tile
                 .microphone
                 .as_ref()
-                .map(|v| &v[within..within + count])
-                .unwrap_or(&silence);
+                .map(|v| v[within..within + count].to_vec())
+                .unwrap_or_else(|| vec![0.; count]);
             let system = tile
                 .system
                 .as_ref()
-                .map(|v| &v[within..within + count])
-                .unwrap_or(&silence);
-            let mixed: Vec<_> = microphone
-                .iter()
-                .zip(system)
-                .map(|(m, s)| (m + s).clamp(-1., 1.))
-                .collect();
-            let stereo: Vec<_> = tile
+                .map(|v| v[within..within + count].to_vec())
+                .unwrap_or_else(|| vec![0.; count]);
+            let reference = tile
                 .reference
                 .as_ref()
-                .map(|v| {
-                    v[within..within + count]
-                        .iter()
-                        .flatten()
-                        .copied()
-                        .collect()
-                })
-                .unwrap_or_else(|| vec![0.; count * 2]);
-            let result = (|| {
-                for (name, wav) in &mut self.files {
-                    let samples = match *name {
-                        "audio" => &mixed,
-                        "microphone" | "microphone_clean" => microphone,
-                        "system" => system,
-                        "system_reference" => &stereo,
-                        _ => unreachable!(),
-                    };
-                    let bytes = pcm16_bytes(samples).map_err(|e| invalid(e.to_string()))?;
-                    let mut block = wav.get_i16_writer((bytes.len() / 2) as u32);
-                    for sample in bytes.as_chunks::<2>().0 {
-                        block.write_sample(i16::from_le_bytes(*sample));
+                .map(|v| v[within..within + count].to_vec())
+                .unwrap_or_else(|| vec![[0.; 2]; count]);
+            let stereo: Vec<_> = reference.iter().flatten().copied().collect();
+            // Raw tracks commit first, including when DSP or its clean output fails.
+            let raw_result = (|| {
+                for (name, samples) in [
+                    ("microphone", microphone.as_slice()),
+                    ("system", system.as_slice()),
+                    ("system_reference", stereo.as_slice()),
+                ] {
+                    if let Some(wav) = self.files.get_mut(name) {
+                        write_samples(wav, samples)?;
                     }
-                    block.flush()?;
-                    wav.flush()?;
                 }
                 Ok::<_, CaptureError>(())
             })();
-            if result.is_err() {
+            if raw_result.is_err() {
                 self.write_failed = true;
             }
-            result?;
-            self.snapshot.committed_sample += count as u32;
+            raw_result?;
+            self.snapshot.raw_sample += count as u32;
             if within + count == TILE as usize {
                 self.tiles.remove(&(cursor / TILE));
             }
+            if !self.clean_failed {
+                let clean_result = if let Some(echo) = &mut self.echo {
+                    echo.add(&microphone, &system, &reference, false)
+                        .map_err(|e| invalid(e.to_string()))
+                        .and_then(|out| self.write_clean(&out.clean, &out.system))
+                } else {
+                    self.write_clean(&microphone, &system)
+                };
+                if clean_result.is_err() {
+                    self.clean_failed = true;
+                }
+                clean_result?;
+            }
+        }
+        self.reset_at_cursor()?;
+        if final_tail {
+            self.drain_echo()?;
+        }
+        Ok(())
+    }
+
+    fn write_clean(&mut self, clean: &[f32], system: &[f32]) -> Result<(), CaptureError> {
+        let mixed: Vec<_> = clean
+            .iter()
+            .zip(system)
+            .map(|(m, s)| (m + s).clamp(-1., 1.))
+            .collect();
+        if let Some(wav) = self.files.get_mut("microphone_clean") {
+            write_samples(wav, clean)?;
+        }
+        write_samples(self.files.get_mut("audio").expect("mix"), &mixed)?;
+        self.snapshot.committed_sample += clean.len() as u32;
+        Ok(())
+    }
+
+    fn drain_echo(&mut self) -> Result<(), CaptureError> {
+        if self.clean_failed {
+            return Ok(());
+        }
+        if let Some(echo) = &mut self.echo {
+            let result = echo
+                .add(&[], &[], &[], true)
+                .map_err(|e| invalid(e.to_string()))
+                .and_then(|out| self.write_clean(&out.clean, &out.system));
+            if result.is_err() {
+                self.clean_failed = true;
+            }
+            result?;
+        }
+        Ok(())
+    }
+
+    fn reset_at_cursor(&mut self) -> Result<(), CaptureError> {
+        while self
+            .reset_points
+            .first()
+            .is_some_and(|point| *point <= self.snapshot.raw_sample)
+        {
+            self.reset_points.remove(0);
+            self.drain_echo()?;
         }
         Ok(())
     }
 
     pub fn finish(mut self) -> CaptureSnapshot {
         // Preserve valid packets still behind the watermark on every failure path.
-        if !self.stopped
+        if (!self.stopped || self.clean_failed)
             && !self.write_failed
             && let Err(error) = self.flush(self.last_packet[0].max(self.last_packet[1]), true)
         {
@@ -557,6 +645,17 @@ impl SourceWriter {
         self.files
             .insert("audio", hound::WavWriter::new_append(read_only).unwrap());
     }
+}
+
+fn write_samples(wav: &mut hound::WavWriter<File>, samples: &[f32]) -> Result<(), CaptureError> {
+    let bytes = pcm16_bytes(samples).map_err(|e| invalid(e.to_string()))?;
+    let mut block = wav.get_i16_writer((bytes.len() / 2) as u32);
+    for sample in bytes.as_chunks::<2>().0 {
+        block.write_sample(i16::from_le_bytes(*sample));
+    }
+    block.flush()?;
+    wav.flush()?;
+    Ok(())
 }
 
 fn seconds(value: &Value) -> Result<f64, CaptureError> {
