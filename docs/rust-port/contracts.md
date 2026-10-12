@@ -78,6 +78,17 @@ Incomplete cores stay retryable and cannot erase previously published words.
 Edited continuation and sealed-row cleanup discard the corresponding progress.
 This bounds repeated model decoding, not every activity or projection scan.
 
+Qualified microphone/system Pause drains the retained capture graph and writer.
+Resume is armed by the parent, then requires a fresh producer observation equal
+to the original route, formats and voice-processing readbacks before resumed PCM
+or Recording acknowledgement. The helper checks the input device on its control
+path. The first accepted microphone callback anchors the clock to the saved pause
+endpoint; earlier callbacks are rejected. The original source catalog and receipt
+remain authoritative. A repeated Resume conflicts; Stop keeps ownership through
+drain/reap and cannot revert from finishing on a late Recording acknowledgement.
+These boundaries have replay and native control tests; physical graph restart
+remains a hardware acceptance gate.
+
 ## Messages and security
 
 User-facing strings live in `speakerdesk_core::messages` and are copied from v0.6.6. The token header, CSP, and host allowlist live in `speakerdesk_core::security`. Do not change them without an owner decision.

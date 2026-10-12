@@ -904,6 +904,166 @@ async fn live_saved_audio_candidates_preserve_edits_language_eof_and_reopen() {
 }
 
 #[tokio::test]
+async fn qualified_live_resume_keeps_sources_and_owns_pending_shutdown() {
+    for case in ["twice", "device-failure", "stop-pending", "late-recording"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let host = Running::open(root, true).await;
+        trigger(root, 1);
+        let id = host.start(json!(["microphone", "system"])).await;
+        let path = format!("api/jobs/{id}");
+        host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 6.5)
+            .await;
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        let paused = host
+            .wait(&path, |v| {
+                v["status"] == "paused" && v["pause_flush"]["status"] == "complete"
+            })
+            .await;
+        let folder = root.join("data").join(&id);
+        let receipt = fs::read(folder.join("capture-processing.json")).unwrap();
+        let catalog = paused["capture_source_catalog"].clone();
+        fs::write(root.join("hold-resume"), b"replay barrier").unwrap();
+        if case == "device-failure" {
+            fs::write(root.join("fail-resume"), b"replay").unwrap();
+        }
+        if case == "late-recording" {
+            fs::write(root.join("late-recording"), b"replay").unwrap();
+        }
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        wait_file(&root.join("resume-started")).await;
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                .await
+                .status(),
+            409,
+            "{case}"
+        );
+        let pending = host.get(&path).await;
+        assert_eq!(pending["message"], "Resuming recording…");
+        assert_eq!(pending["inference_owned"], true);
+        let finished = if matches!(case, "stop-pending" | "late-recording") {
+            assert_eq!(
+                host.post(&format!("api/meetings/{id}/stop"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            if case == "late-recording" {
+                wait_file(&root.join("late-recording-sent")).await;
+                let draining = host
+                    .wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 7.5)
+                    .await;
+                assert_eq!(draining["status"], "finishing");
+                assert_eq!(draining["inference_owned"], true);
+                fs::write(root.join("release-stop"), b"replay").unwrap();
+            }
+            host.wait(&path, |v| {
+                v["status"] == "ready" && v["inference_owned"] == false
+            })
+            .await
+        } else {
+            fs::write(root.join("release-resume"), b"replay").unwrap();
+            if case == "device-failure" {
+                let failed = host
+                    .wait(&path, |v| {
+                        v["status"] == "failed" && v["inference_owned"] == false
+                    })
+                    .await;
+                assert!(
+                    failed["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("device changed"),
+                    "{failed}"
+                );
+                failed
+            } else {
+                host.wait(&path, |v| v["status"] == "recording").await;
+                for stage in 2..=3 {
+                    if stage == 3 {
+                        assert_eq!(
+                            host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                                .await
+                                .status(),
+                            202
+                        );
+                        host.wait(&path, |v| v["status"] == "recording").await;
+                    }
+                    trigger(root, stage);
+                    host.wait(&path, |v| {
+                        v["duration"].as_f64().unwrap_or(0.) >= f64::from(stage * 7) - 0.5
+                    })
+                    .await;
+                    assert_eq!(
+                        host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                            .await
+                            .status(),
+                        202
+                    );
+                    host.wait(&path, |v| {
+                        v["status"] == "paused" && v["pause_flush"]["status"] == "complete"
+                    })
+                    .await;
+                }
+                host.stop(&id).await
+            }
+        };
+        let samples = match case {
+            "twice" => 336000,
+            "late-recording" => 128000,
+            _ => 112000,
+        };
+        assert_eq!(finished["duration"], f64::from(samples) / 16000., "{case}");
+        assert_eq!(finished["capture_source_catalog"], catalog);
+        assert_eq!(
+            fs::read(folder.join("capture-processing.json")).unwrap(),
+            receipt
+        );
+        let microphone = hound::WavReader::open(folder.join("microphone.wav"))
+            .unwrap()
+            .into_samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let clean = hound::WavReader::open(folder.join("microphone_clean.wav"))
+            .unwrap()
+            .into_samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(microphone, clean);
+        assert_eq!(clean.len(), samples as usize);
+        for (index, &sample) in clean.iter().enumerate() {
+            let value = 0.2_f32 * (index as f32 * 0.071).sin();
+            let expected = (f64::from(value) * 32768.)
+                .round_ties_even()
+                .clamp(-32768., 32767.) as i16;
+            assert_eq!(sample, expected, "{case} sample {index}");
+        }
+        let sources: std::collections::BTreeSet<_> = finished["document"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["capture_source"]["source_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            sources,
+            std::collections::BTreeSet::from(["microphone_clean", "system"])
+        );
+        host.close(root).await;
+    }
+}
+
+#[tokio::test]
 async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest() {
     for mode in [
         "dual-stop",
@@ -975,19 +1135,13 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
                         .status(),
                     202
                 );
-                let failed = host
-                    .wait(&path, |v| {
-                        v["status"] == "failed" && v["inference_owned"] == false
-                    })
-                    .await;
-                assert!(failed["message"].as_str().unwrap().contains("Pause"));
-                assert!(failed["duration"].as_f64().unwrap() >= 7.);
-                assert_eq!(
-                    host.post(&format!("api/meetings/{id}/resume"), json!({}))
-                        .await
-                        .status(),
-                    409
-                );
+                host.wait(&path, |v| {
+                    v["status"] == "paused" && v["pause_flush"]["status"] == "complete"
+                })
+                .await;
+                let saved = host.stop(&id).await;
+                assert_eq!(saved["status"], "ready");
+                assert_eq!(saved["duration"], 7.);
                 host.close(root).await;
             }
             "capture-error" => {
@@ -1297,7 +1451,7 @@ async fn ordinary_live_language_evidence_survives_routing_edits_and_restart() {
         }
         if case == "mixed" {
             // The acknowledged pause has already published the long English
-            // prefix. Final EOF decodes its remaining tail in German, regardless
+            // prefix. Resumed audio decodes its remaining tail in German, regardless
             // of how many probes or balanced cuts were needed before the pause.
             assert_eq!(prefix["language"], "en");
             assert!(prefix["canonical_text_end_sample"].as_i64().unwrap() > 392000);
@@ -1313,6 +1467,15 @@ async fn ordinary_live_language_evidence_survives_routing_edits_and_restart() {
                 json!({"probabilities":[0.01,0.99],"codes":["en","de"]}).to_string(),
             )
             .unwrap();
+            assert_eq!(
+                host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            trigger(root, 5);
+            host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 34.5)
+                .await;
         }
         let done = host.stop(&id).await;
         assert_eq!(done["status"], "ready", "{case}: {done}");

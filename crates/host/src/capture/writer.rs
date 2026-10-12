@@ -30,6 +30,7 @@ pub enum CapturePhase {
     Starting,
     Recording,
     Paused,
+    Resuming,
     Stopping,
     Stopped,
     Failed,
@@ -68,6 +69,7 @@ pub(super) struct SourceWriter {
     pcm_seen: bool,
     stopped: bool,
     write_failed: bool,
+    resume_qualified: bool,
     pub snapshot: CaptureSnapshot,
 }
 
@@ -156,6 +158,7 @@ impl SourceWriter {
             pcm_seen: false,
             stopped: false,
             write_failed: false,
+            resume_qualified: false,
             snapshot,
         })
     }
@@ -182,6 +185,22 @@ impl SourceWriter {
         let value = event.body();
         match event.kind() {
             EventKind::CaptureProcessing => {
+                if self.snapshot.phase == CapturePhase::Resuming {
+                    let initial = self
+                        .snapshot
+                        .processing
+                        .as_ref()
+                        .ok_or_else(|| invalid("Unexpected resumed processing receipt."))?;
+                    if self.resume_qualified || initial.metadata.get("producer") != Some(value) {
+                        return Err(invalid(
+                            "Resumed microphone qualification differs from the retained capture graph.",
+                        ));
+                    }
+                    // Exact equality includes the already validated job, helper, route,
+                    // formats and readbacks. Keep the original on-disk receipt/catalog.
+                    self.resume_qualified = true;
+                    return Ok(());
+                }
                 if !self.config.microphone
                     || !self.config.system
                     || self.pcm_seen
@@ -199,6 +218,7 @@ impl SourceWriter {
                 )?);
             }
             EventKind::Audio => {
+                self.require_active_input()?;
                 if self.config.microphone
                     && self.config.system
                     && self.snapshot.processing.is_none()
@@ -211,6 +231,11 @@ impl SourceWriter {
                 self.pcm_seen = true;
             }
             EventKind::Clock => {
+                if self.snapshot.phase == CapturePhase::Paused
+                    || (self.snapshot.phase == CapturePhase::Resuming && !self.resume_qualified)
+                {
+                    return Ok(());
+                }
                 let seconds = seconds(value)?;
                 self.flush(seconds, false)?;
                 if let Some(message) =
@@ -230,6 +255,7 @@ impl SourceWriter {
                 // Raw single-source has no AEC state to reset; Swift already drained its converter.
             }
             EventKind::Recording => {
+                self.require_active_input()?;
                 if self.config.microphone
                     && self.config.system
                     && self.snapshot.processing.is_none()
@@ -242,11 +268,6 @@ impl SourceWriter {
             }
             EventKind::Paused => {
                 self.flush(seconds(value)?, true)?;
-                if self.snapshot.processing.is_some() {
-                    return Err(invalid(
-                        "Qualified microphone processing ended at Pause; restart recording. Audio is preserved.",
-                    ));
-                }
                 self.snapshot.phase = CapturePhase::Paused;
             }
             EventKind::Stopped => {
@@ -263,6 +284,28 @@ impl SourceWriter {
                 ));
             }
             EventKind::CaptureRuntime | EventKind::HelperCheck => (),
+        }
+        Ok(())
+    }
+
+    pub(super) fn resume(&mut self) -> Result<(), CaptureError> {
+        if self.snapshot.phase != CapturePhase::Paused {
+            return Err(invalid(
+                "Capture can resume only from an acknowledged Pause.",
+            ));
+        }
+        self.resume_qualified = self.snapshot.processing.is_none();
+        self.snapshot.phase = CapturePhase::Resuming;
+        Ok(())
+    }
+
+    fn require_active_input(&self) -> Result<(), CaptureError> {
+        if self.snapshot.phase == CapturePhase::Paused
+            || (self.snapshot.phase == CapturePhase::Resuming && !self.resume_qualified)
+        {
+            return Err(invalid(
+                "Capture advanced without an owned Resume and fresh microphone qualification.",
+            ));
         }
         Ok(())
     }
@@ -523,13 +566,22 @@ fn seconds(value: &Value) -> Result<f64, CaptureError> {
         .ok_or_else(|| invalid("Capture event has no timestamp."))
 }
 
+pub(super) enum WriterInput {
+    Event(CaptureEvent),
+    Resume,
+}
+
 pub(super) fn run_writer(
     mut writer: SourceWriter,
-    mut input: mpsc::Receiver<CaptureEvent>,
+    mut input: mpsc::Receiver<WriterInput>,
     output: watch::Sender<CaptureSnapshot>,
 ) -> CaptureSnapshot {
     while let Some(event) = input.blocking_recv() {
-        if let Err(error) = writer.accept(event) {
+        let result = match event {
+            WriterInput::Event(event) => writer.accept(event),
+            WriterInput::Resume => writer.resume(),
+        };
+        if let Err(error) = result {
             writer.snapshot.error = Some(error.to_string());
             writer.snapshot.phase = CapturePhase::Stopping;
             output.send_replace(writer.snapshot.clone());

@@ -192,13 +192,17 @@ impl Recording {
         {
             self.recover(e, snapshot, dual).await?;
         }
-        if self.phase != snapshot.phase {
+        if self.phase != snapshot.phase
+            && !(self.phase == CapturePhase::Resuming && snapshot.phase == CapturePhase::Paused)
+        {
             self.phase = snapshot.phase;
             let phase = snapshot.phase;
-            if matches!(
-                phase,
-                CapturePhase::Recording | CapturePhase::Paused | CapturePhase::Stopping
-            ) {
+            if !self.stopping
+                && matches!(
+                    phase,
+                    CapturePhase::Recording | CapturePhase::Paused | CapturePhase::Stopping
+                )
+            {
                 self.mutate(move |job| {
                     job.status = match phase {
                         CapturePhase::Recording => "recording",
@@ -292,12 +296,16 @@ impl Recording {
                         {
                             return Err(conflict("Wait for paused audio to finish processing."));
                         }
+                        job.message = "Resuming recording…".into();
                         Ok(())
                     })
                     .await?;
                 capture
                     .command(Command::Resume)
                     .map_err(|e| conflict(e.to_string()))?;
+                // The actor owns this transition before the next HTTP command;
+                // a second Resume must not queue another qualification attempt.
+                self.phase = CapturePhase::Resuming;
                 Ok(job)
             }
             Action::Language { language, revision } => {

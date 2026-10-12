@@ -27,6 +27,10 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var processingAnnounced = false
     private var pendingSystemChunks: [ConvertedAudioChunk] = []
     private var microphoneFormat: AVAudioFormat?
+    private var microphoneObservation: AppleCaptureObservation?
+    private var microphoneDevice: UInt32?
+    private var resumeBoundary: AppleMicrophoneResumeBoundary?
+    private var captureHostFloor = 0.0
     private var failed = false
     private var startupPhase = "idle"
     private var captureGeneration: UInt64 = 0
@@ -66,11 +70,13 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             converters.removeAll()
             pendingSystemChunks.removeAll()
             microphoneFormat=nil
+            microphoneObservation=nil;microphoneDevice=nil
             stateLock.withLock {
                 captureGeneration += 1
                 processingAnnounced=false
                 failed=false
                 startHost=0;pausedAt=0;pausedSeconds=0;paused=false
+                resumeBoundary=nil;captureHostFloor=0
                 startupPhase="idle"
             }
         }
@@ -79,16 +85,16 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     private func acceptedSystemGeneration(_ origin:SCStream) -> UInt64? {
         stateLock.withLock {
-            guard active && !failed && stream === origin else {return nil}
+            guard active && !paused && !failed && stream === origin else {return nil}
             return captureGeneration
         }
     }
     private func packet(_ input: AVAudioPCMBuffer, source: String, timestamp: Double, generation: UInt64, observation: AppleCaptureObservation? = nil) {
         // The serial audio queue owns both converters; state snapshots use a lock.
-        let timing = stateLock.withLock { (active, paused, startHost, pausedSeconds, captureGeneration) }
-        guard timing.0 && !timing.1 && timing.4 == generation && !stateLock.withLock({failed}) else { return }
+        let timing = stateLock.withLock { (active, paused, captureGeneration, captureHostFloor, resumeBoundary) }
+        guard timing.0 && timing.2 == generation && AppleMicrophoneResumeBoundary.accepts(timestamp,after:timing.3) &&
+            (!timing.1 || (source == "microphone" && timing.4 != nil)) && !stateLock.withLock({failed}) else { return }
         let targetFormat = source == "system" ? systemFormat : pcmFormat
-        let position = max(0, timestamp-timing.2-timing.3)
         do {
             var retained = input
             if source == "microphone", let jobID=processingJobID {
@@ -99,15 +105,24 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 if let previous=microphoneFormat, !captureFormatMatches(previous,input.format) {
                     throw NSError(domain:"AppleCaptureRoute",code:4,userInfo:[NSLocalizedDescriptionKey:"Microphone capture epoch changed; captured audio is preserved."])
                 }
+                if let previous=microphoneObservation, !previous.matches(observation) {
+                    throw NSError(domain:"AppleCaptureRoute",code:4,userInfo:[NSLocalizedDescriptionKey:"Microphone I/O route changed; captured audio is preserved."])
+                }
                 retained=try appleMicrophoneCopy(input) // Validate every callback before any PCM advances.
                 if !processingAnnounced {
                     microphoneFormat=input.format
+                    microphoneObservation=observation
+                    if var boundary=timing.4 {
+                        guard let offset=boundary.pausedOffset(firstCallback:timestamp,origin:stateLock.withLock({startHost})) else {return}
+                        stateLock.withLock {pausedSeconds=offset;paused=false;captureHostFloor=boundary.hostFloor;resumeBoundary=nil}
+                    }
                     emit(receipt)
                     stateLock.withLock {processingAnnounced=true}
                     try emitConverted(pendingSystemChunks,source:"system")
                     pendingSystemChunks.removeAll()
                 }
             }
+            let position=stateLock.withLock {max(0,timestamp-startHost-pausedSeconds)}
             var converter = converters[source]
             if let previous = converter,
                previous.inputFormat != retained.format || previous.discontinuous(at: position) {
@@ -238,6 +253,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 if processingJobID != nil {stateLock.withLock {startHost=hostSeconds()}}
                 try engine.start()
                 if processingJobID != nil {
+                    microphoneDevice=engine.inputNode.auAudioUnit.deviceID
                     emit(["type":"capture_runtime","state_phase":"after_start",
                           "input_output_format":captureFormat(engine.inputNode.outputFormat(forBus:0)),
                           "output_input_format":renderFormat(engine.outputNode.inputFormat(forBus:0)),
@@ -294,14 +310,6 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func pause() async throws {
         let timing = stateLock.withLock { (active, paused, startHost, pausedSeconds) }
         guard timing.0 && !timing.1 else { return }
-        if processingJobID != nil {
-            // The qualified app boundary ends the epoch after draining.
-            if let stream {try await stream.stopCapture()}
-            if micEnabled {engine.pause()}
-            finishConversion()
-            stateLock.withLock {pausedAt=hostSeconds();paused=true}
-            emit(["type":"paused","time":elapsed()]);return
-        }
         if let stream { try await stream.stopCapture() }
         if micEnabled { engine.pause() }
         // Drain copied audio before changing timeline state.
@@ -311,8 +319,43 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     func resume() async throws {
         guard stateLock.withLock({ active && paused }) else { return }
-        guard processingJobID == nil else {throw NSError(domain:"AppleCaptureRoute",code:8,
-            userInfo:[NSLocalizedDescriptionKey:"Restart the recording after a processed microphone Pause."])}
+        if processingJobID != nil {
+            var audioSuspended=false
+            do {
+                // Device queries belong to this control path, never the tap.
+                try requireSameAppleInputDevice(microphoneDevice,engine.inputNode.auAudioUnit.deviceID)
+                audioQueue.sync {
+                    stateLock.withLock {processingAnnounced=false}
+                }
+                audioQueue.suspend();audioSuspended=true
+                stateLock.withLock {
+                    let floor=hostSeconds()
+                    captureHostFloor=floor
+                    resumeBoundary=AppleMicrophoneResumeBoundary(hostFloor:floor,recordingTime:max(0,pausedAt-startHost-pausedSeconds))
+                    startupPhase="waiting_for_microphone"
+                }
+                try engine.start()
+                try requireSameAppleInputDevice(microphoneDevice,engine.inputNode.auAudioUnit.deviceID)
+                audioQueue.resume();audioSuspended=false
+                try await startSystemAfterAppleMicrophone(readiness: {
+                    self.stateLock.withLock {
+                        if !self.active || self.failed {return .stopped}
+                        return self.processingAnnounced && !self.paused ? .ready : .waiting
+                    }
+                }, startSystem: {
+                    self.stateLock.withLock {self.startupPhase="system_start"}
+                    if let stream=self.stream {try await stream.startCapture()}
+                })
+                stateLock.withLock {startupPhase="recording"}
+                emit(["type":"recording","time":elapsed()])
+                return
+            } catch {
+                stateLock.withLock {failed=true}
+                if audioSuspended {audioQueue.resume()}
+                await stop(emitStopped:false)
+                throw error
+            }
+        }
         stateLock.withLock { pausedSeconds += hostSeconds()-pausedAt; paused = false }
         if let stream { try await stream.startCapture() }
         if micEnabled { try engine.start() }

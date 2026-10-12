@@ -39,7 +39,7 @@ class AppleCaptureStartupTests(unittest.TestCase):
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
             receipt = json.loads(result.stdout)
-            self.assertEqual(receipt['count'], 13)
+            self.assertEqual(receipt['count'], 15)
             self.assertTrue(all(receipt['checks'].values()))
             self.assertEqual(receipt['old_error_code'], 6)
             self.assertEqual(receipt['old_emitted_packets'], 0)

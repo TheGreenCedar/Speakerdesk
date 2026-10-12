@@ -48,12 +48,15 @@ pub fn run() {
     let start = rx.recv().unwrap();
     assert_eq!(start["type"], "start");
     let dual = start["microphone"] == true && start["system"] == true;
-    if dual {
+    let receipt = if dual {
         let mut receipt: Value =
             serde_json::from_slice(&fs::read(root.join("receipt.json")).unwrap()).unwrap();
         receipt["job_id"] = start["job_id"].clone();
-        emit(receipt);
-    }
+        emit(receipt.clone());
+        Some(receipt)
+    } else {
+        None
+    };
     emit(json!({"type":"recording"}));
     let sources: Vec<_> = if dual {
         vec!["microphone", "system"]
@@ -82,7 +85,7 @@ pub fn run() {
             fs::write(root.join(format!("sent-{stage}")), endpoint.to_string()).unwrap();
         }
         if root.join("fail-capture").exists() {
-            emit(json!({"type":"error","message":"Replay capture failed"}));
+            emit(json!({"type":"error","error":"Replay capture failed"}));
             return;
         }
         match rx.recv_timeout(Duration::from_millis(5)) {
@@ -92,6 +95,40 @@ pub fn run() {
                     emit(json!({"type":"paused","time":f64::from(endpoint)/16000.}));
                 }
                 "resume" => {
+                    fs::write(root.join("resume-started"), b"replay").unwrap();
+                    while root.join("hold-resume").exists() && !root.join("release-resume").exists()
+                    {
+                        match rx.recv_timeout(Duration::from_millis(5)) {
+                            Ok(command) if command["type"] == "stop" => {
+                                if root.join("late-recording").exists() {
+                                    if let Some(receipt) = &receipt {
+                                        emit(receipt.clone());
+                                    }
+                                    emit(json!({"type":"recording"}));
+                                    audio(endpoint, endpoint + 16000, &sources);
+                                    endpoint += 16000;
+                                    fs::write(root.join("late-recording-sent"), b"replay").unwrap();
+                                    while !root.join("release-stop").exists() {
+                                        std::thread::sleep(Duration::from_millis(5));
+                                    }
+                                }
+                                emit(json!({"type":"stopped","time":f64::from(endpoint)/16000.}));
+                                return;
+                            }
+                            Ok(other) => panic!("unexpected pending-resume command {other}"),
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(_) => return,
+                        }
+                    }
+                    if root.join("fail-resume").exists() {
+                        emit(
+                            json!({"type":"error","error":"Replay resumed microphone device changed"}),
+                        );
+                        return;
+                    }
+                    if let Some(receipt) = &receipt {
+                        emit(receipt.clone());
+                    }
                     paused = false;
                     emit(json!({"type":"recording"}));
                 }
@@ -101,8 +138,10 @@ pub fn run() {
                             std::thread::park();
                         }
                     }
-                    audio(endpoint, endpoint + 513, &sources);
-                    endpoint += 513;
+                    if !paused {
+                        audio(endpoint, endpoint + 513, &sources);
+                        endpoint += 513;
+                    }
                     emit(json!({"type":"stopped","time":f64::from(endpoint)/16000.}));
                     return;
                 }

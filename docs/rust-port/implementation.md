@@ -40,8 +40,9 @@ Local implementation branch: `codex/python-free-mac`.
    real-model saved-PCM checks, including long English context assembly and live
    language-decision persistence across protected continuation and restart. Long
    growing rows retain accepted cores instead of re-decoding completed audio.
-   Non-English accuracy, rolling live refinement, qualified Pause/Resume, raw
-   dual-source echo, physical capture and long-session gates remain.
+   Qualified Pause/Resume passes native controls and mounted process replays.
+   Non-English accuracy, rolling live refinement, raw dual-source echo, physical
+   capture and long-session gates remain.
 6. Pending: Python-free packaged execution, full product/security/performance gates.
 
 All validation uses disposable storage and synthetic/public audio. No installed
@@ -1211,6 +1212,47 @@ the pending Tauri live/setup/long-import workflow, default native startup and ac
 Python-free packaging, updater/security qualification and equivalent 0.6.6
 performance gates. The installed app, production data and existing model cache
 remain untouched. Windows and issue #25 remain deferred.
+
+## Qualified capture Pause/Resume
+
+The original protocol replay failed because qualified Pause terminated capture
+with “restart recording.” The retained Swift graph now drains at Pause and resumes
+only after a fresh microphone callback confirms the original formats and
+voice-processing readbacks. Device checks run before and after engine start on
+the control path. The first accepted callback advances the shared clock from the
+saved pause endpoint, excluding pause/negotiation time and rejecting older queued
+callbacks. The same stream, recording files, source catalog and receipt survive.
+
+The Rust writer requires an internal parent-owned Resume before accepting fresh
+qualification. Helper JSON cannot arm that transition. Repeated Resume conflicts;
+Stop retains admission until drain/reap, even if Recording arrives afterward.
+Qualified microphone audio continues draining while system startup is pending.
+
+Independent verification reproduced the old failure, then passed two cycles with
+511-, 513- and 17-sample blocks: microphone, clean microphone, stereo reference and
+the 0.6.6 anti-phase downmix retain exact expected bytes, with no late samples.
+Hostile cases reject missing, duplicate and changed receipts without replacing
+the original receipt or losing accepted audio. The mounted router/SQLite/process
+matrix covers two resumes, device failure, Stop before acknowledgement and late
+Recording after Stop; owned processes are reaped. The replay helper now models
+real paused Stop without inventing an extra 513 samples. Its error packets use
+the actual Swift field name; the initial mounted failure exposed that fixture bug.
+
+The full Rust gate passes 172 core, 63 host, 14 mounted live, one service and nine
+process tests (the same four explicit network/previous hardware test ignores).
+Strict all-target core/host Clippy passes. The locked optimized desktop build
+passes with the two unchanged upstream mlx-sys binding warnings; binary SHA256
+is `9b3d3c37d96904d68db9ad2b211d5752c0fcd1259b7e64a3b753ed969ba7320b`.
+Four Swift harnesses pass startup, route-format, converter and epoch controls;
+these execute native predicates/converters without opening devices. The optimized
+production Swift helper compiles cleanly; metadata-only `--check` reports capture
+false. SHA256: `99601766788b8d339ff4bc38a94a0171096163c1546be43dc1b57090588eb983`.
+Evidence is in `/private/tmp/speakerdesk-qualified-resume.p2kB7G/` and
+`/tmp/speakerdesk-qualified-resume-{red,green,mounted,mounted-green,tests}.log`.
+
+The UI tool still reports the Mac locked. Physical graph/device Pause/Resume and
+the actual editor workflow are unverified for this slice. Replay and native
+control success do not establish capture quality, acceleration or performance.
 
 ## Bounded repeated live decoding
 

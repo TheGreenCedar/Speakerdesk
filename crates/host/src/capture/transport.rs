@@ -10,7 +10,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::processing::{EXPORT, Helper, invalid, private_create};
-use super::writer::{SourceWriter, run_writer};
+use super::writer::{SourceWriter, WriterInput, run_writer};
 use super::{
     CaptureConfig, CaptureError, CapturePhase, CaptureSnapshot, Command, EventKind, STALL_STOP,
     parse_event,
@@ -127,6 +127,7 @@ impl CaptureSupervisor {
             let mut commands_open = true;
             let mut failure = None;
             let mut stdin_joined = false;
+            let mut resuming = false;
             loop {
                 tokio::select! {
                     _=actor_stop.cancelled(), if !stopping => {
@@ -140,6 +141,11 @@ impl CaptureSupervisor {
                             if stopping {continue;}
                             stopping=true;deadline=Some(Instant::now()+stop_bound);
                         } else if stopping {continue;}
+                        if matches!(command,Command::Resume) {
+                            if resuming {continue;}
+                            resuming=true;
+                            if packets_tx.try_send(WriterInput::Resume).is_err() {failure=Some("Capture writer fell behind before Resume.".into());break;}
+                        }
                         if stdin_tx.try_send(command).is_err() {failure=Some("Capture command queue is full.".into());break;}
                     }
                     _=async { if let Some(deadline)=deadline {sleep_until(deadline).await} else {std::future::pending::<()>().await} } => {
@@ -164,7 +170,8 @@ impl CaptureSupervisor {
                             stopped=true;
                             deadline.get_or_insert_with(|| Instant::now()+stop_bound);
                         }
-                        if packets_tx.try_send(event).is_err() {failure=Some("Capture writer fell behind; recording stopped and accepted audio is being saved.".into());break;}
+                        if event.kind()==EventKind::Recording {resuming=false;}
+                        if packets_tx.try_send(WriterInput::Event(event)).is_err() {failure=Some("Capture writer fell behind; recording stopped and accepted audio is being saved.".into());break;}
                     }
                 }
             }

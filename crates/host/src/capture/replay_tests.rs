@@ -268,30 +268,27 @@ fn invalid_packets_preserve_the_valid_buffered_tail() {
 }
 
 #[test]
-fn qualified_epoch_changes_retain_tail_and_cannot_resume_as_raw() {
-    for kind in ["paused", "format_changed"] {
-        let folder = TempDir::new().unwrap();
-        let path = helper(folder.path(), true, "fixture");
-        let mut writer =
-            SourceWriter::create(config(folder.path(), true), Helper::inspect(&path).unwrap())
-                .unwrap();
-        accept(&mut writer, &receipt(&path)).unwrap();
-        accept(&mut writer, &audio("microphone", 0., &[0.25; 511], 1)).unwrap();
-        assert!(
-            accept(
-                &mut writer,
-                &json!({"type":kind,"source":"microphone","time":511./16000.})
-            )
-            .is_err()
-        );
-        let result = writer.finish();
-        assert_eq!(result.committed_sample, 511);
-        assert!(result.processing.is_some());
-        assert_eq!(
-            pcm(&folder.path().join("microphone.wav")),
-            pcm(&folder.path().join("microphone_clean.wav"))
-        );
-    }
+fn qualified_format_changes_retain_tail_and_cannot_resume_as_raw() {
+    let folder = TempDir::new().unwrap();
+    let path = helper(folder.path(), true, "fixture");
+    let mut writer =
+        SourceWriter::create(config(folder.path(), true), Helper::inspect(&path).unwrap()).unwrap();
+    accept(&mut writer, &receipt(&path)).unwrap();
+    accept(&mut writer, &audio("microphone", 0., &[0.25; 511], 1)).unwrap();
+    assert!(
+        accept(
+            &mut writer,
+            &json!({"type":"format_changed","source":"microphone","time":511./16000.})
+        )
+        .is_err()
+    );
+    let result = writer.finish();
+    assert_eq!(result.committed_sample, 511);
+    assert!(result.processing.is_some());
+    assert_eq!(
+        pcm(&folder.path().join("microphone.wav")),
+        pcm(&folder.path().join("microphone_clean.wav"))
+    );
 }
 
 #[test]
@@ -309,6 +306,97 @@ fn recording_files_are_created_exclusively() {
     assert_eq!(fs::read(folder.path().join("audio.wav")).unwrap(), b"keep");
 }
 
+#[test]
+fn qualified_resume_requires_owned_arm_and_exact_fresh_observation() {
+    for case in [
+        "unsolicited",
+        "missing",
+        "duplicate",
+        "job",
+        "route",
+        "format",
+        "readback",
+        "epoch",
+        "delayed-recording",
+    ] {
+        let folder = TempDir::new().unwrap();
+        let path = helper(folder.path(), true, "qualified protocol replay");
+        let mut writer =
+            SourceWriter::create(config(folder.path(), true), Helper::inspect(&path).unwrap())
+                .unwrap();
+        let original = receipt(&path);
+        accept(&mut writer, &original).unwrap();
+        accept(&mut writer, &json!({"type":"recording"})).unwrap();
+        accept(&mut writer, &audio("microphone", 0., &[0.25; 511], 1)).unwrap();
+        accept(&mut writer, &json!({"type":"paused","time":511./16000.})).unwrap();
+        let persisted = fs::read(folder.path().join("capture-processing.json")).unwrap();
+        if case == "unsolicited" {
+            assert!(accept(&mut writer, &original).is_err());
+            assert!(accept(&mut writer, &audio("microphone", 511., &[0.5; 17], 1)).is_err());
+        } else {
+            writer.resume().unwrap();
+            if case == "missing" {
+                assert!(accept(&mut writer, &json!({"type":"recording"})).is_err());
+                assert!(accept(&mut writer, &audio("microphone", 511., &[0.5; 17], 1)).is_err());
+            } else if case == "delayed-recording" {
+                accept(&mut writer, &original).unwrap();
+                // A qualified mic may flow while SCStream.startCapture still awaits.
+                for index in 0..28 {
+                    let start = 511 + index * 4000;
+                    accept(
+                        &mut writer,
+                        &audio("microphone", f64::from(start), &[0.25; 4000], 1),
+                    )
+                    .unwrap();
+                    accept(
+                        &mut writer,
+                        &json!({"type":"clock","time":f64::from(start+4000)/16000.}),
+                    )
+                    .unwrap();
+                }
+                assert_eq!(writer.snapshot.phase, CapturePhase::Resuming);
+                assert!(writer.snapshot.committed_sample >= 104_000);
+                accept(&mut writer, &json!({"type":"recording"})).unwrap();
+                accept(
+                    &mut writer,
+                    &json!({"type":"stopped","time":112511./16000.}),
+                )
+                .unwrap();
+            } else {
+                let mut fresh = original.clone();
+                match case {
+                    "duplicate" => {
+                        accept(&mut writer, &fresh).unwrap();
+                    }
+                    "job" => fresh["job_id"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    "route" => fresh["route"]["bus"] = json!(1),
+                    "format" => fresh["callback_format"]["sample_rate"] = json!(16000),
+                    "readback" => fresh["readbacks"]["agc_enabled"] = json!(true),
+                    "epoch" => fresh["stream_epoch"] = json!(1),
+                    _ => unreachable!(),
+                }
+                assert!(accept(&mut writer, &fresh).is_err(), "{case}");
+            }
+        }
+        let finished = writer.finish();
+        assert_eq!(
+            finished.committed_sample,
+            if case == "delayed-recording" {
+                112511
+            } else {
+                511
+            },
+            "{case}"
+        );
+        assert_eq!(
+            fs::read(folder.path().join("capture-processing.json")).unwrap(),
+            persisted
+        );
+        let samples = pcm(&folder.path().join("microphone_clean.wav"));
+        assert_eq!(&samples[..1022], &[0, 32].repeat(511));
+    }
+}
+
 #[cfg(unix)]
 fn assert_reaped(pid: u32) {
     assert_eq!(
@@ -320,6 +408,129 @@ fn assert_reaped(pid: u32) {
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::ESRCH)
     );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn qualified_pause_resume_requalifies_same_graph_and_keeps_exact_tails() {
+    // Protocol replay only: the helper owns no devices. Each resume repeats the
+    // same freshly observed producer contract before any resumed PCM.
+    let folder = TempDir::new().unwrap();
+    let directory = folder.path().display();
+    let script = format!(
+        "#!/bin/sh\nIFS= read -r start\ncat '{directory}/receipt.json' '{directory}/stage-0.jsonl'\nstage=0\nwhile IFS= read -r command; do\ncase \"$command\" in\n*pause*) cat '{directory}/paused-'\"$stage\"'.jsonl' ;;\n*resume*) stage=$((stage+1)); cat '{directory}/receipt.json' '{directory}/stage-'\"$stage\"'.jsonl' ;;\n*stop*) cat '{directory}/stopped-'\"$stage\"'.jsonl'; exit 0 ;;\nesac\ndone\n"
+    );
+    let path = helper(folder.path(), true, &script);
+    fs::write(
+        folder.path().join("receipt.json"),
+        format!("{}\n", receipt(&path)),
+    )
+    .unwrap();
+    let mut endpoint = 0;
+    let mut expected = Vec::new();
+    let mut expected_stereo = Vec::new();
+    for (stage, (count, sample)) in [(511, 0.25_f32), (513, 0.5), (17, -0.25)]
+        .into_iter()
+        .enumerate()
+    {
+        let microphone = vec![sample; count];
+        let stereo: Vec<_> = (0..count).flat_map(|_| [sample, -sample]).collect();
+        let lines = [
+            json!({"type":"recording"}),
+            audio("microphone", endpoint as f64, &microphone, 1),
+            audio("system", endpoint as f64, &stereo, 2),
+        ];
+        fs::write(
+            folder.path().join(format!("stage-{stage}.jsonl")),
+            lines
+                .iter()
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        endpoint += count;
+        expected.extend(((sample * 32768.) as i16).to_le_bytes().repeat(count));
+        for _ in 0..count {
+            expected_stereo.extend(((sample * 32768.) as i16).to_le_bytes());
+            expected_stereo.extend(((-sample * 32768.) as i16).to_le_bytes());
+        }
+        for kind in ["paused", "stopped"] {
+            fs::write(
+                folder.path().join(format!("{kind}-{stage}.jsonl")),
+                format!("{}\n", json!({"type":kind,"time":endpoint as f64/16000.})),
+            )
+            .unwrap();
+        }
+    }
+    let mut session = CaptureSupervisor::spawn_with_deadline(
+        &path,
+        config(folder.path(), true),
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    let pid = session.pid;
+    let mut failure = None;
+    let mut initial = None;
+    for stage in 0..3 {
+        for phase in [CapturePhase::Recording, CapturePhase::Paused] {
+            if phase == CapturePhase::Paused {
+                session.command(Command::Pause).unwrap();
+            }
+            let observed = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let state = session.updates.borrow().clone();
+                    if state.phase == phase || state.error.is_some() {
+                        break state;
+                    }
+                    session.updates.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            if observed.error.is_some() {
+                failure = observed.error;
+                break;
+            }
+            if phase == CapturePhase::Paused {
+                assert_eq!(observed.committed_sample, [511, 1024, 1041][stage]);
+                let current = fs::read(folder.path().join("capture-processing.json")).unwrap();
+                if let Some(initial) = &initial {
+                    assert_eq!(&current, initial);
+                } else {
+                    initial = Some(current);
+                }
+            }
+        }
+        if failure.is_some() {
+            break;
+        }
+        if stage < 2 {
+            session.command(Command::Resume).unwrap();
+        }
+    }
+    let result = session.finish().await.unwrap();
+    assert_reaped(pid);
+    assert!(
+        failure.is_none(),
+        "qualified Pause/Resume failed: {failure:?}"
+    );
+    assert_eq!(result.phase, CapturePhase::Stopped, "{:?}", result.error);
+    assert_eq!(result.committed_sample, 1041);
+    assert_eq!(result.late_samples, 0);
+    for name in ["microphone.wav", "microphone_clean.wav"] {
+        assert_eq!(pcm(&folder.path().join(name)), expected);
+    }
+    assert_eq!(
+        pcm(&folder.path().join("system_reference.wav")),
+        expected_stereo
+    );
+    assert_eq!(pcm(&folder.path().join("system.wav")), expected);
+    let mixed: Vec<_> = [(511, 16384_i16), (513, 32767), (17, -16384)]
+        .into_iter()
+        .flat_map(|(count, value)| value.to_le_bytes().repeat(count))
+        .collect();
+    assert_eq!(pcm(&folder.path().join("audio.wav")), mixed);
 }
 
 #[tokio::test]

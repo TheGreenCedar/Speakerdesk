@@ -110,6 +110,9 @@ struct AppleCaptureObservation {
     let input: AVAudioFormat
     let output: AVAudioFormat
     let readbacks: [String:Bool]
+    func matches(_ other: AppleCaptureObservation) -> Bool {
+        captureFormatMatches(input,other.input) && captureFormatMatches(output,other.output) && readbacks == other.readbacks
+    }
     func packet(jobID:String,helperHash:String,callback:AVAudioFormat) throws -> [String:Any] {
         try appleRoutePacket(jobID:jobID,helperHash:helperHash,input:input,output:output,
                              callback:callback,readbacks:readbacks)
@@ -128,6 +131,31 @@ func observeAppleCapture(_ engine:AVAudioEngine) -> AppleCaptureObservation {
 // System audio must not outrun the first validated processed-microphone tap.
 // AVAudioEngine.start returning is not a microphone callback acknowledgement.
 enum AppleMicrophoneStartupState { case waiting, ready, stopped }
+
+// A retained graph resumes at its already saved pause endpoint. Negotiation is
+// excluded by anchoring the shared clock to the first accepted microphone tap,
+// whose host time may precede engine.start() returning.
+struct AppleMicrophoneResumeBoundary {
+    private(set) var hostFloor: Double
+    let recordingTime: Double
+
+    static func accepts(_ timestamp: Double, after floor: Double) -> Bool {
+        timestamp.isFinite && timestamp >= floor
+    }
+
+    mutating func pausedOffset(firstCallback: Double, origin: Double) -> Double? {
+        guard Self.accepts(firstCallback,after:hostFloor) else { return nil }
+        hostFloor=firstCallback
+        return firstCallback - origin - recordingTime
+    }
+}
+
+func requireSameAppleInputDevice(_ original: UInt32?, _ current: UInt32) throws {
+    guard let original, original != 0, current == original else {
+        throw NSError(domain:"AppleCaptureRoute",code:12,userInfo:[NSLocalizedDescriptionKey:
+            "The microphone device changed while paused. Recorded audio is preserved; start a new recording for this device."])
+    }
+}
 
 func startSystemAfterAppleMicrophone(timeout: Double = 10,
     readiness: () -> AppleMicrophoneStartupState,
