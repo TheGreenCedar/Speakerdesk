@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use sha2::{Digest, Sha256};
 
 /// Reject a missing path, and a directory that still carries Python artifacts.
 pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
@@ -20,7 +21,55 @@ pub fn run(path: Option<PathBuf>) -> anyhow::Result<()> {
             hits.join("\n")
         );
     }
+    if path.extension().is_some_and(|extension| extension == "app") {
+        native_layout(&path)?;
+    }
     println!("verify-bundle ok: {}", path.display());
+    Ok(())
+}
+
+fn native_layout(root: &Path) -> anyhow::Result<()> {
+    for relative in [
+        "Contents/MacOS/speakerdesk",
+        "Contents/Resources/speakerdesk-capture",
+        "Contents/Resources/speakerdesk-capture.capability.json",
+        "Contents/Resources/libspeakerdesk_echo.dylib",
+        "Contents/Frameworks/libmlx.dylib",
+        "Contents/Resources/mlx/mlx.metallib",
+        "Contents/Resources/licenses/mlx/LICENSE",
+        "Contents/Resources/licenses/native/packages.json",
+        "Contents/Resources/THIRD_PARTY_NOTICES.txt",
+    ] {
+        let path = root.join(relative);
+        let meta = fs::symlink_metadata(&path)
+            .with_context(|| format!("missing native resource: {relative}"))?;
+        if !meta.is_file() || meta.len() == 0 {
+            bail!("unusable native resource: {relative}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if (relative == "Contents/MacOS/speakerdesk"
+                || relative == "Contents/Resources/speakerdesk-capture")
+                && meta.permissions().mode() & 0o111 == 0
+            {
+                bail!("native executable lacks execution permission: {relative}");
+            }
+        }
+    }
+    let resources = root.join("Contents/Resources");
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(
+        resources.join("speakerdesk-capture.capability.json"),
+    )?)?;
+    let helper_hash = hex::encode(Sha256::digest(fs::read(
+        resources.join("speakerdesk-capture"),
+    )?));
+    if manifest["helper_sha256"].as_str() != Some(helper_hash.as_str())
+        || manifest["export_contract"] != "apple_processed_mono16k_v1"
+        || manifest["capability_version"] != "apple_input_node_output_route_v1"
+    {
+        bail!("capture capability does not match the final bundled helper");
+    }
     Ok(())
 }
 
@@ -67,6 +116,9 @@ fn is_python_artifact(path: &Path) -> bool {
     };
     let name = name.to_string_lossy();
     name.ends_with(".py")
+        || name.ends_with(".pyc")
+        || name.ends_with(".pyo")
+        || name == "__pycache__"
         || name.contains("libpython")
         || name.contains("Python.framework")
         || name.contains("speakerdesk-runtime")
@@ -126,7 +178,7 @@ mod tests {
             root.join("Frameworks/Native.framework/Native"),
         )
         .unwrap();
-        let alias = dir.path().join("Speakerdesk.app");
+        let alias = dir.path().join("Speakerdesk-alias");
         symlink(&root, &alias).unwrap();
         run(Some(alias.clone())).unwrap();
         fs::write(version.join("helper.py"), b"python fixture").unwrap();
@@ -159,6 +211,59 @@ mod tests {
         let error = run(None).unwrap_err();
         let text = error.to_string();
         assert!(text.contains("path"), "expected a path error, got {text}");
+    }
+
+    #[test]
+    fn native_bundle_requires_complete_resources_and_final_helper_binding() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Speakerdesk.app");
+        let resources = root.join("Contents/Resources");
+        let paths = [
+            "Contents/MacOS/speakerdesk",
+            "Contents/Resources/speakerdesk-capture",
+            "Contents/Resources/libspeakerdesk_echo.dylib",
+            "Contents/Frameworks/libmlx.dylib",
+            "Contents/Resources/mlx/mlx.metallib",
+            "Contents/Resources/licenses/mlx/LICENSE",
+            "Contents/Resources/licenses/native/packages.json",
+            "Contents/Resources/THIRD_PARTY_NOTICES.txt",
+        ];
+        for relative in paths {
+            let file = root.join(relative);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, b"native resource fixture").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(file, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let manifest = serde_json::json!({"helper_sha256":hex::encode(Sha256::digest(b"native resource fixture")),
+            "export_contract":"apple_processed_mono16k_v1", "capability_version":"apple_input_node_output_route_v1"});
+        fs::write(
+            resources.join("speakerdesk-capture.capability.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        run(Some(root.clone())).unwrap();
+        for relative in paths {
+            let file = root.join(relative);
+            fs::rename(&file, file.with_extension("held")).unwrap();
+            assert!(run(Some(root.clone())).is_err(), "{relative}");
+            fs::rename(file.with_extension("held"), file).unwrap();
+        }
+        fs::write(
+            resources.join("speakerdesk-capture"),
+            b"resigned or replaced helper",
+        )
+        .unwrap();
+        assert!(
+            run(Some(root))
+                .unwrap_err()
+                .to_string()
+                .contains("final bundled helper")
+        );
     }
 
     #[test]

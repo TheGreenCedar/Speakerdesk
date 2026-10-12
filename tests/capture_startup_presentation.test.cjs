@@ -33,6 +33,23 @@ test('unreadable retained audio is reported as unverified rather than kept or em
   assert.equal(f.document.getElementById('refinement-toggle').hidden,true);
 });
 
+test('failed recordings hide retained accuracy controls without losing failure or audio state, while working and Ready controls remain available',()=>{
+  for(const refinement of ['waiting','refining','paused']) {
+    const f=frontend(root);f.seed(1,'failed');f.context.refinement=refinement;
+    f.run("selected.kind='meeting';selected.inference_owned=false;selected.refinement_status=refinement;selected.rolling_refinement={mode:'live',completed:{r0:'retained checkpoint'}};selected.capture_audio={state:'retained',frames:160000};selected.message='Capture helper closed without a stopped acknowledgement. Saved audio and edits are retained.';window.plan=JSON.stringify(selected.rolling_refinement);setStatus()");
+    assert.equal(f.document.getElementById('refinement-controls').hidden,true,refinement);
+    assert.match(f.document.getElementById('job-message').textContent,/Capture helper closed.*Saved audio and edits are retained/);
+    assert.equal(f.document.querySelector('.player-panel').hidden,false);
+    assert.equal(f.run('JSON.stringify(selected.rolling_refinement)'),f.run('plan'));
+    for(const status of ['recording','ready']) {
+      f.context.status=status;
+      f.run("selected.status=status;selected.saved_refinement_available=status==='ready';setStatus()");
+      assert.equal(f.document.getElementById('refinement-controls').hidden,false,`${status}/${refinement}`);
+      assert.equal(f.document.getElementById('refinement-toggle').hidden,false,`${status}/${refinement}`);
+    }
+  }
+});
+
 test('saved accuracy controls start, pause and retry through the existing routes',async()=>{
   const f=frontend(root);f.seed(1,'ready');
   f.run("selected.kind='meeting';selected.saved_refinement_available=true;selected.refinement_status='unavailable';delete selected.rolling_refinement;window.calls=[];api=async(path,options)=>{calls.push({path,method:options.method});return {};};poll=async()=>{};");

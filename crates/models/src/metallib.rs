@@ -5,6 +5,10 @@ use speakerdesk_core::error::ChildError;
 /// Initialize Metal before advertising any GPU capability. Model readiness is separate.
 #[cfg(target_os = "macos")]
 pub fn prepare(path: Option<&Path>) -> Result<(), ChildError> {
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|exe| bundled_metallib(&exe));
+    let path = path.or(bundled.as_deref());
     if let Some(path) = path {
         if !path.is_file() {
             return Err(ChildError::failed(
@@ -30,6 +34,17 @@ pub fn prepare(path: Option<&Path>) -> Result<(), ChildError> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn bundled_metallib(executable: &Path) -> Option<std::path::PathBuf> {
+    let macos = executable
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "MacOS"))?;
+    let contents = macos
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "Contents"))?;
+    Some(contents.join("Resources/mlx/mlx.metallib"))
+}
+
 #[cfg(target_os = "macos")]
 fn initialization_error(error: mlx_rs::error::Exception) -> ChildError {
     ChildError::failed(format!("Metal initialization failed: {error}"), false)
@@ -40,8 +55,21 @@ pub fn prepare(_: Option<&Path>) -> Result<(), ChildError> {
     Err(ChildError::MetalUnavailable)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn relocated_bundle_uses_its_own_kernels_while_development_keeps_mlx_discovery() {
+        let exe = std::path::Path::new("/relocated/Speakerdesk.app/Contents/MacOS/speakerdesk");
+        assert_eq!(
+            super::bundled_metallib(exe).unwrap(),
+            std::path::Path::new("/relocated/Speakerdesk.app/Contents/Resources/mlx/mlx.metallib")
+        );
+        assert!(
+            super::bundled_metallib(std::path::Path::new("/checkout/target/release/speakerdesk"))
+                .is_none()
+        );
+    }
+    #[cfg(target_os = "macos")]
     #[test]
     fn explicit_missing_resource_fails_before_initialization() {
         let missing = std::path::Path::new("/speakerdesk-missing-test-resource/mlx.metallib");

@@ -113,12 +113,7 @@ impl NativeModels {
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         let native = self.clone();
-        native.setup.begin(&crate::setup::artifacts());
-        native.setup.phase(if download {
-            "Checking installed models"
-        } else {
-            "Initializing native speech models"
-        });
+        native.setup.begin(&crate::setup::artifacts(), download);
         if !download {
             app.set_issues(vec!["Initializing native speech models…".into()]);
         }
@@ -164,6 +159,7 @@ impl NativeModels {
         cancel: CancellationToken,
         all: bool,
     ) -> Result<(), String> {
+        self.setup.loading();
         let native = self.clone();
         tokio::task::spawn_blocking(move || native.initialize(&app, &cancel, all))
             .await
@@ -175,13 +171,15 @@ impl NativeModels {
         cancel: &CancellationToken,
         all: bool,
     ) -> Result<(), String> {
+        let artifacts = crate::setup::artifacts();
+        self.setup.check_downloads(&self.model_root, &artifacts);
         let models = self.supervisor.models(cancel.clone());
         let mut reports = Vec::new();
         let mut failures = Vec::new();
         let mut core_failures = Vec::new();
         let mut alignment = None;
         let mut voice = None;
-        for (index, artifact) in crate::setup::artifacts().iter().enumerate() {
+        for (index, artifact) in artifacts.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err("Model setup cancelled".into());
             }
@@ -191,7 +189,7 @@ impl NativeModels {
                 "redimnet2-b6" => native_voice_policy().model.revision,
                 _ => format!("{}@{}", artifact.repo, artifact.revision),
             };
-            self.setup.phase(format!("Initializing {}", artifact.name));
+            self.setup.phase(format!("Loading {}…", artifact.name));
             let loaded = models
                 .setup_check(std::slice::from_ref(&artifact.id))
                 .map_err(|e| e.to_string())
@@ -285,6 +283,7 @@ impl NativeModels {
             completed += model.download_bytes();
             self.setup.bytes(completed);
         }
+        self.setup.loading();
         self.setup.phase("Restarting the model worker");
         let supervisor = self.supervisor.clone();
         let cancellation = cancel.clone();
@@ -677,20 +676,21 @@ async fn setup(State(app): State<AppState>) -> Response {
         let timing = core_ready && app.alignment_ready();
         let ready = core_ready && automatic && timing && voice;
         let progress = app.native.get().map(|native| native.setup.progress()).unwrap_or_default();
-        let busy = progress.status=="downloading";
+        let busy = matches!(progress.status,"downloading" | "loading");
         let supported = cfg!(all(target_os="macos",target_arch="aarch64"));
         let can_download = supported && app.native.get().is_some() && !app.admission.busy() && !app.admission.closed() && !app.admission.reserved();
         let catalog = crate::setup::artifacts();
         let models: Vec<_> = catalog.iter().enumerate().map(|(index, model)| json!({"id":model.id,"name":model.name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":model.download_bytes(),"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
         let alignment = &catalog[4];
-        let status = if busy {"downloading"} else if progress.error.is_some() {"failed"} else if ready {"ready"} else {"idle"};
+        let status = if busy {progress.status} else if progress.error.is_some() {"failed"} else if ready {"ready"} else {"idle"};
         Json(json!({
             "supported":supported,"ready":ready,"core_ready":core_ready,"automatic_language":automatic,
             "status":status,"phase":progress.phase,"error":progress.error,
+            "download_required":progress.download_required,
             "models":models,"total_bytes":catalog.iter().map(|m| m.download_bytes()).sum::<u64>(),
             "downloaded_bytes":progress.downloaded_bytes,"required_free_bytes":catalog.iter().map(|m| m.stored_bytes()).sum::<u64>(),
             "can_download":can_download,"can_cancel":busy && app.native.get().is_some(),
-            "alignment":{"id":alignment.id,"status":if busy {"downloading"}else if timing {"ready"}else {"idle"},"ready":timing,"can_download":false,
+            "alignment":{"id":alignment.id,"status":if busy {progress.status}else if timing {"ready"}else {"idle"},"ready":timing,"can_download":false,
                 "supported_languages":languages::LANGUAGES.iter().map(|(code,_)| *code).collect::<Vec<_>>(),"timing_accuracy_calibrated_languages":["en"],"total_bytes":alignment.download_bytes(),"stored_bytes":alignment.stored_bytes(),"required_free_bytes":alignment.stored_bytes(),
                 "message":"Supplied-text timing preserves authoritative transcript words. Use Download models below to finish setup for all local models.","phase":progress.phase,"downloaded_bytes":0},
             "voice":{"status":if voice {"ready"}else {"unavailable"},"enabled":enabled,"available":voice,"released":false,
@@ -705,7 +705,7 @@ async fn start_setup(State(app): State<AppState>) -> Response {
         return failure("Native model setup is unavailable in this runtime");
     };
     match native.start(app, true) {
-        Ok(()) => Json(json!({"status":"downloading"})).into_response(),
+        Ok(()) => Json(json!({"status":native.setup.progress().status})).into_response(),
         Err(error) => (
             StatusCode::CONFLICT,
             Json(json!({"error":error.to_string()})),
@@ -882,7 +882,7 @@ mod setup_tests {
         let cleanup = Arc::new(tokio::sync::Notify::new());
         let gate = cleanup.clone();
         let lease = app.admission.lease(Activity::Setup).unwrap();
-        native.setup.begin(&crate::setup::artifacts());
+        native.setup.begin(&crate::setup::artifacts(), false);
         *native.task.lock().unwrap() = Some((
             cancel.clone(),
             tokio::spawn(async move {
@@ -909,10 +909,56 @@ mod setup_tests {
                 .post(format!("{url}{path}"))
                 .header("X-Speakerdesk-Token", app.token())
         };
+        let duplicate = post("/api/setup").send().await.unwrap();
         assert_eq!(
-            post("/api/setup").send().await.unwrap().status(),
+            duplicate.status(),
             200,
             "duplicate setup should reach the owner"
+        );
+        assert_eq!(
+            duplicate.json::<Value>().await.unwrap()["status"],
+            "loading"
+        );
+        let setup_status = || client.get(format!("{url}/api/setup"));
+        let loading = setup_status()
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(loading["status"], "loading");
+        assert_eq!(loading["alignment"]["status"], "loading");
+        assert_eq!(loading["can_cancel"], true);
+        assert_eq!(loading["can_download"], false);
+        assert_eq!(loading["download_required"], false);
+        // Transfers and resident initialization share one owned setup task, but not a UI state.
+        native.setup.begin(&crate::setup::artifacts(), true);
+        native.setup.bytes(12);
+        let downloading = setup_status()
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(downloading["status"], "downloading");
+        assert_eq!(downloading["downloaded_bytes"], 12);
+        assert_eq!(downloading["download_required"], true);
+        native.setup.loading();
+        native.setup.phase("A phase description is not the status");
+        let loading = setup_status()
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(loading["status"], "loading");
+        assert_eq!(loading["alignment"]["status"], "loading");
+        assert_eq!(
+            loading["downloaded_bytes"], 12,
+            "loading preserves completed transfer accounting"
         );
         let mut edited = document;
         edited["segments"][0]["text"] = json!("Saved while setup waits.");
@@ -937,6 +983,18 @@ mod setup_tests {
             200
         );
         assert!(cancel.is_cancelled());
+        let cancelling = setup_status()
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(cancelling["status"], "loading");
+        assert_eq!(
+            cancelling["can_cancel"], true,
+            "cancel acknowledgement is not task completion"
+        );
         assert!(
             app.admission.busy(),
             "cancel acknowledgement must retain admission through cleanup"
@@ -962,6 +1020,15 @@ mod setup_tests {
         task.await.unwrap();
         assert_eq!(native.setup.progress().status, "failed");
         assert!(native.setup.progress().error.is_some());
+        let failed = setup_status()
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["can_cancel"], false);
         stop.cancel();
         server.await.unwrap();
         tokio::task::spawn_blocking(move || supervisor.shutdown())

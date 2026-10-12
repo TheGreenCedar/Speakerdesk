@@ -196,3 +196,5 @@
 #new-meeting{gap:8px;padding-left:12px;padding-right:12px}
 .editor-hints kbd{font:inherit}
 @media(max-width:900px){#new-meeting{gap:6px;padding-left:9px;padding-right:9px;font-size:13px}.shortcut-hint{font-size:10px;padding:2px 4px}.transcript-search .shortcut-hint{min-width:25px}}
+
+#job-progress{width:120px;min-width:60px;height:8px;accent-color:var(--green)}

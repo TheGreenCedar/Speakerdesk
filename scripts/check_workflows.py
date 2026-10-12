@@ -29,8 +29,8 @@ def validate(directory):
             assert workflow['concurrency']['cancel-in-progress'] == 'false', 'Never cancel producer/release runs'
             paths = {step['with']['path'] for job in workflow['jobs'].values() for step in job['steps']
                      if step.get('uses', '').startswith('actions/cache/')}
-            allowed = {'.cache/uv\n', '.cache/npm\n', '~/.cargo/registry\n~/.cargo/git\n',
-                       '${{ runner.temp }}/speakerdesk-sccache\n', '.cache/components/runtime\n',
+            allowed = {'.cache/npm\n', '~/.cargo/registry\n~/.cargo/git\n',
+                       '${{ runner.temp }}/speakerdesk-sccache\n',
                        '.cache/components/capture\n'}
             assert paths <= allowed, 'Unexpected persisted cache path'
             assert workflow['jobs']['apple']['env']['APPLE_SIGNING_IDENTITY'] == '-'

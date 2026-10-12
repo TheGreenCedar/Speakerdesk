@@ -29,6 +29,10 @@ struct Context {
     cells: Vec<Cell>,
     words: Vec<Word>,
 }
+pub(super) fn complete_alignment(part: TailPart) -> bool {
+    Context::parse(part).is_some()
+}
+
 impl Context {
     fn parse(part: TailPart) -> Option<Self> {
         let result = part.alignment?;

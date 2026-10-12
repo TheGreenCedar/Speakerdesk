@@ -29,13 +29,11 @@
       "app",
       "dmg"
     ],
-    "externalBin": [
-      "binaries/speakerdesk-runtime"
-    ],
     "macOS": {
       "minimumSystemVersion": "15.0",
       "infoPlist": "Info.plist",
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "frameworks": ["../../target/native/mlx-0.32.2/lib/libmlx.dylib"]
     },
     "shortDescription": "Private transcription and speaker labeling",
     "category": "Productivity",
@@ -46,7 +44,13 @@
     "resources": {
       "../capture/speakerdesk-capture": "speakerdesk-capture",
       "../capture/speakerdesk-capture.capability.json": "speakerdesk-capture.capability.json",
-      "../capture/echo/libspeakerdesk_echo.dylib": "libspeakerdesk_echo.dylib"
+      "../capture/echo/libspeakerdesk_echo.dylib": "libspeakerdesk_echo.dylib",
+      "../../target/native/mlx-0.32.2/lib/mlx.metallib": "mlx/mlx.metallib",
+      "../../target/native/mlx-0.32.2/LICENSE": "licenses/mlx/LICENSE",
+      "../../vendor/mlx-sys/src/mlx-c/LICENSE": "licenses/mlx-c/LICENSE",
+      "../../target/native/licenses/": "licenses/native/",
+      "../../packaging/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
+      "../../packaging/licenses/": "licenses/upstream/"
     }
   }
 }

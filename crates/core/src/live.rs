@@ -1147,6 +1147,30 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
             .map_err(LiveError::from)?;
     let mut candidate = saved_candidate(original, text, detected_language.clone(), detection, end)?;
     if let Some(vocabulary) = vocabulary {
+        if let Some(alignment) = original.rest.get("reading_alignment").filter(|alignment| {
+            vocabulary.matches_input(alignment, pcm, &candidate.text, start, &detected_language)
+                && context::complete_alignment(TailPart {
+                    request: DecodeRequest {
+                        utterance_id: candidate
+                            .canonical_utterance_id
+                            .clone()
+                            .expect("saved bounds"),
+                        machine_revision: candidate.machine_revision.expect("saved candidate"),
+                        audio_revision: candidate.audio_revision.unwrap_or(0),
+                        language_epoch: candidate.rest["language_epoch"].as_i64().unwrap_or(0),
+                        core_start_sample: start,
+                        core_end_sample: end,
+                        start_sample: start,
+                        end_sample: end,
+                    },
+                    text: candidate.text.clone(),
+                    complete: true,
+                    alignment: Some((*alignment).clone()),
+                })
+        }) {
+            crate::alignment::attach(&mut candidate, alignment.clone());
+            return Ok(candidate);
+        }
         match vocabulary.align(models, pcm, &candidate.text, start, &detected_language) {
             Ok(alignment) => crate::alignment::attach(&mut candidate, alignment),
             Err(
@@ -5690,7 +5714,7 @@ mod tests {
         assert_eq!(engine.models.ctc_calls.load(Ordering::SeqCst), 0);
         let events = engine.handle(LiveCommand::Stop).unwrap();
         let rows = revisions(&events);
-        let row = rows.last().unwrap();
+        let row = *rows.last().unwrap();
         assert_eq!(row.text, text);
         assert_eq!(engine.models.ctc_calls.load(Ordering::SeqCst), 1);
         assert!(row.reading_turns.is_some());
@@ -5702,6 +5726,221 @@ mod tests {
             serde_json::from_value(serde_json::to_value(row).unwrap()).unwrap();
         reading.installed_provider_identity = Some(crate::alignment::NATIVE_PROVIDER.into());
         assert_eq!(timing::validated_turns(&reading), reading.reading_turns);
+        let pcm = engine.read_pcm(0, samples as i64).unwrap();
+        let before = engine.models.transcribe_calls.load(Ordering::SeqCst);
+        let refined = refine_saved_passage(
+            engine.models.as_ref(),
+            row,
+            &pcm,
+            engine.word_alignment.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(
+            engine.models.transcribe_calls.load(Ordering::SeqCst),
+            before + 1
+        );
+        assert_eq!(engine.models.ctc_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(refined.text, row.text);
+        assert_eq!(
+            refined.machine_revision,
+            row.machine_revision.map(|revision| revision + 1)
+        );
+        assert_eq!(
+            refined.reading_turn_provenance.as_ref().unwrap()["machine_revision"],
+            refined.machine_revision.unwrap()
+        );
+        for protected in [false, true] {
+            let mut stale = row.clone();
+            if protected {
+                stale.protected_fields = Some(vec!["text".into()]);
+            } else {
+                stale.machine_revision = Some(row.machine_revision.unwrap() + 1);
+            }
+            let mut document = document_with(stale);
+            let before = document.clone();
+            assert!(!publish_saved_passage(&mut document, row, &refined).unwrap());
+            assert_eq!(document, before);
+        }
+
+        let mut current = row.clone();
+        current.machine_revision = Some(99);
+        current.audio_revision = Some(77);
+        current
+            .rest
+            .insert("canonical_machine_revision".into(), Value::from(88));
+        current.rest.insert("language_epoch".into(), Value::from(4));
+        current.capture_source =
+            Some(serde_json::json!({"source_id":"system","source_revision":2}));
+        let activity = current.speaker_activity.as_mut().unwrap();
+        activity["audio_revision"] = Value::from(77);
+        for region in activity["regions"].as_array_mut().unwrap() {
+            region["speakers"] = serde_json::json!(["current-speaker"]);
+        }
+        let projected = refine_saved_passage(
+            engine.models.as_ref(),
+            &current,
+            &pcm,
+            engine.word_alignment.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(engine.models.ctc_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(projected.machine_revision, Some(100));
+        let provenance = projected.reading_turn_provenance.as_ref().unwrap();
+        assert_eq!(provenance["canonical_machine_revision"], 89);
+        assert_eq!(provenance["audio_revision"], 77);
+        assert_eq!(provenance["language_epoch"], 4);
+        assert_eq!(
+            provenance["capture_source"],
+            current.capture_source.clone().unwrap()
+        );
+        assert_ne!(projected.reading_turns, row.reading_turns);
+        let mut reading: timing::ReadingSegment =
+            serde_json::from_value(serde_json::to_value(&projected).unwrap()).unwrap();
+        reading.installed_provider_identity = Some(crate::alignment::NATIVE_PROVIDER.into());
+        assert_eq!(timing::validated_turns(&reading), reading.reading_turns);
+
+        // A rejected reuse must enter the real CTC call and preserve its fatal
+        // cancellation result, rather than publishing stale timing as success.
+        for case in [
+            "pcm",
+            "range",
+            "asr_text",
+            "language",
+            "complete",
+            "status",
+            "raw_text",
+            "text_sha256",
+            "audio_anchor",
+            "provider_identity_sha256",
+            "provider_id",
+            "model_sha256",
+            "normalization_policy_id",
+            "timing_unit_policy_id",
+            "frame_calibration_id",
+            "score_calibration_id",
+            "upstream_normalization_revision",
+            "candidate_runtime",
+            "alignment_backend",
+            "acoustic_aliases",
+            "normalization_spans",
+            "audio_float32_sha256",
+            "missing_cell",
+            "missing_word",
+            "token_id",
+            "cell_text",
+            "cell_utf16",
+            "word_utf16",
+            "frame",
+            "receptive_window",
+            "score",
+            "cell_bounds",
+            "word_bounds",
+            "independent",
+            "protected",
+        ] {
+            let mut old = row.clone();
+            let mut supplied = pcm.clone();
+            let mut models = FakeModels::english();
+            models.alignment = engine.models.alignment.clone();
+            models.ctc_error = Some(ChildError::Cancelled);
+            match case {
+                "pcm" => supplied[0] += 0.001,
+                "range" => {
+                    old.start += 1.;
+                    old.end += 1.;
+                }
+                "asr_text" => models.alignment.as_mut().unwrap().0.push('!'),
+                "language" => {
+                    old.rest.insert("language_mode".into(), Value::from("fr"));
+                }
+                "protected" => old.protected_fields = Some(vec!["text".into()]),
+                _ => {
+                    let alignment = old.rest.get_mut("reading_alignment").unwrap();
+                    match case {
+                        "complete" => alignment[case] = Value::from(false),
+                        "missing_cell" => {
+                            alignment["characters"].as_array_mut().unwrap().remove(1);
+                        }
+                        "missing_word" => {
+                            alignment["words"].as_array_mut().unwrap().remove(0);
+                        }
+                        "token_id" => alignment["characters"][0]["token_id"] = Value::from(-1),
+                        "cell_text" => alignment["characters"][0]["text"] = Value::from("X"),
+                        "cell_utf16" => {
+                            alignment["characters"][0]["start_utf16"] = Value::from(999)
+                        }
+                        "word_utf16" => alignment["words"][0]["start_utf16"] = Value::from(999),
+                        "frame" => alignment["characters"][0]["frame"] = Value::from(-1),
+                        "receptive_window" => {
+                            supplied.truncate(10_240);
+                            old.end = old.start + supplied.len() as f64 / RATE as f64;
+                            alignment["audio_anchor"]["end_sample"] = Value::from(10_240);
+                            let bytes: Vec<_> =
+                                supplied.iter().flat_map(|v| v.to_le_bytes()).collect();
+                            alignment["audio_float32_sha256"] = Value::from(sha256_hex(&bytes));
+                            let cell = alignment["characters"]
+                                .as_array_mut()
+                                .unwrap()
+                                .last_mut()
+                                .unwrap();
+                            cell["frame"] = Value::from(31);
+                            cell["start_sample"] = Value::from(9_920);
+                            cell["end_sample"] = Value::from(10_240);
+                            let word = alignment["words"]
+                                .as_array_mut()
+                                .unwrap()
+                                .last_mut()
+                                .unwrap();
+                            // This final raw unit has exactly one acoustic cell.
+                            word["start_sample"] = Value::from(9_920);
+                            word["end_sample"] = Value::from(10_240);
+                            assert!(context::complete_alignment(TailPart {
+                                request: DecodeRequest {
+                                    utterance_id: old.canonical_utterance_id.clone().unwrap(),
+                                    machine_revision: old.machine_revision.unwrap(),
+                                    audio_revision: old.audio_revision.unwrap_or(0),
+                                    language_epoch: row.rest["language_epoch"]
+                                        .as_i64()
+                                        .unwrap_or(0),
+                                    core_start_sample: 0,
+                                    core_end_sample: 10_240,
+                                    start_sample: 0,
+                                    end_sample: 10_240,
+                                },
+                                text: old.text.clone(),
+                                complete: true,
+                                alignment: Some(alignment.clone()),
+                            }));
+                        }
+                        "score" => alignment["characters"][0]["log_probability"] = Value::from(1.),
+                        "cell_bounds" => {
+                            alignment["characters"][0]["start_sample"] = Value::from(-1)
+                        }
+                        "word_bounds" => alignment["words"][0]["end_sample"] = Value::from(1),
+                        "independent" => {
+                            alignment["characters"][0]["independent_acoustic_timestamp"] =
+                                Value::from(false)
+                        }
+                        _ => alignment[case] = Value::from("stale"),
+                    }
+                }
+            }
+            let result =
+                refine_saved_passage(&models, &old, &supplied, engine.word_alignment.as_deref());
+            if case == "protected" {
+                assert!(result.is_err());
+                assert_eq!(models.transcribe_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(models.ctc_calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    LiveError::Child(ChildError::Cancelled),
+                    "{case}"
+                );
+                assert_eq!(models.transcribe_calls.load(Ordering::SeqCst), 1, "{case}");
+                assert_eq!(models.ctc_calls.load(Ordering::SeqCst), 1, "{case}");
+            }
+        }
     }
 
     #[test]

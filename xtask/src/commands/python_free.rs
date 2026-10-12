@@ -55,8 +55,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_check_names_the_tauri_shell() {
-        let error = run().expect_err("sidecar spawn still remains");
-        assert!(error.to_string().contains(TAURI_SHELL), "{error}");
+    fn workspace_startup_is_python_free() {
+        run().unwrap();
     }
 }

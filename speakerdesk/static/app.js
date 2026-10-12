@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="speakerdesk-token"]').content;
 let config, jobs = [], selected = null, doc = null, dirty = false, polling = false, saving = false, editGeneration = 0, selectionGeneration = 0;
-let meeting = null, followingLive = true, passageEnd = null, retrying = false;
+let meeting = null, followingLive = true, passageEnd = null, retrying = false, startingJob = null;
 let changingLiveLanguage = false, changingDefaultLanguage = false, defaultLanguageGeneration = 0;
 let pendingExport = null, autosaveTimer = null, setupState = null, undoRemoval = null;
 let updateState = {id: 0, state: 'unavailable'}, updateFrozen = false, updatePolling = false;
@@ -188,13 +188,15 @@ function languageReady(mode) {
 function setStatus() {
   $('recording-name').textContent = selected.name; $('recording-name').title = selected.name;
   $('meeting-date').textContent = new Date(selected.created*1000).toLocaleString(undefined,{weekday:'long',month:'long',day:'numeric',hour:'numeric',minute:'2-digit'});
-  $('job-message').textContent = selected.message;
-  const live=isLive(), busy=live || ['preparing','processing','queued'].includes(selected.status);
+  const starting=startingJob===selected.id;
+  $('job-message').textContent = retrying || selected.passage_retry ? 'Retrying passage locally…' : starting ? 'Starting transcription…' : selected.message;
+  const live=isLive(), busy=live || starting || ['preparing','processing','queued'].includes(selected.status);
+  $('job-progress').hidden=selected.kind==='meeting' || !(busy || retrying || selected.passage_retry);
   $('editor').inert=updateFrozen || retrying || (busy && !live);
   $('recording-dot').hidden=!live;
   $('recording-dot').classList.toggle('paused',selected.status==='paused');
   $('run').hidden = !!doc?.segments?.length || live; $('run').disabled = busy || !languageReady(selected.language);
-  $('run').title = languageReady(selected.language) ? '' : 'Download the local models in Settings → Models first.';
+  $('run').title = languageReady(selected.language) ? '' : setupState?.status==='loading' ? 'Loading models…' : 'Finish model setup in Settings → Models first.';
   $('manual').hidden = !!doc || busy || !selected.duration;
   $('delete').disabled = busy || !!selected.inference_owned;
   $('duration').textContent = selected.duration ? time(selected.duration) : emptyFailedCapture(selected)?'No audio':'Preparing…';
@@ -787,7 +789,7 @@ function showInspector(segment,card,force=false) {
     const field=node('label',label,'segment-detail-field'), input=node('input');
     input.type='number';input.min=0;input.max=selected.duration;input.step='.01';input.value=segment[key].toFixed(2);
     const hint=node('small',passageTime(segment[key]),'time-hint');
-    input.addEventListener('change',() => { segment[key]=Number(input.value);segment.timing='user_edited';hint.textContent=passageTime(segment[key]);changed(); });
+    input.addEventListener('change',() => { segment[key]=Number(input.value);segment.timing='user_edited';hint.textContent=passageTime(segment[key]);changed();renderSegments(); });
     field.append(input,hint);details.append(field);
   }
   appendPassageEvidence(details,segment);
@@ -1028,7 +1030,16 @@ function wire() {
     catch(error) { control.checked=!control.checked;notice(error.message,true); }
     finally { control.disabled=false;await refreshSetup(); }
   });
-  $('run').addEventListener('click', async () => { try { selected = await api(`/api/jobs/${selected.id}/run`, {method: 'POST'}); setStatus(); } catch (e) { notice(e.message, true); } });
+  $('run').addEventListener('click', async () => {
+    if(startingJob || !selected || $('run').disabled)return;
+    const jid=selected.id,generation=selectionGeneration;
+    startingJob=jid;setStatus();
+    try {
+      const next=await api(`/api/jobs/${jid}/run`,{method:'POST'});
+      if(selected?.id===jid && generation===selectionGeneration && !(next.revision<selected.revision))selected=next;
+    } catch(error) { notice(error.message,true); }
+    finally { startingJob=null;if(selected)setStatus(); }
+  });
   $('manual').addEventListener('click', manual);
   $('save').addEventListener('click', () => void dispatchAction('save'));
   $('speed').addEventListener('change', () => { $('player').playbackRate = Number($('speed').value); });
@@ -1136,21 +1147,21 @@ async function installModels() {
 function renderStartState() {
   if(!config)return;
   const modelsReady=languageReady($('language').value), capture=meeting?.capture_available!==false;
-  const setupBusy=setupState?.status==='downloading';
-  const state=setupState, busy=state?.status==='downloading';
-  $('setup-card').hidden=modelsReady || !state;
-  if(state && !modelsReady) {
+  const state=setupState, downloading=state?.status==='downloading', loading=state?.status==='loading', busy=downloading || loading;
+  $('setup-card').hidden=modelsReady || !state || loading;
+  $('setup-card-install').hidden=loading;
+  if(state && !modelsReady && !loading) {
     const percent=state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0;
     $('setup-card-text').textContent=state.message || (!state.supported?'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.'
-      :`Download the local models once (${formatBytes(state.total_bytes)}). After that, meetings are transcribed offline on this Mac.`);
-    $('setup-card-progress').hidden=!busy;$('setup-card-progress').value=percent;
-    $('setup-card-status').textContent=state.error || (busy?`${state.phase} · ${percent}%`:'');
+      :state.status==='failed' && !state.download_required?'Model setup did not finish. Retry setup to check the local models.':`Download the local models once (${formatBytes(state.total_bytes)}). After that, meetings are transcribed offline on this Mac.`);
+    $('setup-card-progress').hidden=!downloading;$('setup-card-progress').value=percent;
+    $('setup-card-status').textContent=state.error || (downloading?`${state.phase} · ${percent}%`:'');
     $('setup-card-install').disabled=busy || !state.supported || state.can_download===false || state.voice?.status==='downloading';
-    $('setup-card-install').querySelector('span').textContent=busy?'Downloading…':state.status==='failed'?'Resume download':`Download models · ${formatBytes(state.total_bytes)}`;
+    $('setup-card-install').querySelector('span').textContent=downloading?'Downloading…':state.status==='failed' && !state.download_required?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
   }
-  $('start-meeting').disabled=setupBusy || !modelsReady || !capture || changingLiveLanguage || changingDefaultLanguage;
+  $('start-meeting').disabled=busy || !modelsReady || !capture || changingLiveLanguage || changingDefaultLanguage;
   $('start-hint').textContent=!capture?'Live recording isn’t available in this build. Use Import recording in the sidebar to transcribe a file.'
-    :setupBusy?'Finish model setup before starting a meeting.':!modelsReady?'Start meeting is available once the models are downloaded.':'';
+    :loading?'Loading models…':downloading?'Finish model setup before starting a meeting.':!modelsReady?'Start meeting is available once the models are ready.':'';
 }
 let alignmentChanging=false,alignmentGeneration=0;
 async function alignmentAction(method,body) {
@@ -1162,18 +1173,19 @@ async function alignmentAction(method,body) {
 function renderAlignment(state) {
   const alignment=state.alignment;$('alignment-controls').hidden=!alignment;
   if(!alignment)return;
-  const busy=alignment.status==='downloading';
+  const busy=alignment.status==='downloading', loading=alignment.status==='loading';
   const languages=alignment.supported_languages.map(code=>config?.languages[code]||code).join(', ');
   const calibrated=(alignment.timing_accuracy_calibrated_languages||[]).map(code=>config?.languages[code]||code).join(', ');
   $('alignment-coverage').textContent=`Supported languages: ${languages||'None'}. Timing accuracy measured against references: ${calibrated||'None'}.`;
   if(alignment.supported_languages.some(code=>!(alignment.timing_accuracy_calibrated_languages||[]).includes(code)))
     $('alignment-coverage').textContent+=' Accuracy in other supported languages has not been independently measured.';
   $('alignment-cost').textContent=`${formatBytes(alignment.total_bytes)} download · ${formatBytes(alignment.stored_bytes)} stored · up to ${formatBytes(alignment.required_free_bytes)} free space needed.`;
-  $('alignment-message').textContent=alignment.message;
-  $('alignment-status').textContent=alignment.error || (busy?`${alignment.phase} · ${Math.round(100*alignment.downloaded_bytes/alignment.total_bytes)}%`:alignment.ready?'Ready':'Not ready');
+  $('alignment-cost').hidden=loading || (state.status==='failed' && !state.download_required);
+  $('alignment-message').textContent=loading?'Preparing transcript timing on this Mac.':state.status==='failed' && !state.download_required?'Retry model setup to check transcript timing.':alignment.message;
+  $('alignment-status').textContent=alignment.error || (loading?(alignment.phase || 'Loading models…'):busy?`${alignment.phase} · ${alignment.total_bytes?Math.round(100*alignment.downloaded_bytes/alignment.total_bytes):0}%`:alignment.ready?'Ready':'Not ready');
   $('alignment-progress').hidden=!busy;
   $('alignment-progress').value=alignment.total_bytes?100*alignment.downloaded_bytes/alignment.total_bytes:0;
-  $('install-alignment').hidden=(alignment.ready && alignment.status!=='failed') || alignment.can_download===false;
+  $('install-alignment').hidden=loading || (alignment.ready && alignment.status!=='failed') || alignment.can_download===false;
   $('install-alignment').disabled=alignmentChanging || !alignment.can_download;
   $('install-alignment').textContent=busy?'Setting up…':['failed','interrupted'].includes(alignment.status)?'Retry setup': 'Finish setup';
 }
@@ -1183,25 +1195,26 @@ async function refreshSetup() {
     const state=await api('/api/setup');
     if(generation!==alignmentGeneration || alignmentChanging)return;
     setupState=state;
+    const downloading=state.status==='downloading', loading=state.status==='loading', busy=downloading || loading;
     const list=$('model-list');list.replaceChildren();
     state.models.forEach(model => {
       const size=formatBytes(model.bytes);
       const item=node('div',undefined,'model-item');
       const alignment=model.id===state.alignment?.id?state.alignment:null;
-      const label=model.name==='Voice recognition' && state.voice?.released===false && !state.voice?.available?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':model.optional?`Optional · ${size}`:size;
+      const label=loading?'Loading…':model.name==='Voice recognition' && state.voice?.released===false && !state.voice?.available?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':model.optional?`Optional · ${size}`:size;
       item.append(node('strong',model.name),node('span',label));list.append(item);
     });
     renderAlignment(state);
     if(state.required_free_bytes)$('setup-disk-note').textContent=`First setup needs an internet connection and about ${formatBytes(state.required_free_bytes)} of free disk space including prepared timing weights.`;
-    const busy=state.status==='downloading';
-    $('model-progress').hidden=!busy;
+    $('setup-disk-note').hidden=loading || state.ready || (state.status==='failed' && !state.download_required);
+    $('model-progress').hidden=!downloading;
     $('model-progress').value=state.total_bytes?100*state.downloaded_bytes/state.total_bytes:0;
-    $('model-status').textContent=state.error || state.message || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'Finish required model setup before transcribing.');
-    $('install-models').hidden=state.ready;
+    $('model-status').textContent=state.error || (loading?(state.phase || 'Loading models…'):state.message || (downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?'Ready to transcribe on this Mac.':'Finish required model setup before transcribing.'));
+    $('install-models').hidden=loading || state.ready;
     $('cancel-model-setup').hidden=!state.can_cancel;
     const voice=state.voice,voiceBusy=voice.status==='downloading';
     $('install-models').disabled=busy || voiceBusy || !state.supported || state.can_download===false;
-    $('install-models').textContent=busy?'Downloading…':state.status==='failed'?'Resume download':`Download models · ${formatBytes(state.total_bytes)}`;
+    $('install-models').textContent=downloading?'Downloading…':state.status==='failed' && !state.download_required?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
     if(voiceAvailable!==voice.available) await loadPeople();
     $('settings-voice-note').textContent=voice.enabled?voice.message:'Recognition is off. Saved names and voices stay on this Mac.';
     if(document.activeElement!==$('recognize-voices')) $('recognize-voices').checked=voice.enabled;

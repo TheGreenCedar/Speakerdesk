@@ -32,7 +32,7 @@ function renderRefinementStatus() {
   const status=saved && (!selected?.rolling_refinement || selected.refinement_status==='unavailable')?'paused':selected?.refinement_status;
   const noAudio=emptyFailedCapture(selected);
   const unverified=selected?.status==='failed' && selected.capture_audio?.state==='unverified';
-  $('refinement-controls').hidden=!selected?.rolling_refinement && !saved;
+  $('refinement-controls').hidden=selected?.status==='failed' || (!selected?.rolling_refinement && !saved);
   $('refinement-status').textContent=noAudio?'No audio was recorded.':unverified?'Recorded audio could not be verified.':({waiting:'Accuracy pass queued · recent words may still change',refining:'Rechecking sealed passages…',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Accuracy pass stopped'})[status] || '';
   if(saved && !noAudio && !unverified && status==='refining')$('refinement-status').textContent='Rechecking saved passages…';
   $('refinement-status').title=saved?'Re-decode complete saved passages using their captured Auto or explicit language setting. Saved corrections and speaker identities are retained; uncertain or mixed-language passages keep their previous words. Long passages require one confidently routed language and unambiguous context timing. Non-English word times are uncalibrated estimates.':'Speakerdesk rechecks sealed passages while recording continues. Long passages use overlapping context; uncertain results retain previous words. Pause accuracy independently of recording. Your saved corrections are never overwritten.';

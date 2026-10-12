@@ -190,6 +190,15 @@ d_ref = ""
 rust = "xtask/src/commands/pending.rs"
 owner = "packaging"
 
+# Retained build-tool test; Python is not part of the native app runtime.
+[[row]]
+python = "tests/test_native_licenses.py"
+disposition = "build-tool"
+status = "retained"
+d_ref = ""
+rust = ""
+owner = "packaging"
+
 [[row]]
 python = "tests/test_constant_speech_tail.py"
 disposition = "port"

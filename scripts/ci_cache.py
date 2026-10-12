@@ -22,25 +22,21 @@ def keys(root, tracked, tools):
     def files(*prefixes):
         return [name for name in tracked if any(name.startswith(p) for p in prefixes)]
 
-    locks = files('requirements-')
     environment = fingerprint(root, [], tools)
-    prefix = f"speakerdesk-v1-{environment}"
-    rust_inputs = files('desktop/src-tauri/')
-    rust_contract = files('.cargo/', 'scripts/build_macos.sh', 'scripts/ci_cache.py')
+    prefix = f"speakerdesk-native-v1-{environment}"
+    rust_inputs = files('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'crates/', 'vendor/mlx-sys/', 'desktop/src-tauri/', 'speakerdesk/static/', 'speakerdesk/templates/')
+    rust_contract = files('.cargo/', 'scripts/build_macos.sh', 'scripts/fetch_mlx_runtime.sh', 'scripts/native_licenses.py', 'scripts/ci_cache.py')
     # sccache validates each rustc invocation, source, dependency and environment.
     # Version/lock/manifest changes must not discard unchanged dependency objects.
     compiler_prefix = f"{prefix}-compiler-v2-"
     return {
-        'uv-key': f"{prefix}-uv-{fingerprint(root, locks, {})}",
-        'uv-prefix': f"{prefix}-uv-",
-        'cargo-key': f"{prefix}-cargo-{fingerprint(root, files('desktop/src-tauri/Cargo.lock'), {})}",
+        'cargo-key': f"{prefix}-cargo-{fingerprint(root, files('Cargo.lock'), {})}",
         'cargo-prefix': f"{prefix}-cargo-",
         'npm-key': f"{prefix}-npm-{fingerprint(root, files('desktop/package-lock.json'), {})}",
         'npm-prefix': f"{prefix}-npm-",
         'compiler-prefix': compiler_prefix,
         'compiler-key': compiler_prefix + fingerprint(root, rust_inputs + rust_contract, {}),
         # Whole components use exact inputs only. No prefix restore for executable outputs.
-        'runtime-key': f"{prefix}-runtime-{fingerprint(root, files('speakerdesk/', 'packaging/', 'desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/echo_compile_guard.py', 'requirements-', 'scripts/setup.sh', 'scripts/setup_alignment.sh', 'scripts/build_macos.sh', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
         'capture-key': f"{prefix}-capture-{fingerprint(root, files('desktop/capture/', 'desktop/src-tauri/Entitlements.plist', 'scripts/build_macos.sh', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
     }
 
@@ -65,7 +61,7 @@ def emit(values):
 if __name__ == '__main__':
     import sys
     if sys.argv[1:] == ['size']:
-        paths = [ROOT / '.cache/uv', ROOT / '.cache/npm', ROOT / '.cache/components',
+        paths = [ROOT / '.cache/npm', ROOT / '.cache/components',
                  Path(os.environ['SCCACHE_DIR']), Path.home() / '.cargo/registry',
                  Path.home() / '.cargo/git']
         total = sum(p.stat().st_size for directory in paths if directory.exists()
@@ -85,10 +81,10 @@ if __name__ == '__main__':
             'image': os.getenv('ImageVersion', 'local'), 'target': 'aarch64-apple-darwin',
             'deployment': '15.0', 'rust': command('rustc', '-Vv'),
             'xcode': command('xcodebuild', '-version'), 'swift': command('xcrun', 'swiftc', '--version'),
-            'sdk': command('xcrun', '--show-sdk-version'), 'python': command('python3.13', '--version'),
+            'sdk': command('xcrun', '--show-sdk-version'), 'python': command('python3', '--version'),
             'clang': command('xcrun','clang','--version'),
             'cmake': command('cmake','--version'), 'ninja': command('ninja','--version'),
-            'uv': command('uv', '--version'), 'node': command('node', '--version'),
+            'node': command('node', '--version'),
             'sccache': command('sccache', '--version'), 'profile': 'release-default-features-adhoc',
         }
         tracked = command('git', 'ls-files', '-z').split('\0')

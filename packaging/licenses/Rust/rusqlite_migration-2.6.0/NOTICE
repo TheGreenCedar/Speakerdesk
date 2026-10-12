@@ -1,0 +1,8 @@
+rusqlite_migration-2.6.0
+Declared license: Apache-2.0
+Published crate source: https://github.com/cljoly/rusqlite_migration/tree/37c7a555018ecd80c58b2954779d83c281e4557a
+
+Original upstream license retained because the published crate omits its license text.
+
+Retained text: https://raw.githubusercontent.com/cljoly/rusqlite_migration/37c7a555018ecd80c58b2954779d83c281e4557a/LICENSE.txt
+SHA-256: cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30

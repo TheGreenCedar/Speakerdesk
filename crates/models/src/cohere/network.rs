@@ -113,6 +113,12 @@ impl Network {
                 let (features, valid) = self.features.extract(&padded).map_err(error)?;
                 let (encoded, valid) = self.encoder.forward(&features, valid, cancel)?;
                 let encoded = self.decoder.project(&encoded).map_err(error)?;
+                let cross_mask = Array::from_slice(
+                    &(0..encoded.dim(1) as usize)
+                        .map(|i| i < valid)
+                        .collect::<Vec<_>>(),
+                    &[1, 1, 1, encoded.dim(1)],
+                );
                 let mut caches = std::array::from_fn(|_| Default::default());
                 let mut tokens = Vec::new();
                 let mut input = prompt.clone();
@@ -121,9 +127,9 @@ impl Network {
                     if cancel.load(Ordering::Acquire) {
                         return Err(ChildError::Cancelled);
                     }
-                    let token = self
-                        .decoder
-                        .step(&input, offset, &encoded, valid, &mut caches)?;
+                    let token =
+                        self.decoder
+                            .step(&input, offset, &encoded, &cross_mask, &mut caches)?;
                     if token == super::EOS_TOKEN_ID {
                         return Ok(tokens);
                     }

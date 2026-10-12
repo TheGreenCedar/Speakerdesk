@@ -22,6 +22,82 @@ test('required alignment on the existing runtime still blocks import until ready
   assert.equal(f.document.getElementById('run').disabled, false);
 });
 
+test('model loading hides download actions and progress across the start card and Settings', async () => {
+  const f=frontend(path.resolve(__dirname,'..'));f.seed(0,'uploaded');
+  f.document.getElementById('setup-card-install').append(f.document.createElement('span'));
+  f.run("config.readiness={configured:false,automatic_language:false,word_alignment:false,live_capture:true};meeting={capture_available:true};$('language').value='en';");
+  const state={core_ready:false,ready:false,status:'loading',phase:'Opening installed artifacts',
+    automatic_language:false,models:[{id:'silero-speech',name:'Speech detection',bytes:100,installed:false}],
+    total_bytes:100,downloaded_bytes:0,required_free_bytes:200,supported:true,can_download:false,can_cancel:true,
+    alignment:{id:'coarse-alignment',status:'loading',ready:false,can_download:false,supported_languages:['en'],
+      timing_accuracy_calibrated_languages:['en'],total_bytes:100,stored_bytes:100,required_free_bytes:200,
+      message:'Use Download models below to finish setup for all local models.'},
+    voice:{status:'unavailable',available:false,enabled:false,message:'Unavailable'}};
+  f.context.fetch=async url=>({ok:true,json:async()=>url==='/api/setup'?state:{languages:{en:'English',auto:'Automatic'},
+    default_language:'en',readiness:{configured:state.core_ready,automatic_language:false,word_alignment:state.alignment.ready,live_capture:true}}});
+  const el=id=>f.document.getElementById(id);
+  await f.run('refreshSetup()');
+  assert.equal(el('setup-card').hidden,true);
+  assert.equal(el('setup-card-install').hidden,true);
+  assert.equal(el('install-models').hidden,true);
+  assert.equal(el('install-alignment').hidden,true);
+  for(const id of ['model-progress','alignment-progress','setup-disk-note','alignment-cost'])
+    assert.equal(el(id).hidden,true,id);
+  for(const id of ['start-hint','alignment-status'])
+    assert.match(el(id).textContent,/Loading models…/,id);
+  assert.equal(el('model-status').textContent,state.phase);
+  assert.doesNotMatch(el('alignment-message').textContent,/download/i);
+  assert.match(el('model-list').textContent,/Loading/);
+  assert.equal(el('start-meeting').disabled,true);
+  f.run('setStatus()');
+  assert.equal(el('run').title,'Loading models…');
+  assert.equal(el('cancel-model-setup').hidden,false);
+
+  state.phase=state.alignment.phase='Cancelling model setup';
+  await f.run('refreshSetup()');
+  assert.equal(el('model-status').textContent,'Cancelling model setup');
+  assert.equal(el('alignment-status').textContent,'Cancelling model setup');
+  assert.equal(el('setup-card').hidden,true);
+  assert.equal(el('start-hint').textContent,'Loading models…');
+
+  // A real missing-file transfer still exposes its progress and cancel action.
+  Object.assign(state,{status:'downloading',phase:'Downloading speech detection',downloaded_bytes:25});
+  state.alignment.status='downloading';
+  state.alignment.phase=state.phase;
+  await f.run('refreshSetup()');
+  assert.equal(el('setup-card').hidden,false);
+  assert.equal(el('install-models').hidden,false);
+  assert.equal(el('setup-card-install').hidden,false);
+  assert.equal(el('model-progress').hidden,false);
+  assert.equal(el('model-progress').value,25);
+  assert.match(el('model-status').textContent,/Downloading speech detection · 25%/);
+  assert.equal(el('cancel-model-setup').hidden,false);
+
+  // Initializer failure does not establish that the installed files need another download.
+  Object.assign(state,{status:'failed',error:'Model initialization failed.',can_download:true,can_cancel:false});
+  state.alignment.status='idle';
+  await f.run('refreshSetup()');
+  assert.equal(el('setup-card').hidden,false);
+  assert.equal(el('install-models').textContent,'Retry setup');
+  assert.equal(el('setup-card-install').querySelector('span').textContent,'Retry setup');
+  assert.equal(el('model-status').textContent,state.error);
+  assert.equal(el('cancel-model-setup').hidden,true);
+
+  // A catalog presence check can positively distinguish a missing download from a load failure.
+  Object.assign(state,{download_required:true,error:'Required model files are missing.'});
+  await f.run('refreshSetup()');
+  assert.match(el('install-models').textContent,/^Download models · /);
+  assert.match(el('setup-card-install').querySelector('span').textContent,/^Download models · /);
+  assert.equal(el('setup-disk-note').hidden,false);
+
+  Object.assign(state,{status:'ready',error:null,core_ready:true,ready:true,download_required:false});
+  Object.assign(state.alignment,{status:'ready',ready:true});
+  await f.run('refreshSetup()');
+  assert.equal(el('start-meeting').disabled,false);
+  assert.equal(el('setup-card').hidden,true);
+  assert.equal(el('install-models').hidden,true);
+});
+
 test('setup polling enables native import after initialization with no download total', async () => {
   const f = frontend(path.resolve(__dirname, '..'));f.seed(0, 'uploaded');
   f.run("config.readiness.configured=false;setStatus();");

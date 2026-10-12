@@ -496,8 +496,17 @@ pub(super) async fn record(
                     let id = id.clone();
                     let raw = final_snapshot.raw_sample;
                     let clean = final_snapshot.committed_sample;
+                    let healthy = running.is_ok()
+                        && final_snapshot.phase == CapturePhase::Stopped
+                        && final_snapshot.error.is_none()
+                        && state.failure.is_none()
+                        && clean > 0;
+                    let operation = operation.clone();
                     let coverage=tokio::task::spawn_blocking(move||app.store().update_job(&id,|job| {
                         job.extra.insert("capture_audio_coverage".into(),json!({"raw_samples":raw,"clean_samples":clean,"sample_rate":16000}));
+                        if healthy && operation.current(job) {
+                            job.message = "Audio saved. Finishing transcript…".into();
+                        }
                         Ok::<_,StoreError>(())
                     })).await;
                     if let Err(error) = coverage

@@ -2808,13 +2808,21 @@ async fn rolling_accuracy_pause_is_serviced_while_final_models_drain() {
         202
     );
     wait_file(&root.join("edit-asr-started")).await;
+    let draining = host.get(&path).await;
+    assert_eq!(draining["message"], "Audio saved. Finishing transcript…");
+    assert_eq!(draining["status"], "finishing");
+    assert_eq!(draining["inference_owned"], true);
+    assert_eq!(draining["capture_audio_coverage"]["clean_samples"], 112513);
     let response = host
         .post(&format!("{path}/refinement/pause"), json!({}))
         .await;
     assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
     wait_file(&root.join("asr-cancelled")).await;
-    assert_eq!(host.get(&path).await["status"], "finishing");
-    assert_eq!(host.get(&path).await["inference_owned"], true);
+    let cancelling = host.get(&path).await;
+    assert_eq!(cancelling["status"], "finishing");
+    assert_eq!(cancelling["inference_owned"], true);
+    assert_eq!(cancelling["refinement_status"], "paused");
+    assert_eq!(cancelling["message"], "Audio saved. Finishing transcript…");
     fs::remove_file(root.join("hold-cancel-terminal")).unwrap();
     fs::remove_file(root.join("hold-live-asr")).unwrap();
     let finished = host

@@ -8,6 +8,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
+# Legacy Python sources remain compatibility references, not native bundle inputs.
 required = {'packaging/overrides/mlx_audio/vad/models/__init__.py',
             'speakerdesk/admission_receipt.py',
             'scripts/promote_release.py', 'scripts/core_acceptance.py',
@@ -27,10 +28,12 @@ prohibited_prefixes = ('models/', 'vendor/', '.venv', '.cache/', 'speakerdesk/da
                        'desktop/src-tauri/binaries/')
 prohibited_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.sqlite', '.safetensors',
                          '.dmg', '.zip', '.p12', '.p8', '.pem', '.key', '.pyc'}
+native_audio_fixtures = {'crates/core/tests/testdata/stereo-48k.flac',
+                         'crates/models/tests/data/two-voice.wav'}
 for name in filter(None, tracked):
     path = root/name
-    assert not name.startswith(prohibited_prefixes), f'Excluded path tracked: {name}'
-    assert path.suffix not in prohibited_extensions, f'Excluded file tracked: {name}'
+    assert not name.startswith(prohibited_prefixes) or name.startswith('vendor/mlx-sys/'), f'Excluded path tracked: {name}'
+    assert path.suffix not in prohibited_extensions or name in native_audio_fixtures, f'Excluded file tracked: {name}'
     assert not path.is_symlink(), f'Symlink tracked: {name}'
     if path.suffix == '.py':
         ast.parse(path.read_text(), filename=name)
@@ -43,6 +46,6 @@ capture_info = plistlib.loads((root/'desktop/capture/Info.plist').read_bytes())
 versions.append(capture_info['CFBundleVersion'])
 versions.append(re.search(r'^version = "([^"]+)"', (root/'desktop/src-tauri/Cargo.toml').read_text(), re.M)[1])
 assert len(set(versions)) == 1, f'Version mismatch: {versions}'
-lock = (root/'desktop/src-tauri/Cargo.lock').read_text()
+lock = (root/'Cargo.lock').read_text()
 assert f'name = "speakerdesk"\nversion = "{versions[0]}"' in lock
 print(f'Checked {len(list(filter(None, tracked)))} tracked files; version {versions[0]}; no excluded payload.')

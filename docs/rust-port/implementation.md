@@ -10,6 +10,28 @@ Starting PR head: `01e757cd5f3db3f8fccfcfa34e94e91cadc0fe26`.
 Starting base: `59e7b0c860f72ca94c24e6eab18ac820b144ee24`.
 Local implementation branch: `codex/python-free-mac`.
 
+## Delivery status after migration testing
+
+The native Mac workflow is implemented and has passed the retained actual-app
+tests: import and live capture, editing and revision conflicts, save/reopen and
+export, model setup, language/alignment/voice paths, child/helper failure and
+disposable updater replacement. The canonical signed package runs without a
+Python application runtime. The optimization work did not replace these broader
+migration acceptance criteria.
+
+The accepted replacement is not complete: Stop remains slower than 0.6.6,
+qualified by native final-passage timing absent from the measured baseline.
+Equivalent-quality long-import and comparative cancellation/recovery performance
+also remain unqualified. Windows and issue 25 remain deliberate follow-ups.
+
+Legacy Python application sources remain test/oracle references, not package
+inputs. Current CI, reference generators and source-boundary checks still depend
+on them; removal requires a separate coherent cleanup of those callers. The
+`speakerdesk` directory also contains the editor assets and model metadata that
+the Rust build still embeds. No legacy implementation or shared assets are
+deleted in this delivery. Existing build-time Python scripts are distinct from
+the application's runtime-free requirement.
+
 ## Sequence and current state
 
 1. Source repairs verified: updater/export/bundle/parser/readiness and truthful
@@ -48,14 +70,31 @@ Local implementation branch: `codex/python-free-mac`.
    lifecycle replays and real-model retained-audio checks. Actual Tauri live
    controls, editing, playback, four exports and restart pass with a synthetic
    PCM helper. Real microphone/Mac-audio Start/Pause/Resume/Stop also reaches the
-   editor on the current Mac route. Capture recovery, acoustic calibration and
-   long-session gates remain.
-6. Pending: Python-free packaged execution, full product/security/performance gates.
+   editor on the current Mac route. Bundled-helper failure preserves data through
+   restart and permits a new capture. Nine-minute saved-PCM comparison preserves
+   words/audio with lower observed backlog and memory; Stop is slower. Equivalent
+   performance qualification and the stated acoustic limits remain open.
+6. In progress: native-default startup and canonical Python-free packaging are
+   implemented. The relocated Developer ID signed package runs real inference
+   with an isolated store and sanitized environment, reaches the editor and
+   saves word/name/boundary edits through full restart and native export. The
+   packaged security/data matrix passes. Disposable outgoing updater cancellation,
+   retry, shutdown/replacement, network failure and preservation pass. Equivalent
+   performance qualification remains open. The refreshed signed package also
+   passes the final timing-inspector and failed-meeting accuracy-control checks.
 
-All validation uses disposable storage and synthetic/public audio. No installed
-app replacement, production-data migration, cache mutation, merge, publication,
-or GitHub comments. One implementer and one independent verifier per batch; one
+Planned validation uses disposable storage and synthetic/public audio. An
+unintended baseline relaunch touched default storage directory metadata; the
+exception and limits of its inspection are recorded below. No installed app
+replacement, production-data migration, merge, publication or GitHub comments.
+One implementer and one independent verifier per batch; one
 owner of Mac builds/model runs. A component fix does not complete this objective.
+
+Execution preference: new subagents use Sol 6.1 with explicit reasoning effort:
+high for bounded implementation/verification, xhigh for model correctness or
+cross-boundary architecture. The coordinator remains the sole Mac build/model/UI
+owner. The latest product corrections distinguish installed-model loading from
+downloads and add honest activity feedback during uploaded-recording transcription.
 
 The review already reproduced updater disconnection, stale export projection,
 split identity storage, VAD partial-frame rejection and discarded EOF evidence,
@@ -70,7 +109,324 @@ that prerequisite. Xcode appeared and became selected during implementation;
 its license is pending, so subsequent builds explicitly select the existing
 Command Line Tools. No global toolchain settings or license acceptance changed.
 
-## Foundation proof
+## Native startup and packaging candidate (qualification in progress)
+
+The canonical Mac build now bundles the Rust desktop/host/child executable,
+Swift capture helper, echo library, MLX 0.32.2 dylib and Metal kernels, with
+native dependency notices. Ordinary startup uses the native store and its
+`models` directory by default. The Python sidecar is no longer a startup or
+packaging branch. Recovery checks the native resources; ordinary startup still
+opens the editor when capture resources are unavailable.
+
+Installed-model initialization reports `loading`; download work reports
+`downloading`. Loading hides the pre-meeting setup card and displays “Loading
+models…” in its compact status hint. Settings retains the descriptive load or
+cancellation phase without a download bar or download action. A cached presence
+check distinguishes missing download files from an initialization failure, so
+first setup still explicitly requests downloading models.
+
+Coordinator verification on the current Mac: host 65 unit tests, 18 live replay
+tests, one native-service lifecycle test, nine process tests and 15 xtask tests
+pass. Three host, one live and three process tests remain explicitly ignored;
+their separately retained hardware/model proof is unchanged. Twelve build-tool
+tests, source/workflow checks, shell syntax and strict host/models/desktop/xtask
+Clippy pass. The actual license collector stages 470 dependency notice entries;
+23 packages require retained version-specific license text because their crates
+omit it. Logs are `/tmp/speakerdesk-native-package-final-host-xtask.log` and
+`/tmp/speakerdesk-native-package-clippy.log`. No new acoustic acceptance is implied.
+
+The uploaded-transcription activity bar is joined. It covers local submission,
+queued/preparing/processing and passage retries, stops on completion/failure and
+does not claim a percentage unsupported by the model worker. Four focused tests
+fail against the old frontend and pass against this candidate. The complete Node
+suite has 110 passes and one existing optional performance skip. A late response
+cannot replace a newer selected transcript revision.
+
+Both canonical Mac builds completed: the ad-hoc build passes bundle verification
+but fails actual hardened-runtime launch when loading the separately ad-hoc signed
+MLX library. It is not a runnable qualification artifact. The same source built
+with the existing Developer ID identity runs without relaxing library validation
+or changing system settings. Neither artifact is notarized or published.
+
+The signed ZIP was extracted into
+`/private/tmp/speakerdesk-native-package.waaqwdz8/signed/`. Its actual app launches
+with a system-only PATH, no Python/DYLD/model override, an explicit disposable
+storage root and the normal storage/models directory. Observed application
+processes are the desktop, native host and resident native model child. Loaded
+files show the bundled MLX dylib; no Python runtime, site-packages or developer
+checkout supplies application behavior. `candidate-source.json` in the evidence
+root records HEAD plus dirty-source hashes for this build.
+
+An 82-second synthetic recording was imported and transcribed through the
+packaged editor. The indeterminate loading bar was visible during real model
+execution. Its ten spoken passages became editable, and word, speaker-name and
+boundary edits persisted at revision 6. Full quit reaped the desktop/host/model
+processes. Reopening displayed the same words, name and boundary; the complete
+document/revision and both WAV hashes were identical. Native project export and
+text export after restart contain those edits. The actual startup screen also
+showed “Loading models…” with no download button while initialized files loaded.
+
+The packaged HTTP/data matrix passed 72 checks: mounted Host/Origin/token guards,
+malformed uploads/saves, protected and stale writes, private response fields,
+SQLite/detail/export agreement, all four export formats, full/ranged audio bytes,
+and audio-file/parent-directory symlink confinement. Temporary file swaps were
+restored and independently verified. Evidence is under
+`/private/tmp/speakerdesk-package-security.diCepT/results-final/`. A first harness
+comparison was too strict about stored null versus omitted optional fields; it
+stopped before mutations and was corrected without weakening raw row equality.
+
+Actual bundled Swift-helper failure was injected into a short synthetic system
+audio capture. The failed helper was reaped; the corrected phrase, people and
+133,546 samples in all three WAVs survived. Full application restart preserved
+them, then a fresh real capture produced text and stopped Ready. This proves
+retained-data recovery and new capture, not automatic repair of a failed device
+session. The terminal failed meeting snapshot is intentionally retained until
+another meeting starts; an initial harness expectation of idle was corrected.
+Evidence is `speakerdesk-native-package.waaqwdz8/helper-loss/`.
+
+These actual checks exposed two small editor defects, now fixed and independently
+reviewed: timing-input changes refresh the row's visible/accessibility labels;
+failed recordings hide accuracy controls after their worker has stopped. The
+focused regressions fail before each change. The final Node suite passes 112
+tests with one existing optional performance skip. The refreshed Developer ID
+package now passes both actual UI checks: changing the start to 0.06 immediately
+updates all passage labels with the inspector still open and saves revision 7;
+the failed capture keeps its error, words and playback with no accuracy controls.
+Quit reaped desktop/host/model processes. Evidence is
+`/private/tmp/speakerdesk-final-package.1cj7mpxh/ui-delta-check.json`; its source
+and archive hashes are in `candidate-source.json`. The packaged executable SHA is
+`8728f1d839839f20d2bbcbfb4f772f1d498a3233217554f24b30f72ad36fde6a`.
+The full package workflow above precedes these two fixes. None of this implies
+performance acceptance.
+
+The exact-version native package's actual updater check returned current. A
+disposable copy compiled as 0.6.5 (same source, approved HTTPS feed/public key,
+signature/version policy and Developer ID signing) exercised nonzero-byte
+download cancellation, a fresh retry, verified download, real editor preparation,
+native child shutdown and replacement with the published 0.6.6 bundle. The
+replacement restarted in its own disposable home. All 11 prior file hashes,
+the complete native SQLite logical dump and three native jobs were preserved;
+codesign verification and the installed 0.6.6 version passed. Both the original
+native children and the subsequently closed legacy runtime were reaped.
+
+This qualifies the outgoing native updater to the existing published legacy
+release. It does not qualify a future incoming native release or legacy access
+to the native database. The observation driver stopped early on the expected
+connection-refused transition; an independent post-install check verified the
+completed replacement and preservation without repeating it. The external driver
+now recognizes explicit nested connection-shutdown errors while retaining TLS,
+timeout and unknown-error failures. Evidence is under
+`/private/tmp/speakerdesk-updater-qualification.XSxn2Q0F/`, especially
+`post-install-verification.json`.
+
+A separate disposable copy also passes actual updater network failure and retry.
+A process-local loopback proxy made the approved HTTPS feed unreachable; the
+check reported an error, download/install returned 409, admission was released,
+and the host, executable and native storage remained intact. Relaunching that
+same copy without the proxy completed a real HTTPS check as current. Both process
+trees were reaped. Evidence is `failure-driver.log`, `retry-driver.log` and
+`failure-retry-launch.json` in the same updater evidence directory. No global
+network settings or installed application changed.
+
+A single temporary, optimized Stop diagnostic reproduced 2.902 seconds on the
+retained 54.456-second synthetic PCM fixture. Interruption/database/lease work
+took milliseconds; EOF work took 1.018 seconds, including 0.338 seconds of sealed
+CTC, followed by 1.403 seconds of saved accuracy work (1.055 seconds decoding and
+0.341 seconds CTC). These nested phases are not additive across their parents.
+The run preserved exact PCM and final timing, then reaped its process tree.
+Sparse instrumentation was removed and all six touched Rust files verified
+byte-identical to their pre-diagnostic hashes. Evidence is under
+`/private/tmp/speakerdesk-stop-profile.k_0ivl9_/`. Attribution is established;
+equivalent uninstrumented performance acceptance is still open.
+
+The bounded saved-passage accuracy path now reuses completed CTC only after fresh
+ASR returns the same text/language and current PCM, vocabulary, target/word
+coverage, frame bounds and provider/policy identities match. Existing context
+validation checks acoustic cells; the ordinary attachment rebuilds current
+revision/source/activity provenance. No cache, worker contract or persistent
+receipt was added. Mismatches take the existing fresh-CTC path, and cancellation
+and protected/stale publication remain guarded.
+
+The original regression failed with two CTC calls instead of one. The extended
+existing EOF test covers reuse, input/identity/cell mismatches, current provenance
+and protected/stale rejection. Final validation: 177 core tests, 18 live-route
+tests (one existing ignored) and strict core/host Clippy pass. Two intermediate
+test-fixture mistakes (reference cloning and a moved single-cell word boundary)
+were repaired before the green run; production was not weakened to fit them.
+
+The normal optimized binary then consumed the unchanged 54.456-second fixture in
+`/private/tmp/speakerdesk-live-comparison.tBmzLh/native-1791812182239152000/`.
+Stop took 2.570 seconds versus the prior 2.894 seconds; first persisted words
+took 7.864 seconds and Start-to-Ready took 56.925 seconds. Sampled peak owned
+physical footprint was 3.520 GB and sampled CPU was 18.997 seconds. Words and
+boundaries match the prior result, all spoken rows have complete timing, every
+PCM sample is preserved, and all owned processes were reaped. The binary SHA is
+`70ee2d866a1e85cb68241311e1af143547d679a337d8c8519e6925afed78b0f1`.
+This confirms the expected roughly 0.34-second reduction, not full parity:
+retained baseline Stop is still 1.952–1.959 seconds and its final timing is absent.
+
+During the next external comparison, the first collector exited on the baseline
+long recording's missing timing and its attached process group also stopped the
+preview. A subsequent UI lookup unexpectedly relaunched that copied baseline
+without the explicit disposable-storage environment. It was immediately quit;
+no import, capture or edit was performed in that launch. All original and
+relaunched processes were reaped. The exact relaunched storage path was not
+observed live; its compiled default identifier is `com.speakerdesk.desktop`.
+Read-only metadata checks found that the default root and recordings directory
+change times match that launch, consistent with legacy startup's chmod 0700.
+The database and model settings still have modification times predating this
+run, with no WAL/SHM/journal present. No prior hashes or permission snapshot exist
+to establish byte identity or prior mode. These files were not opened through
+SQLite during inspection; the unintended application startup did open its store.
+The collector now starts an independent process session and saves each import's
+clocks before checking later quality; the coordinator checks recorded PID
+liveness before any UI binding. This unintended launch is excluded from all
+comparison evidence. Details are
+`/private/tmp/speakerdesk-application-cold.ryyiBjrt/launch-incident.json`.
+
+The repaired collector retains a fresh-process short Auto import on the final
+signed native package and the copied 0.6.6 application. Both produced identical
+words, passage bounds, language, PCM anchor and complete timing on the retained
+7.06-second public fixture. Process launch to HTTP Ready was 9.051 seconds native
+and 11.534 seconds baseline. Baseline SQLite verification completed at 11.542
+seconds; the original native persistence check rejected stored-null versus
+public-omitted language on two empty gaps. A separate strict postcheck confirms
+that serialization-only difference and persistence, without fabricating an
+earlier persistence timestamp. Sampled peak owned physical footprint was 3.478
+versus 3.930 GB, sampled CPU lower bounds 8.207 versus 7.742 seconds. These are one
+pair with existing OS caches and explicit disposable storage, not machine-cold
+or editor-render clocks. Both actual editors displayed the saved transcript.
+
+The same native process then imported the unchanged 82.010-second fixture in
+7.974 seconds to HTTP Ready and 7.993 seconds to verified persisted aligned
+output: all ten spoken rows are timed. The phase sampled 3.597 GB peak owned
+physical footprint and 4.441 CPU seconds. The earlier baseline long import
+retains only one aligned spoken row out of eighteen and eight standalone “you”
+rows; its collector lost the clocks on that quality failure. No repeat was run
+to manufacture a like-for-like long comparison. All measured native/baseline
+root, service and model processes were reaped through actual UI Quit. Evidence:
+`/private/tmp/speakerdesk-application-cold.ryyiBjrt/`.
+
+## Additional performance candidates (bounded changes joined)
+
+The accepted implementation now includes four ordered opportunities, without
+assuming defects or speedups: Cohere decoder cache/mask/evaluation efficiency;
+live work priority at existing refinement boundaries; bounded preparation ahead
+of import inference; and truthful stopped/saved/final-accuracy presentation.
+Sol 6.1 high and xhigh agents investigated independent source seams in parallel,
+with a separate implementer and verifier for the selected changes. The coordinator
+alone owned Mac builds/model measurements. Decoder investigation came first;
+the two selected changes below are joined without expanding the scheduler.
+
+Pinned mlx-rs and MLX 0.32.2 source must establish API support; newer KV-cache
+guidance and benchmark numbers do not. Any selected change retains exact input
+alignment reuse and publication guards, fresh saved-accuracy decoding, valid
+lengths, cancellation, model/session ownership and existing latency/memory gates.
+Concurrent heavy inference remains a later evidence-dependent experiment. The
+2.570-second native Stop versus 1.952–1.959-second baseline remains a distinct
+interaction limitation, qualified by baseline's absent final-passage timing.
+Faster Start-to-Ready does not close that gate. The measurements below do not
+establish a performance gain from this additional batch.
+
+Candidate decisions:
+
+- Keep only the request-local cross mask: move the exact valid-prefix expression
+  from each decoder step to the caller where encoded frames and valid length
+  become fixed. This is a small invariant-allocation cleanup with no demonstrated
+  speedup. The experimental scalar causal-mask branch and its library-only test
+  were removed after measurements failed to establish a benefit. Prompt and
+  single-token causal construction, KV layout, evaluation, cancellation and
+  fresh-request ownership remain unchanged.
+- Defer chunked/preallocated KV storage. Pinned MLX 0.32.2 concatenation copies
+  the prefix, but slice updates can also copy the whole input unless ownership
+  permits donation. A naive preallocation is not sufficient evidence. Per-cache
+  eval calls after token evaluation are not proof of repeated GPU synchronization
+  or model work; retain the current graph-lifetime boundary.
+- Reject a blanket “no accuracy while any audio is queued” guard. Synchronous
+  live inference accrues new notices, so that guard could starve rolling accuracy
+  and increase Stop's drain. Existing six-second live batches and pending-control
+  priority already bound/interleave work. Retain scheduling until a measured
+  backlog case supports a small change with demonstrated fairness.
+- Defer concurrent import preparation. It shares the serial queue with inference;
+  source inspection confirms head-of-line delay is possible, but measured WAV
+  preparation is about 56 ms. The inference path can itself prepare audio, so a
+  second worker would need same-job writer ownership; normalization currently
+  retains source and resampled vectors, with an unmeasured overlap-memory cost.
+  No batch-throughput or memory improvement is claimed.
+- Implement one Stop presentation change: after healthy helper/writer drain,
+  atomically checkpoint coverage and say “Audio saved. Finishing transcript…”.
+  Existing refinement controls distinguish active, paused and unresolved work;
+  a second header would add synchronization without a useful new state. Keep
+  finishing/Ready, admission and playback/export behavior unchanged. The existing
+  held-final-model regression fails before the change with “Finishing saved
+  audio…”. The guarded message uses the existing coverage transaction, without
+  another write, revision, task or public state. The regression now also verifies
+  that Pause leaves the audio-saved message while cancellation still owns
+  inference. This is clarity, not an inference speedup.
+
+The discarded combined mask experiment preserved the independent 31-token
+two-voice reference across both repeated requests and both process pairs.
+Reference first/second decode times were 316.491/282.735 and 622.535/279.276 ms;
+candidate times were 392.831/272.151 and 336.668/413.246 ms. This variation supports
+neither a speedup nor a causal regression claim. Its one unchanged 54.456-second
+live run (`native-1791814798166761000` under the retained live-comparison root)
+also preserves exact PCM, words, bounds and complete final timing: first words
+7.889 seconds, Stop 2.668 seconds, total 57.008 seconds, peak owned physical
+footprint 3.518 GB and sampled CPU lower bound 19.645 seconds. The roughly
+0.098-second Stop difference from the prior 2.570-second result is near the
+100-ms polling interval; the sampler's largest gap was 0.313 seconds. All owned
+processes were reaped. No further long variant run is justified by this evidence.
+Neither discarded-variant nor earlier signed-package results establish latency
+for the final hoist-only package. Logs are `/tmp/speakerdesk-decoder-*.log`.
+
+The final hoist-only source passes the independent real Cohere reference twice
+with identical text and 31 tokens (312.508 and 273.562 ms observed decode times,
+not a comparative speedup). The existing live suite passes 18 tests with one
+previously ignored; strict all-target host/models Clippy passes. Locked canonical
+optimized packaging, bundle verification and strict Developer ID signature
+verification pass. The upstream allocator warnings and duplicate rpath warning
+remain. Logs are `/tmp/speakerdesk-decoder-hoist-final.log`,
+`/tmp/speakerdesk-stop-status-live-tests.log`,
+`/tmp/speakerdesk-stop-hoist-final-clippy.log` and
+`/tmp/speakerdesk-stop-hoist-package-build.log`.
+
+The final signed package was extracted to
+`/private/tmp/speakerdesk-stop-status-package.6rhhcgy2/Speakerdesk.app` and launched
+with explicit disposable storage, private model clones, sanitized PATH and no
+development-library or capture-helper override. Executable SHA-256 is
+`dd66f06f9badc8b601efd68f8d38057f91df374a6838d6a67226fdb4fa5c177c`;
+the ZIP SHA-256 is
+`42fd84a622798a746f585f0e5927f7e0270f6b11cde91058c894ef33671ccf7a`.
+The retained launch receipt binds the decoder/network/runtime source hashes.
+
+Actual public playback through the bundled Mac-audio helper reached the editor
+and Ready with complete final timing. That first recording contains 1,383,129
+mono 16 kHz samples including startup/trailing silence; independently hashed
+spoken crops match their row and alignment anchors. On a second recording,
+stopping during speech visibly showed “Audio saved. Finishing transcript…” and
+“Rechecking sealed passages…” with live text retained. The actual editor then
+showed Saved, Accuracy pass complete, the editable passage and 42-second playback.
+These physical captures prove UI/capture boundaries, not equivalent PCM or a
+latency comparison. `ui-stop-observation.json`, `capture-final.json` and
+`short-capture-final.json` retain the observations. Actual UI Quit reaped the
+desktop, host and resident model child; the public player also exited, recorded
+in `shutdown.json`. No package was installed over the working app or published.
+
+Independent verification after Quit confirms that the second job's SQLite
+document equals the API receipt exactly at Ready revision 55. Its audio/system
+WAVs contain identical 686,806 mono samples, and the reference WAV has the same
+frame count. Coverage, canonical observation and independently hashed spoken
+crop match. Reading turns partition the current text with current provenance;
+the cut-off final “last.” fragment remains unassigned with null reading-turn
+times. Complete supplied-text alignment does not establish full speaker/time
+attribution or full-fixture transcription accuracy for this interrupted capture.
+
+The full replacement remains active and unfinished. Stop-to-Ready parity,
+equivalent-quality long-import comparison, and comparative cancellation/recovery
+performance remain open; no additional cache, scheduler, concurrent preparation
+or heavyweight GPU-overlap experiment is justified by the current measurements.
+
+## Earlier foundation proof
 
 - Core 123, host 47, xtask 14 tests passed; focused object-provenance export test
   added afterward passes. Core/host/xtask Clippy with warnings denied passed.
@@ -1286,6 +1642,50 @@ its signed preview executable is
 `24e4f1b1c32c218603e1bf1fda83faea3b4b9c85acf851caa73c87f83a553ba4`.
 All audio and data belong to the disposable test store; the installed app and
 its data/model cache remain untouched.
+
+## Nine-minute live comparison
+
+The optimized `2e98b6a` native service and copied 0.6.6 service each consumed the
+same 8713010 samples (544.563125 seconds), ten successive copies of the retained
+synthetic fixture. Runs were sequential, native then baseline, with fresh
+disposable stores, pinned checkpoints, explicit English, microphone-only replay
+and the accuracy pass enabled. No task build or other model run overlapped them.
+This uses the paced saved-PCM helper, not physical capture or Tauri rendering.
+
+| Diagnostic | Native | 0.6.6 |
+| --- | --- | --- |
+| Start to first persisted words | 8.378 s | 9.799 s |
+| Start to Ready | 547.691 s | 548.746 s |
+| Stop to Ready | 3.091 s | 2.259 s |
+| Pending audio, median / maximum | 0.880 / 2.960 s | 0.950 / 5.590 s |
+| Sampled peak owned physical footprint | 3.585 GB | 4.963 GB |
+| Sampled process CPU lower bound | 133.032 s | 197.211 s |
+
+Both outputs contain the same 1691-word sequence. Against the supplied 1700-word
+script, both replace one article in each repetition and omit the same conjunction
+at the nine joined boundaries. Both preserve every PCM sample and complete their
+accuracy pass. Native retains aligned timing for every spoken passage, including
+the last sample; baseline again lacks complete timing evidence on the final row.
+This output difference remains part of interpreting Stop latency. Native's later
+two-minute memory-window medians remain around 3.15–3.16 GB; baseline's rise from
+4.00 GB in the first window to 4.20 GB in the final window.
+
+This is one run per implementation at this duration, not evidence for arbitrary
+session lengths or the entire performance gate. The Stop increase is retained;
+the roughly one-second total-latency difference is not a repeatable speed claim.
+Maximum observed sampling intervals were 0.130 s native and 0.181 s baseline.
+All owned hosts, workers and replay helpers exited and were reaped. Inputs,
+documents, process samples, word differences and `comparison.json` are retained
+under `/private/tmp/speakerdesk-live-duration.09lje54v/`, in runs
+`native-1791806141029214000` and `baseline-1791806741780652000`.
+
+Albert also reported that ordinary startup presents downloaded models as a
+disabled Download models action while they initialize. The existing DOM test
+reproduces the visible action during loading; its red result is
+`/tmp/speakerdesk-loading-state-red.log`. The host and both startup/settings views
+now distinguish loading from downloading. The signed package's subsequent actual
+startup displayed “Loading models…” without the download card or action, as
+recorded in the current qualification section above.
 
 ## Joint live progress and the first equivalent live diagnostic
 

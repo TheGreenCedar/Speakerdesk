@@ -51,6 +51,7 @@ pub(crate) struct Progress {
     pub phase: String,
     pub downloaded_bytes: u64,
     pub total_bytes: u64,
+    pub download_required: bool,
     pub error: Option<String>,
 }
 #[derive(Default)]
@@ -61,13 +62,38 @@ impl SetupService {
     pub fn progress(&self) -> Progress {
         self.progress.lock().expect("setup progress").clone()
     }
-    pub fn begin(&self, models: &[ModelArtifact]) {
+    pub fn begin(&self, models: &[ModelArtifact], download: bool) {
         *self.progress.lock().expect("setup progress") = Progress {
-            status: "downloading",
-            phase: "Checking installed models".into(),
+            status: if download { "downloading" } else { "loading" },
+            phase: if download {
+                "Checking installed models"
+            } else {
+                "Loading models…"
+            }
+            .into(),
             total_bytes: models.iter().map(ModelArtifact::download_bytes).sum(),
+            download_required: download,
             ..Progress::default()
         };
+    }
+    pub fn loading(&self) {
+        let mut progress = self.progress.lock().expect("setup progress");
+        progress.status = "loading";
+        progress.phase = "Loading models…".into();
+    }
+    pub fn check_downloads(&self, root: &Path, models: &[ModelArtifact]) {
+        // Presence is only a setup-action hint. The initializer still verifies every model.
+        // Errors and invalid contents do not establish that another download is necessary.
+        let missing = models.iter().any(|model| {
+            model
+                .files
+                .keys()
+                .any(|name| matches!(std::fs::metadata(root.join(&model.id).join(name)), Err(error) if error.kind() == io::ErrorKind::NotFound))
+        });
+        self.progress
+            .lock()
+            .expect("setup progress")
+            .download_required = missing;
     }
     pub fn phase(&self, phase: impl Into<String>) {
         self.progress.lock().expect("setup progress").phase = phase.into();
@@ -572,6 +598,43 @@ mod tests {
             sha256: format!("{:x}", Sha256::digest(bytes)),
         }
     }
+    #[test]
+    fn initializer_presence_distinguishes_missing_downloads_from_load_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let models = artifacts();
+        let progress = SetupService::default();
+        progress.begin(&models, false);
+        progress.check_downloads(temp.path(), &models);
+        progress.finish(Err("Replay initializer failure".into()));
+        assert!(
+            progress.progress().download_required,
+            "first setup needs model files"
+        );
+        // Empty files deliberately establish presence, not model validity or readiness.
+        // Prepared outputs may be missing without requiring a network transfer.
+        for model in &models {
+            for name in model.files.keys() {
+                let path = temp.path().join(&model.id).join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"").unwrap();
+            }
+        }
+        progress.begin(&models, false);
+        progress.check_downloads(temp.path(), &models);
+        progress.finish(Err("Replay initializer failure".into()));
+        assert!(
+            !progress.progress().download_required,
+            "load failure is not evidence of a missing download"
+        );
+        assert_eq!(progress.progress().status, "failed");
+        let unknown = temp.path().join("not-a-directory");
+        std::fs::write(&unknown, b"invalid model root").unwrap();
+        progress.check_downloads(&unknown, &models);
+        assert!(
+            !progress.progress().download_required,
+            "filesystem errors leave download need unknown"
+        );
+    }
     async fn server(
         mode: &'static str,
         seen: Arc<Mutex<Vec<Option<String>>>>,
@@ -997,7 +1060,7 @@ mod tests {
         let model = artifacts().remove(0);
         let cancel = CancellationToken::new();
         let progress = SetupService::default();
-        progress.begin(std::slice::from_ref(&model));
+        progress.begin(std::slice::from_ref(&model), true);
         let staging = installer
             .stage(&model, 0, &progress, &cancel)
             .await

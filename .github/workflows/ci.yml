@@ -65,7 +65,7 @@ jobs:
         with:
           path: ~/.cache/pip
           key: ${{ steps.pip.outputs.cache-primary-key }}
-  # Rust port checks. The Python source job above stays until the sidecar spawn is gone.
+  # Native runtime checks; Python source tests retain legacy compatibility references and build tooling.
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -104,7 +104,9 @@ jobs:
           cargo test --locked -p speakerdesk-echo native_echo_bounds_queues_and_drains_partial_frames_exactly -- --ignored
           cc -dynamiclib -o "$RUNNER_TEMP/speakerdesk-echo-failure.dylib" crates/host/tests/testdata/echo-failure.c
           SPEAKERDESK_ECHO_FAULT_LIBRARY="$RUNNER_TEMP/speakerdesk-echo-failure.dylib" cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-host raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen -- --ignored
-      - name: Compile desktop boundary without packaging resources
+      - name: Test and compile desktop boundary without packaging resources
         env:
-          TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
-        run: cargo build --release --locked -p speakerdesk
+          TAURI_CONFIG: '{"bundle":{"resources":[],"macOS":{"frameworks":[]}}}'
+        run: |
+          cargo test --locked -p speakerdesk
+          cargo build --release --locked -p speakerdesk

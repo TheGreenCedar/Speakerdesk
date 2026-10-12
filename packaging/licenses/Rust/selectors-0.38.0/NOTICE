@@ -1,0 +1,8 @@
+selectors-0.38.0
+Declared license: MPL-2.0
+Published crate source: https://github.com/servo/stylo/tree/572ecba2d1600e7c3d490586692a209faf703baa
+
+The pinned upstream Cargo.toml declares MPL-2.0 and source headers direct recipients to https://mozilla.org/MPL/2.0/. The published crate omits that text; the canonical Mozilla text is retained here. Declared authors: The Servo Project Developers.
+
+Retained text: https://www.mozilla.org/media/MPL/2.0/index.txt
+SHA-256: 3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04

@@ -226,10 +226,97 @@ impl Vocabulary {
             let scores = models.ctc_scores(pcm, &ids)?;
             self.materialize(&prepared, &scores, &mut result);
         }
-        let mut bytes = Vec::with_capacity(pcm.len() * 4);
-        bytes.extend(pcm.iter().flat_map(|v| v.to_le_bytes()));
-        result["audio_float32_sha256"] = json!(sha256_hex(&bytes));
+        result["audio_float32_sha256"] = json!(pcm_sha256(pcm));
         Ok(result)
+    }
+
+    // Context::parse checks the acoustic cells; this checks their current input
+    // identity and coverage against this vocabulary before saved-crop reuse.
+    pub(crate) fn matches_input(
+        &self,
+        alignment: &Value,
+        pcm: &[f32],
+        text: &str,
+        start: i64,
+        language: &str,
+    ) -> bool {
+        if pcm.is_empty() || pcm.len() > MAX_SAMPLES || pcm.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+        let Ok(prepared) = self.prepare(text, language) else {
+            return false;
+        };
+        if !prepared.unsupported.is_empty() {
+            return false;
+        }
+        let Some(valid_frames) = pcm.len().checked_sub(400).map(|samples| samples / 320 + 1) else {
+            return false;
+        };
+        let expected = base(&prepared, start, pcm.len(), language);
+        if [
+            "schema_version",
+            "text_source",
+            "offset_unit",
+            "timing_kind",
+            "language",
+            "unsupported",
+            "acoustic_aliases",
+            "upstream_normalization_revision",
+            "normalization_spans",
+            "candidate_runtime",
+            "qualified_scope",
+            "timing_accuracy_calibrated_languages",
+            "non_speech_proof",
+            "linguistic_word_claim",
+        ]
+        .iter()
+        .any(|key| alignment[*key] != expected[*key])
+            || alignment["alignment_backend"] != "speakerdesk-rust-ctc-segmentation-1.7.4"
+            || alignment["audio_float32_sha256"] != pcm_sha256(pcm)
+        {
+            return false;
+        }
+        let Some(characters) = alignment["characters"].as_array() else {
+            return false;
+        };
+        let Some(words) = alignment["words"].as_array() else {
+            return false;
+        };
+        let expected_words = expected["words"].as_array().expect("base words");
+        characters.len() == prepared.targets.len()
+            && characters
+                .iter()
+                .zip(&prepared.targets)
+                .all(|(cell, target)| {
+                    let separator = prepared.aliases.iter().any(|alias| {
+                        alias["kind"] == "upstream_japanese_separator_alias"
+                            && target.a <= alias["start_char"].as_u64().unwrap() as usize
+                            && alias["end_char"].as_u64().unwrap() as usize <= target.b
+                    });
+                    cell["token_id"] == target.id
+                        && cell["frame"]
+                            .as_u64()
+                            .is_some_and(|frame| frame < valid_frames as u64)
+                        && cell["text"] == target.character.to_string()
+                        && cell["start_char"] == target.a
+                        && cell["end_char"] == target.b
+                        && cell["start_utf16"] == utf16(&prepared.raw, target.a)
+                        && cell["end_utf16"] == utf16(&prepared.raw, target.b)
+                        && (cell["independent_acoustic_timestamp"] == false) == separator
+                })
+            && words.len() == expected_words.len()
+            && words.iter().zip(expected_words).all(|(word, expected)| {
+                [
+                    "text",
+                    "start_char",
+                    "end_char",
+                    "start_utf16",
+                    "end_utf16",
+                    "unit_kind",
+                ]
+                .iter()
+                .all(|key| word[*key] == expected[*key])
+            })
     }
 
     fn prepare(&self, text: &str, language: &str) -> Result<Prepared, String> {
@@ -486,6 +573,12 @@ impl Vocabulary {
     }
 }
 
+fn pcm_sha256(pcm: &[f32]) -> String {
+    let mut bytes = Vec::with_capacity(pcm.len() * 4);
+    bytes.extend(pcm.iter().flat_map(|v| v.to_le_bytes()));
+    sha256_hex(&bytes)
+}
+
 struct Target {
     id: i32,
     character: char,
@@ -667,6 +760,17 @@ pub(crate) mod tests {
                 actual["reason"] = json!("no_acoustic_target");
             } else {
                 v.materialize(&p, &s, &mut actual);
+            }
+            if actual["complete"] == true {
+                let pcm = vec![0.; s.audio_num_samples as usize];
+                actual["audio_float32_sha256"] = json!(pcm_sha256(&pcm));
+                assert!(v.matches_input(
+                    &actual,
+                    &pcm,
+                    &p.text,
+                    16000,
+                    case["language"].as_str().unwrap()
+                ));
             }
             let expected = &case["expected"];
             for key in [

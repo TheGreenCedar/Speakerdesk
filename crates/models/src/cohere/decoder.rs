@@ -133,7 +133,7 @@ impl Decoder {
         ids: &[u32],
         offset: usize,
         encoded: &Array,
-        valid: usize,
+        cross_mask: &Array,
         caches: &mut [Cache; 8],
     ) -> Result<u32, ChildError> {
         let run = || -> Result<u32, Exception> {
@@ -156,14 +156,8 @@ impl Decoder {
                     .collect::<Vec<_>>(),
                 &[1, 1, length, total as i32],
             );
-            let cross = Array::from_slice(
-                &(0..encoded.dim(1) as usize)
-                    .map(|i| i < valid)
-                    .collect::<Vec<_>>(),
-                &[1, 1, 1, encoded.dim(1)],
-            );
             for (layer, cache) in self.layers.iter_mut().zip(caches.iter_mut()) {
-                x = layer.forward(&x, encoded, &causal, &cross, cache)?;
+                x = layer.forward(&x, encoded, &causal, cross_mask, cache)?;
             }
             let logits = self
                 .output
