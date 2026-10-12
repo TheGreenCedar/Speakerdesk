@@ -151,6 +151,30 @@ impl Running {
             .await
             .unwrap()
     }
+    async fn name_live_speaker(&self, path: &str, track: &str, name: &str) {
+        // Live publication may advance the revision between GET and naming.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let current = self.get(path).await;
+                let response = self
+                    .post(
+                        &format!("{path}/speakers/{track}/identity"),
+                        json!({"revision":current["revision"],"name":name,"person_id":null}),
+                    )
+                    .await;
+                let status = response.status();
+                if status == 200 {
+                    break;
+                }
+                let body: Value = response.json().await.unwrap();
+                assert_eq!(status, 409, "{body}");
+                assert_eq!(body["error"], speakerdesk_core::messages::NAME_STALE);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("live naming did not reach a current revision");
+    }
     async fn start_live_only(&self, sources: Value) -> String {
         let id = self.start(sources).await;
         let response = self
@@ -266,29 +290,7 @@ async fn exceptional_recovery_preserves_history_and_is_bounded_through_failure_o
         let save=host.client.patch(format!("{}{path}/segments/{}",host.url,old_id.as_str().unwrap())).header("X-Speakerdesk-Token",&host.token)
             .json(&json!({"segment_revision":row["machine_revision"],"changes":{"text":"Protected before child loss","start":0.1}})).send().await.unwrap();
         assert_eq!(save.status(), 200, "{}", save.text().await.unwrap());
-        // Protecting an open row schedules its continuation, which may publish
-        // between this GET and naming. Retry only that genuine revision conflict.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let current = host.get(&path).await;
-                let named = host
-                    .post(
-                        &format!("{path}/speakers/{old_speaker}/identity"),
-                        json!({"revision":current["revision"],"name":"Casey","person_id":null}),
-                    )
-                    .await;
-                let status = named.status();
-                if status == 200 {
-                    break;
-                }
-                let body: Value = named.json().await.unwrap();
-                assert_eq!(status, 409, "{body}");
-                assert_eq!(body["error"], speakerdesk_core::messages::NAME_STALE);
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("pre-loss naming did not reach a current revision");
+        host.name_live_speaker(&path, &old_speaker, "Casey").await;
         // Persist a real pre-loss language boundary; replay must reconstruct it.
         let changed = host
             .client
@@ -649,16 +651,7 @@ async fn editing_open_live_words_preserves_the_edit_and_publishes_continued_spee
             "{mode}: {}",
             edited.text().await.unwrap()
         );
-        let saved = host.get(&path).await;
-        assert_eq!(
-            host.post(
-                &format!("{path}/speakers/speaker_0/identity"),
-                json!({"revision":saved["revision"],"name":"Casey","person_id":null})
-            )
-            .await
-            .status(),
-            200
-        );
+        host.name_live_speaker(&path, "speaker_0", "Casey").await;
         if mode == "inflight" {
             fs::remove_file(root.join("hold-live-asr")).unwrap();
         }
@@ -816,14 +809,7 @@ async fn live_saved_audio_candidates_preserve_edits_language_eof_and_reopen() {
     let end = first["document"]["segments"][0]["end"].as_f64().unwrap() - 0.1;
     let saved=host.client.patch(format!("{}{path}/segments/{}",host.url,segment_id.as_str().unwrap())).header("X-Speakerdesk-Token",&host.token).json(&json!({"segment_revision":first["document"]["segments"][0]["machine_revision"],"changes":{"text":"Words corrected during capture","start":0.1,"end":end}})).send().await.unwrap();
     assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
-    let current = host.get(&path).await;
-    let named = host
-        .post(
-            &format!("{path}/speakers/speaker_0/identity"),
-            json!({"revision":current["revision"],"name":"Casey","person_id":null}),
-        )
-        .await;
-    assert_eq!(named.status(), 200, "{}", named.text().await.unwrap());
+    host.name_live_speaker(&path, "speaker_0", "Casey").await;
     trigger(root, 2);
     host.wait("api/meeting", |v| {
         v["processed_seconds"].as_f64().unwrap_or(0.) >= 12.
@@ -2500,10 +2486,12 @@ async fn rolling_accuracy_default_sources_language_recovery_and_shutdown_matrix(
                 host.wait(&path, |job| job["live_recovery"]["status"] == "recovered")
                     .await;
             } else {
-                let current = host.get(&path).await;
-                let name=host.post(&format!("{path}/speakers/{}/identity",priors[0]["speaker"].as_str().unwrap()),
-                    json!({"revision":current["revision"],"name":"Rolling speaker","person_id":null})).await;
-                assert_eq!(name.status(), 200, "{}", name.text().await.unwrap());
+                host.name_live_speaker(
+                    &path,
+                    priors[0]["speaker"].as_str().unwrap(),
+                    "Rolling speaker",
+                )
+                .await;
                 // A future captured epoch does not invalidate the sealed English anchor.
                 let changed = host
                     .client
