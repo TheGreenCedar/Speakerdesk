@@ -32,7 +32,7 @@ test('required timing remains actionable and prevents fixed-language admission b
     voice:{status:'ready',available:false,enabled:false},models:[{id:'coarse-alignment',name:'Transcript timing',bytes:100,installed:false,optional:false}],
     alignment:{id:'coarse-alignment',status:'idle',ready:false,enabled:true,active:false,can_download:true,total_bytes:100,stored_bytes:500,required_free_bytes:600,supported_languages:['en','ar','ja'],timing_accuracy_calibrated_languages:['en'],message:'Download and enable.'}};
   f.context.requests=[];
-  f.run("api=async (path,options)=>{if(options){requests.push({path,...options});setupFixture.alignment.status='downloading';setupFixture.alignment.can_download=false;}return structuredClone(setupFixture)}");
+  f.run("api=async (path,options)=>{if(path==='/api/config')return {...config,readiness:{...config.readiness,configured:setupFixture.core_ready}};if(options){requests.push({path,...options});setupFixture.alignment.status='downloading';setupFixture.alignment.can_download=false;}return structuredClone(setupFixture)}");
   f.run('wire()');await f.run('refreshSetup()');
   const action=f.document.getElementById('install-alignment');
   assert.equal(f.document.getElementById('install-models').hidden,false);

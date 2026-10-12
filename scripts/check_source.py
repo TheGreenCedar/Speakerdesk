@@ -8,18 +8,17 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
-required = {'packaging/overrides/mlx_audio/vad/models/__init__.py',
-            'speakerdesk/admission_receipt.py',
-            'scripts/promote_release.py', 'scripts/core_acceptance.py',
-            'scripts/packaged_replay.py', 'scripts/replay_capture.py', 'scripts/acceptance_fixtures.py',
+required = {'scripts/promote_release.py', 'scripts/build_macos.sh',
+            'scripts/native_licenses.py', 'scripts/fetch_mlx_runtime.sh',
+            'scripts/replay_capture.py', 'scripts/acceptance_fixtures.py',
             'tests/acceptance/recipes.json', 'tests/acceptance/holdout-recipes.json',
             'tests/acceptance/model-metadata.json',
-            'packaging/runtime.spec', 'packaging/sidecar.py',
-            'packaging/THIRD_PARTY_NOTICES.txt', 'desktop/capture/MeetingCapture.swift',
+            'packaging/THIRD_PARTY_NOTICES.md', 'packaging/native-license-sources.json',
+            'desktop/capture/MeetingCapture.swift',
             'desktop/capture/Info.plist', 'desktop/src-tauri/icons/icon.icns',
             'desktop/src-tauri/icons/icon.png', 'speakerdesk/redimnet2_artifact.json',
-            'speakerdesk/voice_calibration.json', 'speakerdesk/voice_setup.py', 'speakerdesk/voice_recognition.py',
-            'packaging/licenses/redimnet2/LICENSE', 'packaging/licenses/voice-runtime/packages.json'}
+            'speakerdesk/voice_calibration.json', 'speakerdesk/alignment-mlx/manifest.json',
+            'speakerdesk/static/app.js', 'speakerdesk/templates/index.html'}
 assert required.issubset(set(tracked)), f'Missing packaging source: {sorted(required-set(tracked))}'
 prohibited_prefixes = ('models/', 'vendor/', '.venv', '.cache/', 'speakerdesk/data/',
                        'speakerdesk/fixtures/', 'fixtures/', 'evidence/', 'attachments/',
@@ -27,10 +26,13 @@ prohibited_prefixes = ('models/', 'vendor/', '.venv', '.cache/', 'speakerdesk/da
                        'desktop/src-tauri/binaries/')
 prohibited_extensions = {'.wav', '.mp3', '.m4a', '.flac', '.sqlite', '.safetensors',
                          '.dmg', '.zip', '.p12', '.p8', '.pem', '.key', '.pyc'}
+native_audio_fixtures = {'crates/core/tests/testdata/stereo-48k.flac',
+                         'crates/models/tests/data/two-voice.wav'}
 for name in filter(None, tracked):
     path = root/name
-    assert not name.startswith(prohibited_prefixes), f'Excluded path tracked: {name}'
-    assert path.suffix not in prohibited_extensions, f'Excluded file tracked: {name}'
+    assert not (name.startswith('speakerdesk/') and path.suffix == '.py'), f'Legacy application source tracked: {name}'
+    assert not name.startswith(prohibited_prefixes) or name.startswith('vendor/mlx-sys/'), f'Excluded path tracked: {name}'
+    assert path.suffix not in prohibited_extensions or name in native_audio_fixtures, f'Excluded file tracked: {name}'
     assert not path.is_symlink(), f'Symlink tracked: {name}'
     if path.suffix == '.py':
         ast.parse(path.read_text(), filename=name)
@@ -42,7 +44,9 @@ versions = [json.loads((root/p).read_text())['version'] for p in
 capture_info = plistlib.loads((root/'desktop/capture/Info.plist').read_bytes())
 versions.append(capture_info['CFBundleVersion'])
 versions.append(re.search(r'^version = "([^"]+)"', (root/'desktop/src-tauri/Cargo.toml').read_text(), re.M)[1])
+versions.append(re.search(r'^version = "([^"]+)"', (root/'Cargo.toml').read_text(), re.M)[1])
 assert len(set(versions)) == 1, f'Version mismatch: {versions}'
-lock = (root/'desktop/src-tauri/Cargo.lock').read_text()
-assert f'name = "speakerdesk"\nversion = "{versions[0]}"' in lock
+lock = (root/'Cargo.lock').read_text()
+for name in ('speakerdesk','speakerdesk-core','speakerdesk-echo','speakerdesk-host','speakerdesk-models','xtask'):
+    assert f'name = "{name}"\nversion = "{versions[0]}"' in lock, f'Lockfile version mismatch: {name}'
 print(f'Checked {len(list(filter(None, tracked)))} tracked files; version {versions[0]}; no excluded payload.')

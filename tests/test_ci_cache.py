@@ -17,11 +17,10 @@ class IdentityTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.paths = ['requirements-packaging.lock.txt', 'requirements-voice.lock.txt',
-                      'speakerdesk/app.py', 'speakerdesk/static/app.js',
-                      'packaging/runtime.spec', 'packaging/overrides/models.py',
-                      'scripts/setup.sh', 'scripts/build_macos.sh', 'scripts/ci_cache.py',
-                      'scripts/component_cache.py', 'desktop/src-tauri/Cargo.lock',
+        self.paths = ['Cargo.toml', 'crates/core/src/live.rs', 'scripts/fetch_mlx_runtime.sh', 'scripts/native_licenses.py',
+                      'speakerdesk/static/app.js',
+                      'scripts/build_macos.sh', 'scripts/ci_cache.py',
+                      'scripts/component_cache.py', 'Cargo.lock',
                       'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/src/main.rs',
                       'desktop/src-tauri/Entitlements.plist', 'desktop/capture/MeetingCapture.swift',
                       'desktop/capture/Info.plist', 'desktop/package-lock.json']
@@ -31,22 +30,17 @@ class IdentityTests(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('original')
-        self.tools = {'os': '15.7', 'arch': 'arm64', 'rust': '1.97.1',
-                      'python': '3.13.15', 'swift': '6.2', 'sdk': '15.5', 'uv': '0.12.10'}
+        self.tools = {'os': '15.7', 'arch': 'arm64', 'rust': '1.99.0',
+                      'python': '3.13.15', 'swift': '6.2', 'sdk': '15.5'}
 
     def test_changed_input_invalidates_owning_component(self):
-        cases = [('speakerdesk/app.py', 'runtime-key'),
-                 ('speakerdesk/static/app.js', 'runtime-key'),
-                 ('packaging/runtime.spec', 'runtime-key'),
-                 ('packaging/overrides/models.py', 'runtime-key'),
-                 ('requirements-voice.lock.txt', 'runtime-key'),
-                 ('desktop/capture/echo/source-lock.json','runtime-key'),
-                 ('desktop/capture/echo/speakerdesk_echo.cc','runtime-key'),
-                 ('scripts/setup_echo.py','runtime-key'),
-                 ('scripts/echo_compile_guard.py','runtime-key'),
+        cases = [('crates/core/src/live.rs', 'compiler-key'),
+                 ('speakerdesk/static/app.js', 'compiler-key'),
+                 ('scripts/fetch_mlx_runtime.sh', 'compiler-key'),
+                 ('scripts/native_licenses.py', 'compiler-key'),
                  ('desktop/capture/Info.plist', 'capture-key'),
                  ('desktop/capture/MeetingCapture.swift', 'capture-key'),
-                 ('desktop/src-tauri/Cargo.lock', 'cargo-key'),
+                 ('Cargo.lock', 'cargo-key'),
                  ('desktop/package-lock.json', 'npm-key')]
         baseline = keys(self.root, self.paths, self.tools)
         for path, key in cases:
@@ -55,12 +49,12 @@ class IdentityTests(unittest.TestCase):
                 self.assertNotEqual(baseline[key], keys(self.root, self.paths, self.tools)[key])
                 (self.root / path).write_text('original')
 
-    def test_rust_edit_preserves_python_and_swift_and_compatible_objects(self):
+    def test_rust_edit_preserves_swift_and_compatible_objects(self):
         baseline = keys(self.root, self.paths, self.tools)
         (self.root / 'desktop/src-tauri/src/main.rs').write_text('changed')
         current = keys(self.root, self.paths, self.tools)
         self.assertNotEqual(baseline['compiler-key'], current['compiler-key'])
-        for key in ['compiler-prefix', 'runtime-key', 'capture-key', 'uv-key']:
+        for key in ['compiler-prefix', 'capture-key']:
             self.assertEqual(baseline[key], current[key])
 
     def test_toolchain_or_platform_change_blocks_all_reuse(self):
@@ -82,8 +76,7 @@ class IdentityTests(unittest.TestCase):
 
     def test_lock_changes_preserve_download_prefixes_but_change_exact_keys(self):
         baseline = keys(self.root, self.paths, self.tools)
-        for path, name in [('requirements-packaging.lock.txt', 'uv'),
-                           ('desktop/src-tauri/Cargo.lock', 'cargo'),
+        for path, name in [('Cargo.lock', 'cargo'),
                            ('desktop/package-lock.json', 'npm')]:
             with self.subTest(cache=name):
                 (self.root / path).write_text('changed lock')
@@ -93,7 +86,7 @@ class IdentityTests(unittest.TestCase):
                 (self.root / path).write_text('original')
 
     def test_symlink_input_is_rejected(self):
-        path = self.root / 'speakerdesk/app.py'
+        path = self.root / 'crates/core/src/live.rs'
         path.unlink()
         path.symlink_to(self.root / 'desktop/package-lock.json')
         with self.assertRaises(ValueError):

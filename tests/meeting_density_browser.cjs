@@ -1,3 +1,4 @@
+// Historical fixture regression: use the external Python fixture checkout described in docs/rust-port/python-source-removal.md.
 // Model-free browser layout/interaction regression. Uses installed Chromium;
 // starts no devices or model workers and downloads no browser dependencies.
 const assert = require('node:assert/strict');

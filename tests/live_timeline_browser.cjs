@@ -1,4 +1,5 @@
-// Run against support/live_timeline_server.py: production publication and Flask,
+// Historical fixture regression: use the external Python fixture checkout described in docs/rust-port/python-source-removal.md.
+// Run against the historical checkout's support/live_timeline_server.py: publication and Flask,
 // synthetic model observations, installed Chromium, no capture or neural model.
 // node tests/live_timeline_browser.cjs <base> <chromium> <output> [before]
 const assert = require('node:assert/strict');

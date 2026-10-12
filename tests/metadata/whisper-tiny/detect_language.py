@@ -1,8 +1,8 @@
 # Verbatim detect_language excerpt from mlx-audio (MIT), revision
 # feb25a37b07923bae556e59111995071d66afa0d. CPU test data; not a runtime adapter.
 # Upstream: https://github.com/Blaizzy/mlx-audio/blob/feb25a37b07923bae556e59111995071d66afa0d/mlx_audio/stt/models/whisper/decoding.py
-# License notices: packaging/licenses/mlx-audio/LICENSE and
-# packaging/licenses/Whisper/Apple-MIT.txt, OpenAI-MIT.txt.
+# License sources: packaging/native-license-sources.json; the Mac build collects
+# MLX Audio, Apple MLX and OpenAI Whisper notices into the app notice resource.
 def detect_language(
     model: "Whisper", mel: mx.array, tokenizer=None
 ) -> Tuple[mx.array, List[dict]]:

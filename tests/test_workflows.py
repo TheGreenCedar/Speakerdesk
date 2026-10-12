@@ -20,7 +20,7 @@ class WorkflowTests(unittest.TestCase):
             ('ci.yml', 'contents: read', 'contents: write'),
             ('ci.yml', 'pull_request:', 'pull_request_target:'),
             ('ci.yml', "${{ github.event_name == 'pull_request' }}", 'true'),
-            ('apple-build.yml', '.cache/uv', '~/.cache/huggingface'),
+            ('apple-build.yml', '.cache/npm', '~/.cache/huggingface'),
             ('apple-build.yml', "APPLE_SIGNING_IDENTITY: '-'", 'APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}'),
             ('apple-build.yml', 'cancel-in-progress: false', 'cancel-in-progress: true'),
             ('apple-build.yml', 'actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25', 'actions/cache/restore@v5'),

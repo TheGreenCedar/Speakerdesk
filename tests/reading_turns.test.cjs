@@ -214,3 +214,21 @@ test('read-only actual source projection reduces presentation fragmentation with
     console.log(JSON.stringify({actualCanonicalSlices:112,readingParagraphs:paragraphs.length,paragraphsWithUnassignedWords:notes.length,
       inlineUnassignedSpans:c.querySelectorAll('.reading-turn-unassigned').length,words:1061}));
   });
+
+test('reading turns expose automatic recognition and remove it after confirmation',()=>{
+  const f=fixture(parts);
+  f.run("selected.speaker_assignments={speaker_0:{source:'automatic_voice',confirmed:false}};renderSegments()");
+  const badges=()=>card(f).querySelectorAll('.reading-turn-meta .review-tag').map(e=>e.textContent);
+  assert.deepEqual(badges(),['Recognized','Recognized']);
+  assert.equal(card(f).querySelectorAll('.reading-turn-words').map(e=>e.textContent).join(''),parts.map(t=>t.text).join(''));
+  f.run("selected.speaker_assignments.speaker_0={source:'manual',confirmed:true};renderSegments()");
+  assert.deepEqual(badges(),[]);
+});
+
+test('mixed live routing is described as multiple languages with retained evidence',()=>{
+  const f=frontend(root);f.seed(1,'ready');
+  f.run("Object.assign(doc.segments[0],{speaker:'speaker_0',speaker_candidates:['speaker_0'],language:null,language_detection:{mode:'auto',reason:'mixed',probability:null,probes:[{language:'en'},{language:'de'}]},transcription_review:{reason:'incomplete_cohere_revision'},review:true})");
+  assert.equal(f.run('passageReviewReason(doc.segments[0])'),'Multiple languages detected; review the passage');
+  f.run("doc.segments[0].text=''");
+  assert.equal(f.run('passageReviewReason(doc.segments[0])'),'Multiple languages detected; review the passage');
+});

@@ -167,7 +167,9 @@ audio tails appear in both live and saved editors; unknown audio retains review.
 The enrollment lane's browser flow also passes after integration, including
 bounded preview, consent reset and actionable empty-clip reasons.
 
-Reproduce using an existing Python environment and installed Chrome:
+For historical reproduction, run the following in the external checkout described
+in [source-removal scope](rust-port/python-source-removal.md), using its existing
+Python environment and installed Chrome:
 
 ```sh
 <python> -m unittest discover -s tests -v

@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       signing:
-        description: Ad-hoc candidate; promote this exact artifact through AppleRelease for notarization
+        description: Ad-hoc signing input; promote through AppleRelease for Developer ID signing and notarization before launch
         type: choice
         options: [adhoc]
         default: adhoc
@@ -20,8 +20,6 @@ jobs:
     env:
       APPLE_SIGNING_IDENTITY: '-'
       CI: 'true'
-      SPEAKERDESK_PYTHON: '3.13.15'
-      UV_CACHE_DIR: ${{ github.workspace }}/.cache/uv
       npm_config_cache: ${{ github.workspace }}/.cache/npm
       SCCACHE_CACHE_SIZE: 512M
       SCCACHE_GHA_ENABLED: 'false'
@@ -40,13 +38,8 @@ jobs:
           python-version: '3.13.15'
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          toolchain: 1.97.1
+          toolchain: 1.99.0
           targets: aarch64-apple-darwin
-      - name: Install pinned uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          version: '0.12.10'
-          enable-cache: false
       - name: Install pinned compiler cache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
@@ -57,14 +50,6 @@ jobs:
       - name: Capture cache compatibility and exact component identities
         id: identity
         run: python scripts/ci_cache.py
-      - name: Restore uv cache
-        id: uv
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            .cache/uv
-          key: ${{ steps.identity.outputs.uv-key }}
-          restore-keys: ${{ steps.identity.outputs.uv-prefix }}
       - name: Restore cargo cache
         id: cargo
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -90,13 +75,6 @@ jobs:
             ${{ runner.temp }}/speakerdesk-sccache
           key: ${{ steps.identity.outputs.compiler-key }}
           restore-keys: ${{ steps.identity.outputs.compiler-prefix }}
-      - name: Restore runtime cache
-        id: runtime
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            .cache/components/runtime
-          key: ${{ steps.identity.outputs.runtime-key }}
       - name: Restore capture cache
         id: capture
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -106,33 +84,26 @@ jobs:
           key: ${{ steps.identity.outputs.capture-key }}
       - name: Report cache hit types
         env:
-          UV_HIT: ${{ steps.uv.outputs.cache-hit }}
-          UV_MATCHED: ${{ steps.uv.outputs.cache-matched-key }}
           CARGO_HIT: ${{ steps.cargo.outputs.cache-hit }}
           CARGO_MATCHED: ${{ steps.cargo.outputs.cache-matched-key }}
           NPM_HIT: ${{ steps.npm.outputs.cache-hit }}
           NPM_MATCHED: ${{ steps.npm.outputs.cache-matched-key }}
           COMPILER_MATCHED: ${{ steps.compiler.outputs.cache-matched-key }}
           COMPILER_REQUESTED: ${{ steps.compiler.outputs.cache-primary-key }}
-          RUNTIME_HIT: ${{ steps.runtime.outputs.cache-hit }}
           CAPTURE_HIT: ${{ steps.capture.outputs.cache-hit }}
         run: |
           {
             echo "### Cache restore"
-            echo "- uv exact hit: ${UV_HIT:-false}"
-            echo "- uv matched: ${UV_MATCHED:-miss}"
             echo "- Cargo dependency exact hit: ${CARGO_HIT:-false}"
             echo "- Cargo dependency matched: ${CARGO_MATCHED:-miss}"
             echo "- npm exact hit: ${NPM_HIT:-false}"
             echo "- npm matched: ${NPM_MATCHED:-miss}"
             echo "- compiler requested: $COMPILER_REQUESTED"
             echo "- compiler matched: ${COMPILER_MATCHED:-miss}"
-            echo "- runtime exact hit: ${RUNTIME_HIT:-false}"
             echo "- capture exact hit: ${CAPTURE_HIT:-false}"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Build candidate without model weights
         env:
-          SPEAKERDESK_RUNTIME_KEY: ${{ steps.identity.outputs.runtime-key }}
           SPEAKERDESK_CAPTURE_KEY: ${{ steps.identity.outputs.capture-key }}
         run: |
           started=$SECONDS
@@ -146,13 +117,6 @@ jobs:
       - name: Check cache byte budget
         id: budget
         run: python scripts/ci_cache.py size
-      - name: Save trusted uv cache
-        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.uv.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            .cache/uv
-          key: ${{ steps.uv.outputs.cache-primary-key }}
       - name: Save trusted cargo cache
         if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.cargo.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -175,13 +139,6 @@ jobs:
           path: |
             ${{ runner.temp }}/speakerdesk-sccache
           key: ${{ steps.compiler.outputs.cache-primary-key }}
-      - name: Save trusted runtime cache
-        if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.runtime.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            .cache/components/runtime
-          key: ${{ steps.runtime.outputs.cache-primary-key }}
       - name: Save trusted capture cache
         if: success() && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && steps.budget.outputs.within-limit == 'true' && steps.capture.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5

@@ -1,3 +1,4 @@
+// Historical fixture regression: use the external Python fixture checkout described in docs/rust-port/python-source-removal.md.
 // Candidate word review/export verification using controlled CPU fixture outputs. Uses installed Chromium;
 // starts no devices or model workers and downloads no browser dependencies.
 const assert = require('node:assert/strict');
@@ -35,7 +36,7 @@ async function main() {
     await send('Page.navigate',{url:`${base}/?meeting=${'d'.repeat(32)}`});
     await wait('typeof selected !== "undefined" && selected?.id && !meetingPoll && !polling');
     const checks=[];
-    const files=['speakerdesk/static/app.js','speakerdesk/static/live_editor.js','speakerdesk/static/style.css','speakerdesk/transcript.py','speakerdesk/review.py','speakerdesk/language_detection.py'];
+    const files=['speakerdesk/static/app.js','speakerdesk/static/live_editor.js','speakerdesk/static/style.css'];
     const source={head:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),sha256:{}};
     for(const file of files)source.sha256[file]=createHash('sha256').update(await readFile(file)).digest('hex');
     await evaluate("(async()=>{await api('/fixture/candidate-review',{method:'POST'});await poll();await refreshMeeting();polling=true;meetingPoll=true;notice('')})()");

@@ -1,0 +1,13 @@
+[package]
+name = "speakerdesk-echo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Explicit-reference mixer for the pinned native WebRTC AEC3 component."
+
+[dependencies]
+libc = "0.2.190"
+libloading = "0.8.9"
+realfft = "3.5.0"
+speakerdesk-core = { path = "../core" }

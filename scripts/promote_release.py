@@ -1,9 +1,7 @@
-"""Supported release promotion: exact acoustics AND native export gates.
+"""Promote an authenticated native candidate after recorded operator QA.
 
-Local core/native validation runs before any network call. Default preparation
-verifies signing provenance read-only, then prints a reviewable plan. --publish
-executes an already-authorized release; it is never CI-driven.
-An existing release/draft is preserved, not overwritten or auto-resumed.
+Local QA and payload checks precede read-only signer authentication. --publish
+creates and verifies a draft before publication; existing releases are preserved.
 """
 import argparse
 import base64
@@ -17,10 +15,20 @@ import selectors
 import signal
 import time
 import zipfile
-from core_acceptance import ROOT, artifact, digest_file, require, validate
 
 REPOSITORY='TheGreenCedar/Speakerdesk'
 REPOSITORY_ID=1406057260
+ROOT=Path(__file__).resolve().parents[1]
+
+
+def require(value,message):
+    if not value:raise ValueError(message)
+
+def digest_file(path):
+    digest=hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        while block:=stream.read(1024**2):digest.update(block)
+    return digest.hexdigest()
 
 def payload_names(manifest):
     """Exact signed payload contract; legacy candidates retain two payloads."""
@@ -58,30 +66,32 @@ def verify_updater_files(manifest,directory,config):
     require(signature.stat().st_size<=8192 and not signature.is_symlink(),'Unsafe updater signature file')
     require(signature.read_text().strip()==update['signature'].strip(),'Updater signature metadata differs from final signer bytes')
 
-def prepare(report, manifest_path, qa_path, notes, signer_archive=None):
-    require(manifest_path.name=='artifact-manifest.json','Validate the exact manifest that will be uploaded')
-    core=validate(report,manifest_path)
+def prepare(manifest_path, qa_path, notes, signer_archive):
+    require(manifest_path.name=='artifact-manifest.json' and manifest_path.is_file() and not manifest_path.is_symlink(),
+            'Validate the exact manifest that will be uploaded')
     manifest=json.loads(manifest_path.read_text());qa=json.loads(qa_path.read_text())
-    require(manifest.get('source_repository')==REPOSITORY,'Signer source repository differs')
-    require(all(n.get('status')=='Accepted' for n in manifest.get('notarization',[])) and
+    require(manifest.get('source_repository')==REPOSITORY and
+            re.fullmatch(r'[0-9a-f]{40}',manifest.get('source_commit','')),'Signer source repository or commit differs')
+    require(manifest.get('runtime_kind')=='native','Native signer candidate required; Python acceptance is retired')
+    require(manifest.get('signing')=='developer-id' and manifest.get('notarized') is True and
+            all(n.get('status')=='Accepted' for n in manifest.get('notarization',[])) and
             {n.get('kind') for n in manifest.get('notarization',[])}=={'app','dmg'},'App and DMG notarization required')
-    require(manifest.get('signer_run_id') and manifest.get('producer_run_id') and manifest.get('input_artifact_sha256'),'Trusted signing provenance missing')
     config=json.loads((ROOT/'desktop/src-tauri/tauri.conf.json').read_text())
-    version=manifest['version'];require(version==config['version'] and re.fullmatch(r'\d+\.\d+\.\d+',version),'Candidate version differs')
-    require(qa.get('passed') is True and qa.get('source_commit')==manifest['source_commit'] and qa.get('version')==version,'Exact native export QA required')
-    require(qa.get('candidate_cdhash')==core['app_cdhash'],'Native and acoustic QA executed different apps')
-    for key in ('all_four_native_output_formats_match_expected_bytes','root_independently_rehashed_saved_exports','staging_clean','native_UI_responsive'):
-        require(qa.get(key) is True,'Native export regression incomplete: '+key)
-    require(qa.get('native_UI_save_cancel_retry')=='passed' and qa.get('native_UI_save_cancel_retry_replacement')=='passed','Native Save/Cancel/retry/replacement incomplete')
-    require(digest_file(Path(qa['verification']))==qa.get('verification_sha256'),'Native verification changed')
-    exports=qa.get('rehashed_exports',[])
-    require({x['kind'] for x in exports}=={'txt','srt','vtt','json'},'Native format coverage missing')
-    for item in exports:artifact(Path(item['path']),item)
-    files={}
+    version=manifest['version'];require(version==config['version'],'Candidate version differs')
+    expected=payload_names(manifest);files={}
     for item in manifest['files']:
-        filename=item['filename'];require(Path(filename).name==filename,'Unsafe artifact filename')
-        path=manifest_path.parent/filename;artifact(path,item);files[filename]=dict(item,path=str(path))
-    require(set(files)==payload_names(manifest) and len(manifest['files'])==len(files),'Unexpected package payload inventory')
+        filename=item['filename'];require(filename in expected and filename not in files,'Unexpected package payload inventory')
+        path=manifest_path.parent/filename
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size==item['bytes'] and
+                digest_file(path)==item['sha256'],'Signed payload bytes differ')
+        files[filename]=dict(item,path=str(path))
+    require(set(files)==expected,'Unexpected package payload inventory')
+    require(qa.get('passed') is True and qa.get('source_commit')==manifest['source_commit'] and qa.get('version')==version,
+            'Exact native package QA required')
+    require(qa.get('app_archive_sha256')==files[f'Speakerdesk_{version}_AppleSilicon.app.zip']['sha256'],
+            'Native QA executed a different package')
+    # The report records operator acceptance; signer provenance is authenticated independently below.
+    require(digest_file(Path(qa['verification']))==qa.get('verification_sha256'),'Native verification changed')
     verify_updater_files(manifest,manifest_path.parent,config)
     for name in ('artifact-manifest.json','SHA256SUMS'):
         path=manifest_path.parent/name;require(path.is_file() and not path.is_symlink(),'Release metadata missing')
@@ -89,10 +99,9 @@ def prepare(report, manifest_path, qa_path, notes, signer_archive=None):
     sums=''.join(f'{x["sha256"]}  {x["filename"]}\n' for x in manifest['files'])
     require((manifest_path.parent/'SHA256SUMS').read_text()==sums,'Signed checksum inventory differs')
     body=notes.read_text();require(manifest['source_commit'] in body,'Notes must identify exact source')
-    require(signer_archive is not None,'Authenticated original signer artifact archive required')
     verify_signing(manifest,signer_archive)
     return {'repository':REPOSITORY,'tag':'v'+version,'source_commit':manifest['source_commit'],'version':version,
-            'files':files,'notes_file':str(notes),'notes':body,'core_report_sha256':digest_file(report),'native_gate_sha256':digest_file(qa_path)}
+            'files':files,'notes_file':str(notes),'notes':body,'native_gate_sha256':digest_file(qa_path)}
 
 def api(endpoint,body=None):
     command=['gh','api',endpoint]
@@ -206,10 +215,10 @@ def publish(plan):
     return {'release_url':release['html_url'],'published_at':release['published_at'],'source_commit':plan['source_commit'],'downloads_verified':True}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--report',type=Path,required=True);parser.add_argument('--manifest',type=Path,required=True)
+    parser=argparse.ArgumentParser();parser.add_argument('--manifest',type=Path,required=True)
     parser.add_argument('--native-qa',type=Path,required=True);parser.add_argument('--notes',type=Path,required=True);parser.add_argument('--publish',action='store_true')
     parser.add_argument('--signer-archive',type=Path,required=True)
-    args=parser.parse_args();plan=prepare(args.report,args.manifest,args.native_qa,args.notes,args.signer_archive)
+    args=parser.parse_args();plan=prepare(args.manifest,args.native_qa,args.notes,args.signer_archive)
     print(json.dumps(publish(plan) if args.publish else {k:v for k,v in plan.items() if k!='notes'},indent=2))
 
 if __name__=='__main__':main()

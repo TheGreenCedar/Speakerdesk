@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="speakerdesk-token"]').content;
 let config, jobs = [], selected = null, doc = null, dirty = false, polling = false, saving = false, editGeneration = 0, selectionGeneration = 0;
-let meeting = null, followingLive = true, passageEnd = null, retrying = false;
+let meeting = null, followingLive = true, passageEnd = null, retrying = false, startingJob = null;
 let changingLiveLanguage = false, changingDefaultLanguage = false, defaultLanguageGeneration = 0;
 let pendingExport = null, autosaveTimer = null, setupState = null, undoRemoval = null;
 let updateState = {id: 0, state: 'unavailable'}, updateFrozen = false, updatePolling = false;
@@ -46,7 +46,7 @@ async function api(path, options = {}) {
     const operation=(async()=>{
       const response = await fetch(path, {...requestOptions, headers,...(controller?{signal:controller.signal}:{})});
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Local request failed.');
+      if (!response.ok) throw Object.assign(new Error(data.error || 'Local request failed.'),{status:response.status});
       return data;
     })();
     if(!updater)return await operation;
@@ -181,19 +181,22 @@ function renderJobs() {
   for(const child of Array.from(host.children))if(!retained.has(child))child.remove();
 }
 function languageReady(mode) {
-  return config.readiness.configured && config.readiness.automatic_language
-    && setupState?.core_ready !== false && setupState?.alignment?.ready !== false;
+  return config.readiness.configured && (mode !== 'auto' || config.readiness.automatic_language)
+    && setupState?.core_ready !== false
+    && (config.readiness.word_alignment === false || setupState?.alignment?.ready !== false);
 }
 function setStatus() {
   $('recording-name').textContent = selected.name; $('recording-name').title = selected.name;
   $('meeting-date').textContent = new Date(selected.created*1000).toLocaleString(undefined,{weekday:'long',month:'long',day:'numeric',hour:'numeric',minute:'2-digit'});
-  $('job-message').textContent = selected.message;
-  const live=isLive(), busy=live || ['preparing','processing','queued'].includes(selected.status);
+  const starting=startingJob===selected.id;
+  $('job-message').textContent = retrying || selected.passage_retry ? 'Retrying passage locally…' : starting ? 'Starting transcription…' : selected.message;
+  const live=isLive(), busy=live || starting || ['preparing','processing','queued'].includes(selected.status);
+  $('job-progress').hidden=selected.kind==='meeting' || !(busy || retrying || selected.passage_retry);
   $('editor').inert=updateFrozen || retrying || (busy && !live);
   $('recording-dot').hidden=!live;
   $('recording-dot').classList.toggle('paused',selected.status==='paused');
   $('run').hidden = !!doc?.segments?.length || live; $('run').disabled = busy || !languageReady(selected.language);
-  $('run').title = languageReady(selected.language) ? '' : 'Download the local models in Settings → Models first.';
+  $('run').title = languageReady(selected.language) ? '' : setupState?.status==='loading' ? 'Loading models…' : 'Finish model setup in Settings → Models first.';
   $('manual').hidden = !!doc || busy || !selected.duration;
   $('delete').disabled = busy || !!selected.inference_owned;
   $('duration').textContent = selected.duration ? time(selected.duration) : emptyFailedCapture(selected)?'No audio':'Preparing…';
@@ -390,7 +393,7 @@ function refreshReadingTurnView(card,segment) {
     text.addEventListener('input',()=>refreshReadingTurnView(card,current()));
   }
   const {host,text,button}=binding;
-  const signature=JSON.stringify([turns,doc.speakers]);
+  const signature=JSON.stringify([turns,doc.speakers,turns?.map(turn=>selected.speaker_assignments?.[turn.speaker]?.source)]);
   if(signature!==binding.signature) {
     binding.signature=signature;host.replaceChildren();
     const groups=[];
@@ -427,6 +430,9 @@ function refreshReadingTurnView(card,segment) {
       const row=node('section',undefined,'reading-turn');
       row.dataset.attribution=turn.includesUnassigned?'single_with_unassigned':turn.attribution;
       const label=node('div',undefined,'reading-turn-meta');label.append(node('span',readingTurnLabel(turn),'reading-turn-speaker'));
+      if(turn.attribution==='single' && selected.speaker_assignments?.[turn.speaker]?.source==='automatic_voice') {
+        const recognized=node('span','Recognized','review-tag');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';label.append(recognized);
+      }
       if(turn.includesUnassigned)label.append(node('span','Includes unassigned words','reading-unassigned-note'));
       if(turn.start!==null)label.append(node('span',passageTime(turn.start),'reading-turn-time'));
       const words=node('p',undefined,'reading-turn-words');
@@ -452,7 +458,7 @@ function refreshReadingTurnView(card,segment) {
 }
 function savedPassageSignature(segment) {
   return JSON.stringify([segment,doc.speakers,doc.provenance,selected.speaker_assignments?.[segment.speaker],
-    ['preparing','processing','queued'].includes(selected.status)]);
+    ['preparing','processing','queued'].includes(selected.status),!!selected.passage_retry]);
 }
 function savedCard(segment) {
   const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;card.dataset.speaker=segment.speaker;
@@ -552,9 +558,9 @@ function appendPassageRepair(body,segment,reason) {
     }
     language.value=segment.language || '';
     const retry=node('button','Retry passage locally');
-    const busy=['preparing','processing','queued'].includes(selected.status);
+    const busy=['preparing','processing','queued'].includes(selected.status),retryPending=!!selected.passage_retry;
     const tooLong=segment.end-segment.start>24.5;
-    retry.disabled=busy || tooLong;language.disabled=busy;
+    retry.disabled=busy || retryPending || tooLong;language.disabled=busy || retryPending;
     if(tooLong)retry.title='Choose a passage of at most 24.5 seconds before retrying.';
     retry.addEventListener('click',async()=>{
       try {
@@ -570,6 +576,20 @@ function appendPassageRepair(body,segment,reason) {
       finally{retrying=false;if(selected)setStatus();}
     });
     tools.append(language,retry);repair.append(tools);body.append(repair);
+    if(selected.passage_retry?.segment_id===segment.id) {
+      const cancel=node('button','Cancel passage retry');
+      cancel.addEventListener('click',async()=>{
+        try {
+          await flushSave();
+          const jid=selected.id,generation=++selectionGeneration;retrying=true;cancel.disabled=true;setStatus();
+          const next=await api(`/api/jobs/${jid}/cancel`,{method:'POST'});
+          if(selected?.id!==jid || generation!==selectionGeneration)return;
+          selected=next;doc=structuredClone(next.document);setStatus();renderEditor();
+        } catch(error){cancel.disabled=false;notice(error.message,true);}
+        finally{retrying=false;if(selected)setStatus();}
+      });
+      tools.append(cancel);
+    }
     if(reason && segment.text.trim()) {
       const reviewed=node('button','Mark words reviewed');reviewed.disabled=busy;
       reviewed.addEventListener('click',()=>{segment.review_resolution='words_reviewed';segment.review=hasOverlappingSpeakers(segment);changed();renderSegments();});
@@ -617,6 +637,7 @@ function passageReviewReason(segment) {
   if(segment.transcription_review?.reason==='refinement_conflict')return 'Previous words retained because the new passage also covers another passage needing review.';
   if(['transcription_failed','empty_result','token_limit'].includes(segment.transcription_review?.reason))return reviewReasons[segment.transcription_review.reason];
   if(hasOverlappingSpeakers(segment))return reviewReasons.overlapping_speech;
+  if(segment.language_detection?.reason==='mixed')return 'Multiple languages detected; review the passage';
   if(segment.transcription_review?.reason)return reviewReasons[segment.transcription_review.reason] || 'Passage needs review; audio retained';
   if(segment.language_detection?.reason==='recent_context')return 'Language inferred from recent meeting context';
   if(segment.language_detection?.reason==='best_effort')return 'Best-effort words; language needs review';
@@ -656,7 +677,7 @@ function renderRetainedAudioReview() {
   const host=$('retained-audio-review'),open=host.open;
   if(host.contains(document.activeElement))return;
   const rows=doc.segments.filter(segment=>!showTranscriptPassage(segment) && !isEmptyNonSpeechPlaceholder(segment) &&
-    (segment.transcription_review?.reason || ['unsupported','uncertain','change_pending','needs_language','insufficient_speech'].includes(segment.language_detection?.reason) ||
+    (segment.transcription_review?.reason || ['unsupported','uncertain','change_pending','needs_language','insufficient_speech','mixed'].includes(segment.language_detection?.reason) ||
      (segment.refinement_state==='unresolved' && segment.language_detection?.reason!=='silence')));
   host.hidden=!rows.length;host.replaceChildren();if(!rows.length)return;
   host.append(node('summary','Audio details'));
@@ -695,11 +716,17 @@ function groupConsecutivePassages(host,pending=0) {
     setPassageClass(card,'transcript-section-start',divided && start);
     const className=`${section}-section-label`;
     for(const label of card.querySelectorAll('.live-section-label,.processed-section-label,.corrections-section-label'))if(!start || !divided || !label.classList.contains(className))label.remove();
-    if(start && divided && !card.querySelector(`.${className}`)) {
-      const label=node('span',({processed:'Processed',corrections:'Your corrections · replaced passages',live:'Live'})[section],`transcript-section-label ${className}`);
+    let label=card.querySelector(`.${className}`);
+    if(start && divided && !label) {
+      label=node('span',({processed:'Processed',corrections:'Your corrections · replaced passages',live:'Live'})[section],`transcript-section-label ${className}`);
       label.setAttribute('role','heading');label.setAttribute('aria-level','2');
-      if(live){label.title='These words are awaiting refinement and may change with more context.';label.setAttribute('aria-label','Live words awaiting refinement');}
       card.insertBefore(label,card.firstChild);
+    }
+    if(live && label) {
+      const active=isLive(),text=active?'Live':'Needs review';
+      if(label.textContent!==text)label.textContent=text;
+      label.title=active?'These words are awaiting refinement and may change with more context.':'These words are provisional. Review them against the saved audio.';
+      label.setAttribute('aria-label',active?'Live words awaiting refinement':'Provisional words need review');
     }
     previous=card;previousSection=section;
   }
@@ -762,7 +789,7 @@ function showInspector(segment,card,force=false) {
     const field=node('label',label,'segment-detail-field'), input=node('input');
     input.type='number';input.min=0;input.max=selected.duration;input.step='.01';input.value=segment[key].toFixed(2);
     const hint=node('small',passageTime(segment[key]),'time-hint');
-    input.addEventListener('change',() => { segment[key]=Number(input.value);segment.timing='user_edited';hint.textContent=passageTime(segment[key]);changed(); });
+    input.addEventListener('change',() => { segment[key]=Number(input.value);segment.timing='user_edited';hint.textContent=passageTime(segment[key]);changed();renderSegments(); });
     field.append(input,hint);details.append(field);
   }
   appendPassageEvidence(details,segment);
@@ -780,18 +807,41 @@ async function save({quiet = false} = {}) {
   if (saving) throw new Error('A save is in progress. Try again when it finishes.');
   clearTimeout(autosaveTimer); autosaveTimer = null;
   if (undoRemoval) { clearTimeout(undoRemoval.timer); undoRemoval = null; if (document.querySelector('#notice .notice-action')) notice(''); }
-  const generation = editGeneration, jid = selected.id;
+  const generation = editGeneration, jid = selected.id,base=selected,submitted=structuredClone(doc);
   saving = true; renderSaveState();
   try {
-    const result = await api(`/api/jobs/${jid}/transcript`, {method: 'PUT', updateSave: true, body: JSON.stringify({revision: selected.revision, document: doc})});
+    const put=revision=>api(`/api/jobs/${jid}/transcript`, {method: 'PUT', updateSave: true, body: JSON.stringify({revision, document: submitted})});
+    let result;
+    try {result=await put(base.revision);}
+    catch(error) {
+      if(error.status!==409)throw error;
+      const latest=await api(`/api/jobs/${jid}`);
+      // Metadata and retry candidates may advance revision; authoritative edits still conflict.
+      const withoutCandidates=document=>{
+        const copy=structuredClone(document);for(const segment of copy?.segments || [])delete segment.retry_candidate;
+        return JSON.stringify(copy);
+      };
+      if(selected?.id!==jid || latest.status!==base.status || latest.duration!==base.duration ||
+        withoutCandidates(latest.document)!==withoutCandidates(base.document))throw error;
+      result=await put(latest.revision);
+    }
     if (selected?.id !== jid) return;
     selected = result;
+    const savedSegments=new Map(result.document.segments.map(segment=>[segment.id,segment]));
+    for(const segment of doc.segments) {
+      const saved=savedSegments.get(segment.id);
+      if(saved && saved.start===segment.start && saved.end===segment.end && saved.speaker===segment.speaker) {
+        if(saved.retry_candidate)segment.retry_candidate=structuredClone(saved.retry_candidate);
+        else delete segment.retry_candidate;
+      }
+    }
     if (generation === editGeneration) {
       dirty = false;
       // Keep the live document while someone is typing so the caret and the
       // passage handlers stay attached; adopt the saved copy otherwise.
       if (!$('editor').contains(document.activeElement)) { doc = structuredClone(result.document); renderEditor(); }
     }
+    if(base.passage_retry && $('editor').contains(document.activeElement))renderSegments();
     setStatus();
     if (!quiet) notice('Saved on this Mac.');
   } finally { saving = false; renderSaveState(); if (dirty) scheduleAutosave(); }
@@ -969,6 +1019,10 @@ function wire() {
     }
   });
   $('install-alignment').addEventListener('click',()=>alignmentAction('POST').catch(error=>{ $('alignment-status').textContent=error.message; }));
+  $('cancel-model-setup').addEventListener('click', async () => {
+    try { await api('/api/setup/cancel',{method:'POST'}); await refreshSetup(); }
+    catch(error) { $('model-status').textContent=error.message; }
+  });
   $('install-models').addEventListener('click',() => installModels().catch(error => { $('model-status').textContent=error.message; }));
   $('recognize-voices').addEventListener('change',async event => {
     const control=event.target;control.disabled=true;
@@ -976,7 +1030,16 @@ function wire() {
     catch(error) { control.checked=!control.checked;notice(error.message,true); }
     finally { control.disabled=false;await refreshSetup(); }
   });
-  $('run').addEventListener('click', async () => { try { selected = await api(`/api/jobs/${selected.id}/run`, {method: 'POST'}); setStatus(); } catch (e) { notice(e.message, true); } });
+  $('run').addEventListener('click', async () => {
+    if(startingJob || !selected || $('run').disabled)return;
+    const jid=selected.id,generation=selectionGeneration;
+    startingJob=jid;setStatus();
+    try {
+      const next=await api(`/api/jobs/${jid}/run`,{method:'POST'});
+      if(selected?.id===jid && generation===selectionGeneration && !(next.revision<selected.revision))selected=next;
+    } catch(error) { notice(error.message,true); }
+    finally { startingJob=null;if(selected)setStatus(); }
+  });
   $('manual').addEventListener('click', manual);
   $('save').addEventListener('click', () => void dispatchAction('save'));
   $('speed').addEventListener('change', () => { $('player').playbackRate = Number($('speed').value); });
@@ -1081,24 +1144,28 @@ function formatBytes(bytes) {
 async function installModels() {
   await api('/api/setup',{method:'POST'}); await refreshSetup();
 }
+function modelSetupMessage(state) {
+  if(!state.supported)return 'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.';
+  if(state.status==='failed')return 'Model setup did not finish. Try again, or open Details for more information.';
+  return 'Download the local models once. Meetings are transcribed offline on this Mac.';
+}
 function renderStartState() {
   if(!config)return;
   const modelsReady=languageReady($('language').value), capture=meeting?.capture_available!==false;
-  const setupBusy=setupState?.status==='downloading';
-  const state=setupState, busy=state?.status==='downloading';
-  $('setup-card').hidden=modelsReady || !state;
-  if(state && !modelsReady) {
+  const state=setupState, downloading=state?.status==='downloading', loading=state?.status==='loading', busy=downloading || loading;
+  $('setup-card').hidden=modelsReady || !state || loading;
+  $('setup-card-install').hidden=loading;
+  if(state && !modelsReady && !loading) {
     const percent=state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0;
-    $('setup-card-text').textContent=!state.supported?'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.'
-      :`Download the local models once (${formatBytes(state.total_bytes)}). After that, meetings are transcribed offline on this Mac.`;
-    $('setup-card-progress').hidden=!busy;$('setup-card-progress').value=percent;
-    $('setup-card-status').textContent=state.error || (busy?`${state.phase} · ${percent}%`:'');
-    $('setup-card-install').disabled=busy || !state.supported || state.voice?.status==='downloading';
-    $('setup-card-install').querySelector('span').textContent=busy?'Downloading…':state.status==='failed'?'Resume download':`Download models · ${formatBytes(state.total_bytes)}`;
+    $('setup-card-text').textContent=downloading?'Downloading local models. Meetings are transcribed offline on this Mac.':modelSetupMessage(state);
+    $('setup-card-progress').hidden=!downloading;$('setup-card-progress').value=percent;
+    $('setup-card-status').textContent=downloading?`${state.phase} · ${percent}%`:'';
+    $('setup-card-install').disabled=busy || !state.supported || state.can_download===false || state.voice?.status==='downloading';
+    $('setup-card-install').querySelector('span').textContent=downloading?'Downloading…':state.status==='failed'?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
   }
-  $('start-meeting').disabled=setupBusy || !modelsReady || !capture || changingLiveLanguage || changingDefaultLanguage;
+  $('start-meeting').disabled=busy || !modelsReady || !capture || changingLiveLanguage || changingDefaultLanguage;
   $('start-hint').textContent=!capture?'Live recording isn’t available in this build. Use Import recording in the sidebar to transcribe a file.'
-    :setupBusy?'Finish model setup before starting a meeting.':!modelsReady?'Start meeting is available once the models are downloaded.':'';
+    :loading?'Loading models…':downloading?'Finish model setup before starting a meeting.':!modelsReady?'Start meeting is available once the models are ready.':'';
 }
 let alignmentChanging=false,alignmentGeneration=0;
 async function alignmentAction(method,body) {
@@ -1110,18 +1177,19 @@ async function alignmentAction(method,body) {
 function renderAlignment(state) {
   const alignment=state.alignment;$('alignment-controls').hidden=!alignment;
   if(!alignment)return;
-  const busy=alignment.status==='downloading';
+  const busy=alignment.status==='downloading', loading=alignment.status==='loading';
   const languages=alignment.supported_languages.map(code=>config?.languages[code]||code).join(', ');
   const calibrated=(alignment.timing_accuracy_calibrated_languages||[]).map(code=>config?.languages[code]||code).join(', ');
   $('alignment-coverage').textContent=`Supported languages: ${languages||'None'}. Timing accuracy measured against references: ${calibrated||'None'}.`;
   if(alignment.supported_languages.some(code=>!(alignment.timing_accuracy_calibrated_languages||[]).includes(code)))
     $('alignment-coverage').textContent+=' Accuracy in other supported languages has not been independently measured.';
   $('alignment-cost').textContent=`${formatBytes(alignment.total_bytes)} download · ${formatBytes(alignment.stored_bytes)} stored · up to ${formatBytes(alignment.required_free_bytes)} free space needed.`;
-  $('alignment-message').textContent=alignment.message;
-  $('alignment-status').textContent=alignment.error || (busy?`${alignment.phase} · ${Math.round(100*alignment.downloaded_bytes/alignment.total_bytes)}%`:alignment.ready?'Ready':'Not ready');
+  $('alignment-cost').hidden=loading || (state.status==='failed' && !state.download_required);
+  $('alignment-message').textContent=loading?'Preparing transcript timing on this Mac.':state.status==='failed' && !state.download_required?'Retry model setup to check transcript timing.':alignment.message;
+  $('alignment-status').textContent=alignment.error || (loading?(alignment.phase || 'Loading models…'):busy?`${alignment.phase} · ${alignment.total_bytes?Math.round(100*alignment.downloaded_bytes/alignment.total_bytes):0}%`:alignment.ready?'Ready':'Not ready');
   $('alignment-progress').hidden=!busy;
   $('alignment-progress').value=alignment.total_bytes?100*alignment.downloaded_bytes/alignment.total_bytes:0;
-  $('install-alignment').hidden=alignment.ready && alignment.status!=='failed';
+  $('install-alignment').hidden=loading || (alignment.ready && alignment.status!=='failed') || alignment.can_download===false;
   $('install-alignment').disabled=alignmentChanging || !alignment.can_download;
   $('install-alignment').textContent=busy?'Setting up…':['failed','interrupted'].includes(alignment.status)?'Retry setup': 'Finish setup';
 }
@@ -1131,32 +1199,39 @@ async function refreshSetup() {
     const state=await api('/api/setup');
     if(generation!==alignmentGeneration || alignmentChanging)return;
     setupState=state;
+    const downloading=state.status==='downloading', loading=state.status==='loading', busy=downloading || loading;
     const list=$('model-list');list.replaceChildren();
     state.models.forEach(model => {
       const size=formatBytes(model.bytes);
       const item=node('div',undefined,'model-item');
       const alignment=model.id===state.alignment?.id?state.alignment:null;
-      const label=model.name==='Voice recognition' && state.voice?.released===false?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':model.optional?`Optional · ${size}`:size;
+      const label=loading?'Loading…':model.name==='Voice recognition' && state.voice?.released===false && !state.voice?.available?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':model.optional?`Optional · ${size}`:size;
       item.append(node('strong',model.name),node('span',label));list.append(item);
     });
     renderAlignment(state);
     if(state.required_free_bytes)$('setup-disk-note').textContent=`First setup needs an internet connection and about ${formatBytes(state.required_free_bytes)} of free disk space including prepared timing weights.`;
-    const busy=state.status==='downloading';
-    $('model-progress').hidden=!busy;
-    $('model-progress').value=100*state.downloaded_bytes/state.total_bytes;
-    $('model-status').textContent=state.error || (busy?`${state.phase} · ${Math.round(100*state.downloaded_bytes/state.total_bytes)}%`:state.ready?'Ready to transcribe on this Mac.':'Finish required model setup before transcribing.');
-    $('install-models').hidden=state.ready;
+    $('setup-disk-note').hidden=loading || state.ready || (state.status==='failed' && !state.download_required);
+    $('model-progress').hidden=!downloading;
+    $('model-progress').value=state.total_bytes?100*state.downloaded_bytes/state.total_bytes:0;
+    $('model-status').textContent=loading?(state.phase || 'Loading models…'):downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?'Ready to transcribe on this Mac.':modelSetupMessage(state);
+    $('model-error').textContent=[...new Set([state.error,state.message].filter(Boolean))].join('\n');
+    $('model-error-details').hidden=!$('model-error').textContent;
+    $('install-models').hidden=loading || state.ready;
+    $('cancel-model-setup').hidden=!state.can_cancel;
     const voice=state.voice,voiceBusy=voice.status==='downloading';
-    $('install-models').disabled=busy || voiceBusy || !state.supported;
-    $('install-models').textContent=busy?'Downloading…':state.status==='failed'?'Resume download':`Download models · ${formatBytes(state.total_bytes)}`;
+    $('install-models').disabled=busy || voiceBusy || !state.supported || state.can_download===false;
+    $('install-models').textContent=downloading?'Downloading…':state.status==='failed'?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
     if(voiceAvailable!==voice.available) await loadPeople();
     $('settings-voice-note').textContent=voice.enabled?voice.message:'Recognition is off. Saved names and voices stay on this Mac.';
     if(document.activeElement!==$('recognize-voices')) $('recognize-voices').checked=voice.enabled;
-    if(state.core_ready && (!config.readiness.configured || !config.readiness.automatic_language)) {
+    if(typeof state.core_ready==='boolean' && (state.core_ready !== config.readiness.configured || (state.automatic_language??true)!==config.readiness.automatic_language || (state.alignment?.ready??config.readiness.word_alignment)!==config.readiness.word_alignment)) {
       await refreshConfig();renderLanguageDefault();if(selected)setStatus();
     }
     renderStartState();
-  } catch(error) { $('model-status').textContent=error.message; }
+  } catch(error) {
+    $('model-error').textContent=error.message;$('model-error-details').hidden=false;
+    $('model-status').textContent='Could not check model setup. Open Details and try again.';
+  }
 }
 async function meetingAction(action) {
   if(!meeting?.id)return;

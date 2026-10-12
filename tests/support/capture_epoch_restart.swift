@@ -10,6 +10,10 @@ final class EpochPeer {
     var converters:[String:Int]=[:]
     var pendingSystemChunks:[Int]=[]
     var microphoneFormat:Int?
+    var microphoneObservation:Int?
+    var microphoneDevice:UInt32?
+    var resumeBoundary:AppleMicrophoneResumeBoundary?
+    var captureHostFloor=0.0
     var captureGeneration:UInt64=0
     var processingAnnounced=false
     var failed=false
@@ -34,11 +38,13 @@ final class EpochPeer {
             converters.removeAll()
             pendingSystemChunks.removeAll()
             microphoneFormat=nil
+            microphoneObservation=nil;microphoneDevice=nil
             stateLock.withLock {
                 captureGeneration += 1
                 processingAnnounced=false
                 failed=false
                 startHost=0;pausedAt=0;pausedSeconds=0;paused=false
+                resumeBoundary=nil;captureHostFloor=0
                 startupPhase="idle"
             }
         }
@@ -47,14 +53,15 @@ final class EpochPeer {
     }
     private func acceptedSystemGeneration(_ origin:SCStream) -> UInt64? {
         stateLock.withLock {
-            guard active && !failed && stream === origin else {return nil}
+            guard active && !paused && !failed && stream === origin else {return nil}
             return captureGeneration
         }
     }
     private func packet(_ input: AVAudioPCMBuffer, source: String, timestamp: Double, generation: UInt64, observation: AppleCaptureObservation? = nil) {
         // The serial audio queue owns both converters; state snapshots use a lock.
-        let timing = stateLock.withLock { (active, paused, startHost, pausedSeconds, captureGeneration) }
-        guard timing.0 && !timing.1 && timing.4 == generation && !stateLock.withLock({failed}) else { return }
+        let timing = stateLock.withLock { (active, paused, captureGeneration, captureHostFloor, resumeBoundary) }
+        guard timing.0 && timing.2 == generation && AppleMicrophoneResumeBoundary.accepts(timestamp,after:timing.3) &&
+            (!timing.1 || (source == "microphone" && timing.4 != nil)) && !stateLock.withLock({failed}) else { return }
 
         // Synthetic publication peer follows the unchanged first-receipt gate.
         // The production entry guard above decides whether this job may see PCM.

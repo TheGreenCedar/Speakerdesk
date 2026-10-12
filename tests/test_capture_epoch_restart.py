@@ -28,7 +28,9 @@ class CaptureEpochRestartTests(unittest.TestCase):
         self.assertIn('guard let generation=acceptedSystemGeneration(stream)',source)
         with tempfile.TemporaryDirectory(prefix='speakerdesk-epoch-peer-') as folder:
             folder=Path(folder)
-            snapshot=folder/'restart.swift';snapshot.write_text(peer)
+            route=(ROOT/'desktop/capture/AppleCaptureRoute.swift').read_text()
+            resume_boundary=route[route.index('struct AppleMicrophoneResumeBoundary {'):route.index('\nfunc requireSameAppleInputDevice')]
+            snapshot=folder/'restart.swift';snapshot.write_text(resume_boundary+'\n'+peer)
             binary=folder/'restart'
             built=subprocess.run(['xcrun','swiftc','-parse-as-library','-O','-j','1','-num-threads','1','-module-cache-path',str(folder/'modules'),str(snapshot),'-o',str(binary)],capture_output=True,text=True,timeout=45)
             self.assertEqual(built.returncode,0,built.stderr)

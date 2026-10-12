@@ -1,3 +1,4 @@
+// Historical fixture regression: use the external Python fixture checkout described in docs/rust-port/python-source-removal.md.
 // Real-browser icon retention regression and trusted keyboard input profile.
 // Pass the disposable synthetic fixture URL, an existing Chrome-for-Testing
 // executable, and evidence directory. This never starts capture or AI models.

@@ -21,10 +21,7 @@ manifest={'schema_version':1,'product':'Speakerdesk','version':version,
           'minimum_os':config['bundle']['macOS']['minimumSystemVersion'],'channel':'candidate','public_ready':False,
           'signing':'developer-id' if notarized else 'adhoc','notarized':notarized,
           'native_meeting_qa':'pending','files':files,
-          'core_acceptance':{'required':True,'status':'not_run',
-                             'required_scope':'packaged_production_replay',
-                             'promotion_gate':'scripts/promote_release.py',
-                             'capability_is_acoustic_acceptance':False}}
+          'native_release_promotion':{'status':'requires-signed-package-qa'}}
 manifest['producer']={'repository':os.environ['GITHUB_REPOSITORY'],
                       'workflow_path':'.github/workflows/apple-build.yml',
                       'run_id':int(os.environ['GITHUB_RUN_ID']),

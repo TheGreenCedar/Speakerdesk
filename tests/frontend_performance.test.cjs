@@ -36,6 +36,50 @@ test('saved changed row defers replacement until focus leaves without replacing 
   assert.equal(host.children[0].querySelector('textarea').value,'New returned words');assert.ok(host.children[1]===neighbor);
 });
 
+test('inspector timing edits refresh row times and accessible playback labels while keeping the inspector focused through save',async()=>{
+  const f=frontend(root);f.seed();
+  const el=id=>f.document.getElementById(id),host=el('segments');
+  // Match the shipped inspector ancestry so save retains its focused document.
+  el('editor').append(el('inspector'));el('inspector').append(el('segment-details'));
+  f.run("doc.segments[0].start=.05;renderSegments()");
+  const neighbor=host.children[1],neighborText=neighbor.querySelector('textarea');
+  neighborText.setSelectionRange(2,5);
+  host.children[0].querySelector('.passage-details-toggle').click();
+  const [start,end]=el('segment-details').querySelectorAll('input');
+  const puts=[];let persisted=structuredClone(f.context.fixture);
+  f.context.fetch=async(url,options)=>{
+    assert.equal(url,`/api/jobs/${persisted.id}/transcript`);
+    const body=JSON.parse(options.body);puts.push(body);
+    assert.equal(body.revision,persisted.revision);
+    persisted={...persisted,revision:persisted.revision+1,document:body.document};
+    return {ok:true,json:async()=>structuredClone(persisted)};
+  };
+  for(const [input,value,label,time] of [
+    [start,'0.04','Play passage from 00:00.040 to 00:10.000','00:00'],
+    [start,'1.25','Play passage from 00:01.250 to 00:10.000','00:01'],
+    [end,'9.75','Play passage from 00:01.250 to 00:09.750','00:01']
+  ]) {
+    input.focus();input.value=value;input.dispatchEvent({type:'change'});
+    const card=host.children[0],seek=card.querySelector('.seek');
+    assert.equal(seek.getAttribute('aria-label'),label);
+    assert.equal(seek.title,label.replace(' from ',' ').replace(' to ','–'));
+    assert.equal(seek.querySelector('span').textContent,time);
+    assert.equal(card.querySelector('.passage-details-toggle').getAttribute('aria-label'),`Timing and details for passage at ${label.match(/from (\S+)/)[1]}`);
+    assert.equal(el('inspector').hidden,false);
+    assert.equal(card.classList.contains('active'),true);
+    assert.equal(f.document.activeElement,input);assert.equal(input.isConnected,true);
+    assert.equal(host.children[1],neighbor);assert.equal(neighborText.selectionStart,2);assert.equal(neighborText.selectionEnd,5);
+    seek.click();assert.equal(el('player').currentTime,Number(start.value));
+    assert.equal(f.run('passageEnd'),Number(end.value));
+    await f.run('save({quiet:true})');
+    assert.equal(f.run('dirty'),false);assert.equal(f.run('selected.revision'),puts.length+1);
+    assert.equal(persisted.document.segments[0].start,Number(start.value));
+    assert.equal(persisted.document.segments[0].end,Number(end.value));
+    assert.equal(f.document.activeElement,input);assert.equal(el('inspector').hidden,false);
+    assert.equal(host.children[0].querySelector('.seek').getAttribute('aria-label'),label);
+  }
+});
+
 test('unchanged live rows avoid rewriting names; provisional heading and focused draft survive arrival',()=>{
   const f=frontend(root);f.seed(12,'recording');f.run("doc.segments[0].refinement_state='provisional';doc.segments[1].refinement_state='provisional';renderSegments()");
   const host=f.document.getElementById('segments'),names=host.querySelectorAll('.name-speaker'),assignments=names.map(n=>n.textAssignments);
@@ -46,6 +90,24 @@ test('unchanged live rows avoid rewriting names; provisional heading and focused
   assert.ok(card.querySelector('textarea')===text);assert.equal(text.value,'Protected local words');assert.equal(text.selectionStart,5);
   assert.equal(card.querySelector('.keep-correction').dataset.revision,'2');
   assert.equal(card.querySelector('.latest-machine-words').textContent,'New machine words');
+});
+
+test('stopped provisional words need review without promising more live context',()=>{
+  const f=frontend(root);f.seed(1,'recording');
+  f.run("selected.rolling_refinement={mode:'live'};selected.refinement_status='waiting';doc.segments[0].text='you';doc.segments[0].review=true;doc.segments[0].refinement_state='provisional';renderSegments()");
+  const host=f.document.getElementById('segments'),card=host.children[0],text=card.querySelector('textarea'),label=card.querySelector('.live-section-label');
+  assert.equal(label.textContent,'Live');assert.equal(label.getAttribute('aria-label'),'Live words awaiting refinement');
+  assert.match(label.title,/may change with more context/);
+  text.focus();text.setSelectionRange(1,1);
+  f.run("selected.status='ready';selected.refinement_status='unresolved';selected.inference_owned=false;window.before=JSON.stringify(doc);renderSegments()");
+  assert.equal(card.querySelector('.live-section-label'),label,'Stop updates the existing heading, including a focused passage');
+  assert.equal(label.textContent,'Needs review');assert.equal(label.getAttribute('aria-label'),'Provisional words need review');
+  assert.match(label.title,/saved audio/);assert.doesNotMatch(label.title,/awaiting|more context/);
+  assert.equal(host.children[0],card);assert.equal(card.querySelector('textarea'),text);assert.equal(text.value,'you');
+  assert.equal(f.document.activeElement,text);assert.equal(text.selectionStart,1);assert.notEqual(text.readOnly,true);
+  assert.equal(f.run('JSON.stringify(doc)===before'),true,'Stop presentation does not rewrite or remove uncertain words');
+  assert.equal(f.document.getElementById('refinement-status').textContent,'Accuracy pass stopped');
+  assert.equal(f.document.getElementById('refinement-toggle').textContent,'Retry unresolved phrases');
 });
 
 test('canonical chronology survives mixed processing states, language epochs and duplicate revisions',()=>{

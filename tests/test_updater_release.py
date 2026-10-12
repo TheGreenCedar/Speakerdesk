@@ -33,6 +33,59 @@ class UpdaterReleaseTests(unittest.TestCase):
 
     def tearDown(self):self.temporary.cleanup()
 
+    def native_candidate(self):
+        self.manifest.update(source_repository=promotion.REPOSITORY,runtime_kind='native',signing='developer-id',notarized=True,
+                             notarization=[{'kind':'app','status':'Accepted'}, {'kind':'dmg','status':'Accepted'}])
+        self.config['version']=self.manifest['version']
+        config=self.root/'desktop/src-tauri';config.mkdir(parents=True)
+        (config/'tauri.conf.json').write_text(json.dumps(self.config))
+        manifest=self.root/'artifact-manifest.json';manifest.write_text(json.dumps(self.manifest))
+        (self.root/'SHA256SUMS').write_text(''.join(f'{x["sha256"]}  {x["filename"]}\n' for x in self.manifest['files']))
+        verification=self.root/'native-verification.md'
+        verification.write_text('Synthetic operator QA fixture; not real inference or app proof.\n')
+        qa={'passed':True,'source_commit':self.manifest['source_commit'],'version':self.manifest['version'],
+            'app_archive_sha256':promotion.digest_file(self.root/(self.stem+'.app.zip')),
+            'verification':str(verification),'verification_sha256':promotion.digest_file(verification)}
+        qa_path=self.root/'native-qa.json';qa_path.write_text(json.dumps(qa))
+        notes=self.root/'notes.md';notes.write_text('Source: '+self.manifest['source_commit'])
+        return manifest,qa_path,notes,self.root/'signer.zip'
+
+    def test_native_preparation_binds_qa_and_payloads_before_authenticating_signer(self):
+        args=self.native_candidate()
+        with patch.object(promotion,'ROOT',self.root),patch.object(promotion,'verify_signing') as signer:
+            plan=promotion.prepare(*args)
+        signer.assert_called_once_with(self.manifest,args[-1])
+        self.assertEqual(plan['tag'],'v0.6.2')
+        self.assertEqual(set(plan['files']),promotion.payload_names(self.manifest)|{'artifact-manifest.json','SHA256SUMS'})
+
+    def test_native_qa_for_another_candidate_or_changed_report_fails_before_network(self):
+        args=self.native_candidate();qa=json.loads(args[1].read_text())
+        changes={'passed':False,'source_commit':'b'*40,'version':'0.7.1','app_archive_sha256':'f'*64,'verification_sha256':'f'*64}
+        with patch.object(promotion,'ROOT',self.root),patch.object(promotion,'verify_signing',side_effect=AssertionError('No network before local acceptance')):
+            for key,value in changes.items():
+                with self.subTest(key=key):
+                    args[1].write_text(json.dumps(dict(qa,**{key:value})))
+                    with self.assertRaises(ValueError):promotion.prepare(*args)
+
+    def test_native_promotion_rejects_modified_bytes_and_incomplete_notarization(self):
+        args=self.native_candidate()
+        with patch.object(promotion,'ROOT',self.root),patch.object(promotion,'verify_signing',side_effect=AssertionError('No network before local acceptance')):
+            for kind in ('payload','checksums','notarization','source','inventory','symlink'):
+                with self.subTest(kind=kind):
+                    payload=self.root/(self.stem+'.dmg');original=payload.read_bytes()
+                    sums=(self.root/'SHA256SUMS').read_text();manifest=copy.deepcopy(self.manifest)
+                    if kind=='payload':payload.write_bytes(b'modified')
+                    elif kind=='checksums':(self.root/'SHA256SUMS').write_text('wrong checksums')
+                    elif kind=='notarization':manifest['notarization'].pop()
+                    elif kind=='source':manifest['source_repository']='another/Speakerdesk'
+                    elif kind=='inventory':manifest['files'].append(manifest['files'][0])
+                    elif kind=='symlink':
+                        target=self.root/'other.dmg';target.write_bytes(original);payload.unlink();payload.symlink_to(target)
+                    args[0].write_text(json.dumps(manifest))
+                    with self.assertRaises(ValueError):promotion.prepare(*args)
+                    if payload.is_symlink():payload.unlink()
+                    payload.write_bytes(original);(self.root/'SHA256SUMS').write_text(sums)
+
     def authenticated_archive(self,manifest,extra=None):
         archive=self.root/'signer.zip'
         with zipfile.ZipFile(archive,'w') as zipped:

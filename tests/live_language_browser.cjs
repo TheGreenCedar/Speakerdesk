@@ -1,6 +1,7 @@
+// Historical fixture regression: use the external Python fixture checkout described in docs/rust-port/python-source-removal.md.
 /* Real browser + loopback app fixture. Supply an existing Playwright package.
  * node tests/live_language_browser.cjs URL FIXTURE_FOLDER EVIDENCE PLAYWRIGHT_MODULE
- * Start tests/support/live_language_browser.py separately. No downloads/devices.
+ * Start tests/support/live_language_browser.py in the historical fixture checkout. No downloads/devices.
  */
 const fs = require('node:fs');
 const path = require('node:path');

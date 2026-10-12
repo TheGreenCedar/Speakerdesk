@@ -1,0 +1,106 @@
+[
+  {
+    "id": "one",
+    "text": "Hello there",
+    "speaker": "multiple_speakers",
+    "start": 0.0,
+    "end": 1.0,
+    "canonical_utterance_id": "one",
+    "machine_revision": 1,
+    "canonical_machine_revision": 1,
+    "audio_revision": 1,
+    "language_epoch": 0,
+    "text_audio_anchor": {
+      "start_sample": 0,
+      "end_sample": 16000
+    },
+    "reading_turns": [
+      {
+        "text": "Hello ",
+        "speaker": "speaker_0",
+        "attribution": "single",
+        "start": 0.0,
+        "end": 0.4,
+        "start_offset": 0,
+        "end_offset": 6
+      },
+      {
+        "text": "there",
+        "speaker": "speaker_1",
+        "attribution": "single",
+        "start": 0.4,
+        "end": 1.0,
+        "start_offset": 6,
+        "end_offset": 11
+      }
+    ],
+    "reading_turn_provenance": {
+      "utterance_id": "one",
+      "machine_revision": 1,
+      "canonical_machine_revision": 1,
+      "audio_revision": 1,
+      "language_epoch": 0,
+      "text_sha256": "4e47826698bb4630fb4451010062fadbf85d61427cbdfaed7ad0f23f239bed89",
+      "audio_anchor": {
+        "start_sample": 0,
+        "end_sample": 16000
+      },
+      "activity_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "turns_sha256": "f0a798e53018ba82e52e975824b256d4a39b54116aa4b5b4374f6e1b75916b8c",
+      "model_sha256": "38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d",
+      "calibration_id": "ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75"
+    }
+  },
+  {
+    "id": "one",
+    "text": "Hello there",
+    "speaker": "multiple_speakers",
+    "start": 0.0,
+    "end": 1.0,
+    "canonical_utterance_id": "one",
+    "machine_revision": 1,
+    "canonical_machine_revision": 1,
+    "audio_revision": 1,
+    "language_epoch": 0,
+    "text_audio_anchor": {
+      "start_sample": 0,
+      "end_sample": 16000
+    },
+    "reading_turns": [
+      {
+        "text": "Hello ",
+        "speaker": "speaker_0",
+        "attribution": "single",
+        "start": 0.0,
+        "end": 0.4,
+        "start_offset": 0,
+        "end_offset": 6
+      },
+      {
+        "text": "there",
+        "speaker": "unassigned",
+        "attribution": "unknown",
+        "start": null,
+        "end": null,
+        "start_offset": 6,
+        "end_offset": 11
+      }
+    ],
+    "reading_turn_provenance": {
+      "utterance_id": "one",
+      "machine_revision": 1,
+      "canonical_machine_revision": 1,
+      "audio_revision": 1,
+      "language_epoch": 0,
+      "text_sha256": "4e47826698bb4630fb4451010062fadbf85d61427cbdfaed7ad0f23f239bed89",
+      "audio_anchor": {
+        "start_sample": 0,
+        "end_sample": 16000
+      },
+      "activity_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "turns_sha256": "e3a8d0e37ad39382292691ae6462656826f6b6458987129b1438e48aee328474",
+      "model_sha256": "38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d",
+      "calibration_id": "ami-english-coarse-mlx-f32-v1-5ab4e661e62f-38ff6a225e75"
+    }
+  }
+]

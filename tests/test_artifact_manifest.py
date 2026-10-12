@@ -25,6 +25,7 @@ class ArtifactManifestTests(unittest.TestCase):
             manifest=json.loads((root/'release/artifact-manifest.json').read_text())
             self.assertEqual(manifest['minimum_os'],'15.0');self.assertEqual(manifest['source_commit'],'a'*40)
             self.assertFalse(manifest['notarized']);self.assertFalse(manifest['public_ready'])
+            self.assertEqual(manifest['native_release_promotion'], {'status': 'requires-signed-package-qa'})
             self.assertEqual(manifest['producer'],{'repository':'TheGreenCedar/Speakerdesk',
                              'workflow_path':'.github/workflows/apple-build.yml','run_id':12345,'run_attempt':2})
             for entry,(suffix,data) in zip(manifest['files'],blobs.items()):

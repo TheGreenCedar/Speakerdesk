@@ -1,0 +1,132 @@
+# Integration contracts
+
+Preserve product behavior and saved data. Change incomplete internal interfaces together with their callers and tests when the assembled application requires it.
+
+## Toolchain
+
+Rust **1.99.0** (`rust-toolchain.toml`), edition 2024. This is the stable 1.99 release from `rustup update stable` (rustc `1.99.0`, `b940084d7`, 2026-09-28).
+
+## Crates
+
+- `speakerdesk-core` — domain types, `Models`, IPC payloads, messages, schema SQL.
+- `speakerdesk-models` — inference child. Linux builds the protocol stub. mlx-rs 0.32.0 is a macOS dependency.
+- `speakerdesk-echo` — Rust buffering and reference clock with the pinned native
+  WebRTC ABI 3 DSP. Mac packaging includes the dylib; other platforms are unqualified.
+- `speakerdesk-host` — axum process. `speakerdesk-dev` is behind the `fixtures` feature.
+- `xtask` — `cargo xtask ownership --check`.
+
+## Models and IPC
+
+`speakerdesk_core::models::Models` is the sync trait. Payloads are `speakerdesk_core::ipc::Request` and `Response`. A frame is a big-endian `u32` length plus a postcard `Envelope` (`request_id` and `Result`). Timeouts are `request_timeout`. Offline diarization uses the same open/feed/close boundary as live sessions, with bounded parent feeds; there is no child file-access or whole-recording diarization request.
+
+The Mac child initializes MLX and Metal resources before reporting its device.
+Hello lists only loaded model identities. Silero, multi-window Nemotron,
+Cohere, Whisper language scoring and supplied-text CTC run in Rust; ReDimNet uses
+native Core ML. Nemotron Low and Offline state belongs to each recording, with
+resident weights shared by the serial executor. Diarization turns use absolute
+sample coordinates and separate received and observed endpoints. Its final
+sub-160-sample suffix remains unobserved. Live capture integration remains
+unfinished. Other platforms report
+`"unavailable"` and explicit `ChildError::Unimplemented` results.
+
+Numerical comparisons identify the native runtime and Metal library hashes,
+not just the MLX package version. Apple's macOS 15 and macOS 26 wheels contain
+different kernels under the same 0.32.2 version. This build pins the macOS 15
+archive in `scripts/fetch_mlx_runtime.sh`.
+
+CTC scores carry the original audio length, valid frame count, frame hop/origin,
+explicit selected column IDs (including blank when requested), model identity
+and vocabulary digest. There is no implicit blank column or padded-frame count.
+Scores are normalized across all 9,812 tokens before selection. Core owns the
+supplied-text adapter and the existing reading projection; model output cannot
+replace transcript text. Vocabulary parsing and artifact checks occur once per
+load, outside inference loops. The native provider has a distinct versioned
+identity; saved documents cannot nominate their own trusted provider.
+
+## Jobs
+
+`Job` and `Document` round-trip the product fields named in `document.rs`. A missing `kind` deserializes as `import`. Job ids are 32 lowercase hex characters. `store::SCHEMA_V1` is the new database. `AppState::open` owns one file-backed store at an explicit root. Migration uses a consistent snapshot, private hot-journal recovery, and no-clobber publication; existing native state wins. Migrated audio remains legacy-owned and read-only. Native writes use copy-on-write media storage. Qualification has used disposable stores only.
+
+Saved canonical accuracy passes use the existing parent operation and serial
+worker. Each candidate owns one original audio anchor and captured language mode;
+publication compares that passage with its current stored version and replaces
+its slot without changing names, neighboring passages or source order. Pause
+invalidates publication before cancellation, and admission remains held until
+the worker exits. Completed passage versions survive restart; history retains
+only the previous words, bounds, identity and speaker. The saved path
+supports Auto and explicit-language anchors up to 24.5 seconds. Auto reruns
+language detection from the saved source audio, preserves captured mode and epoch,
+and aligns with the newly selected language. Incomplete, uncertain or mixed-language
+replacements retain the previous words. Longer anchors use bounded physical
+contexts from the saved recording, with original coordinates and internal-edge
+ASR padding. Only adjacent decoded contexts remain resident. One confidently
+routed supported language and bidirectionally unique CTC cells select raw-text
+boundaries; ambiguous seams retain the previous transcript. Selection preserves
+raw Unicode and the chosen context's separator, including adjacent CJK units.
+Non-English timing keeps its functional policy and makes no English calibration
+claim. Selected word timing uses the normal publication validator.
+
+Live accuracy uses that same composition on the existing serial recording worker.
+It advances one physical context before servicing saved-audio notices and ordered
+controls. Capture writing proceeds independently. Discovery follows changed sealed
+rows; completed and failed versions prevent repeated work on every audio tick.
+No live VAD or diarization handle is passed to accuracy work. Pause persists a
+separate refinement generation before cancellation and keeps the active slot until
+the terminal result. Stop drains live EOF before remaining eligible accuracy work;
+accuracy Pause remains available during that drain. Child loss preserves its typed
+cause, reconstructs live sessions once from saved audio, and permits unfinished
+accuracy to retry under the new generation. Publication checks the captured epoch
+and original passage version; unrelated later language changes and names survive.
+Accepted accuracy revisions survive subsequent live snapshots and full restart.
+
+Ordinary live rows retain the language decisions already produced by routing.
+Captured mode and epoch are separate from the selected language. Auto probe and
+recent-context endpoints use absolute recording samples, including continuation
+after an edit. Mixed speech has no invented single-language probability; verified
+non-speech does not erase a supported spoken-language decision. Protected words
+retain their existing decision evidence. GET, export and reopen do not run models
+to reconstruct metadata.
+
+For long growing live rows, accepted disjoint cores retain their raw text,
+language decisions and final sample boundary. Later decoding reads and plans
+only the unaccepted suffix; the last core stays replaceable as audio arrives.
+Incomplete cores stay retryable and cannot erase previously published words.
+Edited continuation and sealed-row cleanup discard the corresponding progress.
+This bounds repeated model decoding, not every activity or projection scan.
+
+Qualified microphone/system Pause drains the retained capture graph and writer.
+Resume is armed by the parent, then requires a fresh producer observation equal
+to the original route, formats and voice-processing readbacks before resumed PCM
+or Recording acknowledgement. The helper checks the input device on its control
+path. The first accepted microphone callback anchors the clock to the saved pause
+endpoint; earlier callbacks are rejected. The original source catalog and receipt
+remain authoritative. A repeated Resume conflicts; Stop keeps ownership through
+drain/reap and cannot revert from finishing on a late Recording acknowledgement.
+These boundaries have replay and native control tests; physical graph restart
+remains a hardware acceptance gate.
+
+Raw dual-source capture uses the explicit bundled echo library. The blocking
+writer constructs, calls and destroys its native state on one thread. Original
+tracks flush before DSP; only completed clean/mixed output advances the inference
+endpoint. Final `capture_audio_coverage` retains both raw and clean sample counts,
+including failure and reopen. A failed native instance cannot be reused. Pause
+and format boundaries drain the 160-sample frames and compensate the 64-sample
+native delay before resetting. No independently detected echo means exact
+microphone retention. A raw AEC source catalog does not claim Apple qualification;
+qualified Apple processing bypasses this library entirely.
+
+## Messages and security
+
+User-facing strings live in `speakerdesk_core::messages` and are copied from v0.6.6. The token header, CSP, and host allowlist live in `speakerdesk_core::security`. Do not change them without an owner decision.
+
+## Ledger
+
+The legacy Python filename ledger and its command were removed with the Python application. Native tests own behavioral regression protection; see [source-removal scope](python-source-removal.md).
+
+Native model installation is owned by the parent, with one fs4 installer lock and
+an exclusive setup admission lease. The child receives only `PrepareAlignment`
+for its fixed private staging path, never an arbitrary installation destination.
+Cancellation retains admission until terminal cleanup. Atomic model publication is
+followed by parent-controlled child restart; old session generations cannot survive
+an installation. Readiness comes from initialization of the activated identities.
+The installer does not enroll voices or hold a SQLite transaction during I/O.

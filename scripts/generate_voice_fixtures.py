@@ -26,7 +26,6 @@ import wave
 RATE = 16_000
 DISK_FLOOR = 40_000_000_000
 MAX_BYTES = 20_000_000  # Includes generated audio, metadata and temporary files.
-MAX_CLIPS = 80
 DATASET_ID = 'macos-compact-tts-development-v1'
 MAUI_ROOT = Path('/System/Library/PrivateFrameworks/TextToSpeechMauiSupport.framework/Versions/A/Resources/TTSResources')
 ASSET_ROOT = Path('/System/Library/AssetsV2/com_apple_MobileAsset_TTSAXResourceModelAssets')
@@ -286,17 +285,6 @@ def write_pcm(path, samples):
         audio.writeframes(samples.tobytes())
 
 
-def validate_manifest(manifest, path):
-    # This import only validates fixture labels/bounds/hashes; it never loads a model.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'speakerdesk'))
-    from voice_measurement import fixture_groups
-    groups = fixture_groups(manifest, path, maximum_clips=MAX_CLIPS)
-    if len(groups) != 36 or sum(len(g['selected']) for g in groups) != 72:
-        raise ValueError('Unexpected synthetic pilot group or passage count.')
-    if len({g['recording_id'] for g in groups}) != len(groups) or len({g['audio_sha256'] for g in groups}) != len(groups):
-        raise ValueError('Every synthetic session must have unique recording ID and bytes.')
-    return groups
-
 
 def generate(output):
     if platform.system() != 'Darwin':
@@ -368,7 +356,11 @@ def generate(output):
         manifest = {'schema_version': 1, 'dataset_id': DATASET_ID, 'fixture_source': 'synthetic',
                     'fixture_root': '.', 'groups': groups, 'limitation': LIMITATION}
         manifest_path = output / 'manifest.json'
-        validated = validate_manifest(manifest, manifest_path)
+        if len(groups) != 36 or sum(len(g['clips']) for g in groups) != 72:
+            raise ValueError('Unexpected synthetic pilot group or passage count.')
+        validated = [dict(g, audio=output/g['file'], audio_sha256=digest(output/g['file'])) for g in groups]
+        if len({g['recording_id'] for g in validated}) != 36 or len({g['audio_sha256'] for g in validated}) != 36:
+            raise ValueError('Every synthetic session must have unique recording ID and bytes.')
         audio_bytes = sum(g['audio'].stat().st_size for g in validated)
         durations = [m['seconds'] for m in passage_metrics]
         report = {'schema_version': 1, 'dataset_id': DATASET_ID, 'fixture_source': 'synthetic',

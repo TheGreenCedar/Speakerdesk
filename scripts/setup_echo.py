@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -62,7 +63,14 @@ def sources():
         previous=signal.signal(signal.SIGALRM,expired)
         signal.alarm(30)
         try:
-            with opener.open(url,timeout=30) as response:data=response.read(RECEIVE_LIMIT-received+1)
+            for attempt in range(3):
+                try:
+                    with opener.open(url,timeout=30) as response:data=response.read(RECEIVE_LIMIT-received+1)
+                    break
+                except urllib.error.HTTPError as error:
+                    if error.code not in (502,503,504) or attempt==2:raise
+                    error.close()
+                    time.sleep(2**attempt)
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM,previous)

@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/models",
+    "crates/echo",
+    "crates/host",
+    "xtask",
+    "desktop/src-tauri",
+]
+exclude = ["vendor/mlx-sys"]
+
+[patch.crates-io]
+mlx-sys = { path = "vendor/mlx-sys" }
+
+[workspace.package]
+version = "0.7.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[profile.release]
+strip = false
+codegen-units = 16

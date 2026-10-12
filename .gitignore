@@ -1,7 +1,9 @@
 .venv*/
 .cache/
+.worktrees/
 /models/
-/vendor/
+/vendor/*
+!/vendor/mlx-sys/
 speakerdesk/data/
 fixtures/
 speakerdesk/fixtures/
@@ -13,6 +15,7 @@ target/
 desktop/src-tauri/binaries/
 desktop/src-tauri/gen/
 desktop/capture/speakerdesk-capture
+desktop/capture/speakerdesk-capture.capability.json
 __pycache__/
 *.py[cod]
 .DS_Store
@@ -33,3 +36,6 @@ __pycache__/
 *.zip
 
 desktop/capture/echo/libspeakerdesk_echo.dylib
+
+!crates/core/tests/testdata/*.flac
+!crates/models/tests/data/two-voice.wav

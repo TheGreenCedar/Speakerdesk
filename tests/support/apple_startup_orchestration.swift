@@ -76,6 +76,41 @@ final class StartupScenario {
         let readbacks=["input_enabled":true,"output_enabled":true,"engine_running":true,"bypassed":false,"manual_rendering":false,"input_muted":false,"agc_enabled":false]
         let observation=AppleCaptureObservation(input:micFormat,output:micFormat,readbacks:readbacks)
         var checks:[String:Bool]=[:]
+        // Execute the same clock boundary used by MeetingCapture.resume; no
+        // synthetic duplicate of that method or device/engine access is needed.
+        var firstResume=AppleMicrophoneResumeBoundary(hostFloor:200,recordingTime:511.0/16000)
+        precondition(firstResume.pausedOffset(firstCallback:199.99,origin:100)==nil)
+        precondition(firstResume.pausedOffset(firstCallback:Double.nan,origin:100)==nil)
+        let offset=firstResume.pausedOffset(firstCallback:200.01,origin:100)!
+        precondition(!AppleMicrophoneResumeBoundary.accepts(200.005,after:firstResume.hostFloor))
+        precondition(AppleMicrophoneResumeBoundary.accepts(200.01,after:firstResume.hostFloor))
+        precondition(abs(200.01-100-offset-511.0/16000)<1e-12)
+        // The first callback preceded a hypothetical 200.05 start return.
+        let resumed=try CaptureAudioConverter(input:format,output:format)
+        let tail=AVAudioPCMBuffer(pcmFormat:format,frameCapacity:513)!;tail.frameLength=513
+        for index in 0..<513 {tail.floatChannelData![0][index*2]=0.25;tail.floatChannelData![0][index*2+1] = -0.25}
+        let retained=try resumed.convert(tail,at:200.01-100-offset)+resumed.finish()
+        precondition(retained.reduce(0,{$0+Int($1.pcm.frameLength)})==513)
+        precondition(abs(retained.first!.time-511.0/16000)<1e-12)
+        var secondResume=AppleMicrophoneResumeBoundary(hostFloor:300,recordingTime:1024.0/16000)
+        let nextOffset=secondResume.pausedOffset(firstCallback:300.125,origin:100)!
+        precondition(abs(300.125-100-nextOffset-1024.0/16000)<1e-12)
+        checks["resume_clock_excludes_pause_negotiation_and_preserves_partial_tail"]=true
+        try requireSameAppleInputDevice(42,42)
+        for candidate in [UInt32(0),UInt32(43)] {
+            var refused=false
+            do {try requireSameAppleInputDevice(42,candidate)} catch {refused=true}
+            precondition(refused)
+        }
+        var unknownRefused=false
+        do {try requireSameAppleInputDevice(nil,42)} catch {unknownRefused=true}
+        precondition(unknownRefused)
+        precondition(observation.matches(observation))
+        let changed=AVAudioFormat(commonFormat:.pcmFormatFloat32,sampleRate:16000,channels:1,interleaved:false)!
+        precondition(!observation.matches(AppleCaptureObservation(input:changed,output:changed,readbacks:readbacks)))
+        var changedState=readbacks;changedState["agc_enabled"]=true
+        precondition(!observation.matches(AppleCaptureObservation(input:micFormat,output:micFormat,readbacks:changedState)))
+        checks["retained_graph_requires_same_device_actual_formats_and_readbacks"]=true
         let old=StartupQueuePeer();var oldError=0
         do {for chunk in chunks {try old.system([chunk])};try old.acceptedMicrophone(input:mic,observation:observation)}
         catch {oldError=(error as NSError).code}

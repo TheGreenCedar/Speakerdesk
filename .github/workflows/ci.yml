@@ -65,3 +65,47 @@ jobs:
         with:
           path: ~/.cache/pip
           key: ${{ steps.pip.outputs.cache-primary-key }}
+  # Native runtime checks; Python tests cover build tooling and native/JS boundaries.
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.99.0
+      - name: Native crate tests
+        run: |
+          cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p xtask
+  rust-macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: 1.99.0
+      - name: Prepare pinned native MLX runtime
+        run: |
+          test "$(uname -m)" = arm64
+          bash scripts/fetch_mlx_runtime.sh
+      - name: Test native crates with locked dependencies
+        run: cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p speakerdesk-models -p speakerdesk-echo -p xtask
+      - name: Build pinned native echo component
+        run: python3 scripts/setup_echo.py
+      - name: Test native raw capture DSP boundary
+        run: |
+          cargo test --locked -p speakerdesk-host raw_dual_capture_opens_and_preserves_partial_pause_tail -- --ignored
+          cargo test --locked -p speakerdesk-echo native_echo_bounds_queues_and_drains_partial_frames_exactly -- --ignored
+          cc -dynamiclib -o "$RUNNER_TEMP/speakerdesk-echo-failure.dylib" crates/host/tests/testdata/echo-failure.c
+          SPEAKERDESK_ECHO_FAULT_LIBRARY="$RUNNER_TEMP/speakerdesk-echo-failure.dylib" cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-host raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen -- --ignored
+      - name: Test and compile desktop boundary without packaging resources
+        env:
+          TAURI_CONFIG: '{"bundle":{"resources":[],"macOS":{"frameworks":[]}}}'
+        run: |
+          cargo test --locked -p speakerdesk
+          cargo build --release --locked -p speakerdesk
