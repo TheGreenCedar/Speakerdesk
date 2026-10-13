@@ -7,6 +7,9 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# Hosted checkout times are not native source identity. The dependency cache key
+# binds every vendored byte before these inputs receive a stable, old timestamp.
+NATIVE_SOURCE_EPOCH = 946684800
 
 
 def fingerprint(root, paths, identity):
@@ -37,7 +40,7 @@ def keys(root, tracked, tools):
     # Version/lock/manifest changes must not discard unchanged dependency objects.
     compiler_tools = {name: value for name, value in tools.items() if name not in {'python', 'node', 'profile'}}
     compiler_prefix = f"speakerdesk-compiler-v3-{fingerprint(root, rust_contract, compiler_tools)}-"
-    dependency_contract = files('vendor/mlx-sys/', 'scripts/fetch_mlx_runtime.sh',
+    dependency_contract = files('vendor/mlx-sys/', 'scripts/ci_cache.py', 'scripts/fetch_mlx_runtime.sh',
                                 'desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/echo_compile_guard.py')
     dependency_tools = {name: value for name, value in tools.items() if name not in {'python', 'node'}}
     return {
@@ -52,6 +55,25 @@ def keys(root, tracked, tools):
         'capture-key': f"{prefix}-capture-{fingerprint(root, files('desktop/capture/', 'desktop/src-tauri/Entitlements.plist', 'scripts/build_macos.sh', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
         'echo-key': f"{prefix}-echo-{fingerprint(root, files('desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/echo_compile_guard.py', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
     }
+
+
+def prepare_native_sources(root, tracked, tools, dependency_key):
+    if os.getenv('GITHUB_ACTIONS') != 'true':
+        raise ValueError('Native timestamp preparation is confined to GitHub Actions')
+    if not dependency_key or keys(root, tracked, tools)['dependency-key'] != dependency_key:
+        raise ValueError('Native source or tool identity changed after cache selection')
+    directory = root / 'vendor/mlx-sys'
+    status = subprocess.check_output(['git', 'status', '--porcelain=v1', '-z',
+                                      '--untracked-files=all', '--ignored', '--', 'vendor/mlx-sys'],
+                                     cwd=root)
+    if status:
+        raise ValueError('Native timestamp preparation requires a clean vendored tree')
+    paths = [root / name for name in tracked if name.startswith('vendor/mlx-sys/')]
+    if not paths or directory.is_symlink() or any(path.is_symlink() for path in directory.rglob('*')):
+        raise ValueError('Missing or unsafe vendored native source')
+    for path in paths:
+        os.utime(path, (NATIVE_SOURCE_EPOCH, NATIVE_SOURCE_EPOCH), follow_symlinks=False)
+    return len(paths)
 
 
 def source_changed(paths):
@@ -114,7 +136,13 @@ if __name__ == '__main__':
         emit({'source': str(changed).lower()})
     else:
         profile = 'release-default-features-adhoc'
-        if sys.argv[1:] == ['rust']:
+        if sys.argv[1:] in (['rust'], ['prepare-native-source', 'rust']):
             profile = 'debug-fixtures-release-default' if platform.system() == 'Darwin' else 'debug-fixtures'
         tracked = command('git', 'ls-files', '-z').split('\0')
-        emit(keys(ROOT, list(filter(None, tracked)), tool_identity(profile)))
+        tracked = list(filter(None, tracked))
+        tools = tool_identity(profile)
+        if sys.argv[1:2] == ['prepare-native-source']:
+            count = prepare_native_sources(ROOT, tracked, tools, os.getenv('SPEAKERDESK_DEPENDENCY_KEY', ''))
+            print(f'Prepared stable timestamps for {count} identity-bound native source files.')
+        else:
+            emit(keys(ROOT, tracked, tools))

@@ -154,6 +154,12 @@ function liveCard(segment) {
   // Evidence is available on request; normal reading shows only the words.
   const details=node('details',undefined,'rolling-review');details.hidden=true;
   details.append(node('summary','Passage details'));appendPassageEvidence(details,segment);
+  const detailName=node('button','Name / remember voice','text-button passage-name-control');detailName.type='button';
+  detailName.hidden=['unassigned','multiple_speakers'].includes(segment.speaker);
+  detailName.addEventListener('click',()=>{
+    const track=card.dataset.speaker;
+    if(!['unassigned','multiple_speakers'].includes(track))nameSpeaker(track);
+  });details.append(detailName);
   const repair=node('div',undefined,'rolling-repair');
   if(languageBlockedPassage(segment))body.append(repair);else details.append(repair);
   const inspect=node('button',undefined,'segment-action passage-details-toggle');inspect.type='button';
@@ -223,7 +229,7 @@ function renderLiveSegments() {
   for(const {segment,section} of rows) {
     if(!showTranscriptPassage(segment) && !isPassageSaving(segment.id)){if(segment.refinement_state==='provisional' && !isEmptyNonSpeechPlaceholder(segment))pending++;continue;}
     if(query && !passageSearchText(segment).toLowerCase().includes(query) && !passageDrafts.has(segment.id))continue;
-    const signature=JSON.stringify([segment,doc.speakers]);let card=existing.get(segment.id);
+    const signature=JSON.stringify([segment,doc.speakers,selected.speaker_assignments]);let card=existing.get(segment.id);
     if(!card || (card.dataset.signature!==signature && !card.contains(document.activeElement) && !passageDrafts.has(segment.id) && !isPassageSaving(segment.id))) {
       const next=liveCard(segment);next.dataset.signature=signature;
       if(card){if(cursor===card)cursor=next;card.replaceWith(next);}card=next;
@@ -237,6 +243,7 @@ function renderLiveSegments() {
     refreshReadingTurnView(card,segment);
     refreshPassageSeparation(card,segment);
     refreshSpeakerRecognition(card,segment);
+    card.querySelector('.passage-name-control').hidden=['unassigned','multiple_speakers'].includes(segment.speaker);
     refreshStoppedPassageRepair(card,segment,uiSignature);
     if(segment.separation)card.querySelector('.seek').disabled=!!isLive();
     if(card.dataset.uiSignature===uiSignature)continue;

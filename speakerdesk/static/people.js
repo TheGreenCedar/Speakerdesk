@@ -61,22 +61,22 @@ function personOptions(current = '') {
   people.forEach(person => { const option = node('option', person.name); option.value = person.id; $('name-person').append(option); });
   $('name-person').value = current;
 }
-async function openNamePicker(track) {
+async function openNamePicker(track,allPersonTracks=false) {
   if (identityBusy) throw new Error('Wait for the name change to finish.');
   if (dirty || saving) await flushSave();
   const jid = selected.id, generation = ++nameOpenGeneration;
   await loadPeople();
   if (generation !== nameOpenGeneration || selected?.id !== jid || !doc?.speakers[track] || dirty || identityBusy) return;
-  nameContext = {jid, track, revision: selected.revision};
+  nameContext = {jid, track, revision: selected.revision, allPersonTracks, personName:speakerLabel(track), sourcePersonId:speakerPerson(track)};
   const assignment=selected.speaker_assignments?.[track];
   const assigned = assignment?.person_id || '';
   personOptions(assigned); $('name-value').value = doc.speakers[track];
-  $('name-title').textContent = 'Name speaker';
-  $('name-message').textContent = '';
+  $('name-title').textContent = allPersonTracks ? 'Name person in this meeting' : 'Name speaker';
+  $('name-message').textContent = allPersonTracks ? `Applies to all passages assigned to ${speakerLabel(track)} in this meeting.` : '';
   nameClipState = null; $('voice-clip-list').replaceChildren(); $('voice-excluded-list').replaceChildren();
   $('voice-preview').pause(); $('voice-preview').removeAttribute('src'); $('voice-preview').hidden = true;
   $('name-dialog').showModal(); $('name-value').focus(); $('name-value').select();
-  await refreshVoiceClips();
+  if(allPersonTracks)updateNameControls();else await refreshVoiceClips();
 }
 
 function selectedVoiceClips() {
@@ -110,10 +110,29 @@ function voiceEnrollmentState() {
 }
 function updateNameControls() {
   if (!nameContext || !$('name-dialog').open) return;
+  if(nameContext.allPersonTracks) {
+    const sourceChanged=selected?.id!==nameContext.jid || !nameContext.sourcePersonId || speakerPerson(nameContext.track)!==nameContext.sourcePersonId;
+    const stale=selected.revision!==nameContext.revision,busy=identityBusy || saving;
+    $('name-apply').disabled=busy || stale || sourceChanged;
+    $('name-add-person').disabled=busy || sourceChanged;
+    $('name-person').disabled=busy || sourceChanged;$('name-value').disabled=busy || sourceChanged;
+    $('name-voice-section').hidden=true;
+    $('refresh-voice-clips').hidden=!stale && !sourceChanged;
+    $('refresh-voice-clips').disabled=busy;
+    $('refresh-voice-clips').textContent=sourceChanged?'Choose person again':'Refresh passages';
+    $('name-message').textContent=sourceChanged
+      ? 'This speaker’s saved person assignment changed. Choose the person again in the speaker strip before applying a name.'
+      : stale ? 'The transcript changed. Refresh passages before applying the name. Your chosen name is kept.'
+      : $('name-person').value
+      ? `Applies to all passages assigned to ${nameContext.personName} in this meeting.`
+      : `Applies this meeting-only name to all passages assigned to ${nameContext.personName}. Removing the saved person link makes each detected voice a separate speaker again.`;
+    return;
+  }
   const state = voiceEnrollmentState();
   $('name-apply').disabled = state.busy || !state.current;
   $('name-add-person').disabled = state.busy;
   $('name-person').disabled = state.busy; $('name-value').disabled = state.busy;
+  $('refresh-voice-clips').hidden=false;$('refresh-voice-clips').textContent='Refresh passages';
   $('refresh-voice-clips').disabled = state.busy;
   $('remember-voice').disabled = !state.ready;
   $('check-voice').hidden = !!state.assignment;
@@ -247,10 +266,19 @@ function wirePeople() {
   });
   $('refresh-voice-clips').addEventListener('click', () => identityAction(async () => {
     const context = nameContext;
+    if(context.allPersonTracks && speakerPerson(context.track)!==context.sourcePersonId) {
+      $('name-dialog').close();notice('Choose the person in the speaker strip to reopen naming.');return;
+    }
     const result = await api(`/api/jobs/${context.jid}`);
     if (nameContext !== context || selected?.id !== context.jid) return;
-    acceptIdentityJob(result); context.revision = result.revision;
-    await refreshVoiceClips();
+    if(result.revision<selected.revision)return;
+    acceptIdentityJob(result);
+    if(context.allPersonTracks) {
+      if(speakerPerson(context.track)!==context.sourcePersonId)return;
+      context.personName=speakerLabel(context.track);context.revision=result.revision;
+    }else {
+      context.revision = result.revision;await refreshVoiceClips();
+    }
   }).catch(error => { $('name-message').textContent = error.message; }));
   $('person-form').addEventListener('submit', async event => {
     event.preventDefault(); const button = event.submitter; button.disabled = true;
@@ -273,7 +301,7 @@ function wirePeople() {
       await loadPeople();
       if (nameContext !== context || !$('name-dialog').open || selected?.id !== context.jid) return;
       personOptions(person.id);
-      $('name-message').textContent = 'Name saved. Apply it to this speaker to continue with voice setup.';
+      $('name-message').textContent = context.allPersonTracks ? 'Name saved. Apply it to all this person’s passages.' : 'Name saved. Apply it to this speaker to continue with voice setup.';
     }).catch(error => { if (nameContext === context) $('name-message').textContent = error.message; });
   });
   $('name-form').addEventListener('submit', event => {
@@ -281,11 +309,12 @@ function wirePeople() {
     identityAction(async () => {
       if (selected?.id !== context.jid) throw new Error('Open this meeting again to name the speaker.');
       const result = await api(`/api/jobs/${context.jid}/speakers/${encodeURIComponent(context.track)}/identity`, {
-        method: 'POST', body: JSON.stringify({revision: context.revision, person_id: $('name-person').value || null, name: $('name-value').value})});
+        method: 'POST', body: JSON.stringify({revision: context.revision, person_id: $('name-person').value || null, name: $('name-value').value, all_person_tracks: context.allPersonTracks})});
       if (nameContext !== context || !$('name-dialog').open) return;
       acceptIdentityJob(result); context.revision = result.revision;
       $('name-message').textContent = 'Name applied to this meeting.';
-      await refreshVoiceClips();
+      if(context.allPersonTracks){$('name-dialog').close();notice('Name applied to this meeting.');}
+      else await refreshVoiceClips();
     }).catch(error => { $('name-message').textContent = error.message; });
   });
   for (const kind of ['remember', 'check']) $(`${kind}-voice`).addEventListener('click', () => {

@@ -116,6 +116,11 @@ jobs:
             echo "- compiler matched: ${COMPILER_MATCHED:-miss}"
             echo "- capture exact hit: ${CAPTURE_HIT:-false}"
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Prepare stable vendored native source timestamps
+        if: github.event.inputs.cache != 'false'
+        env:
+          SPEAKERDESK_DEPENDENCY_KEY: ${{ steps.identity.outputs.dependency-key }}
+        run: python scripts/ci_cache.py prepare-native-source
       - name: Build candidate without model weights
         env:
           SPEAKERDESK_ECHO_KEY: ${{ github.event.inputs.cache != 'false' && steps.identity.outputs.echo-key || '' }}

@@ -1,5 +1,6 @@
 """Regression protection for cache compatibility, exact reuse and PR routing."""
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -177,14 +178,14 @@ class IdentityTests(unittest.TestCase):
         baseline = keys(self.root, self.paths, self.tools)['dependency-key']
         for name in ['crates/core/src/live.rs', 'speakerdesk/static/app.js',
                      'desktop/src-tauri/src/main.rs', 'scripts/build_macos.sh',
-                     'scripts/ci_cache.py', '.github/workflows/ci.yml', 'docs/ci-build-reuse.md']:
+                     '.github/workflows/ci.yml', 'docs/ci-build-reuse.md']:
             with self.subTest(input=name):
                 path = self.root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('changed')
                 self.assertEqual(baseline, keys(self.root, self.paths + [name], self.tools)['dependency-key'])
                 path.write_text('original')
-        for name in ['vendor/mlx-sys/build.rs', 'scripts/fetch_mlx_runtime.sh',
+        for name in ['vendor/mlx-sys/build.rs', 'scripts/ci_cache.py', 'scripts/fetch_mlx_runtime.sh',
                      'desktop/capture/echo/source-lock.json', 'scripts/echo_compile_guard.py']:
             with self.subTest(native=name):
                 path = self.root / name
@@ -200,6 +201,89 @@ class IdentityTests(unittest.TestCase):
         for path in ['.github/workflows/ci.yml', 'requirements-ci.lock.txt',
                      'packaging/licenses/NOTICE', 'new-subsystem/file', 'docs.py']:
             self.assertTrue(source_changed(['docs/guide.md', path]))
+
+
+class NativeSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.tracked = ['vendor/mlx-sys/build.rs', 'vendor/mlx-sys/src/mlx-c/CMakeLists.txt',
+                        'vendor/mlx-sys/src/mlx-c/mlx/c/array.h',
+                        'vendor/mlx-sys/src/mlx-c/mlx/c/array.cpp',
+                        'vendor/mlx-sys/src/mlx-c/mlx/c/private/mlx.h', 'scripts/ci_cache.py']
+        for name in self.tracked:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('Independent native source fixture: ' + name)
+        self.git('init', '-q')
+        self.git('add', '.')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                 '-c', 'commit.gpgsign=false', 'commit', '-qm', 'native source fixture')
+        self.tools = {'target': 'aarch64-apple-darwin', 'sdk': '15.5', 'rust': '1.99.0'}
+        self.key = keys(self.root, self.tracked, self.tools)['dependency-key']
+        self.environment = patch.dict(os.environ, {'GITHUB_ACTIONS': 'true'})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def git(self, *args):
+        return subprocess.check_output(['git', *args], cwd=self.root)
+
+    def prepare(self, key=None, tools=None):
+        return ci_cache.prepare_native_sources(self.root, self.tracked, tools or self.tools,
+                                               self.key if key is None else key)
+
+    def test_fresh_checkout_times_become_stable_without_changing_native_bytes(self):
+        paths = [self.root / name for name in self.tracked if name.startswith('vendor/')]
+        original = {path: path.read_bytes() for path in paths}
+        self.assertEqual(self.prepare(), len(paths))
+        prepared = {path: path.stat().st_mtime_ns for path in paths}
+        for path in paths:
+            os.utime(path, (2_000_000_000, 2_000_000_000))
+        self.assertEqual(self.prepare(), len(paths))
+        self.assertEqual({path: path.stat().st_mtime_ns for path in paths}, prepared)
+        self.assertEqual({path: path.read_bytes() for path in paths}, original)
+        self.assertEqual(keys(self.root, self.tracked, self.tools)['dependency-key'], self.key)
+
+    def test_missing_or_different_native_identity_never_changes_timestamps(self):
+        path = self.root / self.tracked[0]
+        before = path.stat().st_mtime_ns
+        for key, tools in [('', self.tools), ('wrong-key', self.tools),
+                           (self.key, dict(self.tools, sdk='different'))]:
+            with self.subTest(key=key, tools=tools), self.assertRaisesRegex(ValueError, 'identity'):
+                self.prepare(key, tools)
+            self.assertEqual(path.stat().st_mtime_ns, before)
+        path.write_text('Changed native source')
+        with self.assertRaisesRegex(ValueError, 'identity'):
+            self.prepare()
+
+    def test_dirty_untracked_ignored_or_symlink_native_input_is_rejected(self):
+        path = self.root / self.tracked[0]
+        path.write_text('Dirty tracked source')
+        changed_key = keys(self.root, self.tracked, self.tools)['dependency-key']
+        with self.assertRaisesRegex(ValueError, 'clean'):
+            self.prepare(changed_key)
+        self.git('restore', str(path.relative_to(self.root)))
+        untracked = path.parent / 'unexpected.cpp'
+        untracked.write_text('Untracked source')
+        with self.assertRaisesRegex(ValueError, 'clean'):
+            self.prepare()
+        untracked.unlink()
+        self.git('config', 'core.excludesfile', str(self.root / 'ignore'))
+        (self.root / 'ignore').write_text('unexpected.cpp\n')
+        untracked.write_text('Ignored source')
+        with self.assertRaisesRegex(ValueError, 'clean'):
+            self.prepare()
+        untracked.unlink()
+        path.unlink()
+        path.symlink_to(self.root / self.tracked[1])
+        with self.assertRaisesRegex(ValueError, 'unsafe'):
+            self.prepare()
+
+    def test_local_builds_cannot_prepare_native_timestamps(self):
+        with patch.dict(os.environ, {'GITHUB_ACTIONS': 'false'}):
+            with self.assertRaisesRegex(ValueError, 'GitHub Actions'):
+                self.prepare()
 
 
 class ComponentTests(unittest.TestCase):
