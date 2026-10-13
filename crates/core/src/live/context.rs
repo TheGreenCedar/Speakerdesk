@@ -331,6 +331,8 @@ pub struct Refinement {
     english_calibrated: bool,
     probes: Vec<Value>,
     audio_hash: Sha256,
+    review: bool,
+    transcription_review: Option<Value>,
 }
 impl Refinement {
     pub fn new(original: &Segment) -> Result<Self, LiveError> {
@@ -361,6 +363,8 @@ impl Refinement {
             english_calibrated: true,
             probes: Vec::new(),
             audio_hash: Sha256::new(),
+            review: false,
+            transcription_review: None,
         })
     }
     pub fn step<M: Models + ?Sized + 'static>(
@@ -398,7 +402,7 @@ impl Refinement {
             },
             if request.end_sample < end { 3200 } else { 0 },
         );
-        let (text, language, decision) = crate::import::refine_context_source(
+        let source = crate::import::refine_context_source(
             models,
             &pcm,
             mode,
@@ -407,13 +411,21 @@ impl Refinement {
             Some(padding),
         )
         .map_err(LiveError::from)?;
+        let language = source.language.ok_or(LiveError::Message(
+            "Long context accuracy needs unambiguous language ownership; previous words and audio are retained.",
+        ))?;
+        let (text, decision) = (source.text, source.detection);
+        self.review |= source.review;
+        if self.transcription_review.is_none() {
+            self.transcription_review = source.transcription_review;
+        }
         if self
             .selected_language
             .as_ref()
             .is_some_and(|prior| prior != &language)
         {
             return Err(LiveError::Message(
-                "Long context accuracy requires one confidently routed language throughout; previous words and audio are retained.",
+                "Long context accuracy requires consistent language ownership throughout; previous words and audio are retained.",
             ));
         }
         self.selected_language
@@ -462,9 +474,11 @@ impl Refinement {
         let mut candidate = saved_candidate(
             original,
             assembly.text.expect("complete assembly"),
-            language.clone(),
+            Some(language.clone()),
             detection,
             end,
+            self.review,
+            self.transcription_review.take(),
         )?;
         let units = timing::raw_units(&candidate.text, TIMING_UNIT_POLICY_ID)
             .expect("known timing unit policy");

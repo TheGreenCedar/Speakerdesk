@@ -11,6 +11,7 @@ struct Control {
     generation: u64,
     active: Option<CancellationToken>,
     scan_from: Option<usize>,
+    final_retry: bool,
 }
 impl Rolling {
     pub fn new() -> Self {
@@ -19,6 +20,7 @@ impl Rolling {
             generation: 0,
             active: None,
             scan_from: None,
+            final_retry: false,
         })))
     }
     /// Called with the store lock after an accepted sealed publication. Coalesce
@@ -181,15 +183,34 @@ impl Runner {
                 if !control.enabled || operation.cancellation.is_cancelled() {
                     return Ok(false);
                 }
-                let Some(start) = control.scan_from.take() else {
-                    return Ok(false);
-                };
-                let Some(job) = store.get(&operation.id, false).map_err(|e| e.to_string())? else {
+                let Some(mut job) = store.get(&operation.id, false).map_err(|e| e.to_string())?
+                else {
                     return Ok(false);
                 };
                 if !operation.current(&job) {
                     return Ok(false);
                 }
+                if job.status == "finishing" && !control.final_retry {
+                    // Retry live failures once after Stop on the same worker and lease.
+                    // Completed/protected anchors keep their existing selection guards.
+                    let refreshed = store
+                        .update_job(&operation.id, |job| {
+                            job.extra.get_mut("rolling_refinement").expect("live plan")["failed"] =
+                                json!({});
+                            job.extra.remove("refinement_error");
+                            Ok::<_, ApiError>(())
+                        })
+                        .map_err(|e| e.message)?;
+                    let Some((refreshed, ())) = refreshed else {
+                        return Ok(false);
+                    };
+                    job = refreshed;
+                    control.final_retry = true;
+                    control.scan_from = Some(0);
+                }
+                let Some(start) = control.scan_from.take() else {
+                    return Ok(false);
+                };
                 let selected = job
                     .document
                     .as_ref()

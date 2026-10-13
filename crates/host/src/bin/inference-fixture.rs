@@ -44,6 +44,7 @@ fn main() {
     let mut held_live_feed = false;
     let mut held_live_asr = false;
     let mut held_context: Option<usize> = None;
+    let mut capture_vad = None;
     while let Ok(envelope) = read_envelope(&mut std::io::stdin()) {
         let id = envelope.request_id;
         let EnvelopeBody::Request(request) = envelope.body else {
@@ -81,7 +82,9 @@ fn main() {
             && std::fs::read_to_string(root.join("hold-context-index"))
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
-                .is_none_or(|index| index == context_index);
+                .is_none_or(|index| index == context_index)
+            && (!root.join("hold-only-separated").exists()
+                || matches!(request, Request::Transcribe { ref pcm, .. } if pcm.iter().any(|x|x.abs()>0.3)));
         let hold_eof = matches!(request, Request::VadFeed { last: true, .. })
             && root.join("fixture-live").exists()
             && root.join("hold-live-eof").exists();
@@ -98,6 +101,12 @@ fn main() {
             && !held_live_feed;
         let hold_voice =
             matches!(request, Request::EmbedVoice { .. }) && root.join("hold-live-voice").exists();
+        if matches!(request, Request::Transcribe { ref pcm, .. } if pcm.iter().any(|x| x.abs() > 0.3))
+            && root.join("exit-separated-asr-once").exists()
+        {
+            std::fs::remove_file(root.join("exit-separated-asr-once")).unwrap();
+            std::process::exit(20);
+        }
         let result = match request {
             Request::Hello { build_id } => {
                 if root.join("fixture-live").exists() {
@@ -165,6 +174,9 @@ fn main() {
                 };
                 next_session += 1;
                 sessions.insert(handle.session);
+                if capture_vad.is_none() {
+                    capture_vad = Some(handle.session);
+                }
                 Ok(Response::Handle(handle))
             }
             Request::DiarOpen {
@@ -197,8 +209,22 @@ fn main() {
                         frames.push(speakerdesk_core::ipc::VadFrame {
                             start: *observed,
                             end: next,
-                            raw_p: 0.99,
-                            norm_p: 0.99,
+                            raw_p: if root.join("fixture-overlap").exists()
+                                && capture_vad == Some(handle.session)
+                                && *observed >= 4 * 16000
+                            {
+                                0.
+                            } else {
+                                0.99
+                            },
+                            norm_p: if root.join("fixture-overlap").exists()
+                                && capture_vad == Some(handle.session)
+                                && *observed >= 4 * 16000
+                            {
+                                0.
+                            } else {
+                                0.99
+                            },
                             gain: 1.,
                             constant: false,
                         });
@@ -228,7 +254,7 @@ fn main() {
                     } else {
                         *observed
                     };
-                    let turns = if end > *observed {
+                    let mut turns = if end > *observed {
                         vec![speakerdesk_core::ipc::DiarTurn {
                             start: *observed,
                             end,
@@ -237,6 +263,16 @@ fn main() {
                     } else {
                         Vec::new()
                     };
+                    if root.join("fixture-overlap").exists()
+                        && live_diar.contains(&handle.session)
+                        && end > *observed
+                    {
+                        turns.push(speakerdesk_core::ipc::DiarTurn {
+                            start: *observed,
+                            end,
+                            speaker: "speaker_1".into(),
+                        });
+                    }
                     *observed = end;
                     Ok(Response::Diar(speakerdesk_core::ipc::DiarFeedOut {
                         turns,
@@ -377,30 +413,33 @@ fn main() {
                     "{language}"
                 )
                 .unwrap();
-                let text = if context_asr {
-                    let contexts = script.as_ref().expect("scripted context");
-                    let context = &contexts[context_index];
-                    context_index += 1;
-                    writeln!(
-                        std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(root.join("context-crops"))
-                            .unwrap(),
-                        "{} {} {}",
-                        pcm.len(),
-                        pcm.iter().take_while(|v| **v == 0.).count(),
-                        pcm.iter().rev().take_while(|v| **v == 0.).count()
-                    )
-                    .unwrap();
-                    context["text"]
-                        .as_str()
-                        .expect("scripted bounded context")
-                        .to_owned()
-                } else {
-                    std::fs::read_to_string(root.join("replay-transcript"))
-                        .unwrap_or_else(|_| "Replay transcript".into())
-                };
+                let text =
+                    if root.join("fixture-overlap").exists() && pcm.iter().any(|x| x.abs() > 0.3) {
+                        "Separated replay words".into()
+                    } else if context_asr {
+                        let contexts = script.as_ref().expect("scripted context");
+                        let context = &contexts[context_index];
+                        context_index += 1;
+                        writeln!(
+                            std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(root.join("context-crops"))
+                                .unwrap(),
+                            "{} {} {}",
+                            pcm.len(),
+                            pcm.iter().take_while(|v| **v == 0.).count(),
+                            pcm.iter().rev().take_while(|v| **v == 0.).count()
+                        )
+                        .unwrap();
+                        context["text"]
+                            .as_str()
+                            .expect("scripted bounded context")
+                            .to_owned()
+                    } else {
+                        std::fs::read_to_string(root.join("replay-transcript"))
+                            .unwrap_or_else(|_| "Replay transcript".into())
+                    };
                 Ok(Response::Text(AsrText {
                     text: text.clone(),
                     raw_text: text,
@@ -476,6 +515,10 @@ fn main() {
                 }))
             }
             Request::EmbedVoice { pcm } if root.join("fixture-voice").exists() => {
+                if root.join("exit-live-voice-once").exists() {
+                    std::fs::remove_file(root.join("exit-live-voice-once")).unwrap();
+                    std::process::exit(21);
+                }
                 writeln!(
                     std::fs::OpenOptions::new()
                         .create(true)
@@ -492,6 +535,15 @@ fn main() {
                 Ok(Response::Embedding(speakerdesk_core::ipc::VoiceEmbedding {
                     model:speakerdesk_core::voice::VoiceModel::new("aufklarer/ReDimNet2-B6-CoreML","112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU","cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",192,16000).unwrap(),
                     clip:speakerdesk_core::voice::ClipEmbedding {vector,clean:true},
+                }))
+            }
+            Request::Separate { pcm } if root.join("fixture-overlap").exists() => {
+                Ok(Response::Separated(speakerdesk_core::ipc::SeparatedAudio {
+                    model: speakerdesk_core::separation::MODEL.into(),
+                    channels: [
+                        pcm.iter().map(|x| x * 2.).collect(),
+                        pcm.iter().map(|x| x * 3.).collect(),
+                    ],
                 }))
             }
             Request::Cancel { request_id } => {

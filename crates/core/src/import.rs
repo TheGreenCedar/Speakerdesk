@@ -463,15 +463,42 @@ fn decode_passage_source<M: Models + ?Sized>(
     Ok(parts)
 }
 
-/// Keep a saved anchor intact unless every routed part supplies complete text in
-/// the same supported language. Mixed/uncertain routes retain the prior words.
+pub(crate) struct RefinedPart {
+    pub start_sample: i64,
+    pub end_sample: i64,
+    pub text: String,
+    pub language: String,
+}
+
+pub(crate) struct RefinedSource {
+    pub text: String,
+    pub language: Option<String>,
+    pub detection: Value,
+    pub review: bool,
+    pub transcription_review: Option<Value>,
+    pub parts: Vec<RefinedPart>,
+}
+
+/// A warning can accompany complete words; decoder truncation and failures cannot.
+pub(crate) fn complete_transcription(review: Option<&Value>) -> bool {
+    review.is_none_or(|review| {
+        matches!(
+            review["reason"].as_str(),
+            Some("short_acoustic_context" | "possible_non_speech")
+        ) && review["partial_text"] != true
+            && review["decoder_reason"] != "token_limit"
+    })
+}
+
+/// Keep a saved anchor intact unless every spoken part supplies complete text.
+/// Routing confidence remains evidence attached to the result, not a decode failure.
 pub(crate) fn refine_passage_source<M: Models + ?Sized>(
     models: &M,
     pcm: &[f32],
     language_mode: &str,
     start_sample: i64,
     processed_microphone_catalog: Option<&str>,
-) -> Result<(String, String, Value), ImportError> {
+) -> Result<RefinedSource, ImportError> {
     refine_context_source(
         models,
         pcm,
@@ -491,7 +518,7 @@ pub(crate) fn refine_context_source<M: Models + ?Sized>(
     start_sample: i64,
     processed_microphone_catalog: Option<&str>,
     context_padding: Option<(u32, u32)>,
-) -> Result<(String, String, Value), ImportError> {
+) -> Result<RefinedSource, ImportError> {
     let parts = decode_passage_source(
         models,
         pcm,
@@ -503,7 +530,7 @@ pub(crate) fn refine_context_source<M: Models + ?Sized>(
     )?;
     let incomplete = || {
         ImportError::new(
-            "The new decode is incomplete or has uncertain or mixed language; previous words and audio are retained.",
+            "The new decode is incomplete or its language could not be routed; previous words and audio are retained.",
         )
     };
     if parts.is_empty()
@@ -516,7 +543,8 @@ pub(crate) fn refine_context_source<M: Models + ?Sized>(
                     part.audio_state.as_deref(),
                     Some("model_non_speech" | "digital_silence" | "constant_signal")
                 );
-            part.transcription_review.is_some() || (!verified_non_speech && (part.review || empty))
+            !verified_non_speech
+                && (!complete_transcription(part.transcription_review.as_ref()) || empty)
         })
     {
         return Err(incomplete());
@@ -537,14 +565,12 @@ pub(crate) fn refine_context_source<M: Models + ?Sized>(
         .iter()
         .filter(|part| !part.text.trim().is_empty())
         .collect();
-    let selected = spoken
-        .first()
-        .and_then(|part| part.language.as_deref())
-        .ok_or_else(incomplete)?;
-    if !languages::is_supported(selected)
-        || spoken
-            .iter()
-            .any(|part| part.language.as_deref() != Some(selected))
+    if spoken.is_empty()
+        || spoken.iter().any(|part| {
+            part.language
+                .as_deref()
+                .is_none_or(|language| !languages::is_supported(language))
+        })
     {
         return Err(incomplete());
     }
@@ -553,53 +579,58 @@ pub(crate) fn refine_context_source<M: Models + ?Sized>(
         .map(|part| part.raw.as_deref().unwrap_or(&part.text))
         .collect::<Vec<_>>()
         .join(" ");
-    let mut detection = spoken
+    let mut probes = spoken
         .iter()
-        .filter_map(|part| part.detection.as_ref())
-        .min_by(|left, right| {
-            left.probability
-                .unwrap_or(1.)
-                .total_cmp(&right.probability.unwrap_or(1.))
-        })
-        .cloned()
-        .ok_or_else(incomplete)?;
-    if language_mode == languages::AUTOMATIC {
-        detection.probes = spoken
-            .iter()
-            .flat_map(|part| {
-                let Some(decision) = part.detection.as_ref() else {
-                    return Vec::new();
-                };
-                if !decision.probes.is_empty() {
-                    return decision.probes.clone();
-                }
-                vec![ProbeEvent {
-                    start_sample: (part.start * f64::from(limits::SAMPLE_RATE)).round() as i64,
-                    end_sample: (part.end * f64::from(limits::SAMPLE_RATE)).round() as i64,
-                    language: part.language.clone(),
-                    decision: decision.clone(),
-                    review: part.review,
-                }]
-            })
-            .collect();
-        for probe in &mut detection.probes {
-            probe.start_sample = probe
-                .start_sample
-                .checked_add(start_sample)
-                .ok_or_else(incomplete)?;
-            probe.end_sample = probe
-                .end_sample
-                .checked_add(start_sample)
-                .ok_or_else(incomplete)?;
-            if let Some(end) = probe.decision.context_end_sample.as_mut() {
-                *end = end.checked_add(start_sample).ok_or_else(incomplete)?;
+        .flat_map(|part| {
+            let Some(decision) = part.detection.as_ref() else {
+                return Vec::new();
+            };
+            if !decision.probes.is_empty() {
+                return decision.probes.clone();
             }
-        }
-        if let Some(end) = detection.context_end_sample.as_mut() {
+            vec![ProbeEvent {
+                start_sample: (part.start * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                end_sample: (part.end * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                language: part.language.clone(),
+                decision: decision.clone(),
+                review: part.review,
+            }]
+        })
+        .collect::<Vec<_>>();
+    for probe in &mut probes {
+        probe.start_sample = probe
+            .start_sample
+            .checked_add(start_sample)
+            .ok_or_else(incomplete)?;
+        probe.end_sample = probe
+            .end_sample
+            .checked_add(start_sample)
+            .ok_or_else(incomplete)?;
+        if let Some(end) = probe.decision.context_end_sample.as_mut() {
             *end = end.checked_add(start_sample).ok_or_else(incomplete)?;
         }
     }
-    Ok((text, selected.to_owned(), detection_value(&detection)))
+    let summary = crate::language::summarize_decisions(probes).ok_or_else(incomplete)?;
+    Ok(RefinedSource {
+        text,
+        language: summary.language,
+        detection: detection_value(&summary.detection),
+        review: summary.review || spoken.iter().any(|part| part.review),
+        transcription_review: spoken
+            .iter()
+            .find_map(|part| part.transcription_review.clone()),
+        parts: spoken
+            .iter()
+            .map(|part| RefinedPart {
+                start_sample: start_sample
+                    + (part.start * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                end_sample: start_sample
+                    + (part.end * f64::from(limits::SAMPLE_RATE)).round() as i64,
+                text: part.raw.clone().unwrap_or_else(|| part.text.clone()),
+                language: part.language.clone().expect("supported spoken language"),
+            })
+            .collect(),
+    })
 }
 
 fn region_from(slice: &ActivitySlice) -> DecodeRegion {
@@ -1935,20 +1966,23 @@ pub(crate) mod tests {
                 models.observed_limit = Some(4 * BLOCK);
             }
             let result = super::refine_passage_source(&models, &pcm, "auto", 7 * 16000 + 137, None);
-            if matches!(case, "uncertain" | "unobserved") {
+            if case == "unobserved" {
                 assert!(
                     result.is_err(),
                     "{case} must retain prior words rather than claim complete coverage"
                 );
             } else {
-                let (text, language, detection) =
-                    result.unwrap_or_else(|error| panic!("{case}: {error}"));
+                let result = result.unwrap_or_else(|error| panic!("{case}: {error}"));
                 assert_eq!(
-                    text.split_whitespace().collect::<Vec<_>>(),
+                    result.text.split_whitespace().collect::<Vec<_>>(),
                     ["en:Hello", "en:Hello"]
                 );
-                assert_eq!(language, "en");
-                assert_eq!(detection["mode"], "auto");
+                assert_eq!(result.language.as_deref(), Some("en"));
+                assert_eq!(result.detection["mode"], "auto");
+                if case == "uncertain" {
+                    assert_eq!(result.detection["reason"], "best_effort");
+                    assert!(result.review);
+                }
                 assert_eq!(
                     models.calls().len(),
                     2,

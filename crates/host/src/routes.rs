@@ -122,6 +122,30 @@ pub trait ApplicationModels: Send + Sync {
     fn separation_available(&self) -> bool {
         false
     }
+    /// Capture yields to live audio between separation and each bounded decode.
+    fn separate_audio(
+        &self,
+        pcm: &[f32],
+        cancellation: &CancellationToken,
+    ) -> Result<speakerdesk_core::ipc::SeparatedAudio, speakerdesk_core::error::ChildError> {
+        let models = self
+            .live_models(cancellation)
+            .ok_or(speakerdesk_core::error::ChildError::Unimplemented)?;
+        let audio = speakerdesk_core::models::Models::separate(&models, pcm)?;
+        speakerdesk_core::separation::prepare_audio(audio, pcm.len())
+    }
+    fn decode_separated_voice(
+        &self,
+        pcm: &[f32],
+        language: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<speakerdesk_core::separation::CandidateVoice, speakerdesk_core::error::ChildError>
+    {
+        let models = self
+            .live_models(cancellation)
+            .ok_or(speakerdesk_core::error::ChildError::Unimplemented)?;
+        speakerdesk_core::separation::decode_voice(&models, pcm, language)
+    }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
         None
     }
@@ -131,6 +155,18 @@ pub trait ApplicationModels: Send + Sync {
         _cancellation: &CancellationToken,
     ) -> Result<speakerdesk_core::ipc::VoiceEmbedding, String> {
         Err("Voice recognition is not available in this build.".into())
+    }
+    fn embed_live_voice(
+        &self,
+        pcm: &[f32],
+        cancellation: &CancellationToken,
+    ) -> Result<speakerdesk_core::ipc::VoiceEmbedding, speakerdesk_core::error::ChildError> {
+        if let Some(models) = self.live_models(cancellation) {
+            speakerdesk_core::models::Models::embed_voice(&models, pcm)
+        } else {
+            self.embed_voice(pcm, cancellation)
+                .map_err(|e| speakerdesk_core::error::ChildError::failed(e, false))
+        }
     }
 }
 
@@ -1228,6 +1264,26 @@ pub(crate) struct OperationGuard {
 impl OperationGuard {
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Capture's serial owner keeps its recording activity and operation generation.
+    /// This does not admit another refinement worker or relax saved/manual routes.
+    pub(crate) fn check_live_voice_step(
+        &self,
+        checks: &mut crate::people_routes::LiveVoiceChecks,
+        models: &dyn ApplicationModels,
+        job: &Job,
+    ) -> Result<bool, speakerdesk_core::live::LiveError> {
+        if !self.current(job)
+            || !matches!(
+                job.status.as_str(),
+                "recording" | "paused" | "finishing" | "ready"
+            )
+        {
+            checks.interrupt(&mut self.shared.store.lock().expect("store"));
+            return Ok(false);
+        }
+        checks.step(&self.shared.store, &self.shared.data_dir, models, self, job)
     }
 
     /// Retain the same operation through optional checks of an already editable result.

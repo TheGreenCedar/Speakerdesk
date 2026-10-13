@@ -90,11 +90,39 @@ pub fn sample_bounds(segment: &Segment) -> Result<(u64, u64), ApiError> {
 
 /// A union of track labels cannot establish simultaneous speech.
 pub fn eligible(job: &Job, segment: &Segment) -> Result<(), ApiError> {
-    if job.status != "ready" || segment.separation.is_some() {
+    if job.status != "ready" {
         return Err(ApiError::new(
             409,
             "Separate an original passage after the recording is ready.",
         ));
+    }
+    eligible_source(job, segment)
+}
+
+/// Capture's serial owner may process a completed original passage under its
+/// existing operation. Manual saved-passage routes keep their ready-only guard.
+pub fn eligible_live(job: &Job, segment: &Segment) -> Result<(), ApiError> {
+    if !matches!(
+        job.status.as_str(),
+        "recording" | "paused" | "finishing" | "ready"
+    ) || segment.canonical_utterance_id.is_none()
+        || segment.rest.get("canonical_state").and_then(Value::as_str) != Some("sealed")
+        || segment
+            .protected_fields
+            .as_ref()
+            .is_some_and(|fields| !fields.is_empty())
+    {
+        return Err(ApiError::new(
+            409,
+            "Live separation needs a completed, unedited passage.",
+        ));
+    }
+    eligible_source(job, segment)
+}
+
+fn eligible_source(job: &Job, segment: &Segment) -> Result<(), ApiError> {
+    if segment.separation.is_some() {
+        return Err(ApiError::new(409, "Separate an original passage."));
     }
     let (start, end) = sample_bounds(segment)?;
     let activity = segment
@@ -185,6 +213,23 @@ pub fn accept(
     passage_id: &str,
     candidate_id: &str,
 ) -> Result<[Segment; 2], ApiError> {
+    accept_current(job, passage_id, candidate_id, false)
+}
+
+pub fn accept_live(
+    job: &mut Job,
+    passage_id: &str,
+    candidate_id: &str,
+) -> Result<[Segment; 2], ApiError> {
+    accept_current(job, passage_id, candidate_id, true)
+}
+
+fn accept_current(
+    job: &mut Job,
+    passage_id: &str,
+    candidate_id: &str,
+    live: bool,
+) -> Result<[Segment; 2], ApiError> {
     let candidate = job
         .document
         .as_ref()
@@ -193,7 +238,17 @@ pub fn accept(
         .filter(|c| c.id == candidate_id)
         .cloned()
         .ok_or_else(|| ApiError::new(409, "This separation candidate is no longer available."))?;
-    if !fresh(job, &candidate) {
+    let current = if live {
+        job.document
+            .as_ref()
+            .and_then(|d| d.segments.iter().find(|s| s.id == passage_id))
+            .is_some_and(|s| {
+                eligible_live(job, s).is_ok() && source_key(job, s) == candidate.source_key
+            })
+    } else {
+        fresh(job, &candidate)
+    };
+    if !current {
         return Err(ApiError::new(
             409,
             "The passage changed. Separate its current words and audio again.",
@@ -327,15 +382,26 @@ pub fn run<M: crate::models::Models + ?Sized>(
     pcm: &[f32],
     language: &str,
 ) -> Result<(crate::ipc::SeparatedAudio, [CandidateVoice; 2]), crate::error::ChildError> {
-    let mut audio = models.separate(pcm)?;
-    audio.validate(pcm.len())?;
+    let audio = prepare_audio(models.separate(pcm)?, pcm.len())?;
+    let candidates = [
+        decode_voice(models, &audio.channels[0], language)?,
+        decode_voice(models, &audio.channels[1], language)?,
+    ];
+    Ok((audio, candidates))
+}
+
+/// The same quantization is used by saved work and the capture continuation.
+pub fn prepare_audio(
+    mut audio: crate::ipc::SeparatedAudio,
+    samples: usize,
+) -> Result<crate::ipc::SeparatedAudio, crate::error::ChildError> {
+    audio.validate(samples)?;
     let peak = audio
         .channels
         .iter()
         .flatten()
         .map(|s| s.abs())
         .fold(1_f32, f32::max);
-    let mut candidates = Vec::with_capacity(2);
     for channel in &mut audio.channels {
         for sample in channel.iter_mut() {
             *sample /= peak;
@@ -345,16 +411,26 @@ pub fn run<M: crate::models::Models + ?Sized>(
         for (sample, bytes) in channel.iter_mut().zip(bytes.chunks_exact(2)) {
             *sample = i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.;
         }
-        let result = crate::import::separated_passage(models, channel, language)
-            .map_err(|e| crate::error::ChildError::failed(e.to_string(), false))?;
-        candidates.push(CandidateVoice {
-            text: result.text,
-            language: result.language,
-            review: result.review,
-            transcription_review: result.transcription_review,
-        });
     }
-    Ok((audio, candidates.try_into().expect("two voices")))
+    Ok(audio)
+}
+
+/// One bounded generated voice retains ordinary speech admission and Auto routing.
+pub fn decode_voice<M: crate::models::Models + ?Sized>(
+    models: &M,
+    channel: &[f32],
+    language: &str,
+) -> Result<CandidateVoice, crate::error::ChildError> {
+    let result = crate::import::separated_passage(models, channel, language).map_err(|e| {
+        e.child
+            .unwrap_or_else(|| crate::error::ChildError::failed(e.message, false))
+    })?;
+    Ok(CandidateVoice {
+        text: result.text,
+        language: result.language,
+        review: result.review,
+        transcription_review: result.transcription_review,
+    })
 }
 
 #[cfg(test)]
@@ -362,6 +438,19 @@ mod tests {
     use super::*;
     fn job() -> Job {
         serde_json::from_value(json!({"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"mix","status":"ready","language":"en","duration":2.,"created":0.,"updated":0.,"document":{"speakers":{},"segments":[{"id":"p","start":0.,"end":2.,"speaker":"overlap","text":"mixed words","audio_revision":0,"speaker_activity":{"audio_revision":0,"observed_end_sample":32000,"regions":[{"start_sample":0,"end_sample":32000,"speakers":["speaker_0","speaker_1"]}]}}]}})).unwrap()
+    }
+    #[test]
+    fn completed_capture_overlap_does_not_require_stop() {
+        let mut job = job();
+        job.status = "recording".into();
+        let row = &mut job.document.as_mut().unwrap().segments[0];
+        row.canonical_utterance_id = Some(row.id.clone());
+        row.rest.insert("canonical_state".into(), json!("sealed"));
+        assert!(
+            eligible(&job, &job.document.as_ref().unwrap().segments[0]).is_err(),
+            "manual routes remain saved-only"
+        );
+        assert!(eligible_live(&job, &job.document.as_ref().unwrap().segments[0]).is_ok());
     }
     #[test]
     fn requires_actual_concurrency_and_exactly_two_tracks() {

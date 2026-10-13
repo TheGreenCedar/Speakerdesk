@@ -417,7 +417,7 @@ pub(super) fn pending_check(job: &Job, track: &str, id: &str) -> bool {
         .is_some_and(|check| check["id"] == id && check["status"] == "checking")
 }
 
-fn clip_recording_path(
+pub(super) fn clip_recording_path(
     root: &std::path::Path,
     job: &Job,
     clip: &VoiceClip,

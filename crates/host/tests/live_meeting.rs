@@ -1420,7 +1420,15 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
 
 #[tokio::test]
 async fn completed_live_transcript_checks_saved_voices_without_owning_or_replacing_words() {
-    for mode in ["match", "disabled", "cancel", "shutdown"] {
+    for mode in [
+        "live",
+        "eof",
+        "child_loss",
+        "match",
+        "disabled",
+        "disable_during",
+        "shutdown",
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         fs::write(
@@ -1474,7 +1482,7 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
                 .count(),
             2
         );
-        if mode == "disabled" {
+        if mode == "disabled" || mode == "eof" {
             let response = host
                 .client
                 .patch(format!("{}api/recognition", host.url))
@@ -1484,7 +1492,13 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
                 .await
                 .unwrap();
             assert_eq!(response.status(), 200);
-        } else {
+        } else if mode == "child_loss" {
+            fs::write(
+                root.join("exit-live-voice-once"),
+                b"exit during live embedding",
+            )
+            .unwrap();
+        } else if mode != "live" {
             fs::write(
                 root.join("hold-live-voice"),
                 b"block optional check after ready",
@@ -1495,14 +1509,103 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
         let path = format!("api/jobs/{second}");
         host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 13.5)
             .await;
-        let stopping = host
-            .post(&format!("api/meetings/{second}/stop"), json!({}))
-            .await;
-        assert_eq!(stopping.status(), 202);
-        let ready = host.wait(&path, |v| v["status"] == "ready").await;
+        if mode == "eof" {
+            assert!(host.get(&path).await["voice_checks"].is_null());
+            let enabled = host
+                .client
+                .patch(format!("{}api/recognition", host.url))
+                .header("X-Speakerdesk-Token", &host.token)
+                .json(&json!({"enabled":true}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(enabled.status(), 200);
+            fs::write(root.join("hold-live-voice"), b"hold EOF identity phase").unwrap();
+            assert_eq!(
+                host.post(&format!("api/meetings/{second}/stop"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            wait_file(&root.join("voice-started")).await;
+            assert_eq!(
+                host.get(&path).await["status"],
+                "finishing",
+                "capture worker must discover the EOF tail before ready fallback"
+            );
+            fs::remove_file(root.join("hold-live-voice")).unwrap();
+            let done = host
+                .wait(&path, |v| {
+                    v["status"] == "ready" && v["inference_owned"] == false
+                })
+                .await;
+            assert_eq!(
+                done["speaker_assignments"]["speaker_0"]["source"],
+                "automatic_voice"
+            );
+            assert_eq!(host.get("api/people").await, people_before);
+            host.close(root).await;
+            continue;
+        }
+        if mode == "live" || mode == "child_loss" {
+            if mode == "child_loss" {
+                host.wait(&path, |v| v["live_recovery"]["status"] == "recovered")
+                    .await;
+                // The interrupted row remains uncertain; use a real capture
+                // boundary before asking new observed audio to identify a new track.
+                let boundary = host
+                    .client
+                    .patch(format!("{}api/meetings/{second}/language", host.url))
+                    .header("X-Speakerdesk-Token", &host.token)
+                    .json(&json!({"language":"en","language_revision":0}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(boundary.status(), 200);
+                host.wait("api/meeting", |v| v["language_acknowledged_revision"] == 1)
+                    .await;
+                trigger(root, 3);
+                trigger(root, 4);
+            }
+            let track = if mode == "child_loss" {
+                "speaker_64"
+            } else {
+                "speaker_0"
+            };
+            let recognized = host
+                .wait(&path, |v| v["voice_checks"][track]["status"] == "matched")
+                .await;
+            assert_eq!(recognized["status"], "recording");
+            if mode == "child_loss" {
+                assert_eq!(recognized["live_stream_generation"], 1);
+                assert!(!root.join("exit-live-voice-once").exists());
+                assert!(
+                    recognized["speaker_assignments"]["speaker_0"].is_null(),
+                    "recovery cannot assign identity to old unresolved crops"
+                );
+            }
+            assert_eq!(
+                recognized["speaker_assignments"][track]["source"],
+                "automatic_voice"
+            );
+            assert_eq!(recognized["document"]["speakers"][track], "Ada");
+            assert!(
+                !recognized["document"]["segments"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .is_empty()
+            );
+            host.stop(&second).await;
+            assert_eq!(host.get("api/people").await, people_before);
+            host.close(root).await;
+            continue;
+        }
+        let ready = host.get(&path).await;
+        assert_eq!(ready["status"], "recording");
         let original_text = ready["document"]["segments"][0]["text"].clone();
         assert!(!original_text.as_str().unwrap().is_empty());
         if mode == "disabled" {
+            host.stop(&second).await;
             host.wait(&path, |v| v["inference_owned"] == false).await;
             assert_eq!(
                 fs::read_to_string(root.join("voice-calls"))
@@ -1523,7 +1626,7 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
             assert_eq!(
                 edited.status(),
                 200,
-                "Ready must remain editable during optional inference"
+                "Live words must remain editable during optional inference"
             );
             let competing = host
                 .post(
@@ -1536,12 +1639,26 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
                 host.close(root).await;
                 continue;
             }
-            if mode == "cancel" {
-                let cancelled = host.post(&format!("{path}/cancel"), json!({})).await;
-                assert_eq!(cancelled.status(), 200);
-            } else {
-                fs::remove_file(root.join("hold-live-voice")).unwrap();
+            if mode == "disable_during" {
+                let disabled = host
+                    .client
+                    .patch(format!("{}api/recognition", host.url))
+                    .header("X-Speakerdesk-Token", &host.token)
+                    .json(&json!({"enabled":false}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(disabled.status(), 200);
             }
+            // Append capture while the first embedding is held. Its stable solo
+            // prefix is still valid, and new audio drains before the next embedding.
+            trigger(root, 3);
+            fs::remove_file(root.join("hold-live-voice")).unwrap();
+            host.wait(&path, |v| {
+                v["voice_checks"]["speaker_0"]["status"] != "checking"
+            })
+            .await;
+            host.stop(&second).await;
             let done = host.wait(&path, |v| v["inference_owned"] == false).await;
             assert_eq!(done["status"], "ready");
             assert_eq!(
@@ -2384,6 +2501,122 @@ async fn rolling_accuracy_keeps_capture_running_and_owns_cancel_until_terminal()
 }
 
 #[tokio::test]
+async fn rolling_accuracy_stop_retries_failed_anchors_once_and_preserves_protected_words() {
+    for case in ["recover", "incomplete", "protected"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("first-stage-samples"), (44 * 2560).to_string()).unwrap();
+        let host = Running::open(root, false).await;
+        let id = host.start_live_only(json!(["microphone"])).await;
+        let path = format!("api/jobs/{id}");
+        trigger(root, 1);
+        host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
+            .await;
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        host.wait(&path, |job| job["pause_flush"]["status"] == "complete")
+            .await;
+        let response = host
+            .client
+            .patch(format!("{}api/meetings/{id}/language", host.url))
+            .header("X-Speakerdesk-Token", &host.token)
+            .json(&json!({"language":"fr","language_revision":0}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let original = host
+            .wait(&path, |job| {
+                job["language_acknowledged_revision"] == 1
+                    && job["document"]["segments"].as_array().is_some_and(|rows| {
+                        !rows.is_empty()
+                            && rows.iter().all(|row| row["canonical_state"] == "sealed")
+                    })
+            })
+            .await;
+        let priors = original["document"]["segments"].as_array().unwrap();
+        assert_eq!(
+            priors.len(),
+            1,
+            "one sealed fixture anchor owns the final retry"
+        );
+        fs::write(root.join("replay-transcript"), "").unwrap();
+        assert_eq!(
+            host.post(&format!("{path}/refinement/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        host.wait(&path, |job| {
+            job["refinement_status"] == "unresolved"
+                && job["rolling_refinement"]["failed"][priors[0]["id"].as_str().unwrap()]
+                    .is_string()
+        })
+        .await;
+        if case == "protected" {
+            let row = &priors[0];
+            let response = host.client.patch(format!("{}{path}/segments/{}", host.url, row["id"].as_str().unwrap()))
+                .header("X-Speakerdesk-Token", &host.token)
+                .json(&json!({"segment_revision":row["machine_revision"],"changes":{"text":"Protected after failed refinement"}}))
+                .send().await.unwrap();
+            assert_eq!(response.status(), 200);
+        }
+        if case != "incomplete" {
+            fs::write(
+                root.join("replay-transcript"),
+                "Final complete accuracy words",
+            )
+            .unwrap();
+        }
+        fs::write(root.join("transcribe-crops"), "").unwrap();
+        let finished = host.stop(&id).await;
+        assert_eq!(finished["status"], "ready");
+        let row = finished["document"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == priors[0]["id"])
+            .unwrap();
+        match case {
+            "recover" => {
+                assert_eq!(finished["refinement_status"], "complete");
+                assert_eq!(row["refinement_state"], "refined");
+                assert_eq!(row["text"], "Final complete accuracy words");
+            }
+            "incomplete" => {
+                assert_eq!(finished["refinement_status"], "unresolved");
+                assert_eq!(
+                    row, &priors[0],
+                    "another empty result retains the original words and evidence"
+                );
+            }
+            "protected" => {
+                assert_eq!(finished["refinement_status"], "complete");
+                assert_eq!(row["text"], "Protected after failed refinement");
+                assert_eq!(row["protected_fields"], json!(["text"]));
+            }
+            _ => unreachable!(),
+        }
+        let calls = fs::read_to_string(root.join("transcribe-crops")).unwrap();
+        assert_eq!(
+            calls.lines().count(),
+            usize::from(case != "protected"),
+            "one finite Stop retry, no work on protected words"
+        );
+        assert_eq!(host.get(&path).await["document"], finished["document"]);
+        assert_eq!(
+            fs::read_to_string(root.join("transcribe-crops")).unwrap(),
+            calls
+        );
+        host.close(root).await;
+    }
+}
+
+#[tokio::test]
 async fn rolling_accuracy_default_sources_language_recovery_and_shutdown_matrix() {
     for case in ["default", "dual", "epoch", "loss", "shutdown"] {
         let temp = tempfile::tempdir().unwrap();
@@ -3132,6 +3365,143 @@ async fn saved_accuracy_pause_failure_and_late_candidate_matrix() {
             retried["document"]["segments"][0]["text"], "New accuracy words.",
             "{case}"
         );
+        host.close(root).await;
+    }
+}
+
+#[tokio::test]
+async fn completed_overlap_is_separated_during_capture_and_survives_child_recovery() {
+    for mode in ["normal", "child_loss", "edit"] {
+        let child_loss = mode == "child_loss";
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(
+            root.join("fixture-overlap"),
+            b"scripted two-voice observations and separator",
+        )
+        .unwrap();
+        fs::create_dir(root.join("mossformer2-16k")).unwrap();
+        fs::write(
+            root.join("mossformer2-16k/model.safetensors"),
+            b"protocol fixture only",
+        )
+        .unwrap();
+        if child_loss {
+            fs::write(
+                root.join("exit-separated-asr-once"),
+                b"exit during generated-voice decode",
+            )
+            .unwrap();
+        }
+        if mode == "edit" {
+            fs::write(root.join("hold-live-asr"), b"hold generated voice A").unwrap();
+            fs::write(
+                root.join("hold-only-separated"),
+                b"do not hold original live words",
+            )
+            .unwrap();
+        }
+        let host = Running::open(root, false).await;
+        trigger(root, 1);
+        let id = host.start_live_only(json!(["microphone"])).await;
+        let path = format!("api/jobs/{id}");
+        if mode == "edit" {
+            wait_file(&root.join("edit-asr-started")).await;
+            let current = host.get(&path).await;
+            assert_eq!(current["status"], "recording");
+            let row = &current["document"]["segments"][0];
+            let edited = host.client.patch(format!("{}{path}/segments/{}", host.url, row["id"].as_str().unwrap()))
+                .header("X-Speakerdesk-Token", &host.token)
+                .json(&json!({"segment_revision":row["machine_revision"],"changes":{"text":"Protected during live separation."}}))
+                .send().await.unwrap();
+            assert_eq!(edited.status(), 200);
+            fs::remove_file(root.join("hold-live-asr")).unwrap();
+            let retained = host
+                .wait(&path, |v| v["passage_separation"].is_null())
+                .await;
+            assert_eq!(
+                retained["document"]["segments"][0]["text"],
+                "Protected during live separation."
+            );
+            assert!(
+                retained["document"]["segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|s| s["separation"].is_null())
+            );
+            let done = host.stop(&id).await;
+            assert_eq!(
+                done["document"]["segments"][0]["text"],
+                "Protected during live separation."
+            );
+            let assets = root.join("data").join(&id).join("separated");
+            assert!(!assets.exists() || fs::read_dir(assets).unwrap().count() == 0);
+            host.close(root).await;
+            continue;
+        }
+        let live = host
+            .wait(&path, |v| {
+                v["document"]["segments"].as_array().is_some_and(|rows| {
+                    rows.iter()
+                        .filter(|row| row["separation"].is_object())
+                        .count()
+                        == 2
+                })
+            })
+            .await;
+        assert_eq!(
+            live["status"], "recording",
+            "separation must not wait for Stop"
+        );
+        let separated: Vec<_> = live["document"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["separation"].is_object())
+            .cloned()
+            .collect();
+        assert_eq!(separated.len(), 2);
+        assert!(
+            separated.iter().all(
+                |row| row["text"] == "Separated replay words" && row["speaker"] == "unassigned"
+            )
+        );
+        let episode = separated[0]["separation"]["episode_id"].as_str().unwrap();
+        let history = host
+            .get(&format!("{path}/separation/{episode}/history"))
+            .await;
+        assert!(
+            history["original"]["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
+        );
+        if child_loss {
+            assert_eq!(live["live_stream_generation"], 1);
+            assert!(!root.join("exit-separated-asr-once").exists());
+            assert_eq!(
+                fs::read_to_string(root.join("fixture-child-pids"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                2
+            );
+        }
+        trigger(root, 2);
+        host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 13.5)
+            .await;
+        let done = host.stop(&id).await;
+        assert_eq!(done["status"], "ready");
+        for row in separated {
+            assert!(
+                done["document"]["segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|saved| saved["id"] == row["id"] && saved["text"] == row["text"]),
+                "later canonical publication must not replace separated words"
+            );
+        }
         host.close(root).await;
     }
 }

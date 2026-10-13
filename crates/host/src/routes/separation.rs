@@ -183,6 +183,246 @@ pub(super) fn automatic(
 fn valid_episode(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
+
+struct LivePending {
+    original: Job,
+    segment: Segment,
+    episode: String,
+    audio: Option<speakerdesk_core::ipc::SeparatedAudio>,
+    voices: Vec<domain::CandidateVoice>,
+}
+
+/// Capture owns one bounded original passage and at most its two output channels.
+/// Discovery is a document cursor, never a queue of PCM or inference tasks.
+pub(crate) struct LiveSeparation {
+    scan_from: Option<usize>,
+    pending: Option<LivePending>,
+}
+impl LiveSeparation {
+    pub(crate) fn new() -> Self {
+        Self {
+            scan_from: Some(0),
+            pending: None,
+        }
+    }
+    pub(crate) fn changed(&mut self, index: usize) {
+        self.scan_from = Some(self.scan_from.map_or(index, |old| old.min(index)));
+    }
+    pub(crate) fn pending(&self) -> bool {
+        self.pending.is_some()
+    }
+    pub(crate) fn interrupt(&mut self, app: &AppState) {
+        if let Some(p) = self.pending.take() {
+            let _ = app.store().update_job(&p.original.id, |job| {
+                if job
+                    .extra
+                    .get("passage_separation")
+                    .and_then(|v| v["id"].as_str())
+                    == Some(&p.episode)
+                {
+                    interrupt(job);
+                }
+                Ok::<_, ApiError>(())
+            });
+            remove_assets(app.data_dir(), &p.original, &p.episode);
+        }
+    }
+    pub(crate) fn step(
+        &mut self,
+        app: &AppState,
+        operation: &OperationGuard,
+        job: &Job,
+    ) -> Result<bool, speakerdesk_core::live::LiveError> {
+        let models = app.models();
+        if operation.cancellation.is_cancelled() {
+            self.interrupt(app);
+            return Ok(false);
+        }
+        if self.pending.is_none() {
+            if !models.separation_available() {
+                return Ok(false);
+            }
+            let Some(start) = self.scan_from.take() else {
+                return Ok(false);
+            };
+            let mut store = app.store();
+            let Some(current) = store
+                .get(&job.id, false)
+                .map_err(|e| speakerdesk_core::live::LiveError::Detail(e.to_string()))?
+            else {
+                return Ok(false);
+            };
+            if !operation.current(&current) {
+                return Ok(false);
+            }
+            let selected = current
+                .document
+                .iter()
+                .flat_map(|d| d.segments.iter().enumerate())
+                .skip(start)
+                .find(|(_, s)| {
+                    s.separation_candidate.is_none()
+                        && domain::eligible_live(&current, s).is_ok()
+                        && current
+                            .extra
+                            .get("separation_attempts")
+                            .and_then(|attempts| attempts.get(&s.id))
+                            .and_then(|attempts| attempts.get(domain::source_key(&current, s)))
+                            .and_then(Value::as_str)
+                            != Some(domain::MODEL)
+                })
+                .map(|(i, s)| (i, s.clone()));
+            let Some((index, segment)) = selected else {
+                return Ok(false);
+            };
+            self.scan_from = Some(index + 1);
+            let episode = random_hex(16);
+            let key = domain::source_key(&current, &segment);
+            let (mut original, ()) = store.update_job(&current.id, |job| {
+                job.extra.entry("separation_attempts").or_insert_with(|| json!({}))
+                    .as_object_mut().expect("owned attempt map").entry(segment.id.clone())
+                    .or_insert_with(|| json!({}))[&key] = json!(domain::MODEL);
+                job.extra.remove("separation_error");
+                job.extra.insert("passage_separation".into(), json!({"id":episode,"segment_id":segment.id,"phase":"Separating overlapping voices…"}));
+                Ok::<_, ApiError>(())
+            }).map_err(|e| speakerdesk_core::live::LiveError::Detail(e.message))?.ok_or(speakerdesk_core::live::LiveError::Message("Recording is unavailable"))?;
+            original.document = None;
+            self.pending = Some(LivePending {
+                original,
+                segment,
+                episode,
+                audio: None,
+                voices: Vec::with_capacity(2),
+            });
+        }
+        let p = self.pending.as_mut().expect("selected passage");
+        let current = app
+            .store()
+            .get(&p.original.id, false)
+            .map_err(|e| speakerdesk_core::live::LiveError::Detail(e.to_string()))?;
+        let fresh = current.as_ref().is_some_and(|job| {
+            operation.current(job)
+                && job
+                    .extra
+                    .get("passage_separation")
+                    .and_then(|v| v["id"].as_str())
+                    == Some(&p.episode)
+                && job
+                    .document
+                    .as_ref()
+                    .and_then(|d| d.segments.iter().find(|s| s.id == p.segment.id))
+                    .is_some_and(|s| {
+                        domain::eligible_live(job, s).is_ok()
+                            && domain::source_key(job, s)
+                                == domain::source_key(&p.original, &p.segment)
+                    })
+        });
+        if !fresh {
+            self.interrupt(app);
+            return Ok(true);
+        }
+        let language = p
+            .segment
+            .rest
+            .get("language_mode")
+            .and_then(Value::as_str)
+            .unwrap_or(&p.original.language);
+        let result = if p.audio.is_none() {
+            (|| {
+                let path =
+                    crate::native::passage_recording_path(app.data_dir(), &p.original, &p.segment)
+                        .map_err(|e| {
+                            speakerdesk_core::error::ChildError::failed(e.to_string(), false)
+                        })?;
+                let pcm =
+                    audio::read_pcm16_range(path, p.segment.start, p.segment.end).map_err(|e| {
+                        speakerdesk_core::error::ChildError::failed(e.to_string(), false)
+                    })?;
+                let audio = models.separate_audio(&pcm, &operation.cancellation)?;
+                audio.validate(pcm.len())?;
+                p.audio = Some(audio);
+                Ok(())
+            })()
+        } else if p.voices.len() < 2 {
+            models
+                .decode_separated_voice(
+                    &p.audio.as_ref().expect("separated audio").channels[p.voices.len()],
+                    language,
+                    &operation.cancellation,
+                )
+                .map(|voice| p.voices.push(voice))
+        } else {
+            let p = self.pending.take().expect("completed passage");
+            let result = write_audio(
+                app.data_dir(),
+                &p.original,
+                &p.episode,
+                p.audio.as_ref().expect("separated audio"),
+                &operation.cancellation,
+            )
+            .map(|()| Candidate {
+                id: p.episode.clone(),
+                source_key: domain::source_key(&p.original, &p.segment),
+                original: Box::new(p.segment.clone()),
+                voices: p.voices.try_into().expect("two voices"),
+                model: p.audio.expect("separated audio").model,
+            });
+            finish(
+                operation,
+                &p.original,
+                &p.segment,
+                &p.episode,
+                true,
+                true,
+                result,
+            );
+            return Ok(true);
+        };
+        if let Err(error) = result {
+            let p = self.pending.take().expect("failed passage");
+            if matches!(
+                error,
+                speakerdesk_core::error::ChildError::ProcessLost { .. }
+                    | speakerdesk_core::error::ChildError::Timeout
+            ) {
+                // A new child generation may retry once through capture's existing
+                // bounded recovery; a model/data failure remains a recorded attempt.
+                let key = domain::source_key(&p.original, &p.segment);
+                let _ = app.store().update_job(&p.original.id, |job| {
+                    if operation.current(job) {
+                        if let Some(attempts) = job
+                            .extra
+                            .get_mut("separation_attempts")
+                            .and_then(|a| a.get_mut(&p.segment.id))
+                            .and_then(Value::as_object_mut)
+                        {
+                            attempts.remove(&key);
+                        }
+                    }
+                    Ok::<_, ApiError>(())
+                });
+            }
+            finish(
+                operation,
+                &p.original,
+                &p.segment,
+                &p.episode,
+                true,
+                true,
+                Err(error.to_string()),
+            );
+            if matches!(
+                error,
+                speakerdesk_core::error::ChildError::ProcessLost { .. }
+                    | speakerdesk_core::error::ChildError::Timeout
+                    | speakerdesk_core::error::ChildError::Cancelled
+            ) {
+                return Err(error.into());
+            }
+        }
+        Ok(true)
+    }
+}
 fn raw_path(root: &Path, job: &Job, episode: &str, channel: u8) -> std::io::Result<PathBuf> {
     if !valid_episode(episode) || channel > 1 {
         return Err(std::io::Error::other("Invalid separated audio identity"));
@@ -293,42 +533,13 @@ fn execute(
             .unwrap_or(&original.language);
         let (audio, voices) = models.separate_passage(&pcm, language, &operation.cancellation)?;
         audio.validate(pcm.len()).map_err(|e| e.to_string())?;
-        for (channel, pcm) in audio.channels.iter().enumerate() {
-            if operation.cancellation.is_cancelled() {
-                return Err("Separation cancelled.".into());
-            }
-            let path = raw_path(&operation.shared.data_dir, original, episode, channel as u8)
-                .map_err(|e| e.to_string())?;
-            let directory = path.parent().expect("owned audio directory");
-            fs::create_dir_all(directory).map_err(|e| e.to_string())?;
-            let root = fs::canonicalize(&operation.shared.data_dir).map_err(|e| e.to_string())?;
-            if !fs::canonicalize(directory)
-                .map_err(|e| e.to_string())?
-                .starts_with(&root)
-                || fs::symlink_metadata(directory)
-                    .map_err(|e| e.to_string())?
-                    .is_symlink()
-            {
-                return Err("Separated audio directory is not owned by this app.".into());
-            }
-            let partial = path.with_extension("part");
-            // New unpredictable identities never replace an existing file or follow its link.
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&partial)
-                .map_err(|e| e.to_string())?;
-            let mut writer = audio::RecordingWriter::create(&partial).map_err(|e| e.to_string())?;
-            writer.write_samples(pcm).map_err(|e| e.to_string())?;
-            drop(writer);
-            fs::File::open(&partial)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| e.to_string())?;
-            fs::rename(&partial, &path).map_err(|e| e.to_string())?;
-            fs::File::open(directory)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| e.to_string())?;
-        }
+        write_audio(
+            &operation.shared.data_dir,
+            original,
+            episode,
+            &audio,
+            &operation.cancellation,
+        )?;
         Ok(Candidate {
             id: episode.into(),
             source_key: source_key.clone(),
@@ -337,6 +548,66 @@ fn execute(
             model: audio.model,
         })
     })();
+    finish(
+        operation, original, segment, episode, automatic, false, result,
+    );
+}
+
+fn write_audio(
+    root: &Path,
+    original: &Job,
+    episode: &str,
+    audio: &speakerdesk_core::ipc::SeparatedAudio,
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
+    for (channel, pcm) in audio.channels.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            return Err("Separation cancelled.".into());
+        }
+        let path = raw_path(root, original, episode, channel as u8).map_err(|e| e.to_string())?;
+        let directory = path.parent().expect("owned audio directory");
+        fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+        let authority = fs::canonicalize(root).map_err(|e| e.to_string())?;
+        if !fs::canonicalize(directory)
+            .map_err(|e| e.to_string())?
+            .starts_with(&authority)
+            || fs::symlink_metadata(directory)
+                .map_err(|e| e.to_string())?
+                .is_symlink()
+        {
+            return Err("Separated audio directory is not owned by this app.".into());
+        }
+        let partial = path.with_extension("part");
+        // New unpredictable identities never replace an existing file or follow its link.
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+            .map_err(|e| e.to_string())?;
+        let mut writer = audio::RecordingWriter::create(&partial).map_err(|e| e.to_string())?;
+        writer.write_samples(pcm).map_err(|e| e.to_string())?;
+        drop(writer);
+        fs::File::open(&partial)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+        fs::rename(&partial, &path).map_err(|e| e.to_string())?;
+        fs::File::open(directory)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn finish(
+    operation: &OperationGuard,
+    original: &Job,
+    segment: &Segment,
+    episode: &str,
+    automatic: bool,
+    live: bool,
+    result: Result<Candidate, String>,
+) {
+    let source_key = domain::source_key(original, segment);
     let mut store = operation.shared.store.lock().expect("jobs");
     let published=store.update_job(&original.id,|job| {
         if !operation.current(job) || job.extra.get("passage_separation").and_then(|v|v["id"].as_str())!=Some(episode) {
@@ -354,13 +625,13 @@ fn execute(
             Ok(candidate) => {
                 job.document.as_mut().expect("current document").segments.iter_mut().find(|s|s.id==segment.id).expect("current passage").separation_candidate=Some(Box::new(candidate.clone()));
                 if automatic {
-                    if let Err(error) = domain::accept(job, &segment.id, episode) {
+                    if let Err(error) = if live { domain::accept_live(job, &segment.id, episode) } else { domain::accept(job, &segment.id, episode) } {
                         job.document.as_mut().expect("current document").segments.iter_mut().find(|s|s.id==segment.id).expect("current passage").separation_candidate=None;
                         job.extra.insert("separation_error".into(),json!(error.message));
                         job.message=RETAINED.into();
                         return Ok(false);
                     }
-                    job.message="Separated voices saved. Check separated voices.".into();
+                    if !live { job.message="Separated voices saved. Check separated voices.".into(); }
                     return Ok(true);
                 }
                 job.message="Voice estimates ready. Listen to both before replacing the original passage.".into();
