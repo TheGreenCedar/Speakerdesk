@@ -35,11 +35,29 @@ function renderRefinementStatus() {
   $('refinement-controls').hidden=selected?.status==='failed' || (!selected?.rolling_refinement && !saved);
   $('refinement-status').textContent=noAudio?'No audio was recorded.':unverified?'Recorded audio could not be verified.':({waiting:'Accuracy pass queued · recent words may still change',refining:'Rechecking sealed passages…',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Accuracy pass incomplete · your transcript is saved'})[status] || '';
   if(saved && !noAudio && !unverified && status==='refining')$('refinement-status').textContent='Rechecking saved passages…';
-  $('refinement-status').title=saved?'Re-decode complete saved passages using their captured Auto or explicit language setting. Saved corrections and speaker identities are retained; incomplete results keep their previous words. Language uncertainty stays in passage details. Long passages require one supported language and unambiguous context timing. Non-English word times are uncalibrated estimates.':'Speakerdesk rechecks sealed passages while recording continues. Incomplete results retain previous words; language uncertainty stays in passage details. Pause accuracy independently of recording. Your saved corrections are never overwritten.';
+  $('refinement-status').title=saved?'Re-decode complete saved passages using their captured Auto or explicit language setting. Saved corrections and speaker identities are retained; incomplete results keep their previous words. Passages blocked by language appear in the transcript with repair controls. Long passages require one supported language and unambiguous context timing. Non-English word times are uncalibrated estimates.':'Speakerdesk rechecks sealed passages while recording continues. Incomplete results retain previous words. Passages blocked by language appear in the transcript with repair controls after recording stops. Pause accuracy independently of recording. Your saved corrections are never overwritten.';
   $('refinement-toggle').hidden=noAudio || unverified || status==='complete';
   $('refinement-toggle').textContent=saved && !selected?.rolling_refinement?'Start saved accuracy pass':status==='paused'?'Resume accuracy pass':status==='unresolved'?'Retry accuracy pass':'Pause accuracy pass';
+  const blocked=unresolvedLanguagePassages();
+  if(blocked.length) {
+    $('refinement-status').textContent=`${blocked.length} ${blocked.length===1?'passage needs':'passages need'} a language · your transcript is saved`;
+    $('refinement-toggle').textContent='Choose passage language';
+  }
 }
 async function toggleRefinement() {
+  const blocked=unresolvedLanguagePassages()[0];
+  if(blocked) {
+    // Navigation is explicit; polling must never move focus out of an edit.
+    $('search').value='';renderSegments();
+    const card=$('segments').querySelector(`[data-segment-id="${CSS.escape(blocked.id)}"]`);
+    const repair=card?.querySelector('.passage-repair');
+    if(repair){
+      repair.open=true;const language=repair.querySelector('select');
+      if(language && !language.disabled)language.focus();
+      else if(card){card.tabIndex=-1;card.focus();}
+    }
+    return;
+  }
   const jid=selected.id,button=$('refinement-toggle');button.disabled=true;
   try { await api(`/api/jobs/${jid}/refinement/${(!selected.rolling_refinement && selected.saved_refinement_available) || ['paused','unresolved'].includes(selected.refinement_status)?'resume':'pause'}`,{method:'POST'});await poll(); }
   catch(error){notice(error.message,true);}finally{button.disabled=false;}
@@ -136,7 +154,8 @@ function liveCard(segment) {
   // Evidence is available on request; normal reading shows only the words.
   const details=node('details',undefined,'rolling-review');details.hidden=true;
   details.append(node('summary','Passage details'));appendPassageEvidence(details,segment);
-  details.append(node('div',undefined,'rolling-repair'));
+  const repair=node('div',undefined,'rolling-repair');
+  if(languageBlockedPassage(segment))body.append(repair);else details.append(repair);
   const inspect=node('button',undefined,'segment-action passage-details-toggle');inspect.type='button';
   inspect.append(icon('sliders-horizontal'),node('span','Details'));inspect.title='Passage details';
   inspect.setAttribute('aria-label',`Details for passage at ${passageTime(segment.start)}`);inspect.setAttribute('aria-expanded','false');
@@ -176,6 +195,9 @@ function livePassageRows() {
 }
 function refreshStoppedPassageRepair(card,segment,signature) {
   const host=card.querySelector('.rolling-repair');
+  const blocked=languageBlockedPassage(segment);
+  const parent=card.querySelector(blocked?'.segment-body':'.rolling-review');
+  if(host.parentElement!==parent && (blocked || !host.contains(document.activeElement)))parent.append(host);
   const visibleSource=()=>doc.segments.find(row=>row.id===segment.id)===segment && card.querySelector('textarea').value===segment.text;
   const key=JSON.stringify([signature,isLive(),selected.status,!!selected.passage_retry,!!selected.passage_separation,hasPassageDrafts(),hasPendingPassageSaves(),visibleSource()]);
   if(host.dataset.signature===key || host.contains(document.activeElement))return;
@@ -183,7 +205,7 @@ function refreshStoppedPassageRepair(card,segment,signature) {
   host.replaceChildren();host.dataset.signature=key;
   if(!isLive()) {
     appendPassageRepair(host,segment,passageReviewReason(segment),visibleSource);
-    host.querySelector('.passage-repair').open=!!open;
+    host.querySelector('.passage-repair').open=languageBlockedPassage(segment) || !!open;
   }
 }
 function renderLiveSegments() {

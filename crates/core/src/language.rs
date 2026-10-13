@@ -171,7 +171,11 @@ pub struct LanguageDetection {
     pub candidates: Vec<Candidate>,
     pub detector_error: bool,
     pub context_end_sample: Option<i64>,
+    pub context_evidence: Option<LanguageContextEvidence>,
     pub probes: Vec<ProbeEvent>,
+    /// At most two selected direct self-donor receipts survive a routed append.
+    /// These remain separate from the current crop's language observations.
+    pub context_witnesses: Vec<ProbeEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -258,6 +262,7 @@ pub(crate) fn summarize_decisions(events: Vec<ProbeEvent>) -> Option<PolicyDecis
         detection.margin = None;
         detection.candidates.clear();
         detection.context_end_sample = None;
+        detection.context_evidence = None;
     }
     detection.detector_error = events.iter().any(|event| event.decision.detector_error);
     let review = mixed || unknown.is_some() || events.iter().any(|event| event.review);
@@ -277,6 +282,33 @@ pub(crate) fn summarize_decisions(events: Vec<ProbeEvent>) -> Option<PolicyDecis
 pub struct LanguageContext {
     pub language: String,
     pub end_sample: i64,
+    pub evidence: Option<LanguageContextEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageContextAnchor {
+    pub utterance_id: String,
+    pub row_start_sample: i64,
+    pub speaker_track_id: Option<String>,
+    pub start_sample: i64,
+    pub end_sample: i64,
+    pub machine_revision: i64,
+    pub audio_revision: i64,
+    pub probe_sha256: String,
+    pub probe_index: Option<usize>,
+}
+
+/// Borrowed decisions retain their actual acoustic sources. They never become
+/// new direct detections when later passages choose a language context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageContextEvidence {
+    pub scope: &'static str,
+    pub speaker_track_id: Option<String>,
+    pub language_epoch: i64,
+    pub interpretation_generation: u64,
+    pub capture_source: Option<serde_json::Value>,
+    pub stream_generation: Option<i64>,
+    pub anchors: Vec<LanguageContextAnchor>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -575,6 +607,21 @@ impl<'a> SpeechTranscriber<'a> {
 
     pub fn context(&self) -> Option<&LanguageContext> {
         self.context.as_ref()
+    }
+
+    /// The import adapter routes a bounded crop on its local clock. Validate
+    /// source context in `new` first; only this owner translates its origin.
+    pub(crate) fn translate_context_to_crop(&mut self, origin: i64) -> Result<(), LanguageError> {
+        if origin < 0 {
+            return Err(LanguageError::InvalidContext);
+        }
+        if let Some(context) = &mut self.context {
+            context.end_sample = context
+                .end_sample
+                .checked_sub(origin)
+                .ok_or(LanguageError::InvalidContext)?;
+        }
+        Ok(())
     }
 
     pub fn set_language(&mut self, language: &str) -> Result<(), LanguageError> {
@@ -988,7 +1035,9 @@ fn blank_detection(mode: DetectionMode, reason: DetectionReason) -> LanguageDete
         candidates: Vec::new(),
         detector_error: false,
         context_end_sample: None,
+        context_evidence: None,
         probes: Vec::new(),
+        context_witnesses: Vec::new(),
     }
 }
 
@@ -1123,7 +1172,13 @@ fn rescue_follower(
 fn fresh_context(context: &Option<LanguageContext>, start_sample: i64) -> Option<LanguageContext> {
     let ctx = context.as_ref()?;
     let delta = start_sample - ctx.end_sample;
-    if (0..=RECENT_CONTEXT_SAMPLES).contains(&delta) {
+    let main = ctx.evidence.as_ref().is_some_and(|e| {
+        matches!(
+            e.scope,
+            "speaker_main_language" | "meeting_main_language" | "same_anchor_direct_windows"
+        ) && e.anchors.len() >= 2
+    });
+    if main || (0..=RECENT_CONTEXT_SAMPLES).contains(&delta) {
         Some(ctx.clone())
     } else {
         None
@@ -1134,6 +1189,7 @@ fn apply_rescue(context: &LanguageContext, probe: &mut Probe) {
     probe.language = Some(context.language.clone());
     probe.detection.reason = DetectionReason::RecentContext;
     probe.detection.context_end_sample = Some(context.end_sample);
+    probe.detection.context_evidence = context.evidence.clone();
 }
 
 fn snapshot(probe: &Probe, start_sample: i64) -> ProbeEvent {
@@ -1316,6 +1372,7 @@ fn update_context(
                         *context = Some(LanguageContext {
                             language: language.clone(),
                             end_sample: event.end_sample,
+                            evidence: None,
                         });
                     }
                 } else if context
@@ -1713,6 +1770,7 @@ mod tests {
             Some(&LanguageContext {
                 language: "en".to_owned(),
                 end_sample: 3 * 16_000,
+                evidence: None,
             })
         );
     }
@@ -1765,6 +1823,7 @@ mod tests {
             Some(LanguageContext {
                 language: "en".to_owned(),
                 end_sample: 0,
+                evidence: None,
             }),
         );
         let rows = rig
@@ -1793,6 +1852,7 @@ mod tests {
             Some(LanguageContext {
                 language: "en".to_owned(),
                 end_sample: 0,
+                evidence: None,
             }),
         );
         let rows = rig
@@ -1823,6 +1883,7 @@ mod tests {
             Some(&LanguageContext {
                 language: "fr".to_owned(),
                 end_sample: 3 * 16_000,
+                evidence: None,
             })
         );
     }
@@ -1840,6 +1901,7 @@ mod tests {
                 Some(LanguageContext {
                     language: "fr".to_owned(),
                     end_sample: 16_000,
+                    evidence: None,
                 }),
             );
             let row = rig
@@ -1910,6 +1972,7 @@ mod tests {
             Some(LanguageContext {
                 language: "en".to_owned(),
                 end_sample: 0,
+                evidence: None,
             }),
             vec![Err(RouteError::Recognition)],
         );
@@ -1943,6 +2006,7 @@ mod tests {
             Some(LanguageContext {
                 language: "fr".to_owned(),
                 end_sample: 0,
+                evidence: None,
             }),
             Vec::new(),
         );
@@ -2208,6 +2272,7 @@ mod tests {
             Some(LanguageContext {
                 language: "fr".to_owned(),
                 end_sample: 16_000,
+                evidence: None,
             }),
         );
         let mut shared = memo;
@@ -2225,6 +2290,7 @@ mod tests {
             Some(LanguageContext {
                 language: "en".to_owned(),
                 end_sample: 16_000,
+                evidence: None,
             }),
         );
         let right = second
@@ -2343,6 +2409,7 @@ mod tests {
             Some(LanguageContext {
                 language: "ru".to_owned(),
                 end_sample: 0,
+                evidence: None,
             }),
         ) {
             Err(error) => assert_eq!(error.to_string(), "Invalid preceding language context."),
@@ -2370,6 +2437,7 @@ mod tests {
             Some(LanguageContext {
                 language: "fr".to_owned(),
                 end_sample: 0,
+                evidence: None,
             }),
         );
         kept.router.set_language("auto").unwrap();

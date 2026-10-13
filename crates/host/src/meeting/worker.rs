@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use speakerdesk_core::{
     audio::RecordingReader,
-    document::Job,
+    document::{Job, Segment},
     error::{ApiError, ChildError, StoreError},
     ids::JobId,
     live::{
@@ -196,6 +196,43 @@ impl Engines {
             Self::Sources(e) => e.poll(),
         }
     }
+    fn refresh_language_ownership(&mut self, rows: &[Segment], generation: u64) {
+        match self {
+            Self::Single(engine) => engine.refresh_language_ownership(rows, generation),
+            Self::Sources(engine) => engine.refresh_language_ownership(rows, generation),
+        }
+    }
+    fn accept_language_publication(
+        &mut self,
+        job: &Job,
+        prior: Option<&Segment>,
+        accepted: &Segment,
+    ) {
+        let rows = &job.document.as_ref().expect("document").segments;
+        let generation = job
+            .extra
+            .get("language_context_generation")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        match self {
+            Self::Single(engine) => {
+                engine.accept_language_publication(rows, generation, prior, accepted)
+            }
+            Self::Sources(engine) => {
+                engine.accept_language_publication(rows, generation, prior, accepted)
+            }
+        }
+    }
+    fn retry_language_context(
+        &mut self,
+        rejected: &Segment,
+        accepted: Option<&Segment>,
+    ) -> Result<Option<Vec<EngineEvent>>, LiveError> {
+        match self {
+            Self::Single(engine) => engine.retry_language_context(rejected, accepted),
+            Self::Sources(engine) => engine.retry_language_context(rejected, accepted),
+        }
+    }
     fn continue_edited(
         &mut self,
         boundary: &EditedBoundary,
@@ -293,11 +330,55 @@ fn publish(
                     continue;
                 }
                 let mut boundary = None;
+                let mut context_retry = None;
                 stream_update(app, id, op, generation, |job| {
                     let document = job
                         .document
                         .as_ref()
                         .ok_or_else(|| conflict("Meeting document is missing."))?;
+                    if crate::routes::refinement::context_superseded(job, &candidate) {
+                        engine.refresh_language_ownership(
+                            &document.segments,
+                            job.extra
+                                .get("language_context_generation")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0),
+                        );
+                        let prior = document.segments.iter().find(|row| row.id == candidate.id);
+                        let end = candidate.rest["end_sample"].as_i64().unwrap_or(-1);
+                        let source_owned = prior.is_none_or(|row| {
+                            row.protected_fields.as_ref().is_none_or(Vec::is_empty)
+                                && row.capture_source == candidate.capture_source
+                                && row.canonical_utterance_id == candidate.canonical_utterance_id
+                                && row.rest.get("start_sample")
+                                    == candidate.rest.get("start_sample")
+                                && row.rest.get("language_epoch")
+                                    == candidate.rest.get("language_epoch")
+                                && row.rest.get("language_mode")
+                                    == candidate.rest.get("language_mode")
+                                && row.rest.get("stream_generation")
+                                    == candidate.rest.get("stream_generation")
+                                && !(row.refinement_state.as_deref() == Some("refined")
+                                    && row.audio_revision == candidate.audio_revision)
+                        });
+                        let language_owned = job
+                            .extra
+                            .get("language_history")
+                            .and_then(Value::as_array)
+                            .is_none_or(|history| {
+                                history
+                                    .iter()
+                                    .filter(|entry| {
+                                        entry["epoch"].as_i64()
+                                            > candidate.rest["language_epoch"].as_i64()
+                                    })
+                                    .all(|entry| entry["start_sample"].as_i64().unwrap_or(0) >= end)
+                            });
+                        if source_owned && language_owned {
+                            context_retry = Some(prior.cloned());
+                        }
+                        return Ok(());
+                    }
                     // Accepted estimates own this original slot. A later canonical
                     // snapshot/recovery must not recreate its mixed source row.
                     if document.segments.iter().any(|row| {
@@ -369,9 +450,83 @@ fn publish(
                     {
                         changed = Some(changed.map_or(index, |old: usize| old.min(index)));
                     }
+                    let prior = document
+                        .segments
+                        .iter()
+                        .find(|row| row.id == candidate.id)
+                        .cloned();
                     job.document = Some(merged);
+                    let accepted = job
+                        .document
+                        .as_ref()
+                        .expect("document")
+                        .segments
+                        .iter()
+                        .find(|row| row.id == candidate.id)
+                        .expect("accepted canonical passage");
+                    rolling.published(job, prior.as_ref(), accepted);
+                    engine.accept_language_publication(job, prior.as_ref(), accepted);
                     Ok(())
                 })?;
+                if let Some(accepted) = context_retry {
+                    // The store lock has been released. Models still use the
+                    // recording's cancellation token; every emitted event
+                    // returns through the same operation/source/edit guards.
+                    if let Some(retry) =
+                        engine.retry_language_context(&candidate, accepted.as_ref())?
+                    {
+                        for event in retry.into_iter().rev() {
+                            events.push_front(event);
+                        }
+                    } else {
+                        let mut retained = (*candidate).clone();
+                        retained.text.clear();
+                        retained.language = None;
+                        if let Some(detection) = &mut retained.language_detection {
+                            fn unborrow(decision: &mut Value) {
+                                if decision["reason"] == "recent_context" {
+                                    decision["reason"] = json!("needs_language");
+                                    decision
+                                        .as_object_mut()
+                                        .map(|map| map.remove("context_evidence"));
+                                }
+                            }
+                            unborrow(detection);
+                            if let Some(probes) = detection["probes"].as_array_mut() {
+                                for probe in probes {
+                                    if probe["decision"]["reason"] == "recent_context" {
+                                        probe["language"] = Value::Null;
+                                        unborrow(&mut probe["decision"]);
+                                    }
+                                }
+                            }
+                        }
+                        retained.rest.insert(
+                            "canonical_unresolved".into(),
+                            json!("language_context_changed"),
+                        );
+                        retained.refinement_state = Some("unresolved".into());
+                        retained.review = Some(true);
+                        stream_update(app, id, op, generation, |job| {
+                            let document = job
+                                .document
+                                .as_ref()
+                                .ok_or_else(|| conflict("Meeting document is missing."))?;
+                            job.document = Some(apply_canonical_candidate(document, &retained));
+                            job.extra.insert("refinement_error".into(), json!("Language context changed again; previous words and audio are retained."));
+                            if let Some(index) = job.document.as_ref().and_then(|document| {
+                                document
+                                    .segments
+                                    .iter()
+                                    .position(|row| row.id == retained.id)
+                            }) {
+                                rolling.changed(index);
+                                changed = Some(changed.map_or(index, |old: usize| old.min(index)));
+                            }
+                            Ok(())
+                        })?;
+                    }
+                }
                 if let Some(boundary) = boundary {
                     boundaries.insert(boundary.utterance_id.clone(), boundary.end_sample);
                     let continuation = engine.continue_edited(&boundary)?;
@@ -589,7 +744,9 @@ pub(super) async fn worker(
                 if eof_published {
                     // A cooperative decode may have published EOF while yielding to capture.
                     while enrichment.step(&operation, &id, &mut || Ok(()))?
-                        || accuracy.step(&app, &operation)?
+                        || accuracy.step(&app, &operation, &mut |job, prior, accepted| {
+                            engine.accept_language_publication(job, Some(prior), accepted);
+                        })?
                     {}
                     return Ok(());
                 }
@@ -656,7 +813,10 @@ pub(super) async fn worker(
                     }
                     progressed |= enriched;
                     if !enriched {
-                        let refined = accuracy.step(&app, &operation)?;
+                        let refined =
+                            accuracy.step(&app, &operation, &mut |job, prior, accepted| {
+                                engine.accept_language_publication(job, Some(prior), accepted);
+                            })?;
                         progressed |= refined;
                     }
                 }

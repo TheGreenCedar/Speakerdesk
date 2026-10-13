@@ -50,6 +50,7 @@ const SERVER_REST_KEYS: &[&str] = &[
     "bounded_decode_provenance",
     "audio_state",
     "canonical_unresolved",
+    "refinement_issue",
 ];
 
 const TYPED_SERVER_KEYS: &[&str] = &[
@@ -81,6 +82,7 @@ pub struct PassageEditOutcome {
     pub document: Document,
     pub segment: Segment,
     pub revision: i64,
+    pub language_context_changed: bool,
 }
 
 /// Inputs for `PUT /api/jobs/<jid>/transcript`.
@@ -106,6 +108,7 @@ pub struct SaveOutcome {
     pub voice_checks: Map<String, Value>,
     /// `save` always drops `voice_suggestions`.
     pub clear_voice_suggestions: bool,
+    pub language_context_changed: bool,
 }
 
 /// `edit_passage` rules: protected fields, stale passage revision, server attachments.
@@ -159,9 +162,56 @@ pub fn edit_passage(input: PassageEditInput<'_>) -> Result<PassageEditOutcome, A
     let segment = row.clone();
     validated.edited_at = Some(input.now);
     Ok(PassageEditOutcome {
+        language_context_changed: language_row_interpretation_changed(&prior, &segment),
         document: validated,
         segment,
         revision: input.revision + 1,
+    })
+}
+
+/// User changes to acoustic ownership/interpretation invalidate one operation's
+/// compact main-language summary. Spelling and display-name edits are neutral.
+fn language_row_interpretation_changed(prior: &Segment, row: &Segment) -> bool {
+    prior.start != row.start
+        || prior.end != row.end
+        || prior.capture_source != row.capture_source
+        || prior.audio_revision != row.audio_revision
+        || [
+            "language_epoch",
+            "language_mode",
+            "stream_generation",
+            "source_speaker_candidates",
+        ]
+        .iter()
+        .any(|key| prior.rest.get(*key) != row.rest.get(*key))
+        || prior
+            .protected_fields
+            .as_ref()
+            .is_some_and(|fields| fields.iter().any(|field| field == "speaker"))
+            != row
+                .protected_fields
+                .as_ref()
+                .is_some_and(|fields| fields.iter().any(|field| field == "speaker"))
+        || prior.language != row.language
+        || (row
+            .language_detection
+            .as_ref()
+            .is_some_and(|d| d["mode"] == "manual")
+            && prior.language_detection != row.language_detection)
+}
+fn language_interpretation_changed(before: &Document, after: &Document) -> bool {
+    if before.segments.len() != after.segments.len() {
+        return true;
+    }
+    let priors: HashMap<&str, &Segment> = before
+        .segments
+        .iter()
+        .map(|row| (row.id.as_str(), row))
+        .collect();
+    after.segments.iter().any(|row| {
+        priors
+            .get(row.id.as_str())
+            .is_none_or(|prior| language_row_interpretation_changed(prior, row))
     })
 }
 
@@ -196,7 +246,11 @@ pub fn save_transcript(input: SaveInput<'_>) -> Result<SaveOutcome, ApiError> {
         input.speaker_assignments,
         input.voice_checks,
     );
+    let language_context_changed = input
+        .saved
+        .is_some_and(|prior| language_interpretation_changed(prior, &document));
     Ok(SaveOutcome {
+        language_context_changed,
         document,
         revision: input.revision + 1,
         status: "ready",
@@ -276,6 +330,7 @@ fn finish_passage_edit(row: &mut Segment, prior: &Segment, changes: &Map<String,
         row.rest.remove("review");
         row.review = Some(false);
     }
+    clear_stale_refinement_issue(row);
 }
 
 fn apply_save_rules(segment: &mut Segment, prior: Option<&Segment>, imported: bool, now: f64) {
@@ -289,9 +344,34 @@ fn apply_save_rules(segment: &mut Segment, prior: Option<&Segment>, imported: bo
         segment.rest.remove("text_audio_anchor");
     }
     apply_voice(segment, prior, imported, now);
+    if prior.is_some_and(|prior| language_row_interpretation_changed(prior, segment)) {
+        segment.rest.remove("refinement_issue");
+    }
+    clear_stale_refinement_issue(segment);
+}
+
+fn clear_stale_refinement_issue(segment: &mut Segment) {
+    if segment.rest.get("refinement_issue").is_some_and(|issue| {
+        issue["segment_version"].as_str() != Some(crate::live::segment_version(segment).as_str())
+    }) {
+        segment.rest.remove("refinement_issue");
+    }
 }
 
 fn restore_server_owned(segment: &mut Segment, prior: Option<&Segment>) {
+    if let Some(detection) = segment
+        .language_detection
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        detection.remove("context_witnesses");
+        if let Some(witnesses) = prior
+            .and_then(|row| row.language_detection.as_ref())
+            .and_then(|d| d.get("context_witnesses"))
+        {
+            detection.insert("context_witnesses".into(), witnesses.clone());
+        }
+    }
     segment.rest.remove("decode_core_plan");
     for key in SERVER_REST_KEYS {
         segment.rest.remove(*key);
@@ -442,16 +522,48 @@ fn apply_voice(segment: &mut Segment, prior: Option<&Segment>, imported: bool, n
     let Some(mut candidate) = prior_retry else {
         return;
     };
+    let explicit_language_repair = prior.is_some_and(|prior| {
+        candidate["id"].is_string()
+            && candidate["accepted_at"].is_null()
+            && candidate["error"].is_null()
+            && candidate["original_text"] == prior.text
+            && candidate["text"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty() && text == segment.text)
+            && candidate["language"].as_str().is_some_and(|language| {
+                crate::languages::is_supported(language)
+                    && segment.language.as_deref() == Some(language)
+            })
+            && segment
+                .language_detection
+                .as_ref()
+                .is_some_and(|d| d["mode"] == "manual" && d["reason"] == "passage_retry")
+            && (segment.language != prior.language
+                || segment.language_detection != prior.language_detection)
+    });
     if let Some(prior) = prior
         && let Some(object) = candidate.as_object_mut()
     {
         let candidate_text = object.get("text").and_then(Value::as_str);
-        if candidate_text == Some(segment.text.as_str()) && segment.text != prior.text {
+        if candidate_text == Some(segment.text.as_str())
+            && (segment.text != prior.text || explicit_language_repair)
+        {
             object.insert(
                 "replaced_text".to_string(),
                 Value::String(prior.text.clone()),
             );
             object.insert("accepted_at".to_string(), f64_value(now));
+            if explicit_language_repair && segment.text == prior.text {
+                let mut protected = segment.protected_fields.clone().unwrap_or_default();
+                if !protected.iter().any(|field| field == "text") {
+                    protected.push("text".into());
+                    protected.sort();
+                }
+                segment.protected_fields = Some(protected);
+                segment.machine_revision = Some(prior.machine_revision.unwrap_or(0) + 1);
+                segment.refinement_state = Some("edited".into());
+                clear_alignment_bundle(segment);
+            }
         }
     }
     segment.retry_candidate = Some(candidate);
@@ -813,7 +925,9 @@ mod tests {
 
     #[test]
     fn save_restores_server_owned_fields_and_protects_edits() {
-        let document = saved_document(prior_segment());
+        let mut document = saved_document(prior_segment());
+        document.segments[0].language_detection =
+            Some(json!({"context_witnesses":[{"owner":"server"}]}));
         let (assignments, checks) = empty_maps();
         let unchanged = json!({
             "revision": 7,
@@ -828,6 +942,7 @@ mod tests {
                     "audio_revision": 0,
                     "canonical_utterance_id": "forged",
                     "alignment": {"forged": true},
+                    "language_detection": {"context_witnesses":[{"owner":"uploaded"}]},
                     "language_generation": 99,
                     "machine_revision": 900,
                     "protected_fields": ["speaker"]
@@ -851,6 +966,10 @@ mod tests {
         let segment = &outcome.document.segments[0];
         assert_eq!(segment.alignment, Some(json!({"old": true})));
         assert_eq!(segment.audio_revision, Some(4));
+        assert_eq!(
+            segment.language_detection.as_ref().unwrap()["context_witnesses"],
+            json!([{"owner":"server"}])
+        );
         assert_eq!(
             segment.canonical_utterance_id.as_deref(),
             Some("canonical-one")

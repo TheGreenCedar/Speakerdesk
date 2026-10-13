@@ -55,6 +55,7 @@ const WARN_TIMING_MANUAL: &str = "Retained audio split into ≤25-second crops; 
 pub struct ImportError {
     pub message: String,
     pub(crate) child: Option<ChildError>,
+    pub(crate) language_failure: Option<&'static str>,
 }
 
 impl ImportError {
@@ -62,6 +63,7 @@ impl ImportError {
         Self {
             message: message.into(),
             child: None,
+            language_failure: None,
         }
     }
 }
@@ -245,7 +247,7 @@ pub fn import_recording<M: Models + ?Sized>(
     let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
     let work = plan_work(&ledger, pcm, &chunks, &spans)?;
     let mut transcriber = if work.iter().any(|item| item.blocked.is_none()) {
-        Some(open_transcriber(models, language, ledger, None)?)
+        Some(open_transcriber(models, language, ledger, None, None)?)
     } else {
         None
     };
@@ -352,7 +354,7 @@ pub fn separated_passage<M: Models + ?Sized>(
 ) -> Result<PassageCandidate, ImportError> {
     LanguageChoice::parse(language).map_err(language_err)?;
     let end = pcm.len() as f64 / 16000.;
-    let parts = decode_passage_source(models, pcm, 0., end, language, None, None)?;
+    let parts = decode_passage_source(models, pcm, 0., end, language, None, None, None)?;
     let languages: std::collections::BTreeSet<_> = parts
         .iter()
         .filter(|p| !p.text.trim().is_empty())
@@ -388,6 +390,7 @@ pub fn retry_passage_source<M: Models + ?Sized>(
         language,
         processed_microphone_catalog,
         None,
+        None,
     )?;
     Ok(candidate_from_parts(start, end, language, &parts))
 }
@@ -402,6 +405,7 @@ fn decode_passage_source<M: Models + ?Sized>(
     language: &str,
     processed_microphone_catalog: Option<&str>,
     context_padding: Option<(u32, u32)>,
+    language_context: Option<(crate::language::LanguageContext, i64)>,
 ) -> Result<Vec<Decoded>, ImportError> {
     let duration = require_pcm(pcm)?;
     if !start.is_finite()
@@ -441,6 +445,7 @@ fn decode_passage_source<M: Models + ?Sized>(
             language,
             ledger,
             Some(child_failure.clone()),
+            language_context,
         )?)
     } else {
         None
@@ -492,24 +497,6 @@ pub(crate) fn complete_transcription(review: Option<&Value>) -> bool {
 }
 
 /// Keep a saved anchor intact unless every spoken part supplies complete text.
-/// Routing confidence remains evidence attached to the result, not a decode failure.
-pub(crate) fn refine_passage_source<M: Models + ?Sized>(
-    models: &M,
-    pcm: &[f32],
-    language_mode: &str,
-    start_sample: i64,
-    processed_microphone_catalog: Option<&str>,
-) -> Result<RefinedSource, ImportError> {
-    refine_context_source(
-        models,
-        pcm,
-        language_mode,
-        start_sample,
-        processed_microphone_catalog,
-        None,
-    )
-}
-
 /// A physical context crop is one recognition request (up to 20 seconds). Only
 /// Cohere sees edge padding; VAD, language probes and CTC retain physical coordinates.
 pub(crate) fn refine_context_source<M: Models + ?Sized>(
@@ -519,6 +506,7 @@ pub(crate) fn refine_context_source<M: Models + ?Sized>(
     start_sample: i64,
     processed_microphone_catalog: Option<&str>,
     context_padding: Option<(u32, u32)>,
+    language_context: Option<crate::language::LanguageContext>,
 ) -> Result<RefinedSource, ImportError> {
     let parts = decode_passage_source(
         models,
@@ -528,11 +516,32 @@ pub(crate) fn refine_context_source<M: Models + ?Sized>(
         language_mode,
         processed_microphone_catalog,
         context_padding,
+        language_context.map(|context| (context, start_sample)),
     )?;
     let incomplete = || {
-        ImportError::new(
+        let mut error = ImportError::new(
             "The new decode is incomplete or its language could not be routed; previous words and audio are retained.",
-        )
+        );
+        error.language_failure = parts
+            .iter()
+            .filter(|part| part.language.is_none())
+            .filter_map(|part| part.detection.as_ref())
+            .find_map(|detection| {
+                use crate::language::{DetectionMode, DetectionReason};
+                if detection.mode != DetectionMode::Auto {
+                    return None;
+                }
+                if detection.detector_error {
+                    return Some("detector_error");
+                }
+                match detection.reason {
+                    DetectionReason::Unsupported => Some("unsupported"),
+                    DetectionReason::NeedsLanguage => Some("uncertain"),
+                    DetectionReason::Mixed => Some("mixed"),
+                    _ => None,
+                }
+            });
+        error
     };
     if parts.is_empty()
         || parts.iter().any(|part| {
@@ -1377,26 +1386,30 @@ fn manual_language(language: &str) -> Option<String> {
 
 pub(crate) fn detection_value(detection: &LanguageDetection) -> Value {
     let mut value = detection_summary(detection);
-    if !detection.probes.is_empty() {
-        value["probes"] = json!(
-            detection
-                .probes
-                .iter()
-                .map(|probe| json!({
-                    "start_sample": probe.start_sample,
-                    "end_sample": probe.end_sample,
-                    "language": probe.language,
-                    "decision": detection_summary(&probe.decision),
-                    "review": probe.review,
-                }))
-                .collect::<Vec<_>>()
-        );
+    for (name, probes) in [
+        ("probes", &detection.probes),
+        ("context_witnesses", &detection.context_witnesses),
+    ] {
+        if !probes.is_empty() {
+            value[name] = json!(
+                probes
+                    .iter()
+                    .map(|probe| json!({
+                        "start_sample": probe.start_sample,
+                        "end_sample": probe.end_sample,
+                        "language": probe.language,
+                        "decision": detection_summary(&probe.decision),
+                        "review": probe.review,
+                    }))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
     value
 }
 
 fn detection_summary(detection: &LanguageDetection) -> Value {
-    json!({
+    let mut value = json!({
         "mode": detection.mode.as_str(),
         "reason": detection.reason.as_str(),
         "probability": detection.probability,
@@ -1407,6 +1420,25 @@ fn detection_summary(detection: &LanguageDetection) -> Value {
             "language": candidate.language,
             "probability": candidate.probability,
         })).collect::<Vec<_>>(),
+    });
+    if let Some(evidence) = &detection.context_evidence {
+        value["context_evidence"] = context_evidence_value(evidence);
+    }
+    value
+}
+
+pub(crate) fn context_evidence_value(evidence: &crate::language::LanguageContextEvidence) -> Value {
+    json!({
+            "scope": evidence.scope,
+            "speaker_track_id": evidence.speaker_track_id,
+            "language_epoch": evidence.language_epoch,
+            "interpretation_generation": evidence.interpretation_generation,
+            "capture_source": evidence.capture_source,
+            "stream_generation": evidence.stream_generation,
+            "anchors": evidence.anchors.iter().map(|anchor| json!({
+                "utterance_id":anchor.utterance_id,"row_start_sample":anchor.row_start_sample,"speaker_track_id":anchor.speaker_track_id,"start_sample":anchor.start_sample,"end_sample":anchor.end_sample,
+                "machine_revision":anchor.machine_revision,"audio_revision":anchor.audio_revision,"probe_sha256":anchor.probe_sha256,"probe_index":anchor.probe_index
+            })).collect::<Vec<_>>(),
     })
 }
 
@@ -1613,6 +1645,7 @@ fn open_transcriber<'a, M: Models + ?Sized>(
     language: &str,
     ledger: SpeechLedger,
     failure: Option<std::sync::Arc<std::sync::Mutex<Option<ChildError>>>>,
+    language_context: Option<(crate::language::LanguageContext, i64)>,
 ) -> Result<SpeechTranscriber<'a>, ImportError> {
     let detector = if language == languages::AUTOMATIC {
         Some(Box::new(BorrowedModels::new(models, failure.clone()))
@@ -1620,14 +1653,20 @@ fn open_transcriber<'a, M: Models + ?Sized>(
     } else {
         None
     };
-    SpeechTranscriber::new(
+    let (context, origin) =
+        language_context.map_or((None, 0), |(context, origin)| (Some(context), origin));
+    let mut transcriber = SpeechTranscriber::new(
         language,
         Box::new(ledger),
         detector,
         Box::new(BorrowedModels::new(models, failure.clone())),
-        None,
+        context,
     )
-    .map_err(language_err)
+    .map_err(language_err)?;
+    transcriber
+        .translate_context_to_crop(origin)
+        .map_err(language_err)?;
+    Ok(transcriber)
 }
 
 fn language_err(error: LanguageError) -> ImportError {
@@ -1646,6 +1685,7 @@ fn child_err(error: ChildError) -> ImportError {
     ImportError {
         message,
         child: Some(error),
+        language_failure: None,
     }
 }
 
@@ -1984,7 +2024,7 @@ pub(crate) mod tests {
                     vec![0.99, 0.01],
                 ]);
                 let result =
-                    super::decode_passage_source(&models, &pcm, 0., 9., "auto", None, None);
+                    super::decode_passage_source(&models, &pcm, 0., 9., "auto", None, None, None);
                 let calls = models
                     .events()
                     .iter()
@@ -2042,7 +2082,15 @@ pub(crate) mod tests {
             if case == "unobserved" {
                 models.observed_limit = Some(4 * BLOCK);
             }
-            let result = super::refine_passage_source(&models, &pcm, "auto", 7 * 16000 + 137, None);
+            let result = super::refine_context_source(
+                &models,
+                &pcm,
+                "auto",
+                7 * 16000 + 137,
+                None,
+                None,
+                None,
+            );
             if case == "unobserved" {
                 assert!(
                     result.is_err(),

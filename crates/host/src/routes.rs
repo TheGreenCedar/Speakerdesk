@@ -27,7 +27,7 @@ use axum::routing::{get, patch, post, put};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use speakerdesk_core::audio::{self, AudioError};
-use speakerdesk_core::document::{Document, Job, JobKind};
+use speakerdesk_core::document::{Document, Job, JobKind, Segment};
 use speakerdesk_core::edit::{self, PassageEditInput, SaveInput};
 use speakerdesk_core::error::{ApiError, StoreError};
 use speakerdesk_core::ids::JobId;
@@ -858,6 +858,51 @@ async fn save_transcript(
                 speaker_assignments: &assignments,
                 voice_checks: &checks,
             })?;
+            let accepted_repair = if job.extra.get("refinement_status").and_then(Value::as_str)
+                == Some("unresolved")
+            {
+                job.document.as_ref().and_then(|prior| {
+                    let rows: std::collections::HashMap<&str, &Segment> = prior
+                        .segments
+                        .iter()
+                        .map(|row| (row.id.as_str(), row))
+                        .collect();
+                    outcome
+                        .document
+                        .segments
+                        .iter()
+                        .find(|row| {
+                            rows.get(row.id.as_str())
+                                .is_some_and(|old| accepted_retry(old, row))
+                        })
+                        .map(|row| {
+                            (
+                                row.id.clone(),
+                                row.retry_candidate.as_ref().expect("accepted retry")["id"]
+                                    .as_str()
+                                    .expect("retry id")
+                                    .to_owned(),
+                                speakerdesk_core::live::segment_version(row),
+                            )
+                        })
+                })
+            } else {
+                None
+            };
+            if outcome.language_context_changed {
+                let generation = job
+                    .extra
+                    .get("language_context_generation")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                job.extra.insert(
+                    "language_context_generation".into(),
+                    json!(generation.checked_add(1).ok_or_else(|| ApiError::new(
+                        409,
+                        "Language context generation exhausted."
+                    ))?),
+                );
+            }
             job.document = Some(outcome.document);
             job.revision = outcome.revision;
             job.status = outcome.status.to_string();
@@ -873,15 +918,72 @@ async fn save_transcript(
             if outcome.clear_voice_suggestions {
                 job.extra.remove("voice_suggestions");
             }
-            Ok::<_, ApiError>(())
+            Ok::<_, ApiError>(accepted_repair)
         });
         match result {
-            Ok(Some((job, ()))) => Json(stored_job_json(&job)).into_response(),
+            Ok(Some((job, accepted_repair))) => {
+                if let Some(repair) = accepted_repair {
+                    let app = app.clone();
+                    let id = job.id.to_string();
+                    let generation = job
+                        .extra
+                        .get("operation_generation")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let queue = app.worker.queue_handle();
+                    queue.enqueue(move || {
+                        refinement::resume_after_repair(&app, &id, repair, generation)
+                    });
+                }
+                Json(stored_job_json(&job)).into_response()
+            }
             Ok(None) => error_response(StatusCode::NOT_FOUND, NOT_FOUND),
             Err(error) => from_api(error),
         }
     })
     .await
+}
+
+/// Acceptance must come from the server's fresh retained candidate, never an
+/// uploaded receipt or an unrelated edit that happens to use the same words.
+fn accepted_retry(old: &Segment, row: &Segment) -> bool {
+    let (Some(before), Some(after)) = (&old.retry_candidate, &row.retry_candidate) else {
+        return false;
+    };
+    let Some(language) = before["language"]
+        .as_str()
+        .filter(|code| languages::is_supported(code))
+    else {
+        return false;
+    };
+    before["id"].is_string()
+        && before["id"] == after["id"]
+        && before["accepted_at"].is_null()
+        && after["accepted_at"].is_number()
+        && before["error"].is_null()
+        && before["transcription_review"]["partial_text"] != true
+        && before["original_text"] == old.text
+        && before["text"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty() && text == row.text)
+        && row.language.as_deref() == Some(language)
+        && row.language_detection.as_ref().is_some_and(|decision| {
+            decision["mode"] == "manual" && decision["reason"] == "passage_retry"
+        })
+        && before["start"] == old.start
+        && before["end"] == old.end
+        && before["speaker"] == old.speaker
+        && row.start == old.start
+        && row.end == old.end
+        && row.speaker == old.speaker
+        && row.capture_source == old.capture_source
+        && row.audio_revision == old.audio_revision
+        && row.rest.get("language_epoch") == old.rest.get("language_epoch")
+        && row.rest.get("language_mode") == old.rest.get("language_mode")
+        && row
+            .protected_fields
+            .as_ref()
+            .is_some_and(|fields| fields.iter().any(|field| field == "text"))
 }
 
 async fn edit_passage(
@@ -908,6 +1010,20 @@ async fn edit_passage(
                 body: &body,
                 now: unix_now(),
             })?;
+            if outcome.language_context_changed {
+                let generation = job
+                    .extra
+                    .get("language_context_generation")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                job.extra.insert(
+                    "language_context_generation".into(),
+                    json!(generation.checked_add(1).ok_or_else(|| ApiError::new(
+                        409,
+                        "Language context generation exhausted."
+                    ))?),
+                );
+            }
             job.document = Some(outcome.document);
             job.revision = outcome.revision;
             Ok::<_, ApiError>(outcome.segment)
@@ -1917,6 +2033,99 @@ mod tests {
             diarization: Vec::new(),
             edited_at: None,
             rest: Map::new(),
+        }
+    }
+
+    #[test]
+    fn only_fresh_explicit_accepted_repair_authorizes_accuracy_continuation() {
+        for case in [
+            "accepted",
+            "same_words",
+            "unrelated",
+            "discarded",
+            "duplicate",
+            "stale_candidate",
+            "forged",
+            "error",
+            "partial",
+            "bounds",
+        ] {
+            let mut old = segment("Previous words", 2);
+            old.rest.insert("language_epoch".into(), json!(4));
+            old.rest.insert("language_mode".into(), json!("auto"));
+            old.retry_candidate = Some(
+                json!({"id":"owned-retry","start":old.start,"end":old.end,"speaker":old.speaker,"original_text":old.text,
+                "language":"de","text":if case == "same_words" { "Previous words" } else { "Repaired words" }}),
+            );
+            match case {
+                "duplicate" => old.retry_candidate.as_mut().unwrap()["accepted_at"] = json!(1.),
+                "stale_candidate" => {
+                    old.retry_candidate.as_mut().unwrap()["original_text"] = json!("Older revision")
+                }
+                "forged" => old.retry_candidate = None,
+                "error" => {
+                    old.retry_candidate.as_mut().unwrap()["error"] = json!("Failed model candidate")
+                }
+                "partial" => {
+                    old.retry_candidate.as_mut().unwrap()["transcription_review"] =
+                        json!({"partial_text":true})
+                }
+                _ => {}
+            }
+            let saved = Document {
+                segments: vec![old.clone()],
+                ..document("unused", 2)
+            };
+            let mut incoming = serde_json::to_value(&saved).unwrap();
+            if case != "discarded" {
+                incoming["segments"][0]["text"] = json!(if case == "same_words" {
+                    "Previous words"
+                } else {
+                    "Repaired words"
+                });
+                incoming["segments"][0]["language"] = json!("de");
+                incoming["segments"][0]["language_detection"] = if case == "unrelated" {
+                    json!({"mode":"manual","reason":"override"})
+                } else {
+                    json!({"mode":"manual","reason":"passage_retry"})
+                };
+            }
+            if case == "bounds" {
+                incoming["segments"][0]["start"] = json!(0.1);
+            }
+            if case == "forged" {
+                incoming["segments"][0]["retry_candidate"] = json!({"id":"uploaded","accepted_at":1.,"language":"de","text":"Repaired words"});
+            }
+            let outcome =
+                speakerdesk_core::edit::save_transcript(speakerdesk_core::edit::SaveInput {
+                    status: "ready",
+                    duration: Some(10.),
+                    revision: 7,
+                    saved: Some(&saved),
+                    body: &json!({"revision":7,"document":incoming}),
+                    now: 12.,
+                    speaker_assignments: &Map::new(),
+                    voice_checks: &Map::new(),
+                })
+                .unwrap();
+            let row = &outcome.document.segments[0];
+            assert_eq!(
+                super::accepted_retry(&old, row),
+                matches!(case, "accepted" | "same_words"),
+                "{case}"
+            );
+            assert_eq!(row.rest["language_mode"], "auto");
+            assert_eq!(row.rest["language_epoch"], 4);
+            if matches!(case, "accepted" | "same_words") {
+                assert!(
+                    outcome.language_context_changed,
+                    "accepted language interpretation invalidates main summary"
+                );
+            }
+            if case == "same_words" {
+                assert_eq!(row.protected_fields, Some(vec!["text".into()]));
+                assert!(row.retry_candidate.as_ref().unwrap()["accepted_at"].is_number());
+            }
         }
     }
 

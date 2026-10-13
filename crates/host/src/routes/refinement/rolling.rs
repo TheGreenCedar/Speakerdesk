@@ -12,6 +12,8 @@ struct Control {
     active: Option<CancellationToken>,
     scan_from: Option<usize>,
     final_retry: bool,
+    language_summary: live::MainLanguageSummary,
+    language_generation: Option<u64>,
 }
 impl Rolling {
     pub fn new() -> Self {
@@ -21,6 +23,8 @@ impl Rolling {
             active: None,
             scan_from: None,
             final_retry: false,
+            language_summary: live::MainLanguageSummary::default(),
+            language_generation: None,
         })))
     }
     /// Called with the store lock after an accepted sealed publication. Coalesce
@@ -28,6 +32,13 @@ impl Rolling {
     pub fn changed(&self, index: usize) {
         let mut control = self.0.lock().expect("rolling control");
         control.scan_from = Some(control.scan_from.map_or(index, |old| old.min(index)));
+    }
+    /// Store publication owns both the discovery cursor and accepted language
+    /// memberships. Audio publication does not advance the edit generation.
+    pub fn published(&self, job: &Job, prior: Option<&Segment>, accepted: &Segment) {
+        let mut control = self.0.lock().expect("rolling control");
+        control.refresh_language(job);
+        control.language_summary.accept_publication(prior, accepted);
     }
     pub fn action(
         &self,
@@ -135,6 +146,17 @@ impl Rolling {
         self.0.lock().expect("rolling control").active = None;
     }
 }
+impl Control {
+    fn refresh_language(&mut self, job: &Job) {
+        let generation = context_generation(job);
+        if self.language_generation != Some(generation) {
+            self.language_summary = live::MainLanguageSummary::from_segments(
+                &job.document.as_ref().expect("document").segments,
+            );
+            self.language_generation = Some(generation);
+        }
+    }
+}
 
 struct Pending {
     original: Job,
@@ -148,6 +170,7 @@ struct Pending {
 pub(crate) struct Runner {
     rolling: Rolling,
     pending: Option<Pending>,
+    refreshed_context: Option<(String, String)>,
 }
 impl Drop for Runner {
     fn drop(&mut self) {
@@ -161,12 +184,14 @@ impl Runner {
         Self {
             rolling,
             pending: None,
+            refreshed_context: None,
         }
     }
     pub fn step(
         &mut self,
         app: &AppState,
         operation: &OperationGuard,
+        accepted_language: &mut impl FnMut(&Job, &Segment, &Segment),
     ) -> Result<bool, live::LiveError> {
         if self
             .pending
@@ -271,6 +296,12 @@ impl Runner {
             let Some((mut original, prior, generation, cancellation)) = selection else {
                 return Ok(false);
             };
+            let generation_now = context_generation(&original);
+            let language_context = {
+                let mut control = self.rolling.0.lock().expect("rolling control");
+                control.refresh_language(&original);
+                selected_context(&mut control.language_summary, &original, &prior)
+            };
             // Keep the immutable audio/epoch snapshot, not another transcript history.
             original.document = None;
             original.extra.remove("refinement_history");
@@ -280,7 +311,9 @@ impl Runner {
                 let path = crate::native::passage_recording_path(app.data_dir(), &original, &prior)
                     .map_err(|e| e.to_string())?;
                 let reader = audio::RecordingReader::open(path).map_err(|e| e.to_string())?;
-                let composition = live::SavedRefinement::new(&prior)?;
+                let mut composition =
+                    live::SavedRefinement::with_language_context(&prior, language_context)?;
+                composition.set_interpretation_generation(generation_now);
                 let models = application
                     .live_models(&cancellation)
                     .ok_or("Live accuracy models are unavailable")?;
@@ -307,6 +340,7 @@ impl Runner {
                         generation,
                         &cancellation,
                         Err(error),
+                        accepted_language,
                     )?;
                     return Ok(true);
                 }
@@ -330,12 +364,13 @@ impl Runner {
             pending.generation,
             &pending.cancellation,
             result.map(|candidate| candidate.expect("complete")),
+            accepted_language,
         )?;
         Ok(true)
     }
     #[allow(clippy::too_many_arguments)]
     fn finish(
-        &self,
+        &mut self,
         app: &AppState,
         operation: &OperationGuard,
         original: &Job,
@@ -343,19 +378,43 @@ impl Runner {
         generation: u64,
         cancellation: &CancellationToken,
         result: Result<Segment, live::LiveError>,
+        accepted_language: &mut impl FnMut(&Job, &Segment, &Segment),
     ) -> Result<(), live::LiveError> {
+        let version = (prior.id.clone(), live::segment_version(prior));
+        let allow_refresh = self.refreshed_context.as_ref() != Some(&version);
         let published = app.store().update_job(&operation.id, |current| {
             if !operation.current(current)
                 || cancellation.is_cancelled()
                 || current.extra["refinement_generation"].as_u64() != Some(generation)
             {
-                return Ok(());
+                return Ok(None);
+            }
+            let superseded = fresh(current, original, prior)
+                && result
+                    .as_ref()
+                    .is_ok_and(|candidate| context_superseded(current, candidate));
+            if superseded && allow_refresh {
+                return Ok(current.document.as_ref().and_then(|document| {
+                    document.segments.iter().position(|row| row.id == prior.id)
+                }));
             }
             let accepted = match &result {
                 Ok(candidate) => publish_candidate(current, original, prior, candidate)
                     .map_err(|e| ApiError::new(500, e.to_string()))?,
                 Err(_) => false,
             };
+            if accepted {
+                let row = current
+                    .document
+                    .as_ref()
+                    .expect("document")
+                    .segments
+                    .iter()
+                    .find(|row| row.id == prior.id)
+                    .expect("accepted passage");
+                self.rolling.published(current, Some(prior), row);
+                accepted_language(current, prior, row);
+            }
             if !accepted
                 && !matches!(
                     result,
@@ -366,24 +425,44 @@ impl Runner {
                     ))
                 )
             {
+                if fresh(current, original, prior)
+                    && let Err(error) = &result
+                {
+                    super::publish_language_issue(current, prior, error);
+                }
                 current.extra.get_mut("rolling_refinement").expect("plan")["failed"][&prior.id] =
                     json!(live::segment_version(prior));
                 current.extra.insert(
                     "refinement_error".into(),
-                    json!(result.as_ref().err().map_or(
-                        "Passage changed; previous words retained.".to_string(),
-                        ToString::to_string
-                    )),
+                    json!(if superseded {
+                        "Language context changed again; previous words and audio are retained."
+                            .to_string()
+                    } else {
+                        result.as_ref().err().map_or(
+                            "Passage changed; previous words retained.".to_string(),
+                            ToString::to_string,
+                        )
+                    }),
                 );
             }
             current.extra.insert(
                 "refinement_status".into(),
                 json!(if accepted { "waiting" } else { "unresolved" }),
             );
-            Ok::<_, ApiError>(())
+            Ok::<_, ApiError>(None)
         });
         self.rolling.release();
-        published.map_err(|e| e.message)?;
+        if let Some((_, Some(index))) = published.map_err(|e| e.message)? {
+            self.refreshed_context = Some(version);
+            let mut control = self.rolling.0.lock().expect("rolling control");
+            control.language_generation = None;
+            if control.enabled
+                && control.generation == generation
+                && !operation.cancellation.is_cancelled()
+            {
+                control.scan_from = Some(control.scan_from.map_or(index, |old| old.min(index)));
+            }
+        }
         if let Err(
             error @ live::LiveError::Child(ChildError::ProcessLost { .. } | ChildError::Timeout),
         ) = result

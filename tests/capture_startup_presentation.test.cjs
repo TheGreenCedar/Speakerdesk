@@ -64,7 +64,7 @@ test('saved accuracy controls start, pause and retry through the existing routes
     assert.equal(f.document.getElementById('refinement-toggle').textContent,label);
     if(status==='refining')assert.equal(f.document.getElementById('refinement-status').textContent,'Rechecking saved passages…');
     assert.match(f.document.getElementById('refinement-status').title,/captured Auto or explicit language/);
-    assert.match(f.document.getElementById('refinement-status').title,/Language uncertainty stays in passage details/);
+    assert.match(f.document.getElementById('refinement-status').title,/Passages blocked by language appear in the transcript/);
     assert.match(f.document.getElementById('refinement-status').title,/one supported language/);
     assert.match(f.document.getElementById('refinement-status').title,/Non-English word times are uncalibrated estimates/);
     await f.run('toggleRefinement()');

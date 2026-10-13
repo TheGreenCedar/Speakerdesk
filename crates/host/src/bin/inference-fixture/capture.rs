@@ -14,6 +14,12 @@ fn emit(value: Value) {
     std::io::stdout().flush().unwrap();
 }
 fn audio(start: u32, end: u32, sources: &[&str]) {
+    let silence: Vec<(u32, u32)> = fs::read(
+        std::path::Path::new(&std::env::args().nth(2).unwrap()).join("fixture-silence.json"),
+    )
+    .ok()
+    .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    .unwrap_or_default();
     for position in (start..end).step_by(4000) {
         let stop = (position + 4000).min(end);
         for source in sources {
@@ -28,7 +34,11 @@ fn audio(start: u32, end: u32, sources: &[&str]) {
             };
             let bytes: Vec<u8> = (position..stop)
                 .flat_map(|i| {
-                    let v = scale * (i as f32 * 0.071).sin();
+                    let v = if silence.iter().any(|(a, b)| (*a..*b).contains(&i)) {
+                        0.
+                    } else {
+                        scale * (i as f32 * 0.071).sin()
+                    };
                     v.to_le_bytes()
                 })
                 .collect();
@@ -80,14 +90,19 @@ pub fn run() {
     loop {
         if !paused && root.join(format!("stage-{}", stage + 1)).exists() {
             stage += 1;
-            let samples = if stage == 1 {
-                fs::read_to_string(root.join("first-stage-samples"))
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(112000)
-            } else {
-                112000
-            };
+            let samples = fs::read_to_string(root.join(format!("stage-{stage}-samples")))
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or_else(|| {
+                    if stage == 1 {
+                        fs::read_to_string(root.join("first-stage-samples"))
+                            .ok()
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(112000)
+                    } else {
+                        112000
+                    }
+                });
             let target = endpoint + samples;
             audio(endpoint, target, &sources);
             endpoint = target;
