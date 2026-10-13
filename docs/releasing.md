@@ -15,6 +15,13 @@ manifest is produced.
 
 ## 2. Sign and notarize (AppleRelease)
 
+Before dispatching the signer, register the successful producer's exact run,
+artifact, source commit, archive digest/size and payload hashes in AppleRelease's
+`policy/apps.json`. Retain the native runtime, capture capability and updater
+opt-ins. Validate and merge that one-build registration through its normal PR
+checks; the signer accepts only registered artifacts. Do not dispatch it against
+an older registration or rebuild an already qualified producer artifact.
+
 The [`TheGreenCedar/AppleRelease`](https://github.com/TheGreenCedar/AppleRelease/blob/main/.github/workflows/sign.yml) signer checks the exact producer run, source commit, artifact ID and archive digest against its central policy. It then signs the native code, refreshes the capture-helper receipt, and notarizes and staples the app and the DMG. It also signs a version-bound Tauri updater archive. It uses its existing Developer ID, notarization and updater-signing credentials, and needs no new grants. Private keys stay in AppleRelease and must never appear in logs, chat or source.
 
 The signed artifact contains exactly:

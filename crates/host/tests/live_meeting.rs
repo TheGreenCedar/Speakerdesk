@@ -14,6 +14,7 @@ struct Running {
     url: String,
     token: String,
     client: reqwest::Client,
+    root: std::path::PathBuf,
 }
 impl Running {
     async fn open(root: &Path, dual: bool) -> Self {
@@ -90,6 +91,7 @@ impl Running {
             url,
             token,
             client,
+            root: root.into(),
         };
         running
             .wait("api/config", |v| v["readiness"]["configured"] == true)
@@ -201,7 +203,23 @@ impl Running {
         let response = self
             .post(&format!("api/meetings/{id}/stop"), json!({}))
             .await;
-        assert_eq!(response.status(), 202, "{}", response.text().await.unwrap());
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        if status != 202 {
+            let job = self.get(&format!("api/jobs/{id}")).await;
+            let meeting = self.get("api/meeting").await;
+            let log =
+                fs::read(self.root.join("data").join(id).join("capture.log")).unwrap_or_default();
+            let diagnostics = json!({
+                "meeting":meeting,
+                "job":{"status":job["status"],"message":job["message"],"duration":job["duration"],
+                    "inference_owned":job["inference_owned"],"live_recovery":job["live_recovery"],
+                    "live_inference_error":job["live_inference_error"],"pause_flush":job["pause_flush"],
+                    "capture_audio_coverage":job["capture_audio_coverage"]},
+                "capture_log":String::from_utf8_lossy(&log[..log.len().min(4096)]),
+            });
+            panic!("Stop must return 202; got {status}: {body}; lifecycle: {diagnostics}");
+        }
         self.wait(&format!("api/jobs/{id}"), |v| {
             ["ready", "failed"].contains(&v["status"].as_str().unwrap_or(""))
                 && v["inference_owned"] == false
@@ -1287,6 +1305,7 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
         "capture-error",
         "inference-error",
     ] {
+        eprintln!("live source lifecycle case: {mode}");
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let dual = mode.starts_with("dual");
@@ -1375,14 +1394,26 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
                 host.close(root).await;
             }
             "inference-error" => {
+                // Scripted capture emits whole seven-second bursts. Drain the
+                // first through the writer's half-second watermark before killing
+                // inference, so recovery does not stack unacknowledged bursts.
+                let captured = host
+                    .wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 6.5)
+                    .await;
+                assert_eq!(captured["status"], "recording", "{}", captured["message"]);
                 let child: i32 = fs::read_to_string(root.join("fixture-child-pid"))
                     .unwrap()
                     .parse()
                     .unwrap();
                 assert_eq!(unsafe { libc::kill(child, libc::SIGKILL) }, 0);
                 trigger(root, 2);
-                host.wait(&path, |v| v["live_recovery"]["status"] == "recovered")
+                let recovered = host
+                    .wait(&path, |v| {
+                        v["live_recovery"]["status"] == "recovered"
+                            && v["duration"].as_f64().unwrap_or(0.) >= 13.5
+                    })
                     .await;
+                assert_eq!(recovered["status"], "recording", "{}", recovered["message"]);
                 trigger(root, 3);
                 host.wait("api/meeting", |v| {
                     v["duration"].as_f64().unwrap_or(0.) >= 20.5
