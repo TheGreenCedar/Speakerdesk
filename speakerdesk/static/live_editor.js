@@ -33,11 +33,11 @@ function renderRefinementStatus() {
   const noAudio=emptyFailedCapture(selected);
   const unverified=selected?.status==='failed' && selected.capture_audio?.state==='unverified';
   $('refinement-controls').hidden=selected?.status==='failed' || (!selected?.rolling_refinement && !saved);
-  $('refinement-status').textContent=noAudio?'No audio was recorded.':unverified?'Recorded audio could not be verified.':({waiting:'Accuracy pass queued · recent words may still change',refining:'Rechecking sealed passages…',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Accuracy pass stopped'})[status] || '';
+  $('refinement-status').textContent=noAudio?'No audio was recorded.':unverified?'Recorded audio could not be verified.':({waiting:'Accuracy pass queued · recent words may still change',refining:'Rechecking sealed passages…',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Accuracy pass incomplete · your transcript is saved'})[status] || '';
   if(saved && !noAudio && !unverified && status==='refining')$('refinement-status').textContent='Rechecking saved passages…';
-  $('refinement-status').title=saved?'Re-decode complete saved passages using their captured Auto or explicit language setting. Saved corrections and speaker identities are retained; uncertain or mixed-language passages keep their previous words. Long passages require one confidently routed language and unambiguous context timing. Non-English word times are uncalibrated estimates.':'Speakerdesk rechecks sealed passages while recording continues. Long passages use overlapping context; uncertain results retain previous words. Pause accuracy independently of recording. Your saved corrections are never overwritten.';
+  $('refinement-status').title=saved?'Re-decode complete saved passages using their captured Auto or explicit language setting. Saved corrections and speaker identities are retained; incomplete results keep their previous words. Language uncertainty stays in passage details. Long passages require one supported language and unambiguous context timing. Non-English word times are uncalibrated estimates.':'Speakerdesk rechecks sealed passages while recording continues. Incomplete results retain previous words; language uncertainty stays in passage details. Pause accuracy independently of recording. Your saved corrections are never overwritten.';
   $('refinement-toggle').hidden=noAudio || unverified || status==='complete';
-  $('refinement-toggle').textContent=saved && !selected?.rolling_refinement?'Start saved accuracy pass':status==='paused'?'Resume accuracy pass':status==='unresolved'?'Retry unresolved phrases':'Pause accuracy pass';
+  $('refinement-toggle').textContent=saved && !selected?.rolling_refinement?'Start saved accuracy pass':status==='paused'?'Resume accuracy pass':status==='unresolved'?'Retry accuracy pass':'Pause accuracy pass';
 }
 async function toggleRefinement() {
   const jid=selected.id,button=$('refinement-toggle');button.disabled=true;
@@ -49,12 +49,12 @@ function liveCard(segment) {
   card.dataset.start=segment.start;card.dataset.end=segment.end;
   card.dataset.speaker=segment.speaker;
   const jid=selected.id,key=`${jid}:${segment.id}`;card.dataset.meetingId=jid;
-  const avatar=node('span',segment.speaker==='unassigned'?'?':`S${Object.keys(doc.speakers).indexOf(segment.speaker)+1}`,'speaker-avatar');
-  avatar.dataset.color=segment.speaker==='unassigned'?-1:Object.keys(doc.speakers).indexOf(segment.speaker)%8;avatar.setAttribute('aria-hidden','true');
+  const avatar=node('span',undefined,'speaker-avatar');updateSpeakerAvatar(avatar,segment.speaker);avatar.setAttribute('aria-hidden','true');
   const body=node('div',undefined,'segment-body'),top=node('div',undefined,'segment-top');
   const identity=speakerNameControl(segment.speaker);
   const timing=node(segment.separation?'button':'span',undefined,segment.separation?'seek':'rolling-time');
   if(segment.separation) {
+    timing.disabled=!!isLive();
     timing.append(icon('play'),node('span',time(segment.start)));
     timing.addEventListener('click',()=>playSeparatedPassage(card,segment));
   }else timing.textContent=time(segment.start);
@@ -136,6 +136,7 @@ function liveCard(segment) {
   // Evidence is available on request; normal reading shows only the words.
   const details=node('details',undefined,'rolling-review');details.hidden=true;
   details.append(node('summary','Passage details'));appendPassageEvidence(details,segment);
+  details.append(node('div',undefined,'rolling-repair'));
   const inspect=node('button',undefined,'segment-action passage-details-toggle');inspect.type='button';
   inspect.append(icon('sliders-horizontal'),node('span','Details'));inspect.title='Passage details';
   inspect.setAttribute('aria-label',`Details for passage at ${passageTime(segment.start)}`);inspect.setAttribute('aria-expanded','false');
@@ -161,17 +162,29 @@ function livePassageRows() {
   const rows=new Map();
   for(const segment of doc.segments) {
     const prior=rows.get(segment.id)?.segment;
-    if(!prior || (segment.machine_revision ?? 0)>=(prior.machine_revision ?? 0))rows.set(segment.id,{segment,section:segment.refinement_state==='provisional'?'live':'processed'});
+    if(!prior || (segment.machine_revision ?? 0)>=(prior.machine_revision ?? 0))rows.set(segment.id,{segment,section:'transcript'});
   }
   const retain=segment=>{if(!rows.has(segment.id))rows.set(segment.id,{segment,section:'corrections'});};
   for(const draft of passageDrafts.values())retain(draft.segment);
   for(const draft of recoverablePassageDrafts.values())retain(draft.segment);
   for(const operation of passageSaveOperations.values())if(operation.jid===selected.id)retain(operation.segment);
   // Refinement may finish out of order, and a later fast publication may make
-  // the same canonical ID provisional again. Processing state changes its
-  // presentation in place; it must never change the meeting's reading order.
+  // the same canonical ID provisional again. Keep one continuous reading order
+  // regardless of which passages have completed their accuracy pass.
   // Replaced human corrections remain outside the canonical machine timeline.
   return Array.from(rows.values()).sort((a,b)=>(a.section==='corrections')-(b.section==='corrections') || a.segment.start-b.segment.start || a.segment.end-b.segment.end || String(a.segment.id).localeCompare(String(b.segment.id)));
+}
+function refreshStoppedPassageRepair(card,segment,signature) {
+  const host=card.querySelector('.rolling-repair');
+  const visibleSource=()=>doc.segments.find(row=>row.id===segment.id)===segment && card.querySelector('textarea').value===segment.text;
+  const key=JSON.stringify([signature,isLive(),selected.status,!!selected.passage_retry,!!selected.passage_separation,hasPassageDrafts(),hasPendingPassageSaves(),visibleSource()]);
+  if(host.dataset.signature===key || host.contains(document.activeElement))return;
+  const open=host.querySelector('.passage-repair')?.open;
+  host.replaceChildren();host.dataset.signature=key;
+  if(!isLive()) {
+    appendPassageRepair(host,segment,passageReviewReason(segment),visibleSource);
+    host.querySelector('.passage-repair').open=!!open;
+  }
 }
 function renderLiveSegments() {
   const pane=$('transcript-pane'),host=$('segments'),scroll=pane.scrollTop;
@@ -201,6 +214,9 @@ function renderLiveSegments() {
     const uiSignature=JSON.stringify([signature,draft?.text,draft?.revision,recoverablePassageDrafts.has(segment.id),isPassageSaving(segment.id)]);
     refreshReadingTurnView(card,segment);
     refreshPassageSeparation(card,segment);
+    refreshSpeakerRecognition(card,segment);
+    refreshStoppedPassageRepair(card,segment,uiSignature);
+    if(segment.separation)card.querySelector('.seek').disabled=!!isLive();
     if(card.dataset.uiSignature===uiSignature)continue;
     card.dataset.uiSignature=uiSignature;
     if(card.dataset.speaker!==segment.speaker)card.dataset.speaker=segment.speaker;
@@ -208,10 +224,7 @@ function renderLiveSegments() {
     if(name && name.dataset.speaker!==segment.speaker){const next=speakerNameControl(segment.speaker);name.replaceWith(next);name=next;}
     const label=speakerLabel(segment.speaker);
     if(name && name.textContent!==label){name.textContent=label;name.setAttribute('aria-label',segment.speaker==='unassigned'?label:`Name or remember voice for ${label}`);}
-    const avatar=card.querySelector('.speaker-avatar'),index=Object.keys(doc.speakers).indexOf(segment.speaker);
-    const avatarText=segment.speaker==='unassigned'?'?':`S${index+1}`,color=String(segment.speaker==='unassigned'?-1:index%8);
-    if(avatar.textContent!==avatarText)avatar.textContent=avatarText;
-    if(avatar.dataset.color!==color)avatar.dataset.color=color;
+    updateSpeakerAvatar(card.querySelector('.speaker-avatar'),segment.speaker);
     card.classList.toggle('has-draft',!!draft);
     card.classList.toggle('has-new-words',!!draft && draft.revision!==segment.machine_revision);
     card.classList.toggle('has-recoverable-draft',recoverablePassageDrafts.has(segment.id));
@@ -232,13 +245,13 @@ function renderLiveSegments() {
     if(caret)active.setSelectionRange(...caret);
   }
   renderRetainedAudioReview();
-  groupConsecutivePassages(host,pending);
+  groupConsecutivePassages(host);
   const texts=[];
   for(const card of host.children)for(const text of card.querySelectorAll('textarea'))if(text.readOnly || !card.contains(document.activeElement))texts.push(text);
   fitPassageTexts(texts);
-  $('pending-phrases').hidden=!pending;
+  $('pending-phrases').hidden=!pending || (!isLive() && !['waiting','refining'].includes(selected.refinement_status));
   $('pending-phrases').classList.toggle('live-pending',!!pending);
-  $('pending-phrases').textContent=pending?(host.querySelector('.live-provisional')?'Listening…':'Live · listening…'):'';
+  $('pending-phrases').textContent=pending?(isLive()?'Transcribing…':'Finishing transcript…'):'';
   $('listening').hidden=visible>0 || pending>0 || !isLive();
   renderSearchResults(visible,query);
   $('no-results').hidden=visible>0 || !query;

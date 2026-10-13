@@ -56,7 +56,7 @@ test('saved accuracy controls start, pause and retry through the existing routes
   for(const [status,label,action] of [
     ['unavailable','Start saved accuracy pass','resume'],
     ['refining','Pause accuracy pass','pause'],
-    ['unresolved','Retry unresolved phrases','resume'],
+    ['unresolved','Retry accuracy pass','resume'],
   ]) {
     f.context.nextStatus=status;
     f.run("selected.refinement_status=nextStatus;if(nextStatus!=='unavailable')selected.rolling_refinement={mode:'saved'};renderRefinementStatus()");
@@ -64,8 +64,8 @@ test('saved accuracy controls start, pause and retry through the existing routes
     assert.equal(f.document.getElementById('refinement-toggle').textContent,label);
     if(status==='refining')assert.equal(f.document.getElementById('refinement-status').textContent,'Rechecking saved passages…');
     assert.match(f.document.getElementById('refinement-status').title,/captured Auto or explicit language/);
-    assert.match(f.document.getElementById('refinement-status').title,/uncertain or mixed-language/);
-    assert.match(f.document.getElementById('refinement-status').title,/one confidently routed language/);
+    assert.match(f.document.getElementById('refinement-status').title,/Language uncertainty stays in passage details/);
+    assert.match(f.document.getElementById('refinement-status').title,/one supported language/);
     assert.match(f.document.getElementById('refinement-status').title,/Non-English word times are uncalibrated estimates/);
     await f.run('toggleRefinement()');
     assert.equal(f.run('calls.at(-1).path'),`/api/jobs/${'d'.repeat(32)}/refinement/${action}`);

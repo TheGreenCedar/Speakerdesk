@@ -437,6 +437,9 @@ pub fn eligible_segment(segment: &AudioSegment, track_id: &str) -> bool {
 }
 
 pub fn speaker_audio_ranges(segment: &AudioSegment, track_id: &str) -> Vec<(f64, f64)> {
+    observed_audio_ranges(segment, track_id, false)
+}
+fn observed_audio_ranges(segment: &AudioSegment, track_id: &str, live: bool) -> Vec<(f64, f64)> {
     if segment.separation.is_some() {
         return Vec::new();
     }
@@ -444,7 +447,7 @@ pub fn speaker_audio_ranges(segment: &AudioSegment, track_id: &str) -> Vec<(f64,
     {
         return vec![(segment.start, segment.end)];
     }
-    let Some((start_sample, end_sample, revision)) = crop_anchor(segment, track_id) else {
+    let Some((start_sample, end_sample, revision)) = crop_anchor(segment, track_id, live) else {
         return Vec::new();
     };
     if start_sample < 0 || start_sample >= end_sample || revision < 0 {
@@ -503,11 +506,11 @@ pub fn speaker_audio_ranges(segment: &AudioSegment, track_id: &str) -> Vec<(f64,
         .collect()
 }
 
-fn crop_anchor(segment: &AudioSegment, track_id: &str) -> Option<(i64, i64, i64)> {
+fn crop_anchor(segment: &AudioSegment, track_id: &str, live: bool) -> Option<(i64, i64, i64)> {
     if truthy(&segment.audio_state)
         || !NUMBERED_TRACK.is_match(track_id)
         || truthy(&segment.canonical_unresolved)
-        || segment.finalized == Some(false)
+        || !live && segment.finalized == Some(false)
         || segment.canonical_utterance_id.as_deref() != Some(segment.id.as_str())
         || !sole_owner(&segment.speaker_candidates, track_id)
         || segment.source_speaker_candidates.is_some()
@@ -515,7 +518,7 @@ fn crop_anchor(segment: &AudioSegment, track_id: &str) -> Option<(i64, i64, i64)
         || segment
             .canonical_state
             .as_deref()
-            .is_some_and(|state| state != "sealed")
+            .is_some_and(|state| state != "sealed" && !(live && state == "open"))
         || segment
             .protected_fields
             .iter()
@@ -523,9 +526,14 @@ fn crop_anchor(segment: &AudioSegment, track_id: &str) -> Option<(i64, i64, i64)
     {
         return None;
     }
-    let (start, end) = if segment.canonical_state.as_deref() == Some("sealed") {
+    let (start, end) = if segment.canonical_state.as_deref() == Some("sealed")
+        || live && segment.canonical_state.as_deref() == Some("open")
+    {
         if (segment.speaker != track_id && segment.speaker != "unassigned")
             || segment.finalized != Some(true)
+                && !(live
+                    && segment.canonical_state.as_deref() == Some("open")
+                    && segment.finalized == Some(false))
             || !sole_owner(&segment.source_speaker_candidates, track_id)
         {
             return None;
@@ -546,12 +554,17 @@ fn crop_anchor(segment: &AudioSegment, track_id: &str) -> Option<(i64, i64, i64)
 }
 
 pub fn voice_clip_choices(job: &RecognitionMeeting, track_id: &str) -> Vec<(String, VoiceClip)> {
+    clip_choices(job, track_id, false)
+}
+/// The capture owner may select already-observed solo audio from a growing row.
+/// Unknown/overlapping regions, stale revisions and corrected anchors still abstain.
+fn clip_choices(job: &RecognitionMeeting, track_id: &str, live: bool) -> Vec<(String, VoiceClip)> {
     if !job.is_local() {
         return Vec::new();
     }
     let mut choices = Vec::new();
     for segment in &job.segments {
-        for (left, right) in speaker_audio_ranges(segment, track_id) {
+        for (left, right) in observed_audio_ranges(segment, track_id, live) {
             let mut start = left;
             while right - start >= 2.0 {
                 let end = if right - left > 10.0 {
@@ -588,10 +601,18 @@ pub fn voice_clip_choices(job: &RecognitionMeeting, track_id: &str) -> Vec<(Stri
 }
 
 pub fn automatic_clips(job: &RecognitionMeeting, track_id: &str, minimum: usize) -> Vec<VoiceClip> {
+    select_automatic_clips(job, track_id, minimum, false)
+}
+fn select_automatic_clips(
+    job: &RecognitionMeeting,
+    track_id: &str,
+    minimum: usize,
+    live: bool,
+) -> Vec<VoiceClip> {
     if !job.is_local() {
         return Vec::new();
     }
-    let mut clips: Vec<VoiceClip> = voice_clip_choices(job, track_id)
+    let mut clips: Vec<VoiceClip> = clip_choices(job, track_id, live)
         .into_iter()
         .map(|(_, clip)| clip)
         .collect();
@@ -620,13 +641,34 @@ pub fn automatic_clips(job: &RecognitionMeeting, track_id: &str, minimum: usize)
 }
 
 pub fn clips_current(job: &RecognitionMeeting, clips: &[VoiceClip]) -> bool {
+    current_clips(job, clips, false)
+}
+pub fn live_clips_current(job: &RecognitionMeeting, clips: &[VoiceClip]) -> bool {
+    job.is_local()
+        && clips.iter().all(|clip| {
+            clip.meeting_id == job.id
+                && clip.start.is_finite()
+                && clip.end.is_finite()
+                && duration_in_range(clip.end - clip.start)
+                && job
+                    .segments
+                    .iter()
+                    .find(|row| row.id == clip.segment_id)
+                    .is_some_and(|row| {
+                        observed_audio_ranges(row, &clip.track_id, true)
+                            .iter()
+                            .any(|(start, end)| *start <= clip.start && clip.end <= *end)
+                    })
+        })
+}
+fn current_clips(job: &RecognitionMeeting, clips: &[VoiceClip], live: bool) -> bool {
     if !job.is_local() {
         return false;
     }
     let mut cache: BTreeMap<&str, Vec<VoiceClip>> = BTreeMap::new();
     for clip in clips {
         if !cache.contains_key(clip.track_id.as_str()) {
-            let choices = voice_clip_choices(job, &clip.track_id)
+            let choices = clip_choices(job, &clip.track_id, live)
                 .into_iter()
                 .map(|(_, choice)| choice)
                 .collect();
@@ -947,6 +989,21 @@ pub fn plan_checks(
     ctx: &RecognitionContext<'_>,
     only_track: Option<&str>,
 ) -> Vec<ScheduledCheck> {
+    plan_checks_context(job, ctx, only_track, false)
+}
+pub fn plan_live_checks(
+    job: &RecognitionMeeting,
+    ctx: &RecognitionContext<'_>,
+    only_track: Option<&str>,
+) -> Vec<ScheduledCheck> {
+    plan_checks_context(job, ctx, only_track, true)
+}
+fn plan_checks_context(
+    job: &RecognitionMeeting,
+    ctx: &RecognitionContext<'_>,
+    only_track: Option<&str>,
+    live: bool,
+) -> Vec<ScheduledCheck> {
     if ctx.closed || !ctx.preference_enabled {
         return Vec::new();
     }
@@ -984,7 +1041,7 @@ pub fn plan_checks(
         {
             continue;
         }
-        let clips = automatic_clips(job, track, calibration.minimum_clips);
+        let clips = select_automatic_clips(job, track, calibration.minimum_clips, live);
         if clips.is_empty() || !ctx.audio_available {
             continue;
         }
@@ -1060,6 +1117,25 @@ pub fn apply_check(
     outcome: &CheckOutcome,
     checked_at: f64,
 ) {
+    apply_check_context(job, scheduled, ctx, outcome, checked_at, false)
+}
+pub fn apply_live_check(
+    job: &mut RecognitionMeeting,
+    scheduled: &ScheduledCheck,
+    ctx: &RecognitionContext<'_>,
+    outcome: &CheckOutcome,
+    checked_at: f64,
+) {
+    apply_check_context(job, scheduled, ctx, outcome, checked_at, true)
+}
+fn apply_check_context(
+    job: &mut RecognitionMeeting,
+    scheduled: &ScheduledCheck,
+    ctx: &RecognitionContext<'_>,
+    outcome: &CheckOutcome,
+    checked_at: f64,
+    live: bool,
+) {
     if ctx.closed {
         return;
     }
@@ -1069,7 +1145,7 @@ pub fn apply_check(
     if check.id != scheduled.check_id || check.status != CHECK_CHECKING {
         return;
     }
-    let unchanged = recognition_unchanged(job, scheduled, ctx);
+    let unchanged = recognition_unchanged(job, scheduled, ctx, live);
     let assignment = if unchanged && !outcome.failed {
         matched_assignment(job, scheduled, ctx, outcome)
     } else {
@@ -1147,6 +1223,7 @@ fn recognition_unchanged(
     job: &RecognitionMeeting,
     scheduled: &ScheduledCheck,
     ctx: &RecognitionContext<'_>,
+    live: bool,
 ) -> bool {
     let Some(model) = ctx.model else {
         return false;
@@ -1171,8 +1248,11 @@ fn recognition_unchanged(
         .speakers
         .get(&scheduled.track_id)
         .is_some_and(|label| is_unassigned_speaker_label(label));
-    clips_current(job, &scheduled.clips)
-        && current == scheduled_versions
+    (if live {
+        live_clips_current(job, &scheduled.clips)
+    } else {
+        current_clips(job, &scheduled.clips, false)
+    }) && current == scheduled_versions
         && ctx.preference_enabled
         && !job.assignments.contains_key(&scheduled.track_id)
         && label_ok
@@ -2156,4 +2236,46 @@ mod tests {
             ..*ctx
         }
     }
+}
+#[test]
+fn live_voice_clip_keeps_its_observed_solo_prefix_when_audio_grows() {
+    let row: AudioSegment = serde_json::from_value(serde_json::json!({
+        "id":"open","speaker":"speaker_0","text":"fixture words","start":0.,"end":5.,
+        "canonical_utterance_id":"open","canonical_state":"open","finalized":false,
+        "speaker_candidates":["speaker_0"],"source_speaker_candidates":["speaker_0"],
+        "start_sample":0,"end_sample":80000,"audio_revision":1,
+        "speaker_activity":{"audio_revision":1,"observed_end_sample":80000,
+            "regions":[{"start_sample":0,"end_sample":80000,"speakers":["speaker_0"]}]}
+    }))
+    .unwrap();
+    let clip = VoiceClip::try_new("meeting", "speaker_0", "open", 0., 5.).unwrap();
+    let mut meeting = RecognitionMeeting::local("meeting", vec![row]);
+    assert!(live_clips_current(&meeting, std::slice::from_ref(&clip)));
+    let row = &mut meeting.segments[0];
+    row.end = 6.;
+    row.end_sample = Some(96000);
+    row.audio_revision = Some(2);
+    let activity = row.speaker_activity.as_mut().unwrap();
+    activity.audio_revision = 2;
+    activity.observed_end_sample = 96000;
+    activity.regions[0].end_sample = 96000;
+    assert!(
+        live_clips_current(&meeting, std::slice::from_ref(&clip)),
+        "existing observed prefix remains usable"
+    );
+    assert!(
+        !clips_current(&meeting, std::slice::from_ref(&clip)),
+        "saved/manual crop selection stays strict"
+    );
+    meeting.segments[0]
+        .speaker_activity
+        .as_mut()
+        .unwrap()
+        .regions[0]
+        .speakers
+        .push("speaker_1".into());
+    assert!(
+        !live_clips_current(&meeting, &[clip]),
+        "overlap cannot become voice evidence"
+    );
 }

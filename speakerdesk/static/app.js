@@ -255,7 +255,29 @@ function nameSpeaker(id) {
 }
 function speakerLabel(id) {
   if(id==='unassigned')return 'Speaker unassigned';
-  return doc.speakers[id] || (/^speaker_\d+$/.test(id)?`Speaker ${Number(id.slice(8))+1}`:'Unknown speaker');
+  return doc.speakers[id] || 'Unknown speaker';
+}
+function speakerColor(id) {
+  if(id==='unassigned' || id==='multiple_speakers')return -1;
+  // Track IDs include source and recovery namespaces. They are identities, not
+  // display ordinals; keep their color stable through names and key ordering.
+  let hash=0;for(const char of id)hash=(hash*31+char.codePointAt(0))>>>0;
+  return hash%8;
+}
+function updateSpeakerAvatar(avatar,id) {
+  const color=String(speakerColor(id)),label=speakerLabel(id),number=label.match(/^Speaker (\d+)$/);
+  const text=color==='-1'?(id==='multiple_speakers'?'…':'?'):number?`S${number[1]}`:label==='Unknown speaker'?'?':label.trim().split(/\s+/u).slice(0,2).map(part=>Array.from(part)[0]).join('').toLocaleUpperCase();
+  if(avatar.textContent!==text)avatar.textContent=text;
+  if(avatar.dataset.color!==color)avatar.dataset.color=color;
+}
+function refreshSpeakerRecognition(card,segment) {
+  const existing=card.querySelector('.recognized-speaker');
+  const recognized=selected.speaker_assignments?.[segment.speaker]?.source==='automatic_voice';
+  if(!recognized){existing?.remove();return;}
+  if(existing)return;
+  const hint=node('span','Recognized','review-tag routine-state recognized-speaker');
+  hint.title='Matched a saved voice. Choose the speaker name to correct it.';
+  const top=card.querySelector('.segment-top');top.insertBefore(hint,top.querySelector('.segment-actions'));
 }
 function speakerNameControl(id,className='name-speaker') {
   const assigned=id!=='unassigned',label=speakerLabel(id);
@@ -305,9 +327,9 @@ function renderEditor() {
   renderSaveState();
   $('segment-count').textContent = isLive() ? '' : passageCountLabel();
   $('speaker-list').replaceChildren();
-  Object.keys(doc.speakers).forEach((id, i) => {
+  Object.keys(doc.speakers).forEach(id => {
     const row = node('div', undefined, 'speaker-name');
-    const dot = node('span', undefined, 'speaker-dot'); dot.dataset.color = i % 8;
+    const dot = node('span', undefined, 'speaker-dot'); dot.dataset.color = speakerColor(id);
     const choose = speakerNameControl(id,'speaker-name-action name-speaker');
     choose.replaceChildren(dot, node('span', speakerLabel(id)));
     if(id!=='unassigned')choose.append(icon('pencil'));
@@ -464,8 +486,7 @@ function savedPassageSignature(segment) {
 }
 function savedCard(segment) {
   const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;card.dataset.speaker=segment.speaker;
-  const index = Object.keys(doc.speakers).indexOf(segment.speaker);
-  const avatar=node('span',segment.speaker==='unassigned'?'?':`S${index+1}`,'speaker-avatar');avatar.setAttribute('aria-hidden','true');avatar.dataset.color=segment.speaker==='unassigned'?-1:index%8;
+  const avatar=node('span',undefined,'speaker-avatar');avatar.setAttribute('aria-hidden','true');updateSpeakerAvatar(avatar,segment.speaker);
   const body=node('div',undefined,'segment-body');
   const top = node('div', undefined, 'segment-top');
   const seek = node('button', undefined, 'seek'); seek.append(icon('play'),node('span',time(segment.start))); seek.setAttribute('aria-label', `Play passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);seek.title=`Play passage ${passageTime(segment.start)}–${passageTime(segment.end)}`;
@@ -482,9 +503,6 @@ function savedCard(segment) {
   if(segment.separation) {
     card.dataset.separationEpisode=segment.separation.episode_id;
     seek.setAttribute('aria-label',`Play separated passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);
-  }
-  if(selected.speaker_assignments?.[segment.speaker]?.source==='automatic_voice') {
-    const recognized=node('span','Recognized','review-tag routine-state');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';top.append(recognized);
   }
   const actions=node('div',undefined,'segment-actions');
   const repairToggle=node('button',undefined,'segment-action repair-toggle');repairToggle.type='button';
@@ -509,7 +527,7 @@ function savedCard(segment) {
     repairToggle.addEventListener('click',()=>{repair.open=!repair.open;if(repair.open)repair.querySelector('select')?.focus();});
     repair.addEventListener('toggle',()=>repairToggle.setAttribute('aria-expanded',String(repair.open)));
   }else repairToggle.hidden=true;
-  card.append(avatar,body);refreshReadingTurnView(card,segment);
+  card.append(avatar,body);refreshSpeakerRecognition(card,segment);refreshReadingTurnView(card,segment);
   card.dataset.meetingId=selected.id;savedPassageBindings.set(card,segment);
   // Defer a changed focused row until focus leaves, rather than losing its caret.
   card.addEventListener('focusout',()=>queueMicrotask(()=>{
@@ -557,7 +575,7 @@ function renderSegments() {
   renderSearchResults(visible,query);pane.scrollTop=previousScroll;
   renderIcons();refreshPlaybackCards();
 }
-function appendPassageRepair(body,segment,reason) {
+function appendPassageRepair(body,segment,reason,visibleSource=()=>true) {
   if(!isLive()) {
     const repair=node('details',undefined,'passage-repair');repair.append(node('summary','Repair passage'));
     const tools=node('div',undefined,'passage-retry'), language=node('select');
@@ -570,12 +588,16 @@ function appendPassageRepair(body,segment,reason) {
     language.value=segment.language || '';
     const retry=node('button','Retry passage locally');
     const busy=['preparing','processing','queued'].includes(selected.status),retryPending=!!selected.passage_retry || !!selected.passage_separation;
+    const drafts=hasPassageDrafts() || hasPendingPassageSaves();
     const tooLong=segment.end-segment.start>24.5;
-    retry.disabled=busy || retryPending || tooLong;language.disabled=busy || retryPending;
+    retry.disabled=busy || retryPending || tooLong || drafts;language.disabled=busy || retryPending || drafts;
+    if(drafts)retry.title='Save or discard passage corrections before retrying.';
     if(tooLong)retry.title='Choose a passage of at most 24.5 seconds before retrying.';
     retry.addEventListener('click',async()=>{
       try {
+        if(hasPassageDrafts() || hasPendingPassageSaves())throw new Error('Save or discard passage corrections before retrying.');
         await flushSave();
+        if(hasPassageDrafts() || hasPendingPassageSaves())throw new Error('Save or discard passage corrections before retrying.');
         if(!language.value)throw new Error('Choose the language spoken in this passage.');
         const jid=selected.id,generation=++selectionGeneration;
         retrying=true;retry.disabled=true;setStatus();
@@ -602,8 +624,8 @@ function appendPassageRepair(body,segment,reason) {
       tools.append(cancel);
     }
     if(reason && segment.text.trim()) {
-      const reviewed=node('button','Mark words reviewed');reviewed.disabled=busy;
-      reviewed.addEventListener('click',()=>{segment.review_resolution='words_reviewed';segment.review=hasOverlappingSpeakers(segment);changed();renderSegments();});
+      const reviewed=node('button','Mark words reviewed');reviewed.disabled=busy || drafts || !visibleSource();
+      reviewed.addEventListener('click',()=>{if(hasPassageDrafts() || hasPendingPassageSaves() || !visibleSource())return;segment.review_resolution='words_reviewed';segment.review=hasOverlappingSpeakers(segment);changed();renderSegments();});
       tools.append(reviewed);
     }
     const candidate=segment.retry_candidate;
@@ -614,8 +636,9 @@ function appendPassageRepair(body,segment,reason) {
         result.append(node('p',candidate.text,'segment-text'));
         if(candidate.transcription_review)result.append(node('p',reviewReasons[candidate.transcription_review.reason] || 'Retry needs review','passage-review'));
         const currentCandidate=()=>candidate.start===segment.start && candidate.end===segment.end && candidate.speaker===segment.speaker;
-        const use=node('button','Use this text');use.disabled=busy || !currentCandidate();
+        const use=node('button','Use this text');use.disabled=busy || drafts || !currentCandidate() || !visibleSource();
         use.addEventListener('click',()=>{
+          if(hasPassageDrafts() || hasPendingPassageSaves() || !visibleSource())return;
           if(!currentCandidate()){notice('This retry belongs to earlier passage timing or a different speaker. Save and retry the current passage.',true);return;}
           candidate.prior_language_detection=segment.language_detection;
           segment.text=candidate.text;segment.language=candidate.language;
@@ -693,7 +716,6 @@ function separationAudio(path,start,end,label) {
   return audio;
 }
 function appendPassageSeparation(body,segment) {
-  if(isLive())return;
   const panel=node('div',undefined,'passage-separation');body.append(panel);
   renderPassageSeparation(panel,segment);
 }
@@ -705,6 +727,10 @@ function renderPassageSeparation(panel,segment) {
   const signature=JSON.stringify([segment,selected.status,selected.passage_separation,selected.passage_retry,selected.separation_error,setupState?.separation]);
   if(panel.dataset.signature===signature)return;
   panel.dataset.signature=signature;panel.replaceChildren();
+  if(isLive()) {
+    if(segment.separation)panel.append(node('p',`${voiceEstimateLabel(segment.separation.channel)} · Check separated voices`,'separation-hint'));
+    return;
+  }
   if(segment.separation) {
     const voice=segment.separation,origin=voice.origin_sample/16000;
     const audio=separationAudio(`/api/jobs/${selected.id}/separation/${voice.episode_id}/${voice.channel}/audio`,Math.max(0,segment.start-origin),segment.end-origin,`${voiceEstimateLabel(voice.channel)} separated audio`);
@@ -856,32 +882,22 @@ function renderRetainedAudioReview() {
 }
 // Group presentation only: each passage keeps its own edit, timing, retry and
 // playback targets. Recompute after filtering/reconciliation without merging IDs.
-function groupConsecutivePassages(host,pending=0) {
+function groupConsecutivePassages(host) {
   let previous,previousSection;
-  const divided=pending>0 || !!host.querySelector('.rolling-segment[data-transcript-section="live"],.rolling-segment[data-transcript-section="corrections"]');
   for(const card of host.children) {
-    const section=card.dataset.transcriptSection || 'processed',start=section!==previousSection;
-    const continuation=!start && previous && !card.dataset.separationEpisode && !previous.dataset.separationEpisode && card.dataset.speaker!=='unassigned' && previous.dataset.speaker===card.dataset.speaker;
+    const section=card.dataset.transcriptSection || 'transcript',start=section!==previousSection;
+    const continuation=!start && previous && !card.dataset.separationEpisode && !previous.dataset.separationEpisode && !['unassigned','multiple_speakers'].includes(card.dataset.speaker) && previous.dataset.speaker===card.dataset.speaker;
     setPassageClass(card,'speaker-continuation',!!continuation);
     setPassageClass(card,'passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
-    const live=section==='live';
-    setPassageClass(card,'live-provisional',live);
-    setPassageClass(card,'live-section-start',live && start);
     setPassageClass(card,'retained-correction',section==='corrections');
-    setPassageClass(card,'transcript-section-start',divided && start);
-    const className=`${section}-section-label`;
-    for(const label of card.querySelectorAll('.live-section-label,.processed-section-label,.corrections-section-label'))if(!start || !divided || !label.classList.contains(className))label.remove();
-    let label=card.querySelector(`.${className}`);
-    if(start && divided && !label) {
-      label=node('span',({processed:'Processed',corrections:'Your corrections · replaced passages',live:'Live'})[section],`transcript-section-label ${className}`);
+    const correctionStart=section==='corrections' && start;
+    setPassageClass(card,'transcript-section-start',correctionStart);
+    let label=card.querySelector('.corrections-section-label');
+    if(label && !correctionStart)label.remove();
+    if(correctionStart && !label) {
+      label=node('span','Your corrections · replaced passages','transcript-section-label corrections-section-label');
       label.setAttribute('role','heading');label.setAttribute('aria-level','2');
       card.insertBefore(label,card.firstChild);
-    }
-    if(live && label) {
-      const active=isLive(),text=active?'Live':'Needs review';
-      if(label.textContent!==text)label.textContent=text;
-      label.title=active?'These words are awaiting refinement and may change with more context.':'These words are provisional. Review them against the saved audio.';
-      label.setAttribute('aria-label',active?'Live words awaiting refinement':'Provisional words need review');
     }
     previous=card;previousSection=section;
   }
@@ -1213,7 +1229,12 @@ function wire() {
     changed(); $('search').value = ''; renderEditor();
     document.querySelector('#segments .segment:last-child textarea')?.focus();
   });
-  $('add-speaker').addEventListener('click', () => { const id = `speaker_${crypto.randomUUID().slice(0,8)}`; doc.speakers[id] = `Speaker ${Object.keys(doc.speakers).length + 1}`; changed(); renderEditor(); });
+  $('add-speaker').addEventListener('click', () => {
+    const names=Object.entries(doc.speakers).filter(([id])=>id!=='unassigned' && id!=='multiple_speakers').map(([,name])=>name);
+    let number=names.length+1;while(names.includes(`Speaker ${number}`))number++;
+    const id=`manual_${crypto.randomUUID()}`;
+    doc.speakers[id]=`Speaker ${number}`;changed();renderEditor();
+  });
   $('import').addEventListener('change', async () => {
     try {
       if(hasPendingPassageSaves())throw new Error('Wait for the passage save to finish before importing.');

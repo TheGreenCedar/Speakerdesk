@@ -43,19 +43,19 @@ if(process.argv[2]==='--render') {
     const copies=retained.querySelectorAll('textarea').map(t=>t.value);
     assert(copies.includes('Recoverable human correction'),'the retained card must expose the exact correction');
   });
-  for(const status of ['recording','paused','ready'])test(`refined and pending words retain chronology and distinct styling while ${status}`,()=>{
+  for(const status of ['recording','paused','ready'])test(`refined and pending words remain one chronological transcript while ${status}`,()=>{
     const f=frontend(root);f.seed(4,status);
     f.run("doc.segments.forEach((s,i)=>s.refinement_state=i%2?'refined':'provisional');window.before=JSON.stringify(doc);renderSegments()");
     const host=f.document.getElementById('segments');
     for(const card of host.children) {
-      assert.equal(card.classList.contains('live-provisional'),['r0','r2'].includes(card.dataset.segmentId));
+      assert.equal(card.classList.contains('live-provisional'),false);
     }
     assert.deepEqual(host.children.map(c=>c.dataset.segmentId),['r0','r1','r2','r3']);
-    assert.equal(host.querySelectorAll('.live-section-label').filter(e=>!e.hidden).length,2);
+    assert.equal(host.querySelectorAll('.transcript-section-label').length,0);
     assert.equal(f.run('JSON.stringify(doc)===before'),true,'presentation must not mutate stored order');
     f.run("doc.segments[0].text='Refined replacement';doc.segments[0].refinement_state='refined';doc.segments[0].machine_revision++;renderSegments()");
     assert.equal(host.children.filter(c=>c.dataset.segmentId==='r0').length,1,'refinement must replace the existing passage');
-    assert.deepEqual(host.children.filter(c=>c.classList.contains('live-provisional')).map(c=>c.dataset.segmentId),['r2']);
+    assert.equal(host.querySelectorAll('.transcript-section-label').length,0);
     assert.equal(host.querySelectorAll('textarea').filter(e=>e.value==='Words 0').length,0,'stale live words must disappear');
   });
 }

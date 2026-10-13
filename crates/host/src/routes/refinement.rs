@@ -224,7 +224,9 @@ fn fresh(current: &Job, original: &Job, prior: &Segment) -> bool {
                     })
             })
     };
-    captured(current, epoch) == captured(original, epoch)
+    captured(current, epoch)
+        .is_none_or(|entry| entry.get("language") == prior.rest.get("language_mode"))
+        && captured(current, epoch) == captured(original, epoch)
         && covered(current)
         && current
             .document

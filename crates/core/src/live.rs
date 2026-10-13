@@ -1143,11 +1143,51 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
         .as_str()
         .expect("checked mode");
     let processed = processed_catalog(original);
-    let (text, detected_language, detection) =
-        crate::import::refine_passage_source(models, pcm, language, start, processed)
-            .map_err(LiveError::from)?;
-    let mut candidate = saved_candidate(original, text, detected_language.clone(), detection, end)?;
+    let decoded = crate::import::refine_passage_source(models, pcm, language, start, processed)
+        .map_err(LiveError::from)?;
+    let mut candidate = saved_candidate(
+        original,
+        decoded.text,
+        decoded.language.clone(),
+        decoded.detection,
+        end,
+        decoded.review,
+        decoded.transcription_review,
+    )?;
     if let Some(vocabulary) = vocabulary {
+        let Some(detected_language) = decoded.language else {
+            let mut parts = Vec::new();
+            for part in decoded.parts {
+                let audio =
+                    &pcm[(part.start_sample - start) as usize..(part.end_sample - start) as usize];
+                let alignment = match vocabulary.align(
+                    models,
+                    audio,
+                    &part.text,
+                    part.start_sample,
+                    &part.language,
+                ) {
+                    Ok(alignment) => alignment,
+                    Err(
+                        error @ (ChildError::ProcessLost { .. }
+                        | ChildError::Timeout
+                        | ChildError::Cancelled),
+                    ) => return Err(error.into()),
+                    Err(_) => {
+                        serde_json::json!({"status":"unavailable","reason":"model_error","language":part.language,
+                        "raw_text":part.text,"audio_anchor":{"start_sample":part.start_sample,"end_sample":part.end_sample}})
+                    }
+                };
+                parts.push(alignment);
+            }
+            // Each receipt owns its routed text and language. There is no single-language
+            // whole-anchor alignment or invented cross-language word boundary.
+            candidate.rest.insert(
+                "reading_alignment".into(),
+                serde_json::json!({"status":"segmented","reason":"mixed_language","parts":parts}),
+            );
+            return Ok(candidate);
+        };
         if let Some(alignment) = original.rest.get("reading_alignment").filter(|alignment| {
             vocabulary.matches_input(alignment, pcm, &candidate.text, start, &detected_language)
                 && context::complete_alignment(TailPart {
@@ -1231,15 +1271,28 @@ fn processed_catalog(original: &Segment) -> Option<&str> {
 fn saved_candidate(
     original: &Segment,
     text: String,
-    detected_language: String,
+    detected_language: Option<String>,
     detection: Value,
     end: i64,
+    review: bool,
+    transcription_review: Option<Value>,
 ) -> Result<Segment, LiveError> {
     let mut candidate = original.clone();
     crate::edit::clear_alignment_bundle(&mut candidate);
     candidate.text = text;
-    candidate.language = Some(detected_language);
+    candidate.language = detected_language;
     candidate.language_detection = Some(detection);
+    candidate.review = Some(
+        review
+            || candidate.speaker == "multiple_speakers"
+            || candidate.speaker == "unassigned"
+            || candidate.speaker.starts_with("overlap")
+            || candidate
+                .rest
+                .get("speaker_candidates")
+                .and_then(Value::as_array)
+                .is_some_and(|speakers| speakers.len() > 1),
+    );
     candidate.machine_revision = Some(
         original
             .machine_revision
@@ -1262,7 +1315,7 @@ fn saved_candidate(
         .insert("canonical_text_end_sample".into(), Value::from(end));
     candidate.rest.remove("canonical_unresolved");
     candidate.rest.remove("cohere_raw_text");
-    candidate.transcription_review = None;
+    candidate.transcription_review = transcription_review;
     candidate.retry_candidate = None;
     candidate.review_resolution = None;
     candidate.rest.remove("text_audio_anchor");
@@ -1331,7 +1384,7 @@ pub fn publish_saved_passage(
             .and_then(Value::as_i64)
             != next_canonical
         || candidate.text.trim().is_empty()
-        || candidate.transcription_review.is_some()
+        || !crate::import::complete_transcription(candidate.transcription_review.as_ref())
     {
         return Err(LiveError::Message(
             "Invalid saved canonical refinement candidate.",
@@ -5442,7 +5495,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_auto_accuracy_reprobes_and_preserves_uncertain_or_mixed_anchors() {
+    fn saved_auto_accuracy_processes_complete_routing_with_warnings_and_keeps_failures() {
         let mut old = sample_segment("Earlier legible English words", 7);
         old.start = 1.;
         old.end = 7.;
@@ -5491,10 +5544,15 @@ mod tests {
                 "{case}: captured Auto must probe again instead of forcing the old detected language"
             );
             let mut document = document_with(old.clone());
-            if case == "single" {
+            if matches!(case, "single" | "uncertain" | "mixed") {
                 let candidate = result.unwrap();
-                assert_eq!(candidate.text, "eins");
-                assert_eq!(candidate.language.as_deref(), Some("de"));
+                if case == "mixed" {
+                    assert_eq!(candidate.text, "hello eins");
+                    assert_eq!(candidate.language, None);
+                } else {
+                    assert_eq!(candidate.text, "eins");
+                    assert_eq!(candidate.language.as_deref(), Some("de"));
+                }
                 assert_eq!(
                     candidate.language_detection.as_ref().unwrap()["mode"],
                     "auto"
@@ -5504,23 +5562,197 @@ mod tests {
                 let detection = candidate.language_detection.as_ref().unwrap();
                 assert_eq!(detection["probes"][0]["start_sample"], RATE);
                 assert_eq!(detection["probes"][1]["end_sample"], 7 * RATE);
-                assert_eq!(*models.transcription_languages.lock().unwrap(), vec!["de"]);
+                if case == "mixed" {
+                    assert_eq!(
+                        *models.transcription_languages.lock().unwrap(),
+                        vec!["en", "de"]
+                    );
+                    assert_eq!(detection["reason"], "mixed");
+                    assert!(detection["probability"].is_null());
+                } else {
+                    assert_eq!(*models.transcription_languages.lock().unwrap(), vec!["de"]);
+                    assert_eq!(
+                        detection["reason"],
+                        if case == "uncertain" {
+                            "best_effort"
+                        } else {
+                            "detected"
+                        }
+                    );
+                }
+                assert_eq!(candidate.review, Some(case != "single"));
                 assert!(publish_saved_passage(&mut document, &old, &candidate).unwrap());
+                assert_eq!(
+                    document.segments[0].refinement_state.as_deref(),
+                    Some("refined")
+                );
             } else {
                 assert!(
                     result.is_err(),
                     "{case}: preserve previous words if this anchor has no complete single-language replacement"
                 );
                 assert_eq!(document, document_with(old.clone()));
-                if case == "mixed" {
-                    assert_eq!(
-                        *models.transcription_languages.lock().unwrap(),
-                        vec!["en", "de"]
-                    );
-                } else if case != "uncertain" {
-                    assert_eq!(models.transcribe_calls.load(Ordering::SeqCst), 0, "{case}");
+                assert_eq!(models.transcribe_calls.load(Ordering::SeqCst), 0, "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn saved_accuracy_distinguishes_complete_short_warnings_from_partial_or_empty_output() {
+        for case in [
+            "short_complete",
+            "short_partial",
+            "partial",
+            "empty",
+            "speaker_uncertain",
+        ] {
+            let models = FakeModels::english();
+            let short = case.starts_with("short");
+            let samples = if short { 3_040 } else { 2 * RATE as usize };
+            let mut old = sample_segment("Earlier retained words", 7);
+            old.start = 1.;
+            old.end = 1. + samples as f64 / RATE as f64;
+            old.canonical_utterance_id = Some(old.id.clone());
+            old.rest.extend(serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+                "canonical_state":"sealed","language_mode":"en","language_epoch":3,"canonical_machine_revision":7
+            })).unwrap());
+            if case == "speaker_uncertain" {
+                old.rest.insert(
+                    "speaker_candidates".into(),
+                    serde_json::json!(["speaker_0", "speaker_1"]),
+                );
+                old.review = Some(true);
+            }
+            let text = if case == "empty" {
+                ""
+            } else {
+                "Complete replay words"
+            };
+            models
+                .transcription_results
+                .lock()
+                .unwrap()
+                .push_back(AsrText {
+                    text: text.into(),
+                    raw_text: text.into(),
+                    token_count: if matches!(case, "short_partial" | "partial") {
+                        448
+                    } else {
+                        1
+                    },
+                });
+            let result = refine_saved_passage(&models, &old, &loud(samples), None);
+            let mut document = document_with(old.clone());
+            if matches!(case, "short_complete" | "speaker_uncertain") {
+                let candidate = result.unwrap_or_else(|error| panic!("{case}: {error}"));
+                assert_eq!(candidate.text, text);
+                assert_eq!(candidate.review, Some(true));
+                if short {
+                    let warning = candidate.transcription_review.as_ref().unwrap();
+                    assert_eq!(warning["reason"], "short_acoustic_context");
+                    assert_eq!(warning["partial_text"], false);
+                }
+                assert!(publish_saved_passage(&mut document, &old, &candidate).unwrap());
+                assert_eq!(
+                    document.segments[0].refinement_state.as_deref(),
+                    Some("refined")
+                );
+                assert_eq!(document.segments[0].review_resolution, None);
+            } else {
+                assert!(
+                    result.is_err(),
+                    "{case}: incomplete output cannot replace retained words"
+                );
+                assert_eq!(document, document_with(old));
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_refinement_preserves_routed_timing_receipts_through_json_and_subtitle_export() {
+        for unavailable in [false, true] {
+            let (vocabulary, text, mut scores) = crate::alignment::tests::live_fixture();
+            // Synthetic blank tail extends the retained CTC replay to each 3s language crop.
+            // The independent fixture's word cells stay unchanged; no acoustic claim is made.
+            scores.audio_num_samples = (3 * RATE) as u32;
+            scores.valid_frames = ((3 * RATE - 400) / 320 + 1) as u32;
+            let mut blank = vec![-20.; scores.token_ids.len()];
+            blank[0] = 0.;
+            while scores.gathered.len() < scores.valid_frames as usize * scores.token_ids.len() {
+                scores.gathered.extend_from_slice(&blank);
+            }
+            let mut models = FakeModels::english();
+            models.alignment = Some((text.clone(), scores));
+            if unavailable {
+                models.ctc_error = Some(ChildError::Unimplemented);
+            }
+            models
+                .probe_scores
+                .lock()
+                .unwrap()
+                .extend([("en", "de"), ("de", "en")].map(|(first, second)| {
+                    Ok(LanguageProbeOut {
+                        codes: vec![first.into(), second.into()],
+                        probabilities: vec![0.99, 0.01],
+                    })
+                }));
+            let mut old = sample_segment("Earlier words", 7);
+            old.start = 1.;
+            old.end = 7.;
+            old.canonical_utterance_id = Some(old.id.clone());
+            old.rest.extend(serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+                "canonical_state":"sealed","language_mode":"auto","language_epoch":3,"canonical_machine_revision":7
+            })).unwrap());
+            let candidate =
+                refine_saved_passage(&models, &old, &loud(6 * RATE as usize), Some(&vocabulary))
+                    .unwrap();
+            assert_eq!(candidate.language, None);
+            assert_eq!(models.ctc_calls.load(Ordering::SeqCst), 2);
+            let mut document = document_with(old.clone());
+            assert!(publish_saved_passage(&mut document, &old, &candidate).unwrap());
+            let exported: Value =
+                serde_json::from_str(&crate::export::export(&document, "json").unwrap().body)
+                    .unwrap();
+            let timing = &exported["segments"][0]["reading_alignment"];
+            assert_eq!(timing["status"], "segmented");
+            assert!(timing["language"].is_null());
+            let parts = timing["parts"].as_array().unwrap();
+            assert_eq!(parts.len(), 2);
+            for (index, part) in parts.iter().enumerate() {
+                assert_eq!(part["language"], if index == 0 { "en" } else { "de" });
+                assert_eq!(part["raw_text"], text);
+                assert_eq!(
+                    part["audio_anchor"],
+                    serde_json::json!({"start_sample":(1+3*index as i64)*RATE,"end_sample":(4+3*index as i64)*RATE})
+                );
+                assert_eq!(
+                    part["status"],
+                    if unavailable {
+                        "unavailable"
+                    } else {
+                        "aligned"
+                    }
+                );
+                if !unavailable {
+                    assert_eq!(part["model_sha256"], timing::MODEL);
+                    for word in part["words"].as_array().unwrap() {
+                        assert!(
+                            word["start_sample"].as_i64().unwrap()
+                                >= part["audio_anchor"]["start_sample"].as_i64().unwrap()
+                        );
+                        assert!(
+                            word["end_sample"].as_i64().unwrap()
+                                <= part["audio_anchor"]["end_sample"].as_i64().unwrap()
+                        );
+                    }
                 }
             }
+            let roundtrip: Document = serde_json::from_value(exported).unwrap();
+            assert!(roundtrip.segments[0].reading_turns.is_none());
+            let subtitle = crate::export::export(&roundtrip, "srt").unwrap().body;
+            assert_eq!(subtitle.matches("-->").count(), 1);
+            assert!(subtitle.contains("00:00:01,000 --> 00:00:07,000"));
+            assert!(subtitle.contains(&format!("{text} {text}")));
         }
     }
 

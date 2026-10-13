@@ -23,7 +23,7 @@ The editor frontend lives in `speakerdesk/static/` and `speakerdesk/templates/` 
 
 ## Inference boundary
 
-`speakerdesk_core::models::Models` is the sync model trait. The host implements it with `ChildModels`, which talks to the child over stdin/stdout. Each frame is a big-endian `u32` length followed by a postcard `Envelope` (`request_id` plus `Result`), with a 64 MiB frame cap (`ipc.rs`). Requests are Hello, VAD and diarization open/feed/close, language probe, transcribe, CTC scores and voice embedding.
+`speakerdesk_core::models::Models` is the sync model trait. The host implements it with `ChildModels`, which talks to the child over stdin/stdout. Each frame is a big-endian `u32` length followed by a postcard `Envelope` (`request_id` plus `Result`), with a 64 MiB frame cap (`ipc.rs`). Requests are Hello, VAD and diarization open/feed/close, language probe, transcribe, CTC scores, voice embedding and two-voice separation.
 
 - The parent owns cancellation and the child's lifecycle. Control stays responsive while inference runs. Termination is a bounded fallback, followed by reaping and generation invalidation, so old session handles cannot survive a restart.
 - Offline diarization uses the same open/feed/close sessions as live capture. The child never reads files and has no whole-recording request.
@@ -42,10 +42,13 @@ The store is `<storage>/speakerdesk.sqlite` (`core/src/store/`). On first start 
 Live text comes from the serial recording worker. Saved and live accuracy passes reuse the parent operation and the serial worker. Each candidate owns one original audio anchor and its captured language mode and epoch. Publication compares the passage with its current stored version and replaces only that slot. Names, neighbouring passages and source order stay as they are, and protected edits always win.
 
 - Pause invalidates publication before it cancels. Admission stays held until the worker exits.
-- Stop drains live EOF before running the remaining accuracy work.
+- Complete supported-language output may retain routing warnings. Short mixed-language output keeps per-language timing receipts; long context composition still requires consistent language ownership and unambiguous timing.
+- Stop drains live EOF before running the remaining accuracy work and retries failed live anchors once. Shared recording control retains this limit across worker recovery.
 - Child loss keeps its typed cause, rebuilds live sessions once from saved audio, and lets unfinished accuracy work retry under the new generation.
 - Long rows plan only the unaccepted suffix. Accepted cores keep their text, language decisions and final sample boundary.
 - GET, export and reopen never run models to rebuild metadata.
+
+The recording worker also owns live voice recognition and separation under the same operation and cancellation token. It retains one auxiliary continuation, returning to pending capture audio and controls between an embedding, separation, or separated-voice transcription request. Recognition checks observed solo crops without waiting for an ongoing passage to close; enrollment still requires finalized clips. Separation publishes only against the unchanged completed source passage. Source changes, edits and stale generations invalidate publication, and accepted separated rows prevent a later live snapshot from restoring the original mixed row. No additional inference worker runs concurrently.
 
 ## Capture
 

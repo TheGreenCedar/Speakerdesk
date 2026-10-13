@@ -275,8 +275,9 @@ fn publish(
     progress: &watch::Sender<Progress>,
     events: Vec<EngineEvent>,
     rolling: &crate::routes::refinement::Rolling,
-) -> Result<bool, LiveError> {
+) -> Result<(bool, Option<usize>), LiveError> {
     let mut finished = false;
+    let mut changed = None;
     let mut events = VecDeque::from(events);
     let mut boundaries = BTreeMap::new();
     while let Some(event) = events.pop_front() {
@@ -297,6 +298,15 @@ fn publish(
                         .document
                         .as_ref()
                         .ok_or_else(|| conflict("Meeting document is missing."))?;
+                    // Accepted estimates own this original slot. A later canonical
+                    // snapshot/recovery must not recreate its mixed source row.
+                    if document.segments.iter().any(|row| {
+                        row.separation
+                            .as_ref()
+                            .is_some_and(|voice| voice.original_id == candidate.id)
+                    }) {
+                        return Ok(());
+                    }
                     boundary = edited_boundary(document, &candidate);
                     if boundary.is_some() {
                         let prior = job
@@ -351,6 +361,13 @@ fn publish(
                             .position(|row| row.id == candidate.id)
                     {
                         rolling.changed(index);
+                    }
+                    if let Some(index) = merged
+                        .segments
+                        .iter()
+                        .position(|row| row.id == candidate.id)
+                    {
+                        changed = Some(changed.map_or(index, |old: usize| old.min(index)));
                     }
                     job.document = Some(merged);
                     Ok(())
@@ -417,7 +434,7 @@ fn publish(
             EngineEvent::Finished { .. } => finished = true,
         }
     }
-    Ok(finished)
+    Ok((finished, changed))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -565,6 +582,7 @@ pub(super) async fn worker(
                 });
             }
             let mut accuracy = crate::routes::refinement::Runner::new(rolling.clone());
+            let mut enrichment = Enrichment::new(app.clone());
             let inbox = engine.inbox();
             loop {
                 if operation.cancellation.is_cancelled() {
@@ -573,7 +591,7 @@ pub(super) async fn worker(
                 let mut progressed = false;
                 if let Some(events) = engine.poll()? {
                     progressed = true;
-                    if publish(
+                    let (finished, changed) = publish(
                         &mut engine,
                         &app,
                         &id,
@@ -582,15 +600,33 @@ pub(super) async fn worker(
                         &progress,
                         events,
                         &rolling,
-                    )? {
+                    )?;
+                    if let Some(index) = changed {
+                        enrichment.identity.changed();
+                        enrichment.separation.changed(index);
+                    }
+                    if finished {
                         // Live EOF is fully published before the remaining saved work. The
                         // same recording lease owns cancellation and every final model call.
-                        while accuracy.step(&app, &operation)? {}
+                        while enrichment.step(&operation, &id)?
+                            || accuracy.step(&app, &operation)?
+                        {}
                         return Ok(());
                     }
                 }
-                if !inbox.lock().expect("inbox").has_pending_control() {
-                    progressed |= accuracy.step(&app, &operation)?;
+                let idle = {
+                    let inbox = inbox.lock().expect("inbox");
+                    !inbox.has_pending_control() && inbox.queued_audio_span().is_none()
+                };
+                if idle {
+                    // A running child request is not preemptible. Never admit another
+                    // auxiliary phase while saved capture audio/control needs draining.
+                    let enriched = enrichment.step(&operation, &id)?;
+                    progressed |= enriched;
+                    if !enriched {
+                        let refined = accuracy.step(&app, &operation)?;
+                        progressed |= refined;
+                    }
                 }
                 if !progressed && receiver.blocking_recv().is_none() {
                     break;
@@ -616,6 +652,63 @@ pub(super) async fn worker(
                 .cloned()
                 .unwrap_or_else(|| "Live worker could not initialize".into()))
         }
+    }
+}
+
+/// The capture worker is the only owner: at most one identity/separation phase
+/// is pending, with live polling between phases and cleanup on recovery/shutdown.
+struct Enrichment {
+    app: AppState,
+    identity: crate::people_routes::LiveVoiceChecks,
+    separation: crate::routes::separation::LiveSeparation,
+}
+impl Enrichment {
+    fn new(app: AppState) -> Self {
+        Self {
+            app,
+            identity: crate::people_routes::LiveVoiceChecks::new(true),
+            separation: crate::routes::separation::LiveSeparation::new(),
+        }
+    }
+    fn step(&mut self, operation: &OperationGuard, id: &JobId) -> Result<bool, LiveError> {
+        use speakerdesk_core::store::JobStore;
+        let job = self
+            .app
+            .store()
+            .get(id, false)
+            .map_err(|e| LiveError::Detail(e.to_string()))?;
+        let Some(job) = job else { return Ok(false) };
+        if !self.separation.pending() {
+            let models = self.app.models();
+            match operation.check_live_voice_step(&mut self.identity, models.as_ref(), &job) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error) => {
+                    if matches!(
+                        error,
+                        LiveError::Child(
+                            ChildError::ProcessLost { .. }
+                                | ChildError::Timeout
+                                | ChildError::Cancelled
+                        )
+                    ) {
+                        return Err(error);
+                    }
+                    tracing::warn!(message = %error, "live voice check stopped");
+                    self.identity.interrupt(&mut self.app.store());
+                }
+            }
+        }
+        if !self.identity.pending() {
+            return self.separation.step(&self.app, operation, &job);
+        }
+        Ok(false)
+    }
+}
+impl Drop for Enrichment {
+    fn drop(&mut self) {
+        self.identity.interrupt(&mut self.app.store());
+        self.separation.interrupt(&self.app);
     }
 }
 

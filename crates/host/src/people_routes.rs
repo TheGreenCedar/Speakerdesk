@@ -24,6 +24,7 @@ const VOICE_READY: &str = "Saved voices can recognize speakers in new recordings
 const VOICE_UNQUALIFIED: &str = "Voice recognition needs a qualified GPU/ANE runtime. Saved names and voices are kept. Install a Speakerdesk update with qualified voice recognition.";
 mod automatic;
 mod voice_http;
+pub(crate) use automatic::Checks as LiveVoiceChecks;
 pub(crate) use automatic::check_saved_voices;
 
 const PROFILE_KEPT: &str = "Your saved voice is kept. Voice recognition is currently unavailable.";
@@ -1726,8 +1727,12 @@ mod tests {
                 assert_eq!(doc.segments[0].text, "Protected words.");
             }
             let expected_calls = match case {
-                "words" | "bounds" | "name" | "unrelated_legacy" => 4,
-                "forget" | "replace" | "off_on" | "model" => 2,
+                "words" | "unrelated_legacy" => 4,
+                // Recheck between embeddings: do not embed a crop whose bounds,
+                // name or remembered profile became invalid during the first call.
+                "bounds" | "name" => 3,
+                "forget" | "replace" | "off_on" => 1,
+                "model" => 2,
                 _ => 1,
             };
             assert_eq!(

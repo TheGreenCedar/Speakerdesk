@@ -17,6 +17,8 @@ async function main(){
     document:{schema_version:1,speakers:{s0:'Speaker 1'},segments:Array.from({length:6},(_,i)=>({id:`r${i}`,start:i*10,end:(i+1)*10,speaker:'s0',text:`Synthetic words from epoch ${Math.floor(i/2)}, passage ${i}.`,language_epoch:Math.floor(i/2),machine_revision:1,refinement_state:i%2?'provisional':'refined'}))}};
   job.document.segments.push({...job.document.segments[3],text:'Older duplicate',machine_revision:0});
   job.document.segments.reverse();
+  // Silent audio keeps the real player usable without touching a recording.
+  const pcm=Buffer.alloc(44+60*16000*2);pcm.write('RIFF',0);pcm.writeUInt32LE(pcm.length-8,4);pcm.write('WAVEfmt ',8);pcm.writeUInt32LE(16,16);pcm.writeUInt16LE(1,20);pcm.writeUInt16LE(1,22);pcm.writeUInt32LE(16000,24);pcm.writeUInt32LE(32000,28);pcm.writeUInt16LE(2,32);pcm.writeUInt16LE(16,34);pcm.write('data',36);pcm.writeUInt32LE(pcm.length-44,40);
   let holdNext=false,held=null;
   const server=createServer(async(req,res)=>{
     try{
@@ -39,9 +41,10 @@ async function main(){
         if(Number(url.searchParams.get('known_revision'))===job.revision){delete snapshot.document;snapshot.unchanged=true;}
         send(snapshot);return;
       }
-      if(url.pathname==='/api/meeting'){send({meeting:null});return;}
+      if(url.pathname==='/api/meeting'){send({status:'idle',duration:0,levels:{microphone:0,system:0},sources:[]});return;}
       if(url.pathname==='/api/people'){send({people:[],voice_available:false});return;}
       if(url.pathname.endsWith('/identity-suggestions')){send({suggestions:[]});return;}
+      if(url.pathname.endsWith('/audio')){res.setHeader('Content-Type','audio/wav');res.end(pcm);return;}
       if(url.pathname==='/api/setup'){send({models:[],status:'ready',ready:true,core_ready:true,supported:true,total_bytes:0,downloaded_bytes:0,voice:{available:false,enabled:false,status:'ready',message:'Synthetic fixture'}});return;}
       res.statusCode=404;send({error:'Synthetic fixture route unavailable'});
     }catch(error){res.statusCode=500;res.end(JSON.stringify({error:error.message}));}
@@ -101,25 +104,25 @@ async function main(){
     }
     const ids=()=>evaluate("Array.from($('segments').children).map(c=>c.dataset.segmentId)");
     assert.deepEqual(await ids(),['r0','r1','r2','r3','r4','r5']);
-    assert.equal(await evaluate("document.querySelectorAll('.live-section-label').length"),3);
-    assert.equal(await evaluate("document.querySelectorAll('.processed-section-label').length"),3);
+    assert.equal(await evaluate("document.querySelectorAll('.live-section-label').length"),0);
+    assert.equal(await evaluate("document.querySelectorAll('.processed-section-label').length"),0);
     assert.equal(await evaluate("document.querySelector('[data-segment-id=r3] textarea').value"),'Synthetic words from epoch 1, passage 3.');
     checks.push('Shipped renderer keeps three epochs chronological across mixed live/processed states; duplicate ID retains newest revision.');
     for(const width of [1280,760])for(const theme of ['light','dark']){
       await send('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false});
       await evaluate(`document.documentElement.dataset.theme='${theme}';$('transcript-pane').scrollTop=0`);await delay(100);
-      const m=await evaluate(`(()=>{const processed=document.querySelector('[data-segment-id=r0]'),live=document.querySelector('[data-segment-id=r1]'),label=live.querySelector('.live-section-label'),text=live.querySelector('textarea'),timing=live.querySelector('.rolling-time');const cs=getComputedStyle(live),r=text.getBoundingClientRect(),t=timing.getBoundingClientRect();return {background:cs.backgroundColor,processedBackground:getComputedStyle(processed).backgroundColor,ink:getComputedStyle(text).color,label:getComputedStyle(label).color,font:getComputedStyle(text).fontSize,overlap:t.right>r.left,overflow:document.body.scrollWidth>innerWidth,headingVisible:label.checkVisibility(),liveBelowProcessed:live.getBoundingClientRect().top>=processed.getBoundingClientRect().bottom}})()`);
-      assert.equal(m.font,'16px');assert.equal(m.overlap,false);assert.equal(m.overflow,false);assert.equal(m.headingVisible,true);assert.equal(m.liveBelowProcessed,true);assert.notEqual(m.background,m.processedBackground);
+      const m=await evaluate(`(()=>{const processed=document.querySelector('[data-segment-id=r0]'),live=document.querySelector('[data-segment-id=r1]'),text=live.querySelector('textarea'),timing=live.querySelector('.rolling-time');const cs=getComputedStyle(live),r=text.getBoundingClientRect(),t=timing.getBoundingClientRect();return {background:getComputedStyle(document.querySelector('main')).backgroundColor,rowBackground:cs.backgroundColor,processedBackground:getComputedStyle(processed).backgroundColor,ink:getComputedStyle(text).color,font:getComputedStyle(text).fontSize,overlap:t.right>r.left,overflow:document.body.scrollWidth>innerWidth,liveBelowProcessed:live.getBoundingClientRect().top>=processed.getBoundingClientRect().bottom}})()`);
+      assert.equal(m.font,'16px');assert.equal(m.overlap,false);assert.equal(m.overflow,false);assert.equal(m.liveBelowProcessed,true);assert.equal(m.rowBackground,m.processedBackground);
       const luminance=value=>{const c=value.match(/[\d.]+/g).slice(0,3).map(Number).map(x=>{x/=255;return x<=.04045?x/12.92:((x+.055)/1.055)**2.4});return .2126*c[0]+.7152*c[1]+.0722*c[2];};
       const contrast=(a,b)=>{a=luminance(a);b=luminance(b);return(Math.max(a,b)+.05)/(Math.min(a,b)+.05);};
-      m.textContrast=contrast(m.ink,m.background);m.labelContrast=contrast(m.label,m.background);assert(m.textContrast>=4.5);assert(m.labelContrast>=4.5);
+      m.textContrast=contrast(m.ink,m.background);assert(m.textContrast>=4.5);
       measurements.push({width,theme,...m});await screenshot(`partition-${width}-${theme}.png`);
     }
-    checks.push('Wide/narrow light/dark screenshots show distinct state runs in chronology,16px words, AA contrast, no timing overlap or body overflow.');
+    checks.push('Wide/narrow light/dark screenshots show one chronological reading column,16px words, AA contrast, no timing overlap or body overflow.');
     await evaluate(`(()=>{window.focusedText=document.querySelector('[data-segment-id=r1] textarea');focusedText.focus();focusedText.value='Exact human correction';focusedText.dispatchEvent(new Event('input',{bubbles:true}));focusedText.setSelectionRange(2,8,'backward');window.beforeTop=focusedText.getBoundingClientRect().top;})()`);
     job.document.segments=job.document.segments.filter(s=>s.machine_revision>0);const row=job.document.segments.find(s=>s.id==='r1');row.refinement_state='refined';row.machine_revision=2;row.text='New processed machine words';job.revision++;
     await evaluate('poll()');
-    assert.deepEqual(await evaluate(`({same:document.activeElement===focusedText,value:focusedText.value,caret:[focusedText.selectionStart,focusedText.selectionEnd,focusedText.selectionDirection],section:focusedText.closest('article').dataset.transcriptSection,latest:focusedText.closest('article').querySelector('.latest-machine-words').textContent})`),{same:true,value:'Exact human correction',caret:[2,8,'backward'],section:'processed',latest:'New processed machine words'});
+    assert.deepEqual(await evaluate(`({same:document.activeElement===focusedText,value:focusedText.value,caret:[focusedText.selectionStart,focusedText.selectionEnd,focusedText.selectionDirection],section:focusedText.closest('article').dataset.transcriptSection,latest:focusedText.closest('article').querySelector('.latest-machine-words').textContent})`),{same:true,value:'Exact human correction',caret:[2,8,'backward'],section:'transcript',latest:'New processed machine words'});
     assert.equal(await evaluate(`Math.abs(focusedText.getBoundingClientRect().top-beforeTop)<1 || ($('transcript-pane').scrollTop===0 && focusedText.getBoundingClientRect().top >= $('transcript-pane').getBoundingClientRect().top)`),true,'Retain editor anchor unless the scroll range clamps at the top');
     checks.push('Refinement during polling keeps chronological position, identical focused textarea, exact draft, backward caret and displayed new machine revision; viewport remains anchored within available scroll range.');
     job.document.segments=job.document.segments.filter(s=>s.id!=='r1');job.revision++;await evaluate('poll()');
@@ -130,15 +133,15 @@ async function main(){
     job.document.segments.find(s=>s.id==='r5').text='';job.revision++;await evaluate('poll()');
     assert.equal(await evaluate("$('pending-phrases').hidden"),false);assert.equal(await evaluate("$('transcript-pane').scrollTop+$('transcript-pane').clientHeight >= $('transcript-pane').scrollHeight-1"),true);
     job.status='ready';job.refinement_status='paused';job.document.segments.find(s=>s.id==='r5').text='Latest pending tail after Stop';job.revision++;await evaluate('poll()');
-    assert.equal(await evaluate("document.querySelector('[data-segment-id=r5]').classList.contains('live-provisional')"),true);assert.equal(await evaluate("$('pending-phrases').hidden"),true);
+    assert.equal(await evaluate("document.querySelector('[data-segment-id=r5]').classList.contains('live-provisional')"),false);assert.equal(await evaluate("$('pending-phrases').hidden"),true);
     await screenshot('partition-final-stop.png');
-    checks.push('Live follow reaches latest pending tail; final Stop keeps unfinished words visibly provisional.');
+    checks.push('Live follow reaches latest pending tail; final Stop keeps unfinished words readable without a manual review region.');
     await evaluate("(async()=>{await api('/fixture/hold',{method:'POST'});window.oldPoll=poll();})()");await wait("api('/fixture/state').then(s=>s.held)");
     job.refinement_status='complete';job.document.segments.forEach(s=>s.refinement_state='refined');job.revision++;
     await evaluate("(async()=>{const next=await api('/api/jobs/'+selected.id);selected=next;doc=structuredClone(next.document);renderSegments();await api('/fixture/release',{method:'POST'});await oldPoll;})()");
     assert.equal(await evaluate('selected.revision'),job.revision);assert.equal(await evaluate("document.querySelectorAll('.live-provisional,.live-section-label').length"),0);
     assert.equal(await evaluate("document.querySelector('[data-segment-id=r5] textarea').value"),'Latest pending tail after Stop');
-    checks.push('Held older HTTP poll cannot undo a newer fully processed document; all Live headings/tints disappear after completion.');
+    checks.push('Held older HTTP poll cannot undo a newer fully processed document; completion preserves the same reading column.');
     assert.deepEqual(errors,[]);await writeFile(join(output,'partition-browser-report.json'),JSON.stringify({fixture:'Disposable synthetic HTTP server + shipped UI + installed headless Chrome',modelsOrCaptureExecuted:false,source,checks,measurements,pageErrors:errors},null,2));
     console.log(JSON.stringify({checks,measurements,pageErrors:errors},null,2));
   }finally{
