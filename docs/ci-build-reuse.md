@@ -1,10 +1,10 @@
 # CI build reuse
 
 The Linux/macOS native checks and the manual Apple producer reuse Cargo
-downloads and dependency build outputs through pinned Swatinem/rust-cache
-2.9.2, and compiler objects through pinned sccache 0.16.0. Workspace crates
-remain fresh; the maintained action prunes them, final binaries and incremental
-output before saving. Every candidate still runs the
+downloads and Cargo build outputs through pinned Swatinem/rust-cache
+2.9.2, and compiler objects through pinned sccache 0.16.0. Workspace output
+retention includes the vendored `mlx-sys` adapter so its native build does not
+invalidate `mlx-rs` on every restored target. Every candidate still runs the
 locked build, native dependency preparation, bundle checks and exact-source
 artifact manifest generation.
 
@@ -18,7 +18,7 @@ package verification.
 
 | Cache | Reuse rule | Persisted paths |
 | --- | --- | --- |
-| Cargo dependency outputs and downloads | Native contract/job profile plus the maintained action tool/environment and dependency keys; compatible lock fallback | Pruned `target`, `~/.cargo/registry`, `~/.cargo/git` |
+| Cargo build outputs and downloads | Native contract/job profile plus the maintained action tool/environment and dependency keys; compatible lock fallback; Cargo validates restored fingerprints | Pruned `target`, `~/.cargo/registry`, `~/.cargo/git` |
 | Rust compiler objects | Exact source/profile key, compatible native contract fallback; sccache validates each compilation | `$RUNNER_TEMP/speakerdesk-sccache` |
 | npm downloads (producer) | Exact package-lock.json key, compatible tool/environment fallback | `.cache/npm` |
 | Swift capture helper (producer) | Exact source/tool/environment key and verified receipt; no fallback | `.cache/components/capture` |
@@ -36,6 +36,21 @@ or tool changes block dependency fallback. The sccache compatible prefix
 separately binds workflow/build scripts and Tauri configuration. Embedded
 frontend and model resources under `speakerdesk/` select a new exact compiler
 key while preserving this compatible prefix.
+
+`vendor/mlx-sys` is a workspace member so the maintained action includes its
+build-script and library outputs when `cache-workspace-crates: true` is enabled.
+The original six application crates remain `default-members`; ordinary Cargo
+workspace defaults do not add the platform-specific adapter. Cargo checks
+source, feature, profile and build-script fingerprints before reusing restored
+outputs. Native tests and the desktop boundary can legitimately select distinct
+debug dependency variants, while release uses a separate profile; the cache can
+retain each compatible variant rather than rebuilding it on every run.
+The action removes top-level profile files and incremental directories before
+saving. It retains workspace libraries, build outputs and fingerprints, and can
+also retain hashed test/app binaries under `deps` whose names match package or
+library names. `cache-bin: false` excludes installed Cargo tools, not these
+target outputs. See the [pinned pruning implementation](https://github.com/Swatinem/rust-cache/blob/6323deb102c322ba6fcbdcafc7e3dddab59af2b6/src/cleanup.ts).
+
 The pinned MLX 0.32.2 runtime is prepared and checked by its existing script at
 `.cache/native/mlx-0.32.2`, outside Cargo's pruned `target` tree. This prepared
 dependency is reused intact locally and is not included in the persisted cache
@@ -54,15 +69,18 @@ producer's release profile. Python/Node versions do not split the Rust object
 store. A different Rust version, target or native toolchain does.
 
 Rust incremental compilation is disabled. sccache does not cache Rust crates
-that invoke the linker, so final executables, linking and packaging remain real
-work on every run. See the [pinned sccache Rust documentation](https://github.com/mozilla/sccache/blob/v0.16.0/docs/Rust.md).
-No workspace build output, model weights, recording, credential, keychain,
-whole home/temp directory or signed artifact is saved. The explicit compiler/component caches retain a 512 MiB sccache limit and
+that invoke the linker; compatible Cargo target outputs can still avoid that
+work. Every run executes the locked Cargo commands and fresh package staging,
+checks and provenance generation. See the [pinned sccache Rust documentation](https://github.com/mozilla/sccache/blob/v0.16.0/docs/Rust.md).
+No model weights, recording, credential, keychain, whole home/temp directory or
+signed artifact is saved. The explicit compiler/component caches retain a 512 MiB sccache limit and
 2 GiB aggregate byte guard; an oversized cache skips their upload without
-invalidating an otherwise successful build. Cargo dependency outputs use the
+invalidating an otherwise successful build. Cargo build outputs use the
 maintained action pruning and GitHub cache limits. Its post-save runs only on
 successful trusted main jobs and reports actual pruned archive bytes and
-transfer cost. No arbitrary raw target-size threshold prevents dependency reuse.
+transfer cost. Workspace retention can increase that archive; hosted bytes and
+transfer cost must be observed rather than inferred from a cumulative local
+target. No arbitrary raw target-size threshold prevents dependency reuse.
 
 The exact Swift cache remains confined to the ad-hoc producer. Its receipt must
 match both identity and payload digest before restoration. Developer ID builds
@@ -73,11 +91,11 @@ package after authenticating its producer provenance.
 
 Restore/save use separate pinned Actions. Only successful `main` push or manual
 runs save native CI caches, and only successful `main` manual runs save producer
-caches. The job byte budget must pass before compiler/component saves; Cargo dependency
+caches. The job byte budget must pass before compiler/component saves; Cargo build
 outputs are pruned before the maintained action saves them. PR and branch runs
 can restore within GitHub's cache scope but cannot write trusted main caches.
 The sccache GitHub backend is disabled. Explicit guarded save steps own
-compiler/component persistence; the pinned Rust action owns pruned dependency
+compiler/component persistence; the pinned Rust action owns pruned Cargo
 output persistence with an equivalent trusted-main save condition. All source/producer jobs retain read-only permissions and no
 signing credentials.
 

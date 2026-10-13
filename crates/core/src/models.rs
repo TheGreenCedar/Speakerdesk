@@ -54,6 +54,32 @@ pub trait Models: Send + Sync {
     fn separate(&self, _pcm: &[f32]) -> Result<crate::ipc::SeparatedAudio, ChildError> {
         Err(ChildError::Unimplemented)
     }
+    fn separate_open(&self, _pcm: &[f32]) -> Result<Handle, ChildError> {
+        Err(ChildError::Unimplemented)
+    }
+    fn separate_step(
+        &self,
+        _handle: Handle,
+    ) -> Result<Option<crate::ipc::SeparatedAudio>, ChildError> {
+        Err(ChildError::Unimplemented)
+    }
+    fn separate_close(&self, _handle: Handle) -> Result<(), ChildError> {
+        Err(ChildError::Unimplemented)
+    }
+    fn transcribe_open(
+        &self,
+        _pcm: &[f32],
+        _language: &str,
+        _padding: (u32, u32),
+    ) -> Result<Handle, ChildError> {
+        Err(ChildError::Unimplemented)
+    }
+    fn transcribe_step(&self, _handle: Handle) -> Result<Option<AsrText>, ChildError> {
+        Err(ChildError::Unimplemented)
+    }
+    fn transcribe_close(&self, _handle: Handle) -> Result<(), ChildError> {
+        Err(ChildError::Unimplemented)
+    }
     fn metrics(&self) -> Result<MetricsOut, ChildError>;
 }
 

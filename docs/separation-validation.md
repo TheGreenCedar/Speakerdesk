@@ -133,9 +133,11 @@ A future backend with demonstrated product benefits remains an upgrade candidate
 ## Limits
 
 No noisy or far-field quality claim is made. An AMI crop and manual references
-were frozen, but selective audio retrieval timed out; it was not scored. Other
-languages, automatic person assignment from separated embeddings, saved voice
-compatibility for those embeddings and three-or-more overlapping voices are not
-qualified here. Generated voices are not enrolled or matched using the existing
-unseparated-voice calibration. Three-or-more overlap is tracked in issue #36.
-Windows execution and a published package remain separate work.
+were frozen, but selective audio retrieval timed out; it was not scored. These
+2026-10-12 checks did not qualify other languages, automatic separated-voice
+identity or saved-profile compatibility for generated queries. Subsequent bounded
+clean-query attribution, cooperative live inference and French/English checks are
+recorded in [live continuity validation](live-continuity-validation.md); they do
+not change the historical results above. Generated voices remain non-enrollable.
+Three-or-more overlap is tracked in issue #36. Windows execution and package
+publication are outside this local qualification record.

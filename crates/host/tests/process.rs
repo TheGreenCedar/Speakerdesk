@@ -38,6 +38,156 @@ fn cleanup_close_is_idempotent_and_keeps_unrelated_sessions_resident() {
 }
 
 #[test]
+fn auxiliary_sessions_yield_to_primary_work_and_retire_on_cancel_or_child_loss() {
+    use speakerdesk_core::ipc::Handle;
+    for separator in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("fixture-overlap"), b"bounded protocol replay").unwrap();
+        let hold = root.join(if separator {
+            "hold-live-separation"
+        } else {
+            "hold-live-asr"
+        });
+        std::fs::write(&hold, b"keep auxiliary completion pending").unwrap();
+        let host =
+            InferenceSupervisor::new(env!("CARGO_BIN_EXE_inference-fixture"), "fixture", root)
+                .unwrap();
+        let ready = host.models(CancellationToken::new());
+        let vad = ready.vad_open(None).unwrap();
+        let pcm = vec![0.2; 1600];
+        let open = |models: &dyn Models| {
+            if separator {
+                models.separate_open(&pcm)
+            } else {
+                models.transcribe_open(&pcm, "en", (0, 0))
+            }
+        };
+        let pending = |models: &dyn Models, handle| {
+            if separator {
+                models.separate_step(handle).map(|v| v.is_none())
+            } else {
+                models.transcribe_step(handle).map(|v| v.is_none())
+            }
+        };
+        let close = |models: &dyn Models, handle| {
+            if separator {
+                models.separate_close(handle)
+            } else {
+                models.transcribe_close(handle)
+            }
+        };
+        let handle = open(&ready).unwrap();
+        let pid = host.child_pid().unwrap();
+        assert!(pending(&ready, handle).unwrap());
+        assert_eq!(ready.metrics().unwrap().peak_mlx_bytes, 2);
+        assert_eq!(
+            ready.vad_feed(vad, &[0.; 512], false).unwrap().observed,
+            512
+        );
+        assert_eq!(
+            ready.transcribe(&[0.; 160], "en", (0, 0)).unwrap().text,
+            "Replay transcript"
+        );
+        let wrong = Handle {
+            session: handle.session + 100,
+            ..handle
+        };
+        assert!(pending(&ready, wrong).is_err());
+        close(&ready, wrong).unwrap();
+        assert!(
+            pending(&ready, handle).unwrap(),
+            "wrong handle preserves owner"
+        );
+        assert_eq!(host.child_pid(), Some(pid));
+        std::fs::remove_file(&hold).unwrap();
+        if separator {
+            let output = ready.separate_step(handle).unwrap().unwrap();
+            assert_eq!(output.channels, [vec![0.4; 1600], vec![0.6; 1600]]);
+        } else {
+            assert_eq!(
+                ready.transcribe_step(handle).unwrap().unwrap().text,
+                "Replay transcript"
+            );
+        }
+        assert!(
+            pending(&ready, handle).is_err(),
+            "terminal step retires state"
+        );
+        close(&ready, handle).unwrap();
+        assert_eq!(ready.metrics().unwrap().peak_mlx_bytes, 1);
+
+        let token = CancellationToken::new();
+        let cancelled = host.models(token.clone());
+        let owned = open(&cancelled).unwrap();
+        token.cancel();
+        assert_eq!(pending(&cancelled, owned), Err(ChildError::Cancelled));
+        close(&cancelled, owned).unwrap();
+        close(&cancelled, owned).unwrap();
+        assert_eq!(ready.metrics().unwrap().peak_mlx_bytes, 1);
+
+        // A cancelled successful open and a cancelled nonterminal step both own
+        // resident state until the supervisor explicitly closes the discarded result.
+        std::fs::write(&hold, b"pending for cancellation race").unwrap();
+        for step in [false, true] {
+            let token = CancellationToken::new();
+            let active = host.models(token.clone());
+            let owned = step.then(|| open(&active).unwrap());
+            let marker = root.join(if step { "step-race" } else { "open-race" });
+            ready
+                .transcribe(&[], &format!("race:{}", marker.display()), (0, 0))
+                .unwrap();
+            let pcm = pcm.clone();
+            let call = std::thread::spawn(move || match (separator, owned) {
+                (true, None) => active.separate_open(&pcm).map(|_| ()),
+                (false, None) => active.transcribe_open(&pcm, "en", (0, 0)).map(|_| ()),
+                (true, Some(handle)) => active.separate_step(handle).map(|_| ()),
+                (false, Some(handle)) => active.transcribe_step(handle).map(|_| ()),
+            });
+            wait_for(&marker);
+            token.cancel();
+            wait_for(&marker.with_extension("cancelled"));
+            std::fs::write(marker.with_extension("release"), b"release terminal reply").unwrap();
+            assert_eq!(call.join().unwrap(), Err(ChildError::Cancelled));
+            assert_eq!(
+                ready.metrics().unwrap().peak_mlx_bytes,
+                1,
+                "discarded state leaked"
+            );
+        }
+
+        let lost = open(&ready).unwrap();
+        host.restart(&CancellationToken::new()).unwrap();
+        reaped(pid);
+        close(&ready, lost).unwrap();
+        assert_eq!(
+            host.child_pid(),
+            None,
+            "cleanup must not respawn lost child"
+        );
+        let new = ready.vad_open(None).unwrap();
+        let new_pid = host.child_pid().unwrap();
+        assert!(
+            pending(&ready, lost)
+                .unwrap_err()
+                .to_string()
+                .contains("stale")
+        );
+        assert!(
+            close(&ready, lost)
+                .unwrap_err()
+                .to_string()
+                .contains("stale")
+        );
+        assert_eq!(ready.vad_feed(new, &[0.; 512], true).unwrap().observed, 512);
+        assert_eq!(host.child_pid(), Some(new_pid));
+        ready.vad_close(new).unwrap();
+        host.shutdown();
+        reaped(new_pid);
+    }
+}
+
+#[test]
 fn installation_restart_reaps_the_resident_child_and_invalidates_old_handles() {
     let host = supervisor();
     let cancel = CancellationToken::new();

@@ -584,7 +584,15 @@ pub(super) async fn worker(
             let mut accuracy = crate::routes::refinement::Runner::new(rolling.clone());
             let mut enrichment = Enrichment::new(app.clone());
             let inbox = engine.inbox();
+            let mut eof_published = false;
             loop {
+                if eof_published {
+                    // A cooperative decode may have published EOF while yielding to capture.
+                    while enrichment.step(&operation, &id, &mut || Ok(()))?
+                        || accuracy.step(&app, &operation)?
+                    {}
+                    return Ok(());
+                }
                 if operation.cancellation.is_cancelled() {
                     return Err(LiveError::Child(ChildError::Cancelled));
                 }
@@ -606,12 +614,8 @@ pub(super) async fn worker(
                         enrichment.separation.changed(index);
                     }
                     if finished {
-                        // Live EOF is fully published before the remaining saved work. The
-                        // same recording lease owns cancellation and every final model call.
-                        while enrichment.step(&operation, &id)?
-                            || accuracy.step(&app, &operation)?
-                        {}
-                        return Ok(());
+                        eof_published = true;
+                        continue;
                     }
                 }
                 let idle = {
@@ -621,7 +625,35 @@ pub(super) async fn worker(
                 if idle {
                     // A running child request is not preemptible. Never admit another
                     // auxiliary phase while saved capture audio/control needs draining.
-                    let enriched = enrichment.step(&operation, &id)?;
+                    let mut discovered: Option<usize> = None;
+                    let enriched = enrichment.step(&operation, &id, &mut || {
+                        // Live calls use Engine's base connection, so this pump cannot recurse.
+                        while let Some(events) = engine.poll().map_err(auxiliary_error)? {
+                            let (finished, changed) = publish(
+                                &mut engine,
+                                &app,
+                                &id,
+                                &operation,
+                                generation,
+                                &progress,
+                                events,
+                                &rolling,
+                            )
+                            .map_err(auxiliary_error)?;
+                            if let Some(index) = changed {
+                                discovered = Some(discovered.map_or(index, |old| old.min(index)));
+                            }
+                            if finished {
+                                eof_published = true;
+                                break;
+                            }
+                        }
+                        Ok(())
+                    })?;
+                    if let Some(index) = discovered {
+                        enrichment.identity.changed();
+                        enrichment.separation.changed(index);
+                    }
                     progressed |= enriched;
                     if !enriched {
                         let refined = accuracy.step(&app, &operation)?;
@@ -670,7 +702,12 @@ impl Enrichment {
             separation: crate::routes::separation::LiveSeparation::new(),
         }
     }
-    fn step(&mut self, operation: &OperationGuard, id: &JobId) -> Result<bool, LiveError> {
+    fn step<F: FnMut() -> Result<(), ChildError> + Send>(
+        &mut self,
+        operation: &OperationGuard,
+        id: &JobId,
+        pump: &mut F,
+    ) -> Result<bool, LiveError> {
         use speakerdesk_core::store::JobStore;
         let job = self
             .app
@@ -700,11 +737,18 @@ impl Enrichment {
             }
         }
         if !self.identity.pending() {
-            return self.separation.step(&self.app, operation, &job);
+            return self.separation.step(&self.app, operation, &job, pump);
         }
         Ok(false)
     }
 }
+fn auxiliary_error(error: LiveError) -> ChildError {
+    match error {
+        LiveError::Child(error) => error,
+        other => ChildError::failed(other.to_string(), false),
+    }
+}
+
 impl Drop for Enrichment {
     fn drop(&mut self) {
         self.identity.interrupt(&mut self.app.store());

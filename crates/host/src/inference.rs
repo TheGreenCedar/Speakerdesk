@@ -142,7 +142,10 @@ impl ChildModels {
         // Session cleanup remains available after its owning operation is cancelled.
         let cancellation = if matches!(
             request,
-            Request::VadClose { .. } | Request::DiarClose { .. }
+            Request::VadClose { .. }
+                | Request::DiarClose { .. }
+                | Request::SeparateClose { .. }
+                | Request::TranscribeClose { .. }
         ) {
             CancellationToken::new()
         } else {
@@ -264,6 +267,51 @@ impl Models for ChildModels {
         }
     }
 
+    fn separate_open(&self, pcm: &[f32]) -> Result<Handle, ChildError> {
+        match self.exchange(Request::SeparateOpen { pcm: pcm.to_vec() })? {
+            Response::Handle(h) => Ok(h),
+            other => Err(unexpected(&other)),
+        }
+    }
+    fn separate_step(
+        &self,
+        handle: Handle,
+    ) -> Result<Option<speakerdesk_core::ipc::SeparatedAudio>, ChildError> {
+        match self.exchange(Request::SeparateStep { handle })? {
+            Response::SeparationProgress(audio) => Ok(audio),
+            other => Err(unexpected(&other)),
+        }
+    }
+    fn separate_close(&self, handle: Handle) -> Result<(), ChildError> {
+        ack(self.exchange(Request::SeparateClose { handle })?)
+    }
+    fn transcribe_open(
+        &self,
+        pcm: &[f32],
+        language: &str,
+        padding: (u32, u32),
+    ) -> Result<Handle, ChildError> {
+        match self.exchange(Request::TranscribeOpen {
+            pcm: pcm.to_vec(),
+            language: language.into(),
+            padding,
+        })? {
+            Response::Handle(h) => Ok(h),
+            other => Err(unexpected(&other)),
+        }
+    }
+    fn transcribe_step(
+        &self,
+        handle: Handle,
+    ) -> Result<Option<speakerdesk_core::ipc::AsrText>, ChildError> {
+        match self.exchange(Request::TranscribeStep { handle })? {
+            Response::TranscriptionProgress(text) => Ok(text),
+            other => Err(unexpected(&other)),
+        }
+    }
+    fn transcribe_close(&self, handle: Handle) -> Result<(), ChildError> {
+        ack(self.exchange(Request::TranscribeClose { handle })?)
+    }
     fn metrics(&self) -> Result<MetricsOut, ChildError> {
         match self.exchange(Request::Metrics)? {
             Response::Metrics(metrics) => Ok(metrics),
@@ -407,7 +455,10 @@ async fn run(
             // Releasing a lost session must not create another child just to close it.
             if matches!(
                 request,
-                Request::VadClose { .. } | Request::DiarClose { .. }
+                Request::VadClose { .. }
+                    | Request::DiarClose { .. }
+                    | Request::SeparateClose { .. }
+                    | Request::TranscribeClose { .. }
             ) {
                 let _ = call.reply.send(Ok(Response::Ack));
                 continue;
@@ -519,10 +570,14 @@ async fn execute(
         let cleanup = match &request {
             Request::VadFeed { handle, .. } => Some(Request::VadClose { handle: *handle }),
             Request::DiarFeed { handle, .. } => Some(Request::DiarClose { handle: *handle }),
+            Request::SeparateStep { handle } => Some(Request::SeparateClose { handle: *handle }),
+            Request::TranscribeStep { handle } => Some(Request::TranscribeClose { handle: *handle }),
             _ => None,
         };
         let vad_open = matches!(request, Request::VadOpen { .. });
         let diar_open = matches!(request, Request::DiarOpen { .. });
+        let separate_open = matches!(request, Request::SeparateOpen { .. });
+        let transcribe_open = matches!(request, Request::TranscribeOpen { .. });
         tokio::select! {
             // A partial frame cannot be followed by a Cancel frame. Reap this child.
             biased;
@@ -554,6 +609,8 @@ async fn execute(
             let close = match &result {
                 Ok(Response::Handle(handle)) if vad_open => Some(Request::VadClose { handle: *handle }),
                 Ok(Response::Handle(handle)) if diar_open => Some(Request::DiarClose { handle: *handle }),
+                Ok(Response::Handle(handle)) if separate_open => Some(Request::SeparateClose { handle: *handle }),
+                Ok(Response::Handle(handle)) if transcribe_open => Some(Request::TranscribeClose { handle: *handle }),
                 Err(ChildError::Cancelled) => None,
                 _ => cleanup,
             };
@@ -576,7 +633,11 @@ fn request_handle(request: &mut Request) -> Option<&mut Handle> {
         Request::VadFeed { handle, .. }
         | Request::VadClose { handle }
         | Request::DiarFeed { handle, .. }
-        | Request::DiarClose { handle } => Some(handle),
+        | Request::DiarClose { handle }
+        | Request::SeparateStep { handle }
+        | Request::SeparateClose { handle }
+        | Request::TranscribeStep { handle }
+        | Request::TranscribeClose { handle } => Some(handle),
         _ => None,
     }
 }

@@ -3397,6 +3397,88 @@ async fn saved_accuracy_pause_failure_and_late_candidate_matrix() {
 }
 
 #[tokio::test]
+async fn live_words_advance_while_separation_and_generated_decode_are_pending() {
+    for phase in ["moss", "asr"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("fixture-overlap"), b"two-voice protocol replay").unwrap();
+        fs::write(
+            root.join("fixture-live-continuity"),
+            b"second speech interval",
+        )
+        .unwrap();
+        fs::create_dir(root.join("mossformer2-16k")).unwrap();
+        fs::write(
+            root.join("mossformer2-16k/model.safetensors"),
+            b"fixture only",
+        )
+        .unwrap();
+        let (hold, marker) = if phase == "moss" {
+            ("hold-live-separation", "separation-started")
+        } else {
+            fs::write(
+                root.join("hold-only-separated"),
+                b"keep live words responsive",
+            )
+            .unwrap();
+            ("hold-live-asr", "edit-asr-started")
+        };
+        fs::write(root.join(hold), b"auxiliary completion held").unwrap();
+        let host = Running::open(root, false).await;
+        trigger(root, 1);
+        let id = host.start_live_only(json!(["microphone"])).await;
+        let path = format!("api/jobs/{id}");
+        wait_file(&root.join(marker)).await;
+        trigger(root, 2);
+        let advanced = host
+            .wait(&path, |job| {
+                job["document"]["segments"].as_array().is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row["canonical_text_end_sample"].as_u64().unwrap_or(0) > 112_000
+                            && row["text"].as_str().is_some_and(|text| !text.is_empty())
+                    })
+                })
+            })
+            .await;
+        assert_eq!(advanced["status"], "recording");
+        assert!(
+            root.join(hold).exists(),
+            "{phase}: new words precede auxiliary completion"
+        );
+        assert!(advanced["passage_separation"].is_object());
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/stop"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        let draining = host
+            .wait(&path, |job| job["canonical_observed_sample"] == 224513)
+            .await;
+        assert!(draining["passage_separation"].is_object());
+        assert!(
+            root.join(hold).exists(),
+            "{phase}: EOF precedes auxiliary completion"
+        );
+        fs::remove_file(root.join(hold)).unwrap();
+        let finished = host
+            .wait(&path, |job| {
+                job["status"] == "ready"
+                    && job["inference_owned"] == false
+                    && job["document"]["segments"].as_array().is_some_and(|rows| {
+                        rows.iter()
+                            .filter(|row| row["separation"].is_object())
+                            .count()
+                            >= 2
+                    })
+            })
+            .await;
+        assert_eq!(finished["canonical_observed_sample"], 224513);
+        host.close(root).await;
+    }
+}
+
+#[tokio::test]
 async fn completed_overlap_is_separated_during_capture_and_survives_child_recovery() {
     for mode in ["normal", "child_loss", "edit"] {
         let child_loss = mode == "child_loss";

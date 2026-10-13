@@ -31,6 +31,15 @@ pub struct Network {
     mask_projection: Conv1d,
 }
 
+/// Full-window state; only execution is split, never the acoustic context.
+pub struct Session {
+    encoded: Array,
+    residual: Array,
+    x: Array,
+    phase: usize,
+    samples: usize,
+}
+
 impl Network {
     pub fn load(directory: &Path) -> Result<Self, ChildError> {
         let path = directory.join(super::DERIVED_FILE);
@@ -117,11 +126,7 @@ impl Network {
         Ok(network)
     }
 
-    pub fn separate(
-        &mut self,
-        pcm: &[f32],
-        cancel: &AtomicBool,
-    ) -> Result<[Vec<f32>; 2], ChildError> {
+    pub fn begin(&mut self, pcm: &[f32], cancel: &AtomicBool) -> Result<Session, ChildError> {
         if cancel.load(Ordering::Acquire) {
             return Err(ChildError::Cancelled);
         }
@@ -158,19 +163,46 @@ impl Network {
         .multiply(&self.position_scale)
         .map_err(error)?;
         let residual = x.add(embedding).map_err(error)?;
-        let mut x = residual.clone();
-        for (flash, fsmn) in self.flash.iter_mut().zip(&mut self.fsmn) {
-            if cancel.load(Ordering::Acquire) {
-                return Err(ChildError::Cancelled);
-            }
-            x = flash.forward(&x).map_err(error)?;
-            x.eval().map_err(error)?;
-            if cancel.load(Ordering::Acquire) {
-                return Err(ChildError::Cancelled);
-            }
-            x = fsmn.forward(&x).map_err(error)?;
-            x.eval().map_err(error)?;
+        Ok(Session {
+            x: residual.clone(),
+            encoded,
+            residual,
+            phase: 0,
+            samples: pcm.len(),
+        })
+    }
+
+    pub fn step(
+        &mut self,
+        session: &mut Session,
+        cancel: &AtomicBool,
+    ) -> Result<Option<[Vec<f32>; 2]>, ChildError> {
+        if cancel.load(Ordering::Acquire) {
+            return Err(ChildError::Cancelled);
         }
+        if session.phase < 48 {
+            let index = session.phase / 2;
+            let x = if session.phase % 2 == 0 {
+                self.flash[index].forward(&session.x)
+            } else {
+                self.fsmn[index].forward(&session.x)
+            }
+            .map_err(error)?;
+            x.eval().map_err(error)?;
+            if cancel.load(Ordering::Acquire) {
+                return Err(ChildError::Cancelled);
+            }
+            session.x = x;
+            session.phase += 1;
+            return Ok(None);
+        }
+        if session.phase != 48 {
+            return Err(error("completed MossFormer2 session"));
+        }
+        let n = session.encoded.dim(1);
+        let encoded = &session.encoded;
+        let residual = &session.residual;
+        let mut x = session.x.clone();
         x = self.intra_norm.forward(&x).map_err(error)?;
         x = self
             .output_norm
@@ -201,7 +233,7 @@ impl Network {
             return Err(ChildError::Cancelled);
         }
         let decoded = decode(&masked, &self.decoder).map_err(error)?;
-        let decoded = layers::pad_time(&decoded, pcm.len() as i32).map_err(error)?;
+        let decoded = layers::pad_time(&decoded, session.samples as i32).map_err(error)?;
         decoded.eval().map_err(error)?;
         if cancel.load(Ordering::Acquire) {
             return Err(ChildError::Cancelled);
@@ -209,18 +241,31 @@ impl Network {
         let mut result = [Vec::new(), Vec::new()];
         for (channel, samples) in result.iter_mut().enumerate() {
             let output = decoded
-                .index((channel as i32, ..pcm.len() as i32, 0))
+                .index((channel as i32, ..session.samples as i32, 0))
                 .contiguous()
                 .map_err(error)?;
             *samples = output.try_as_slice::<f32>().map_err(error)?.to_vec();
         }
-        if result
-            .iter()
-            .any(|channel| channel.len() != pcm.len() || channel.iter().any(|x| !x.is_finite()))
-        {
+        if result.iter().any(|channel| {
+            channel.len() != session.samples || channel.iter().any(|x| !x.is_finite())
+        }) {
             return Err(error("MossFormer2 produced an invalid waveform"));
         }
-        Ok(result)
+        session.phase += 1;
+        Ok(Some(result))
+    }
+
+    pub fn separate(
+        &mut self,
+        pcm: &[f32],
+        cancel: &AtomicBool,
+    ) -> Result<[Vec<f32>; 2], ChildError> {
+        let mut session = self.begin(pcm, cancel)?;
+        loop {
+            if let Some(audio) = self.step(&mut session, cancel)? {
+                return Ok(audio);
+            }
+        }
     }
 }
 

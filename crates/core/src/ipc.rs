@@ -225,6 +225,26 @@ pub enum Request {
         pcm: Vec<f32>,
     },
     PrepareSeparation,
+    SeparateOpen {
+        pcm: Vec<f32>,
+    },
+    SeparateStep {
+        handle: Handle,
+    },
+    SeparateClose {
+        handle: Handle,
+    },
+    TranscribeOpen {
+        pcm: Vec<f32>,
+        language: String,
+        padding: (u32, u32),
+    },
+    TranscribeStep {
+        handle: Handle,
+    },
+    TranscribeClose {
+        handle: Handle,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -245,6 +265,8 @@ pub enum Response {
     Metrics(MetricsOut),
     Ack,
     Separated(SeparatedAudio),
+    SeparationProgress(Option<SeparatedAudio>),
+    TranscriptionProgress(Option<AsrText>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -261,7 +283,10 @@ pub enum EnvelopeBody {
 
 pub fn request_timeout(request: &Request) -> Duration {
     let seconds = match request {
-        Request::Transcribe { .. } | Request::Separate { .. } => 60,
+        Request::Transcribe { .. }
+        | Request::Separate { .. }
+        | Request::SeparateOpen { .. }
+        | Request::TranscribeOpen { .. } => 60,
         Request::LanguageProbe { .. } => 10,
         Request::CtcScores { .. } => 30,
         Request::EmbedVoice { .. } => 10,
@@ -272,6 +297,10 @@ pub fn request_timeout(request: &Request) -> Duration {
         | Request::VadClose { .. }
         | Request::DiarOpen { .. }
         | Request::DiarClose { .. }
+        | Request::SeparateStep { .. }
+        | Request::SeparateClose { .. }
+        | Request::TranscribeStep { .. }
+        | Request::TranscribeClose { .. }
         | Request::Metrics
         | Request::Cancel { .. }
         | Request::Shutdown => 10,

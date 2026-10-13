@@ -15,6 +15,8 @@ pub struct Runtime {
     ctc: Option<ctc::network::Network>,
     voice: Option<redimnet::coreml::Network>,
     separation: Option<crate::mossformer2::network::Network>,
+    separation_session: Option<(u64, crate::mossformer2::network::Session)>,
+    transcription_session: Option<(u64, cohere::network::Session)>,
     vad_sessions: std::collections::HashMap<u64, crate::silero::session::Session>,
     diar_sessions: std::collections::HashMap<u64, sortformer::session::Session>,
     next_session: u64,
@@ -35,6 +37,8 @@ impl Runtime {
             ctc: None,
             voice: None,
             separation: None,
+            separation_session: None,
+            transcription_session: None,
             vad_sessions: Default::default(),
             diar_sessions: Default::default(),
             next_session: 1,
@@ -325,7 +329,140 @@ impl Runtime {
                     clip: network.embed(&pcm, cancel)?,
                 }))
             }
+            Request::SeparateOpen { pcm } => {
+                if self.separation_session.is_some() {
+                    return Err(ChildError::failed("separation session already open", false));
+                }
+                if self.separation.is_none() {
+                    self.separation = Some(crate::mossformer2::network::Network::load(
+                        &self.model_root.join("mossformer2-16k"),
+                    )?);
+                }
+                let session = self
+                    .separation
+                    .as_mut()
+                    .expect("loaded")
+                    .begin(&pcm, cancel)?;
+                let id = self.next_session;
+                self.next_session = id
+                    .checked_add(1)
+                    .ok_or_else(|| ChildError::failed("model session id exhausted", false))?;
+                self.separation_session = Some((id, session));
+                Ok(Response::Handle(Handle {
+                    generation: 0,
+                    session: id,
+                }))
+            }
+            Request::SeparateStep { handle } => {
+                if handle.generation != 0 {
+                    return Err(ChildError::failed("invalid child generation", false));
+                }
+                let (id, mut session) = self
+                    .separation_session
+                    .take()
+                    .ok_or_else(|| ChildError::failed("unknown separation session", false))?;
+                if id != handle.session {
+                    self.separation_session = Some((id, session));
+                    return Err(ChildError::failed("unknown separation session", false));
+                }
+                let result = self
+                    .separation
+                    .as_mut()
+                    .expect("loaded")
+                    .step(&mut session, cancel)?;
+                if result.is_none() {
+                    self.separation_session = Some((id, session));
+                }
+                Ok(Response::SeparationProgress(result.map(|channels| {
+                    speakerdesk_core::ipc::SeparatedAudio {
+                        model: speakerdesk_core::separation::MODEL.into(),
+                        channels,
+                    }
+                })))
+            }
+            Request::SeparateClose { handle } => {
+                if handle.generation != 0 {
+                    return Err(ChildError::failed("invalid child generation", false));
+                }
+                if self
+                    .separation_session
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == handle.session)
+                {
+                    self.separation_session = None;
+                }
+                Ok(Response::Ack)
+            }
+            Request::TranscribeOpen {
+                pcm,
+                language,
+                padding,
+            } => {
+                if self.transcription_session.is_some() {
+                    return Err(ChildError::failed(
+                        "transcription session already open",
+                        false,
+                    ));
+                }
+                if self.cohere.is_none() {
+                    self.cohere = Some(cohere::network::Network::load(
+                        &self.model_root.join("cohere-speech"),
+                    )?);
+                }
+                let session = self
+                    .cohere
+                    .as_mut()
+                    .expect("loaded")
+                    .begin(&pcm, &language, padding, cancel)?;
+                let id = self.next_session;
+                self.next_session = id
+                    .checked_add(1)
+                    .ok_or_else(|| ChildError::failed("model session id exhausted", false))?;
+                self.transcription_session = Some((id, session));
+                Ok(Response::Handle(Handle {
+                    generation: 0,
+                    session: id,
+                }))
+            }
+            Request::TranscribeStep { handle } => {
+                if handle.generation != 0 {
+                    return Err(ChildError::failed("invalid child generation", false));
+                }
+                let (id, mut session) = self
+                    .transcription_session
+                    .take()
+                    .ok_or_else(|| ChildError::failed("unknown transcription session", false))?;
+                if id != handle.session {
+                    self.transcription_session = Some((id, session));
+                    return Err(ChildError::failed("unknown transcription session", false));
+                }
+                let result = self
+                    .cohere
+                    .as_mut()
+                    .expect("loaded")
+                    .step(&mut session, cancel)?;
+                if result.is_none() {
+                    self.transcription_session = Some((id, session));
+                }
+                Ok(Response::TranscriptionProgress(result))
+            }
+            Request::TranscribeClose { handle } => {
+                if handle.generation != 0 {
+                    return Err(ChildError::failed("invalid child generation", false));
+                }
+                if self
+                    .transcription_session
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == handle.session)
+                {
+                    self.transcription_session = None;
+                }
+                Ok(Response::Ack)
+            }
             Request::Separate { pcm } => {
+                if self.separation_session.is_some() {
+                    return Err(ChildError::failed("separation session already open", false));
+                }
                 if self.separation.is_none() {
                     self.separation = Some(crate::mossformer2::network::Network::load(
                         &self.model_root.join("mossformer2-16k"),
@@ -387,7 +524,13 @@ pub fn dispatch(request: Request, cancel: &AtomicBool) -> Result<Response, Child
         Request::SetupCheck { .. }
         | Request::PrepareAlignment
         | Request::PrepareSeparation
-        | Request::Separate { .. } => Err(ChildError::Unimplemented),
+        | Request::Separate { .. }
+        | Request::SeparateOpen { .. }
+        | Request::SeparateStep { .. }
+        | Request::SeparateClose { .. }
+        | Request::TranscribeOpen { .. }
+        | Request::TranscribeStep { .. }
+        | Request::TranscribeClose { .. } => Err(ChildError::Unimplemented),
         Request::Metrics => memory::metrics().map(Response::Metrics),
         Request::Cancel { .. } | Request::Shutdown => Ok(Response::Ack),
     }

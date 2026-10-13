@@ -63,7 +63,7 @@ jobs:
         with:
           shared-key: ${{ steps.identity.outputs.dependency-key }}
           cache-bin: false
-          cache-workspace-crates: false
+          cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.cache != 'false' }}
       - name: Restore npm cache
         if: github.event.inputs.cache != 'false'
