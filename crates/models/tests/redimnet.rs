@@ -29,9 +29,13 @@ fn native_coreml_policies_return_stable_normalized_embeddings() {
         .collect();
     let cases = [&pcm[..64000], &pcm[80000..]];
     let mut results = vec![];
-    for policy in [ComputePolicy::CpuAndGpu, ComputePolicy::All] {
+    for policy in [
+        ComputePolicy::CpuAndGpu,
+        ComputePolicy::CpuAndNeuralEngine,
+        ComputePolicy::All,
+    ] {
         if let Ok(selected) = std::env::var("SPEAKERDESK_TEST_COMPUTE_POLICY") {
-            assert!(["CPU_AND_GPU", "ALL"].contains(&selected.as_str()));
+            assert!(["CPU_AND_GPU", "CPU_AND_NEURAL_ENGINE", "ALL"].contains(&selected.as_str()));
             if selected != policy.name() {
                 continue;
             }
@@ -96,6 +100,74 @@ fn native_coreml_policies_return_stable_normalized_embeddings() {
         results.push(serde_json::json!({"policy":policy.name(),"model":network.identity(),"load_seconds":load_seconds,"calls":calls}));
     }
     std::fs::write(output, serde_json::to_vec_pretty(&results).unwrap()).unwrap();
+}
+
+#[test]
+#[ignore = "requires SPEAKERDESK_VOICE_CASES manifest, SPEAKERDESK_TEST_VOICE, selected compute policy and a fresh SPEAKERDESK_VOICE_RESULT"]
+fn public_crop_voice_embeddings() {
+    use std::io::Write;
+    let manifest_path =
+        PathBuf::from(std::env::var_os("SPEAKERDESK_VOICE_CASES").expect("public crop manifest"));
+    let bytes = std::fs::read(&manifest_path).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let cases = manifest["cases"].as_array().expect("manifest cases");
+    assert!(!cases.is_empty());
+    let root = PathBuf::from(std::env::var_os("SPEAKERDESK_TEST_VOICE").expect("model directory"));
+    let output = PathBuf::from(std::env::var_os("SPEAKERDESK_VOICE_RESULT").expect("result path"));
+    assert!(!output.exists());
+    let selected =
+        std::env::var("SPEAKERDESK_TEST_COMPUTE_POLICY").expect("explicit compute policy");
+    let policy = [
+        ComputePolicy::CpuAndGpu,
+        ComputePolicy::CpuAndNeuralEngine,
+        ComputePolicy::All,
+    ]
+    .into_iter()
+    .find(|policy| policy.name() == selected)
+    .expect("CPU_AND_GPU, CPU_AND_NEURAL_ENGINE or ALL");
+    let started = Instant::now();
+    let network = Network::load(&root, policy).unwrap();
+    let load_seconds = started.elapsed().as_secs_f64();
+    let mut calls = Vec::with_capacity(cases.len());
+    for case in cases {
+        let id = case["id"].as_str().expect("case id");
+        let path = PathBuf::from(case["path"].as_str().expect("case WAV path"));
+        let path = if path.is_absolute() {
+            path
+        } else {
+            manifest_path.parent().unwrap().join(path)
+        };
+        let audio = std::fs::read(&path).unwrap();
+        let mut reader = hound::WavReader::new(std::io::Cursor::new(&audio)).unwrap();
+        assert_eq!(reader.spec().channels, 1);
+        assert_eq!(reader.spec().sample_rate, 16000);
+        assert_eq!(reader.spec().bits_per_sample, 16);
+        assert_eq!(reader.spec().sample_format, hound::SampleFormat::Int);
+        let pcm: Vec<_> = reader
+            .samples::<i16>()
+            .map(|sample| f32::from(sample.unwrap()) / 32768.)
+            .collect();
+        let start = usize::try_from(case["start_sample"].as_u64().expect("start sample")).unwrap();
+        let end = usize::try_from(case["end_sample"].as_u64().expect("end sample")).unwrap();
+        assert!(start < end && end <= pcm.len(), "invalid crop: {id}");
+        let started = Instant::now();
+        let embedding = network
+            .embed(&pcm[start..end], &AtomicBool::new(false))
+            .unwrap();
+        let seconds = started.elapsed().as_secs_f64();
+        calls.push(serde_json::json!({"id":id,"path":path,"wav_sha256":format!("{:x}",Sha256::digest(&audio)),
+            "start_sample":start,"end_sample":end,"seconds":seconds,"clean":embedding.clean,"vector":embedding.vector}));
+    }
+    let result = serde_json::json!({"manifest_sha256":format!("{:x}",Sha256::digest(&bytes)),
+        "policy":policy.name(),"model":network.identity(),"load_seconds":load_seconds,"calls":calls,
+        "limitation":"Configured compute units; actual ANE placement, recognition accuracy and live concurrency are not established by this probe."});
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .unwrap()
+        .write_all(&serde_json::to_vec_pretty(&result).unwrap())
+        .unwrap();
 }
 
 #[test]

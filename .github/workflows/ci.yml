@@ -103,7 +103,7 @@ jobs:
         with:
           shared-key: ${{ steps.identity.outputs.dependency-key }}
           cache-bin: false
-          cache-workspace-crates: false
+          cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.event.inputs.cache != 'false' }}
       - name: Restore compiler cache
         if: github.event.inputs.cache != 'false'
@@ -178,7 +178,7 @@ jobs:
         with:
           shared-key: ${{ steps.identity.outputs.dependency-key }}
           cache-bin: false
-          cache-workspace-crates: false
+          cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event_name) && github.event.inputs.cache != 'false' }}
       - name: Restore compiler cache
         if: github.event.inputs.cache != 'false'

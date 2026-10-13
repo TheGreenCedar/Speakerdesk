@@ -382,12 +382,26 @@ pub fn run<M: crate::models::Models + ?Sized>(
     pcm: &[f32],
     language: &str,
 ) -> Result<(crate::ipc::SeparatedAudio, [CandidateVoice; 2]), crate::error::ChildError> {
+    let (audio, voices, _) = run_with_evidence(models, pcm, language)?;
+    Ok((audio, voices))
+}
+
+pub fn run_with_evidence<M: crate::models::Models + ?Sized>(
+    models: &M,
+    pcm: &[f32],
+    language: &str,
+) -> Result<
+    (
+        crate::ipc::SeparatedAudio,
+        [CandidateVoice; 2],
+        [Vec<(usize, usize)>; 2],
+    ),
+    crate::error::ChildError,
+> {
     let audio = prepare_audio(models.separate(pcm)?, pcm.len())?;
-    let candidates = [
-        decode_voice(models, &audio.channels[0], language)?,
-        decode_voice(models, &audio.channels[1], language)?,
-    ];
-    Ok((audio, candidates))
+    let (a, a_regions) = decode_voice_with_evidence(models, &audio.channels[0], language)?;
+    let (b, b_regions) = decode_voice_with_evidence(models, &audio.channels[1], language)?;
+    Ok((audio, [a, b], [a_regions, b_regions]))
 }
 
 /// The same quantization is used by saved work and the capture continuation.
@@ -421,16 +435,52 @@ pub fn decode_voice<M: crate::models::Models + ?Sized>(
     channel: &[f32],
     language: &str,
 ) -> Result<CandidateVoice, crate::error::ChildError> {
+    decode_voice_with_evidence(models, channel, language).map(|(voice, _)| voice)
+}
+
+/// Speech-supported query bounds from the same generated PCM admission as ASR.
+pub fn decode_voice_with_evidence<M: crate::models::Models + ?Sized>(
+    models: &M,
+    channel: &[f32],
+    language: &str,
+) -> Result<(CandidateVoice, Vec<(usize, usize)>), crate::error::ChildError> {
     let result = crate::import::separated_passage(models, channel, language).map_err(|e| {
         e.child
             .unwrap_or_else(|| crate::error::ChildError::failed(e.message, false))
     })?;
-    Ok(CandidateVoice {
-        text: result.text,
-        language: result.language,
-        review: result.review,
-        transcription_review: result.transcription_review,
-    })
+    let mut ranges = result
+        .retry_parts
+        .iter()
+        .flat_map(|part| {
+            part["acoustic_evidence"]["speech_regions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|range| {
+            let start = usize::try_from(range["start_sample"].as_u64()?).ok()?;
+            let end = usize::try_from(range["end_sample"].as_u64()?).ok()?;
+            (start < end && end <= channel.len()).then_some((start, end))
+        })
+        .collect::<Vec<_>>();
+    ranges.sort_unstable();
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some(last) = regions.last_mut().filter(|last| start <= last.1) {
+            last.1 = last.1.max(end);
+        } else {
+            regions.push((start, end));
+        }
+    }
+    Ok((
+        CandidateVoice {
+            text: result.text,
+            language: result.language,
+            review: result.review,
+            transcription_review: result.transcription_review,
+        },
+        regions,
+    ))
 }
 
 #[cfg(test)]

@@ -35,6 +35,31 @@ struct Replay {
     available: bool,
     empty_voice: bool,
     calls: AtomicUsize,
+    identity: Option<Arc<IdentityReplay>>,
+}
+
+struct IdentityReplay {
+    entered: AtomicBool,
+    release: (Mutex<bool>, Condvar),
+    child_loss: bool,
+}
+
+fn separated_policy() -> voice::separation::Policy {
+    voice::separation::Policy {
+        separator_model: MODEL.into(),
+        calibration: voice::Calibration::new(
+            voice::VoiceModel::new("mounted-fixture", "r1", "a".repeat(64), 3, 16000).unwrap(),
+            "synthetic-separated-route-test",
+            0.9,
+            0.1,
+            12,
+            12,
+            0.,
+            0.,
+            2,
+        )
+        .unwrap(),
+    }
 }
 
 impl Replay {
@@ -48,11 +73,16 @@ impl Replay {
             available: true,
             empty_voice: false,
             calls: AtomicUsize::new(0),
+            identity: None,
         }
     }
     fn release(&self) {
         *self.release.0.lock().unwrap() = true;
         self.release.1.notify_all();
+        if let Some(identity) = &self.identity {
+            *identity.release.0.lock().unwrap() = true;
+            identity.release.1.notify_all();
+        }
     }
 }
 
@@ -65,6 +95,63 @@ impl ApplicationModels for Replay {
     }
     fn separation_available(&self) -> bool {
         self.available
+    }
+    fn separated_voice_policy(&self) -> Option<voice::separation::Policy> {
+        self.identity.as_ref().map(|_| separated_policy())
+    }
+    fn separate_passage_with_evidence(
+        &self,
+        pcm: &[f32],
+        language: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        (
+            SeparatedAudio,
+            [CandidateVoice; 2],
+            [Vec<(usize, usize)>; 2],
+        ),
+        String,
+    > {
+        self.separate_passage(pcm, language, cancellation)
+            .map(|(audio, voices)| {
+                let ranges = if self.identity.is_some() {
+                    [vec![(0, pcm.len())], vec![(0, pcm.len())]]
+                } else {
+                    [Vec::new(), Vec::new()]
+                };
+                (audio, voices, ranges)
+            })
+    }
+    fn embed_live_voice(
+        &self,
+        pcm: &[f32],
+        cancellation: &CancellationToken,
+    ) -> Result<speakerdesk_core::ipc::VoiceEmbedding, speakerdesk_core::error::ChildError> {
+        let replay = self.identity.as_ref().expect("qualified route replay");
+        replay.entered.store(true, Ordering::SeqCst);
+        let mut released = replay.release.0.lock().unwrap();
+        while !*released {
+            released = replay.release.1.wait(released).unwrap();
+        }
+        if cancellation.is_cancelled() {
+            return Err(speakerdesk_core::error::ChildError::Cancelled);
+        }
+        if replay.child_loss {
+            return Err(speakerdesk_core::error::ChildError::ProcessLost {
+                message: "scripted embedding child loss".into(),
+            });
+        }
+        Ok(speakerdesk_core::ipc::VoiceEmbedding {
+            model: separated_policy().calibration.model,
+            clip: voice::ClipEmbedding {
+                clean: true,
+                vector: if pcm[0] < 0.4 {
+                    vec![1., 0., 0.]
+                } else {
+                    vec![0., 1., 0.]
+                },
+            },
+        })
     }
     fn separate_passage(
         &self,
@@ -556,6 +643,136 @@ async fn automatic_rows_export_restart_restore_and_do_not_repeat_the_same_source
         original_audio
     );
     host.stop().await;
+}
+
+#[tokio::test]
+async fn automatic_identity_publication_retires_checks_and_persists_one_known_channel() {
+    for mode in ["match", "cancel", "stale_generation", "child_loss"] {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, mut replay) = automatic_fixture(temp.path(), false, "ordinary");
+        state.set_models(Arc::new(speakerdesk_host::routes::UnavailableModels));
+        let replay_mut = Arc::get_mut(&mut replay).unwrap();
+        replay_mut.document.as_mut().unwrap().provenance = Some(json!({"kind":"local_inference"}));
+        let identity = Arc::new(IdentityReplay {
+            entered: AtomicBool::new(false),
+            release: (Mutex::new(false), Condvar::new()),
+            child_loss: mode == "child_loss",
+        });
+        replay_mut.identity = Some(identity.clone());
+        state.set_models(replay.clone());
+        let _release_on_failure = ReleaseOnDrop(replay.clone());
+        let mut store = SqliteJobStore::open(temp.path().join("speakerdesk.sqlite")).unwrap();
+        let person = store
+            .edit_person(|people| {
+                let person = people.create_with_id("Lin", 0., "lin").unwrap();
+                Ok::<_, speakerdesk_core::error::StoreError>((person.clone(), person))
+            })
+            .unwrap();
+        let profile = voice::VoiceProfile {
+            person_id: person.id.clone(),
+            version: "v1".into(),
+            enrolled_at: 0.,
+            model: separated_policy().calibration.model,
+            centroid: vec![1., 0., 0.],
+            clips: Vec::new(),
+            consent: speakerdesk_core::people::EXPLICIT_REMEMBER_VOICE.into(),
+        };
+        let generation = store.voice_generation(&person.id).unwrap().unwrap();
+        assert!(
+            store
+                .publish_voice(&JobId::parse(JOB).unwrap(), generation, &profile, |_| Ok::<
+                    _,
+                    speakerdesk_core::error::StoreError,
+                >(
+                    true
+                ))
+                .unwrap()
+        );
+        let profiles_before = store.voice_profiles().unwrap();
+        let host = Host::start(state).await;
+        host.post("/run", 202).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !identity.entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            stored(temp.path()).extra["voice_checks"]
+                .as_object()
+                .unwrap()
+                .len(),
+            2
+        );
+        match mode {
+            "cancel" => {
+                host.post("/cancel", 200).await;
+            }
+            "stale_generation" => {
+                let mut job = stored(temp.path());
+                job.extra["operation_generation"] =
+                    json!(job.extra["operation_generation"].as_u64().unwrap() + 1);
+                job.extra.remove("passage_separation");
+                job.message = "A newer operation owns this message.".into();
+                host.state.insert_job(job);
+            }
+            _ => {}
+        }
+        replay.release();
+        host.state.drain();
+        let finished = host.job().await;
+        let durable = stored(temp.path());
+        assert!(
+            durable.extra["voice_checks"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|check| check["status"] != "checking"),
+            "{mode}"
+        );
+        assert_eq!(store.voice_profiles().unwrap(), profiles_before);
+        assert_eq!(store.people().unwrap().get("lin").unwrap().name, "Lin");
+        if mode == "match" {
+            let rows = finished["document"]["segments"].as_array().unwrap();
+            assert_eq!(
+                finished["document"]["speakers"][rows[0]["speaker"].as_str().unwrap()],
+                "Lin"
+            );
+            assert_eq!(
+                rows[1]["speaker"], "unassigned",
+                "unknown sibling cannot be assigned by exclusion"
+            );
+            assert_eq!(
+                finished["speaker_assignments"][rows[0]["speaker"].as_str().unwrap()]["person_id"],
+                "lin"
+            );
+            let exported = host
+                .request(reqwest::Method::GET, "/export/txt", None)
+                .await
+                .text()
+                .await
+                .unwrap();
+            assert!(exported.contains("Lin") && exported.contains("estimated voice 0"));
+            host.stop().await;
+            let _reopened = AppState::open(temp.path()).unwrap();
+            assert_eq!(stored(temp.path()).document, durable.document);
+            assert_eq!(store.voice_profiles().unwrap(), profiles_before);
+        } else {
+            assert_eq!(finished["document"]["segments"][0]["id"], "mixed", "{mode}");
+            assert_eq!(
+                finished["document"]["segments"][0]["text"], "original mixed words",
+                "{mode}"
+            );
+            if mode == "stale_generation" {
+                assert_eq!(finished["message"], "A newer operation owns this message.");
+            }
+            let assets = temp.path().join(JOB).join("separated");
+            assert!(!assets.exists() || std::fs::read_dir(assets).unwrap().count() == 0);
+            host.stop().await;
+            assert_eq!(stored(temp.path()).document, durable.document);
+        }
+    }
 }
 
 #[tokio::test]

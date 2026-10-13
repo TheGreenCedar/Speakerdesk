@@ -100,10 +100,18 @@ fn serve_with<R: Read + Send, W: Write + Send>(
             for (id, request, cancelled) in receive {
                 let vad_open = matches!(request, Request::VadOpen { .. });
                 let diar_open = matches!(request, Request::DiarOpen { .. });
+                let separate_open = matches!(request, Request::SeparateOpen { .. });
+                let transcribe_open = matches!(request, Request::TranscribeOpen { .. });
                 let session = match &request {
                     Request::VadFeed { handle, .. } => Some(Request::VadClose { handle: *handle }),
                     Request::DiarFeed { handle, .. } => {
                         Some(Request::DiarClose { handle: *handle })
+                    }
+                    Request::SeparateStep { handle } => {
+                        Some(Request::SeparateClose { handle: *handle })
+                    }
+                    Request::TranscribeStep { handle } => {
+                        Some(Request::TranscribeClose { handle: *handle })
                     }
                     _ => None,
                 };
@@ -116,6 +124,12 @@ fn serve_with<R: Read + Send, W: Write + Send>(
                         }
                         Ok(Response::Handle(handle)) if diar_open => {
                             Some(Request::DiarClose { handle: *handle })
+                        }
+                        Ok(Response::Handle(handle)) if separate_open => {
+                            Some(Request::SeparateClose { handle: *handle })
+                        }
+                        Ok(Response::Handle(handle)) if transcribe_open => {
+                            Some(Request::TranscribeClose { handle: *handle })
                         }
                         _ => session,
                     };

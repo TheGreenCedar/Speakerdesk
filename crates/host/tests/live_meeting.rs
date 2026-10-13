@@ -14,6 +14,7 @@ struct Running {
     url: String,
     token: String,
     client: reqwest::Client,
+    root: std::path::PathBuf,
 }
 impl Running {
     async fn open(root: &Path, dual: bool) -> Self {
@@ -90,6 +91,7 @@ impl Running {
             url,
             token,
             client,
+            root: root.into(),
         };
         running
             .wait("api/config", |v| v["readiness"]["configured"] == true)
@@ -201,7 +203,23 @@ impl Running {
         let response = self
             .post(&format!("api/meetings/{id}/stop"), json!({}))
             .await;
-        assert_eq!(response.status(), 202, "{}", response.text().await.unwrap());
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        if status != 202 {
+            let job = self.get(&format!("api/jobs/{id}")).await;
+            let meeting = self.get("api/meeting").await;
+            let log =
+                fs::read(self.root.join("data").join(id).join("capture.log")).unwrap_or_default();
+            let diagnostics = json!({
+                "meeting":meeting,
+                "job":{"status":job["status"],"message":job["message"],"duration":job["duration"],
+                    "inference_owned":job["inference_owned"],"live_recovery":job["live_recovery"],
+                    "live_inference_error":job["live_inference_error"],"pause_flush":job["pause_flush"],
+                    "capture_audio_coverage":job["capture_audio_coverage"]},
+                "capture_log":String::from_utf8_lossy(&log[..log.len().min(4096)]),
+            });
+            panic!("Stop must return 202; got {status}: {body}; lifecycle: {diagnostics}");
+        }
         self.wait(&format!("api/jobs/{id}"), |v| {
             ["ready", "failed"].contains(&v["status"].as_str().unwrap_or(""))
                 && v["inference_owned"] == false
@@ -1287,6 +1305,7 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
         "capture-error",
         "inference-error",
     ] {
+        eprintln!("live source lifecycle case: {mode}");
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let dual = mode.starts_with("dual");
@@ -1375,14 +1394,26 @@ async fn live_source_bindings_qualified_pause_and_whole_host_shutdown_are_honest
                 host.close(root).await;
             }
             "inference-error" => {
+                // Scripted capture emits whole seven-second bursts. Drain the
+                // first through the writer's half-second watermark before killing
+                // inference, so recovery does not stack unacknowledged bursts.
+                let captured = host
+                    .wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 6.5)
+                    .await;
+                assert_eq!(captured["status"], "recording", "{}", captured["message"]);
                 let child: i32 = fs::read_to_string(root.join("fixture-child-pid"))
                     .unwrap()
                     .parse()
                     .unwrap();
                 assert_eq!(unsafe { libc::kill(child, libc::SIGKILL) }, 0);
                 trigger(root, 2);
-                host.wait(&path, |v| v["live_recovery"]["status"] == "recovered")
+                let recovered = host
+                    .wait(&path, |v| {
+                        v["live_recovery"]["status"] == "recovered"
+                            && v["duration"].as_f64().unwrap_or(0.) >= 13.5
+                    })
                     .await;
+                assert_eq!(recovered["status"], "recording", "{}", recovered["message"]);
                 trigger(root, 3);
                 host.wait("api/meeting", |v| {
                     v["duration"].as_f64().unwrap_or(0.) >= 20.5
@@ -3392,6 +3423,88 @@ async fn saved_accuracy_pause_failure_and_late_candidate_matrix() {
             retried["document"]["segments"][0]["text"], "New accuracy words.",
             "{case}"
         );
+        host.close(root).await;
+    }
+}
+
+#[tokio::test]
+async fn live_words_advance_while_separation_and_generated_decode_are_pending() {
+    for phase in ["moss", "asr"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("fixture-overlap"), b"two-voice protocol replay").unwrap();
+        fs::write(
+            root.join("fixture-live-continuity"),
+            b"second speech interval",
+        )
+        .unwrap();
+        fs::create_dir(root.join("mossformer2-16k")).unwrap();
+        fs::write(
+            root.join("mossformer2-16k/model.safetensors"),
+            b"fixture only",
+        )
+        .unwrap();
+        let (hold, marker) = if phase == "moss" {
+            ("hold-live-separation", "separation-started")
+        } else {
+            fs::write(
+                root.join("hold-only-separated"),
+                b"keep live words responsive",
+            )
+            .unwrap();
+            ("hold-live-asr", "edit-asr-started")
+        };
+        fs::write(root.join(hold), b"auxiliary completion held").unwrap();
+        let host = Running::open(root, false).await;
+        trigger(root, 1);
+        let id = host.start_live_only(json!(["microphone"])).await;
+        let path = format!("api/jobs/{id}");
+        wait_file(&root.join(marker)).await;
+        trigger(root, 2);
+        let advanced = host
+            .wait(&path, |job| {
+                job["document"]["segments"].as_array().is_some_and(|rows| {
+                    rows.iter().any(|row| {
+                        row["canonical_text_end_sample"].as_u64().unwrap_or(0) > 112_000
+                            && row["text"].as_str().is_some_and(|text| !text.is_empty())
+                    })
+                })
+            })
+            .await;
+        assert_eq!(advanced["status"], "recording");
+        assert!(
+            root.join(hold).exists(),
+            "{phase}: new words precede auxiliary completion"
+        );
+        assert!(advanced["passage_separation"].is_object());
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/stop"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        let draining = host
+            .wait(&path, |job| job["canonical_observed_sample"] == 224513)
+            .await;
+        assert!(draining["passage_separation"].is_object());
+        assert!(
+            root.join(hold).exists(),
+            "{phase}: EOF precedes auxiliary completion"
+        );
+        fs::remove_file(root.join(hold)).unwrap();
+        let finished = host
+            .wait(&path, |job| {
+                job["status"] == "ready"
+                    && job["inference_owned"] == false
+                    && job["document"]["segments"].as_array().is_some_and(|rows| {
+                        rows.iter()
+                            .filter(|row| row["separation"].is_object())
+                            .count()
+                            >= 2
+                    })
+            })
+            .await;
+        assert_eq!(finished["canonical_observed_sample"], 224513);
         host.close(root).await;
     }
 }

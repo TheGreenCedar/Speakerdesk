@@ -1,4 +1,8 @@
-use super::{decoder::Decoder, encoder::Encoder, features::Features};
+use super::{
+    decoder::{Cache, Decoder},
+    encoder::Encoder,
+    features::Features,
+};
 use crate::weights::{error, verify};
 use mlx_rs::Array;
 use speakerdesk_core::{error::ChildError, ipc::AsrText};
@@ -13,6 +17,17 @@ pub struct Network {
     features: Features,
     tokenizer: tokenizers::Tokenizer,
 }
+/// Full encoded crop and request-local KV caches for cooperative decoding.
+pub struct Session {
+    encoded: Option<Array>,
+    cross_mask: Option<Array>,
+    caches: [Cache; 8],
+    tokens: Vec<u32>,
+    input: Vec<u32>,
+    offset: usize,
+    done: bool,
+}
+
 impl Network {
     pub fn load(directory: &Path) -> Result<Self, ChildError> {
         verify(
@@ -51,13 +66,13 @@ impl Network {
         Ok(network)
     }
 
-    pub fn transcribe(
+    pub fn begin(
         &mut self,
         pcm: &[f32],
         language: &str,
         padding: (u32, u32),
         cancel: &AtomicBool,
-    ) -> Result<AsrText, ChildError> {
+    ) -> Result<Session, ChildError> {
         if ![
             "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
         ]
@@ -79,10 +94,14 @@ impl Network {
             return Err(ChildError::Cancelled);
         }
         if pcm.len() < 160 {
-            return Ok(AsrText {
-                text: String::new(),
-                raw_text: String::new(),
-                token_count: 0,
+            return Ok(Session {
+                encoded: None,
+                cross_mask: None,
+                caches: std::array::from_fn(|_| Default::default()),
+                tokens: Vec::new(),
+                input: Vec::new(),
+                offset: 0,
+                done: false,
             });
         }
         let mut padded = vec![0.0; padding.0 as usize];
@@ -107,9 +126,9 @@ impl Network {
                 .ok_or_else(|| error(format!("missing Cohere prompt token {token}")))
         })
         .collect::<Result<_, _>>()?;
-        let tokens = mlx_rs::with_stream(
+        let (encoded, cross_mask) = mlx_rs::with_stream(
             &mlx_rs::Stream::gpu(),
-            || -> Result<Vec<u32>, ChildError> {
+            || -> Result<(Array, Array), ChildError> {
                 let (features, valid) = self.features.extract(&padded).map_err(error)?;
                 let (encoded, valid) = self.encoder.forward(&features, valid, cancel)?;
                 let encoded = self.decoder.project(&encoded).map_err(error)?;
@@ -119,36 +138,87 @@ impl Network {
                         .collect::<Vec<_>>(),
                     &[1, 1, 1, encoded.dim(1)],
                 );
-                let mut caches = std::array::from_fn(|_| Default::default());
-                let mut tokens = Vec::new();
-                let mut input = prompt.clone();
-                let mut offset = 0;
-                for _ in 0..448 {
-                    if cancel.load(Ordering::Acquire) {
-                        return Err(ChildError::Cancelled);
-                    }
-                    let token =
-                        self.decoder
-                            .step(&input, offset, &encoded, &cross_mask, &mut caches)?;
-                    if token == super::EOS_TOKEN_ID {
-                        return Ok(tokens);
-                    }
-                    tokens.push(token);
-                    offset += input.len();
-                    input.clear();
-                    input.push(token);
-                }
-                Ok(tokens)
+                Ok((encoded, cross_mask))
             },
         )?;
+        Ok(Session {
+            encoded: Some(encoded),
+            cross_mask: Some(cross_mask),
+            caches: std::array::from_fn(|_| Default::default()),
+            tokens: Vec::new(),
+            input: prompt,
+            offset: 0,
+            done: false,
+        })
+    }
+
+    pub fn step(
+        &mut self,
+        session: &mut Session,
+        cancel: &AtomicBool,
+    ) -> Result<Option<AsrText>, ChildError> {
         if cancel.load(Ordering::Acquire) {
             return Err(ChildError::Cancelled);
         }
-        let text = self.tokenizer.decode(&tokens, true).map_err(error)?;
-        Ok(AsrText {
+        if session.done {
+            return Err(error("completed Cohere session"));
+        }
+        let finish = if let Some(encoded) = &session.encoded {
+            if session.tokens.len() >= 448 {
+                true
+            } else {
+                let token = mlx_rs::with_stream(&mlx_rs::Stream::gpu(), || {
+                    self.decoder.step(
+                        &session.input,
+                        session.offset,
+                        encoded,
+                        session.cross_mask.as_ref().expect("encoded mask"),
+                        &mut session.caches,
+                    )
+                })?;
+                if token == super::EOS_TOKEN_ID {
+                    true
+                } else {
+                    session.tokens.push(token);
+                    session.offset += session.input.len();
+                    session.input.clear();
+                    session.input.push(token);
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        if cancel.load(Ordering::Acquire) {
+            return Err(ChildError::Cancelled);
+        }
+        if !finish {
+            return Ok(None);
+        }
+        session.done = true;
+        let text = self
+            .tokenizer
+            .decode(&session.tokens, true)
+            .map_err(error)?;
+        Ok(Some(AsrText {
             raw_text: text.clone(),
             text,
-            token_count: tokens.len() as u32,
-        })
+            token_count: session.tokens.len() as u32,
+        }))
+    }
+
+    pub fn transcribe(
+        &mut self,
+        pcm: &[f32],
+        language: &str,
+        padding: (u32, u32),
+        cancel: &AtomicBool,
+    ) -> Result<AsrText, ChildError> {
+        let mut session = self.begin(pcm, language, padding, cancel)?;
+        loop {
+            if let Some(text) = self.step(&mut session, cancel)? {
+                return Ok(text);
+            }
+        }
     }
 }

@@ -33,12 +33,14 @@ pub const DIMENSION: usize = 192;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComputePolicy {
     CpuAndGpu,
+    CpuAndNeuralEngine,
     All,
 }
 impl ComputePolicy {
     pub fn name(self) -> &'static str {
         match self {
             Self::CpuAndGpu => "CPU_AND_GPU",
+            Self::CpuAndNeuralEngine => "CPU_AND_NEURAL_ENGINE",
             Self::All => "ALL",
         }
     }
@@ -73,6 +75,7 @@ impl Network {
                 let configuration = MLModelConfiguration::new();
                 configuration.setComputeUnits(match policy {
                     ComputePolicy::CpuAndGpu => MLComputeUnits::CPUAndGPU,
+                    ComputePolicy::CpuAndNeuralEngine => MLComputeUnits::CPUAndNeuralEngine,
                     ComputePolicy::All => MLComputeUnits::All,
                 });
                 let model =

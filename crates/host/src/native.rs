@@ -98,8 +98,39 @@ impl ApplicationModels for NativeModels {
             .join("model.safetensors")
             .is_file()
     }
+    fn separate_passage_with_evidence(
+        &self,
+        pcm: &[f32],
+        language: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        (
+            speakerdesk_core::ipc::SeparatedAudio,
+            [speakerdesk_core::separation::CandidateVoice; 2],
+            [Vec<(usize, usize)>; 2],
+        ),
+        String,
+    > {
+        speakerdesk_core::separation::run_with_evidence(
+            &self.supervisor.models(cancellation.clone()),
+            pcm,
+            language,
+        )
+        .map_err(|e| e.to_string())
+    }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
         self.voice.read().expect("voice capability").clone()
+    }
+    fn separated_voice_policy(&self) -> Option<speakerdesk_core::voice::separation::Policy> {
+        let policy = native_separated_voice_policy();
+        (self.separation_available()
+            && self
+                .voice
+                .read()
+                .expect("voice capability")
+                .as_ref()
+                .is_some_and(|active| active.model == policy.calibration.model))
+        .then_some(policy)
     }
     fn embed_voice(
         &self,
@@ -403,6 +434,35 @@ pub(crate) fn native_voice_policy() -> speakerdesk_core::voice::Calibration {
         2,
     )
     .expect("measured voice policy")
+}
+
+pub(crate) fn native_separated_voice_policy() -> speakerdesk_core::voice::separation::Policy {
+    use speakerdesk_core::voice::{Calibration, VoiceModel, separation::Policy};
+    // Frozen clean public generated-query pilot; these observed rates do not
+    // estimate population accuracy. New model identities require new evidence.
+    let model = VoiceModel::new(
+        "aufklarer/ReDimNet2-B6-CoreML",
+        "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU",
+        "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+        192,
+        16000,
+    )
+    .expect("qualified separated-query voice identity");
+    Policy {
+        separator_model: "mossformer2-16k@407cb030cd66340918ebb6c8cc63b18f8592cdbe".into(),
+        calibration: Calibration::new(
+            model,
+            "librispeech-clean-generated-query-v1:development-6-speakers",
+            0.7264125328398843,
+            0.10003429964182987,
+            6,
+            36,
+            0.0,
+            0.0,
+            2,
+        )
+        .expect("measured separated-query policy"),
+    }
 }
 
 pub(crate) fn recording_path(root: &Path, job: &Job) -> std::io::Result<PathBuf> {

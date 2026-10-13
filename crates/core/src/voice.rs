@@ -18,6 +18,8 @@ use crate::people::{
     reconcile_assignments, require_profile_consent, require_remember_consent,
 };
 
+pub mod separation;
+
 /// Caller-owned reuse bar. Matching or enrollment does not create a person id.
 pub const IDENTITY_REUSE_COSINE: f64 = 0.9999;
 
@@ -541,8 +543,10 @@ fn crop_anchor(segment: &AudioSegment, track_id: &str, live: bool) -> Option<(i6
         (segment.start_sample?, segment.end_sample?)
     } else if let Some(anchor) = &segment.decode_context {
         // Unassigned tail words do not erase separately observed solo speaker audio.
-        if anchor.policy != "speech_utterance_tail_context_v1"
-            || (segment.speaker != track_id && segment.speaker != "unassigned")
+        if !matches!(
+            anchor.policy.as_str(),
+            "speech_utterance_tail_context_v1" | "speech_utterance_context_v2"
+        ) || (segment.speaker != track_id && segment.speaker != "unassigned")
         {
             return None;
         }

@@ -45,6 +45,8 @@ fn main() {
     let mut held_live_asr = false;
     let mut held_context: Option<usize> = None;
     let mut capture_vad = None;
+    let mut separation_sessions = std::collections::HashMap::<u64, Vec<f32>>::new();
+    let mut transcription_sessions = std::collections::HashMap::<u64, AsrText>::new();
     while let Ok(envelope) = read_envelope(&mut std::io::stdin()) {
         let id = envelope.request_id;
         let EnvelopeBody::Request(request) = envelope.body else {
@@ -53,6 +55,7 @@ fn main() {
         let script: Option<serde_json::Value> = std::fs::read(root.join("context-replay.json"))
             .ok()
             .map(|bytes| serde_json::from_slice(&bytes).unwrap());
+        let cooperative_asr = matches!(request, Request::TranscribeOpen { .. });
         let context_asr = match &request {
             Request::Transcribe { pcm, .. } => script.as_ref().is_some_and(|script| {
                 script.get(context_index).is_some_and(|context| {
@@ -101,7 +104,9 @@ fn main() {
             && !held_live_feed;
         let hold_voice =
             matches!(request, Request::EmbedVoice { .. }) && root.join("hold-live-voice").exists();
-        if matches!(request, Request::Transcribe { ref pcm, .. } if pcm.iter().any(|x| x.abs() > 0.3))
+        let hold_separation = matches!(request, Request::Separate { .. })
+            && root.join("hold-live-separation").exists();
+        if matches!(request, Request::Transcribe { ref pcm, .. } | Request::TranscribeOpen { ref pcm, .. } if pcm.iter().any(|x| x.abs() > 0.3))
             && root.join("exit-separated-asr-once").exists()
         {
             std::fs::remove_file(root.join("exit-separated-asr-once")).unwrap();
@@ -212,6 +217,8 @@ fn main() {
                             raw_p: if root.join("fixture-overlap").exists()
                                 && capture_vad == Some(handle.session)
                                 && *observed >= 4 * 16000
+                                && (!root.join("fixture-live-continuity").exists()
+                                    || !(7 * 16000..11 * 16000).contains(observed))
                             {
                                 0.
                             } else {
@@ -220,6 +227,8 @@ fn main() {
                             norm_p: if root.join("fixture-overlap").exists()
                                 && capture_vad == Some(handle.session)
                                 && *observed >= 4 * 16000
+                                && (!root.join("fixture-live-continuity").exists()
+                                    || !(7 * 16000..11 * 16000).contains(observed))
                             {
                                 0.
                             } else {
@@ -291,7 +300,9 @@ fn main() {
                 Ok(Response::Ack)
             }
             Request::Metrics => Ok(Response::Metrics(MetricsOut {
-                peak_mlx_bytes: sessions.len() as u64,
+                peak_mlx_bytes: (sessions.len()
+                    + separation_sessions.len()
+                    + transcription_sessions.len()) as u64,
                 rss_bytes: std::process::id() as u64,
             })),
             Request::Transcribe { language, .. } if language == "exit" => std::process::exit(17),
@@ -388,7 +399,8 @@ fn main() {
                     });
                 Ok(Response::Probe(scores))
             }
-            Request::Transcribe { language, pcm, .. } => {
+            Request::Transcribe { language, pcm, .. }
+            | Request::TranscribeOpen { language, pcm, .. } => {
                 use sha2::{Digest, Sha256};
                 let digest = format!(
                     "{:x}",
@@ -440,11 +452,29 @@ fn main() {
                         std::fs::read_to_string(root.join("replay-transcript"))
                             .unwrap_or_else(|_| "Replay transcript".into())
                     };
-                Ok(Response::Text(AsrText {
+                let text = AsrText {
                     text: text.clone(),
                     raw_text: text,
                     token_count: 2,
-                }))
+                };
+                if cooperative_asr {
+                    if root.join("hold-live-asr").exists() {
+                        std::fs::write(
+                            root.join("edit-asr-started"),
+                            b"cooperative decoder pending",
+                        )
+                        .unwrap();
+                    }
+                    let session = next_session;
+                    next_session += 1;
+                    transcription_sessions.insert(session, text);
+                    Ok(Response::Handle(Handle {
+                        generation: 0,
+                        session,
+                    }))
+                } else {
+                    Ok(Response::Text(text))
+                }
             }
             Request::CtcScores { pcm, token_ids }
                 if script.as_ref().is_some_and(|script| {
@@ -537,6 +567,57 @@ fn main() {
                     clip:speakerdesk_core::voice::ClipEmbedding {vector,clean:true},
                 }))
             }
+            Request::SeparateOpen { pcm } if root.join("fixture-overlap").exists() => {
+                let session = next_session;
+                next_session += 1;
+                separation_sessions.insert(session, pcm);
+                std::fs::write(root.join("separation-started"), b"full window pending").unwrap();
+                Ok(Response::Handle(Handle {
+                    generation: 0,
+                    session,
+                }))
+            }
+            Request::SeparateStep { handle } => {
+                if handle.generation != 0 || !separation_sessions.contains_key(&handle.session) {
+                    Err(ChildError::failed("unknown separation session", false))
+                } else if root.join("hold-live-separation").exists() {
+                    std::thread::sleep(Duration::from_millis(1));
+                    Ok(Response::SeparationProgress(None))
+                } else {
+                    let pcm = separation_sessions.remove(&handle.session).unwrap();
+                    Ok(Response::SeparationProgress(Some(
+                        speakerdesk_core::ipc::SeparatedAudio {
+                            model: speakerdesk_core::separation::MODEL.into(),
+                            channels: [
+                                pcm.iter().map(|x| x * 2.).collect(),
+                                pcm.iter().map(|x| x * 3.).collect(),
+                            ],
+                        },
+                    )))
+                }
+            }
+            Request::SeparateClose { handle } => {
+                separation_sessions.remove(&handle.session);
+                std::fs::write(root.join("separation-closed"), b"released").unwrap();
+                Ok(Response::Ack)
+            }
+            Request::TranscribeStep { handle } => {
+                if handle.generation != 0 || !transcription_sessions.contains_key(&handle.session) {
+                    Err(ChildError::failed("unknown transcription session", false))
+                } else if root.join("hold-live-asr").exists() {
+                    std::thread::sleep(Duration::from_millis(1));
+                    Ok(Response::TranscriptionProgress(None))
+                } else {
+                    Ok(Response::TranscriptionProgress(
+                        transcription_sessions.remove(&handle.session),
+                    ))
+                }
+            }
+            Request::TranscribeClose { handle } => {
+                transcription_sessions.remove(&handle.session);
+                std::fs::write(root.join("transcription-closed"), b"released").unwrap();
+                Ok(Response::Ack)
+            }
             Request::Separate { pcm } if root.join("fixture-overlap").exists() => {
                 Ok(Response::Separated(speakerdesk_core::ipc::SeparatedAudio {
                     model: speakerdesk_core::separation::MODEL.into(),
@@ -567,7 +648,7 @@ fn main() {
             }
             _ => Err(ChildError::Unimplemented),
         };
-        if hold_live || hold_eof || hold_asr || hold_voice {
+        if hold_live || hold_eof || hold_asr || hold_voice || hold_separation {
             let context_hold = if hold_asr && context_asr {
                 Some(context_index - 1)
             } else {
@@ -584,7 +665,9 @@ fn main() {
             let writer = output.clone();
             let root = root.clone();
             std::thread::spawn(move || {
-                let (marker, hold) = if hold_voice {
+                let (marker, hold) = if hold_separation {
+                    ("separation-started", "hold-live-separation")
+                } else if hold_voice {
                     ("voice-started", "hold-live-voice")
                 } else if hold_asr {
                     ("edit-asr-started", "hold-live-asr")
@@ -632,7 +715,12 @@ fn main() {
         }
         if matches!(
             result,
-            Ok(Response::Handle(_) | Response::Vad(_) | Response::Diar(_)) | Err(_)
+            Ok(Response::Handle(_)
+                | Response::Vad(_)
+                | Response::Diar(_)
+                | Response::SeparationProgress(_)
+                | Response::TranscriptionProgress(_))
+                | Err(_)
         ) && let Some(marker) = race.take()
         {
             let flag = Arc::new(AtomicBool::new(false));

@@ -43,6 +43,7 @@ use crate::worker::JobWorker;
 pub(crate) mod refinement;
 mod retry;
 pub(crate) mod separation;
+pub(crate) mod separation_identity;
 
 const NOT_FOUND: &str = "The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.";
 const PREPARING_AUDIO: &str = "Preparing local audio…";
@@ -122,6 +123,22 @@ pub trait ApplicationModels: Send + Sync {
     fn separation_available(&self) -> bool {
         false
     }
+    fn separate_passage_with_evidence(
+        &self,
+        pcm: &[f32],
+        language: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<
+        (
+            speakerdesk_core::ipc::SeparatedAudio,
+            [speakerdesk_core::separation::CandidateVoice; 2],
+            [Vec<(usize, usize)>; 2],
+        ),
+        String,
+    > {
+        self.separate_passage(pcm, language, cancellation)
+            .map(|(audio, voices)| (audio, voices, std::array::from_fn(|_| Vec::new())))
+    }
     /// Capture yields to live audio between separation and each bounded decode.
     fn separate_audio(
         &self,
@@ -147,6 +164,9 @@ pub trait ApplicationModels: Send + Sync {
         speakerdesk_core::separation::decode_voice(&models, pcm, language)
     }
     fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
+        None
+    }
+    fn separated_voice_policy(&self) -> Option<speakerdesk_core::voice::separation::Policy> {
         None
     }
     fn embed_voice(

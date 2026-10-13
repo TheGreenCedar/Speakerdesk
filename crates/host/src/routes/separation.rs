@@ -184,12 +184,30 @@ fn valid_episode(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+mod cooperative;
+
+struct SeparatorSession {
+    models: crate::inference::ChildModels,
+    handle: speakerdesk_core::ipc::Handle,
+}
+impl Drop for SeparatorSession {
+    fn drop(&mut self) {
+        use speakerdesk_core::models::Models;
+        let _ = self.models.separate_close(self.handle);
+    }
+}
 struct LivePending {
     original: Job,
     segment: Segment,
     episode: String,
     audio: Option<speakerdesk_core::ipc::SeparatedAudio>,
     voices: Vec<domain::CandidateVoice>,
+    separator: Option<SeparatorSession>,
+    samples: usize,
+    speech_ranges: [Vec<(usize, usize)>; 2],
+    identity_started: bool,
+    identity: Option<super::separation_identity::Identity>,
+    identity_done: bool,
 }
 
 /// Capture owns one bounded original passage and at most its two output channels.
@@ -222,16 +240,20 @@ impl LiveSeparation {
                 {
                     interrupt(job);
                 }
+                if let Some(identity) = &p.identity {
+                    identity.interrupt(job);
+                }
                 Ok::<_, ApiError>(())
             });
             remove_assets(app.data_dir(), &p.original, &p.episode);
         }
     }
-    pub(crate) fn step(
+    pub(crate) fn step<F: FnMut() -> Result<(), speakerdesk_core::error::ChildError> + Send>(
         &mut self,
         app: &AppState,
         operation: &OperationGuard,
         job: &Job,
+        pump: &mut F,
     ) -> Result<bool, speakerdesk_core::live::LiveError> {
         let models = app.models();
         if operation.cancellation.is_cancelled() {
@@ -293,6 +315,12 @@ impl LiveSeparation {
                 episode,
                 audio: None,
                 voices: Vec::with_capacity(2),
+                separator: None,
+                samples: 0,
+                speech_ranges: std::array::from_fn(|_| Vec::new()),
+                identity_started: false,
+                identity: None,
+                identity_done: false,
             });
         }
         let p = self.pending.as_mut().expect("selected passage");
@@ -329,28 +357,86 @@ impl LiveSeparation {
             .unwrap_or(&p.original.language);
         let result = if p.audio.is_none() {
             (|| {
-                let path =
-                    crate::native::passage_recording_path(app.data_dir(), &p.original, &p.segment)
+                use speakerdesk_core::models::Models;
+                if let Some(session) = &p.separator {
+                    if let Some(audio) = session.models.separate_step(session.handle)? {
+                        p.audio = Some(domain::prepare_audio(audio, p.samples)?);
+                        drop(p.separator.take());
+                    }
+                } else {
+                    let path = crate::native::passage_recording_path(
+                        app.data_dir(),
+                        &p.original,
+                        &p.segment,
+                    )
+                    .map_err(|e| {
+                        speakerdesk_core::error::ChildError::failed(e.to_string(), false)
+                    })?;
+                    let pcm = audio::read_pcm16_range(path, p.segment.start, p.segment.end)
                         .map_err(|e| {
                             speakerdesk_core::error::ChildError::failed(e.to_string(), false)
                         })?;
-                let pcm =
-                    audio::read_pcm16_range(path, p.segment.start, p.segment.end).map_err(|e| {
-                        speakerdesk_core::error::ChildError::failed(e.to_string(), false)
-                    })?;
-                let audio = models.separate_audio(&pcm, &operation.cancellation)?;
-                audio.validate(pcm.len())?;
-                p.audio = Some(audio);
+                    let child = models
+                        .live_models(&operation.cancellation)
+                        .ok_or(speakerdesk_core::error::ChildError::Unimplemented)?;
+                    let handle = child.separate_open(&pcm)?;
+                    p.samples = pcm.len();
+                    p.separator = Some(SeparatorSession {
+                        models: child,
+                        handle,
+                    });
+                }
                 Ok(())
             })()
         } else if p.voices.len() < 2 {
-            models
-                .decode_separated_voice(
-                    &p.audio.as_ref().expect("separated audio").channels[p.voices.len()],
+            (|| {
+                let child = models
+                    .live_models(&operation.cancellation)
+                    .ok_or(speakerdesk_core::error::ChildError::Unimplemented)?;
+                let cooperative = cooperative::Cooperative::new(child, pump);
+                let channel = p.voices.len();
+                domain::decode_voice_with_evidence(
+                    &cooperative,
+                    &p.audio.as_ref().expect("separated audio").channels[channel],
                     language,
-                    &operation.cancellation,
                 )
-                .map(|voice| p.voices.push(voice))
+                .map(|(voice, ranges)| {
+                    p.voices.push(voice);
+                    p.speech_ranges[channel] = ranges;
+                })
+            })()
+        } else if !p.identity_started {
+            p.identity = super::separation_identity::Identity::begin(
+                models.as_ref(),
+                &mut app.store(),
+                current.as_ref().expect("fresh current"),
+                &p.segment,
+                &p.episode,
+                p.audio.as_ref().expect("separated audio"),
+                &p.speech_ranges,
+            )
+            .map_err(|e| speakerdesk_core::live::LiveError::Detail(e.to_string()))?;
+            p.identity_started = true;
+            p.identity_done = p.identity.is_none();
+            Ok(())
+        } else if !p.identity_done {
+            let snapshot =
+                super::separation_identity::Snapshot::load(&app.store(), models.as_ref())
+                    .map_err(|e| speakerdesk_core::live::LiveError::Detail(e.to_string()))?;
+            p.identity
+                .as_mut()
+                .expect("started identity")
+                .step(
+                    models.as_ref(),
+                    app.data_dir(),
+                    &operation.cancellation,
+                    current.as_ref().expect("fresh current"),
+                    &snapshot,
+                    p.audio.as_ref().expect("separated audio"),
+                )
+                .map(|progressed| {
+                    p.identity_done = !progressed;
+                })
         } else {
             let p = self.pending.take().expect("completed passage");
             let result = write_audio(
@@ -375,6 +461,8 @@ impl LiveSeparation {
                 true,
                 true,
                 result,
+                p.identity.as_ref(),
+                models.as_ref(),
             );
             return Ok(true);
         };
@@ -410,6 +498,8 @@ impl LiveSeparation {
                 true,
                 true,
                 Err(error.to_string()),
+                p.identity.as_ref(),
+                models.as_ref(),
             );
             if matches!(
                 error,
@@ -517,6 +607,7 @@ fn execute(
     automatic: bool,
 ) {
     let source_key = domain::source_key(original, segment);
+    let mut identity = None;
     let result: Result<Candidate, String> = (|| {
         if operation.cancellation.is_cancelled() {
             return Err("Separation cancelled.".into());
@@ -531,8 +622,52 @@ fn execute(
             .get("language_mode")
             .and_then(Value::as_str)
             .unwrap_or(&original.language);
-        let (audio, voices) = models.separate_passage(&pcm, language, &operation.cancellation)?;
+        let (audio, voices, speech_ranges) =
+            models.separate_passage_with_evidence(&pcm, language, &operation.cancellation)?;
         audio.validate(pcm.len()).map_err(|e| e.to_string())?;
+        if automatic {
+            identity = super::separation_identity::Identity::begin(
+                models,
+                &mut operation.shared.store.lock().expect("jobs"),
+                original,
+                segment,
+                episode,
+                &audio,
+                &speech_ranges,
+            )
+            .map_err(|e| e.to_string())?;
+            if let Some(state) = &mut identity {
+                loop {
+                    let (current, snapshot) = {
+                        let store = operation.shared.store.lock().expect("jobs");
+                        (
+                            store
+                                .get(&original.id, false)
+                                .map_err(|e| e.to_string())?
+                                .ok_or("Recording is unavailable")?,
+                            super::separation_identity::Snapshot::load(&store, models)
+                                .map_err(|e| e.to_string())?,
+                        )
+                    };
+                    if !operation.current(&current) || operation.cancellation.is_cancelled() {
+                        return Err("Separation cancelled.".into());
+                    }
+                    if !state
+                        .step(
+                            models,
+                            &operation.shared.data_dir,
+                            &operation.cancellation,
+                            &current,
+                            &snapshot,
+                            &audio,
+                        )
+                        .map_err(|e| e.to_string())?
+                    {
+                        break;
+                    }
+                }
+            }
+        }
         write_audio(
             &operation.shared.data_dir,
             original,
@@ -549,7 +684,15 @@ fn execute(
         })
     })();
     finish(
-        operation, original, segment, episode, automatic, false, result,
+        operation,
+        original,
+        segment,
+        episode,
+        automatic,
+        false,
+        result,
+        identity.as_ref(),
+        models,
     );
 }
 
@@ -606,9 +749,13 @@ fn finish(
     automatic: bool,
     live: bool,
     result: Result<Candidate, String>,
+    identity: Option<&super::separation_identity::Identity>,
+    models: &dyn ApplicationModels,
 ) {
     let source_key = domain::source_key(original, segment);
     let mut store = operation.shared.store.lock().expect("jobs");
+    let identity_snapshot =
+        identity.and_then(|_| super::separation_identity::Snapshot::load(&store, models).ok());
     let published=store.update_job(&original.id,|job| {
         if !operation.current(job) || job.extra.get("passage_separation").and_then(|v|v["id"].as_str())!=Some(episode) {
             return Err(ApiError::new(409,"Separation was cancelled or superseded."));
@@ -631,6 +778,10 @@ fn finish(
                         job.message=RETAINED.into();
                         return Ok(false);
                     }
+                    if let Some(identity) = identity {
+                        if let Some(snapshot) = &identity_snapshot { identity.apply(job,snapshot); }
+                        identity.interrupt(job);
+                    }
                     if !live { job.message="Separated voices saved. Check separated voices.".into(); }
                     return Ok(true);
                 }
@@ -645,6 +796,14 @@ fn finish(
             }
         }
     });
+    if !matches!(published, Ok(Some((_, true)))) {
+        if let Some(identity) = identity {
+            let _ = store.update_job(&original.id, |job| {
+                identity.interrupt(job);
+                Ok::<_, ApiError>(())
+            });
+        }
+    }
     drop(store);
     if !matches!(published, Ok(Some((_, true)))) {
         remove_assets(&operation.shared.data_dir, original, episode);

@@ -89,7 +89,7 @@ pub struct DecodeRegion {
     pub activity_regions: Option<Vec<ActivitySlice>>,
     pub audio_start: f64,
     pub audio_end: f64,
-    pub utterance_tail_boundary: Option<i64>,
+    pub utterance_context_boundary: Option<i64>,
 }
 
 /// A passage retry is a candidate. Existing words stay until an editor applies it.
@@ -240,6 +240,7 @@ pub fn import_recording<M: Models + ?Sized>(
     }
     let ledger = admit(models, pcm)?;
     let book = canonical_utterances(&ledger, pcm.len() as i64)?;
+    chunks = utterance_prefix_chunks(chunks, &book, pcm.len() as i64);
     chunks = utterance_tail_chunks(chunks, &book, pcm.len() as i64);
     let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
     let work = plan_work(&ledger, pcm, &chunks, &spans)?;
@@ -267,7 +268,7 @@ pub fn import_recording<M: Models + ?Sized>(
             let Some((start, end)) = clip_span(start, end, 0.0, duration) else {
                 continue;
             };
-            let speaker = if chunk.utterance_tail_boundary.is_some()
+            let speaker = if chunk.utterance_context_boundary.is_some()
                 && chunk.activity_regions.as_ref().is_some_and(|activity| {
                     activity.iter().any(|part| {
                         part.speakers.is_empty() && part.start < end && part.end > start
@@ -639,7 +640,7 @@ fn region_from(slice: &ActivitySlice) -> DecodeRegion {
         end: slice.end,
         speakers: slice.speakers.clone(),
         activity_regions: None,
-        utterance_tail_boundary: None,
+        utterance_context_boundary: None,
         audio_start: slice.start,
         audio_end: slice.end,
     }
@@ -824,6 +825,92 @@ fn canonical_utterances(ledger: &SpeechLedger, samples: i64) -> Result<Utterance
     Ok(book)
 }
 
+fn single_owner_activity(chunk: &DecodeRegion) -> bool {
+    chunk.speakers.len() == 1
+        && chunk.activity_regions.as_ref().is_none_or(|activity| {
+            let mut cursor = chunk.start;
+            activity.iter().all(|part| {
+                let valid = (part.start - cursor).abs() <= BOUNDARY_EPSILON
+                    && part.start < part.end
+                    && part.end <= chunk.end
+                    && (part.speakers.is_empty() || part.speakers == chunk.speakers);
+                cursor = part.end;
+                valid
+            }) && (cursor - chunk.end).abs() <= BOUNDARY_EPSILON
+        })
+}
+
+/// A diarizer can start after an utterance's first syllable. Preserve that
+/// unassigned prefix as context instead of decoding it as a separate phrase.
+fn utterance_prefix_chunks(
+    chunks: Vec<DecodeRegion>,
+    book: &UtteranceBook,
+    samples: i64,
+) -> Vec<DecodeRegion> {
+    let mut utterances = book.speech_regions().peekable();
+    let mut planned: Vec<DecodeRegion> = Vec::with_capacity(chunks.len());
+    for mut current in chunks {
+        let boundary = seconds_to_sample(current.start, samples);
+        while utterances
+            .peek()
+            .is_some_and(|(span, _)| span.end_sample <= boundary)
+        {
+            utterances.next();
+        }
+        if single_owner_activity(&current)
+            && let Some(prefix) = planned.last()
+            && prefix.speakers.is_empty()
+            && prefix.activity_regions.is_none()
+            && (prefix.end - current.start).abs() <= BOUNDARY_EPSILON
+            && let Some(&(span, regions)) = utterances.peek()
+            && current.audio_end
+                - prefix
+                    .audio_start
+                    .max(samples_to_seconds(span.start_sample))
+                <= IMPORT_MAX_SECONDS
+            && span.end_sample > boundary
+            && regions.iter().any(|part| part.end_sample > boundary)
+            && regions.first().is_some_and(|first| {
+                seconds_to_sample(prefix.start, samples) <= first.start_sample
+                    && first.start_sample < boundary
+            })
+        {
+            let mut prefix = planned.pop().expect("checked prefix");
+            let start = prefix.start.max(samples_to_seconds(span.start_sample));
+            // The unknown gap can contain the previous utterance's tail too.
+            // Leave that fragment for the tail pass; only this utterance is context.
+            if start > prefix.start {
+                let mut earlier = prefix.clone();
+                earlier.end = start;
+                earlier.audio_end = start;
+                planned.push(earlier);
+                prefix.start = start;
+            }
+            prefix.audio_start = prefix
+                .audio_start
+                .max(samples_to_seconds(span.start_sample));
+            let mut activity = vec![ActivitySlice {
+                start: prefix.start,
+                end: prefix.end,
+                speakers: Vec::new(),
+            }];
+            activity.extend(current.activity_regions.take().unwrap_or_else(|| {
+                vec![ActivitySlice {
+                    start: current.start,
+                    end: current.end,
+                    speakers: current.speakers.clone(),
+                }]
+            }));
+            current.start = prefix.start;
+            current.audio_start = prefix.audio_start;
+            current.activity_regions = Some(activity);
+            current.utterance_context_boundary = Some(boundary);
+        }
+        planned.push(current);
+    }
+    planned
+}
+
 fn utterance_tail_chunks(
     chunks: Vec<DecodeRegion>,
     book: &UtteranceBook,
@@ -841,18 +928,7 @@ fn utterance_tail_chunks(
             utterances.next();
         }
         if let Some(following) = remaining.peek_mut()
-            && current.speakers.len() == 1
-            && current.activity_regions.as_ref().is_none_or(|activity| {
-                let mut cursor = current.start;
-                activity.iter().all(|part| {
-                    let valid = (part.start - cursor).abs() <= BOUNDARY_EPSILON
-                        && part.start < part.end
-                        && part.end <= current.end
-                        && (part.speakers.is_empty() || part.speakers == current.speakers);
-                    cursor = part.end;
-                    valid
-                }) && (cursor - current.end).abs() <= BOUNDARY_EPSILON
-            })
+            && single_owner_activity(&current)
             && following.speakers.is_empty()
             && (current.end - following.start).abs() <= BOUNDARY_EPSILON
             && let Some(&(span, regions)) = utterances.peek()
@@ -880,7 +956,7 @@ fn utterance_tail_chunks(
                 end,
                 speakers: Vec::new(),
             });
-            current.utterance_tail_boundary = Some(boundary);
+            current.utterance_context_boundary = Some(boundary);
             current.end = end;
             current.audio_end = end;
             if end < following.end {
@@ -1161,6 +1237,7 @@ fn candidate_from_parts(
                     "audio_state": part.audio_state,
                     "cohere_raw_text": part.raw,
                     "transcription_review": part.transcription_review,
+                    "acoustic_evidence": part.acoustic,
                 })
             })
             .collect(),
@@ -1240,12 +1317,12 @@ fn segment_from_row(
     rest.insert("canonical_state".into(), json!("sealed"));
     rest.insert("finalized".into(), json!(true));
     if speaker == "unassigned"
-        && let Some(boundary) = chunk.utterance_tail_boundary
+        && let Some(boundary) = chunk.utterance_context_boundary
     {
         rest.insert(
             "decode_context".into(),
             json!({
-                "policy": "speech_utterance_tail_context_v1",
+                "policy": "speech_utterance_context_v2",
                 "start_sample": (chunk.audio_start * f64::from(limits::SAMPLE_RATE)).round() as i64,
                 "end_sample": (chunk.audio_end * f64::from(limits::SAMPLE_RATE)).round() as i64,
                 "boundary_sample": boundary,
@@ -2054,7 +2131,7 @@ pub(crate) mod tests {
                     end: slice.end,
                     speakers: slice.speakers,
                     activity_regions: None,
-                    utterance_tail_boundary: None,
+                    utterance_context_boundary: None,
                     audio_start: slice.start,
                     audio_end: slice.end,
                 })
@@ -2303,6 +2380,155 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn import_keeps_unassigned_utterance_edges_with_their_single_speaker_context() {
+        // Retained FLEURS fr_fr validation row0: Silero begins before the
+        // diarizer's speaker onset and continues beyond its final boundary.
+        let models = Scripted::new(
+            vec![Turn {
+                start: 0.78,
+                end: 13.87,
+                speaker: "speaker_0".into(),
+            }],
+            vec![(9728, 10752), (12800, 228352)],
+        );
+        let document = import_recording(&models, &tone(231360), "en", None).unwrap();
+        assert_eq!(
+            models.calls().len(),
+            1,
+            "an utterance's edges need its words as acoustic context"
+        );
+        let spoken: Vec<_> = document
+            .segments
+            .iter()
+            .filter(|s| !s.text.is_empty())
+            .collect();
+        assert_eq!(spoken.len(), 1);
+        let row = spoken[0];
+        assert_eq!(
+            row.speaker, "unassigned",
+            "context cannot establish ownership of the unknown edges"
+        );
+        assert_eq!(row.rest["voice_eligible"], false);
+        assert_eq!(
+            row.rest["speaker_candidates"],
+            serde_json::json!(["speaker_0"])
+        );
+        let activity = row.rest["activity_regions"].as_array().unwrap();
+        assert!(
+            activity.first().unwrap()["speakers"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            activity.last().unwrap()["speakers"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(document.diarization[0]["start"], 0.78);
+        assert_eq!(document.diarization[0]["end"], 13.87);
+    }
+
+    #[test]
+    fn adjacent_utterances_keep_their_own_unknown_edges() {
+        let models = Scripted::new(
+            vec![
+                Turn {
+                    start: 0.,
+                    end: 2.8,
+                    speaker: "speaker_0".into(),
+                },
+                Turn {
+                    start: 5.,
+                    end: 7.,
+                    speaker: "speaker_1".into(),
+                },
+            ],
+            vec![(0, 49_152), (73_728, 114_688)],
+        );
+        let document = import_recording(&models, &tone(128_000), "en", None).unwrap();
+        assert_eq!(
+            models.calls().len(),
+            2,
+            "a middle unknown range contains two utterances' edges, not one prefix"
+        );
+        let spoken: Vec<_> = document
+            .segments
+            .iter()
+            .filter(|s| !s.text.is_empty())
+            .collect();
+        assert_eq!(spoken.len(), 2);
+        assert!(spoken[0].end < spoken[1].start);
+        assert!(
+            spoken[0].rest["decode_context"]["end_sample"]
+                .as_i64()
+                .unwrap()
+                <= spoken[1].rest["decode_context"]["start_sample"]
+                    .as_i64()
+                    .unwrap()
+        );
+        assert_eq!(
+            spoken[0].rest["speaker_candidates"],
+            serde_json::json!(["speaker_0"])
+        );
+        assert_eq!(
+            spoken[1].rest["speaker_candidates"],
+            serde_json::json!(["speaker_1"])
+        );
+        assert!(
+            spoken
+                .iter()
+                .all(|s| s.speaker == "unassigned" && s.rest["voice_eligible"] == false)
+        );
+    }
+
+    #[test]
+    fn utterance_prefix_keeps_prior_speakers_gaps_and_decode_limits_separate() {
+        let pcm = tone(480000);
+        let models = Scripted::new(Vec::new(), vec![(9728, 10752), (12800, 228352)]);
+        let ledger = super::admit(&models, &pcm).unwrap();
+        let book = super::canonical_utterances(&ledger, pcm.len() as i64).unwrap();
+        let base = decode_regions(
+            &[Turn {
+                start: 0.78,
+                end: 13.87,
+                speaker: "speaker_0".into(),
+            }],
+            Some(18.0),
+            Some((0.0, 30.0)),
+        );
+        for mode in ["previous_owner", "overlap", "gap", "earlier_speech", "long"] {
+            let mut chunks = base.clone();
+            match mode {
+                "previous_owner" => chunks[0].speakers.push("speaker_1".into()),
+                "overlap" => chunks[1].speakers.push("speaker_1".into()),
+                "gap" => chunks[0].end = 0.7,
+                "earlier_speech" => chunks[0].start = 0.7,
+                "long" => {
+                    chunks[1].end = 19.;
+                    chunks[1].audio_end = 19.;
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                super::utterance_prefix_chunks(chunks.clone(), &book, pcm.len() as i64),
+                chunks,
+                "{mode}"
+            );
+        }
+        // A padded utterance end crossing a diarization boundary is not speech
+        // continuing into the following speaker's utterance.
+        let only_prefix = Scripted::new(Vec::new(), vec![(9728, 10752)]);
+        let ledger = super::admit(&only_prefix, &pcm).unwrap();
+        let book = super::canonical_utterances(&ledger, pcm.len() as i64).unwrap();
+        assert_eq!(
+            super::utterance_prefix_chunks(base.clone(), &book, pcm.len() as i64),
+            base
+        );
+    }
+
+    #[test]
     fn canonical_pause_inside_tail_context_does_not_split_import_or_retry() {
         let pcm = tone(48_000);
         let models = Scripted::new(
@@ -2416,7 +2642,7 @@ pub(crate) mod tests {
         let joined = super::utterance_tail_chunks(base, &book, 64_000);
         assert_eq!(joined.len(), 1);
         assert_eq!(joined[0].end, 4.0);
-        assert_eq!(joined[0].utterance_tail_boundary, Some(44_800));
+        assert_eq!(joined[0].utterance_context_boundary, Some(44_800));
     }
 
     #[test]

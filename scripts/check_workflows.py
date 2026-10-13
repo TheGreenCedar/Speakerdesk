@@ -39,7 +39,8 @@ def validate(directory):
                     assert CACHE_ENABLED in step.get('if', '').split(' && '), 'Uncached runs must skip dependency outputs'
                     inputs = step['with']
                     assert inputs['shared-key'] == '${{ steps.identity.outputs.dependency-key }}', 'Dependency outputs must bind native contract and profile'
-                    assert inputs['cache-bin'] == 'false' and inputs['cache-workspace-crates'] == 'false', 'Only dependency build outputs may persist'
+                    assert inputs['cache-bin'] == 'false', 'Installed Cargo binaries must not persist'
+                    assert inputs['cache-workspace-crates'] == 'true', 'Vendored native workspace outputs must survive pruning'
                     assert inputs.get('cache-on-failure', 'false') == 'false', 'Failed jobs cannot persist dependency outputs'
                     assert inputs.get('cache-targets', 'true') == 'true'
                     assert inputs.get('add-rust-environment-hash-key', 'true') == 'true'
