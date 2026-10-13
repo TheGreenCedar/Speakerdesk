@@ -65,6 +65,11 @@ pub enum LiveError {
     Message(&'static str),
     #[error("{0}")]
     Detail(String),
+    #[error("{message}")]
+    Language {
+        reason: &'static str,
+        message: String,
+    },
     #[error(transparent)]
     Child(ChildError),
 }
@@ -94,7 +99,16 @@ impl From<ChildError> for LiveError {
 
 impl From<crate::import::ImportError> for LiveError {
     fn from(error: crate::import::ImportError) -> Self {
-        error.child.map_or(Self::Detail(error.message), Self::Child)
+        if let Some(child) = error.child {
+            Self::Child(child)
+        } else if let Some(reason) = error.language_failure {
+            Self::Language {
+                reason,
+                message: error.message,
+            }
+        } else {
+            Self::Detail(error.message)
+        }
     }
 }
 
@@ -1125,6 +1139,589 @@ pub fn segment_version(segment: &Segment) -> String {
     sha256_hex(serde_json::to_string(&value).unwrap_or_default().as_bytes())
 }
 
+/// Compact direct-acoustic language counts owned by one Engine or accuracy
+/// operation. Borrowed/manual decisions never vote. Two exact supports per
+/// language retain publication provenance without copying transcript history.
+#[derive(Default)]
+pub struct MainLanguageSummary {
+    groups: std::collections::BTreeMap<String, MainLanguageGroup>,
+}
+#[derive(Default)]
+struct MainLanguageGroup {
+    through: i64,
+    meeting: std::collections::BTreeMap<String, MainLanguageCount>,
+    speakers:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, MainLanguageCount>>,
+}
+#[derive(Default)]
+struct MainLanguageCount {
+    count: usize,
+    supports: Vec<crate::language::LanguageContextAnchor>,
+}
+type LanguageVote = (
+    String,
+    Option<String>,
+    crate::language::LanguageContextAnchor,
+);
+fn summary_key(row: &Segment) -> Option<String> {
+    Some(
+        serde_json::json!([
+            row.rest.get("language_epoch")?.as_i64()?,
+            row.capture_source,
+            row.rest.get("stream_generation")
+        ])
+        .to_string(),
+    )
+}
+fn speaker_track(row: &Segment) -> Option<String> {
+    let tracks = row.rest.get("source_speaker_candidates")?.as_array()?;
+    (tracks.len() == 1)
+        .then(|| tracks[0].as_str().map(str::to_owned))
+        .flatten()
+        .filter(|id| !id.is_empty() && id != "unknown")
+}
+impl MainLanguageSummary {
+    pub fn from_segments(rows: &[Segment]) -> Self {
+        collect_main_language(rows).unwrap_or_default()
+    }
+    fn add(&mut self, key: String, vote: LanguageVote) {
+        self.add_owned(key, vote, true);
+    }
+    fn add_owned(
+        &mut self,
+        key: String,
+        (language, track, anchor): LanguageVote,
+        publishable: bool,
+    ) {
+        let group = self.groups.entry(key).or_default();
+        if anchor.start_sample < group.through {
+            return;
+        }
+        group.through = anchor.end_sample;
+        let add = |counts: &mut std::collections::BTreeMap<String, MainLanguageCount>| {
+            let count = counts.entry(language.clone()).or_default();
+            count.count += 1;
+            if publishable {
+                if count.supports.len() == 2 {
+                    count.supports.remove(0);
+                }
+                count.supports.push(anchor.clone());
+            }
+        };
+        add(&mut group.meeting);
+        if let Some(track) = track {
+            add(group.speakers.entry(track).or_default());
+        }
+    }
+    pub fn context(
+        &self,
+        rows: &[Segment],
+        target: &Segment,
+    ) -> Option<crate::language::LanguageContext> {
+        let mut context = self.context_for(target)?;
+        // Row revisions may advance as more direct words are accepted. Rebind
+        // only exact surviving acoustic receipts; protected/source edits fail.
+        for anchor in &mut context.evidence.as_mut()?.anchors {
+            let row = context_anchor_row(rows, &anchor.utterance_id, anchor.row_start_sample)?;
+            anchor.machine_revision = row.machine_revision.unwrap_or(0);
+            anchor.audio_revision = row.audio_revision.unwrap_or(0);
+        }
+        let mut candidate = target.clone();
+        candidate.language_detection = Some(
+            serde_json::json!({"context_evidence": crate::import::context_evidence_value(context.evidence.as_ref()?) }),
+        );
+        borrowed_context_current(rows, &candidate).then_some(context)
+    }
+    pub fn has_context(&self, target: &Segment) -> bool {
+        self.context_for(target).is_some()
+    }
+    fn context_for(&self, target: &Segment) -> Option<crate::language::LanguageContext> {
+        if target.rest.get("language_mode").and_then(Value::as_str) != Some(languages::AUTOMATIC) {
+            return None;
+        }
+        let group = self.groups.get(&summary_key(target)?)?;
+        let choose = |counts: &std::collections::BTreeMap<String, MainLanguageCount>,
+                      track: Option<String>| {
+            let total: usize = counts.values().map(|count| count.count).sum();
+            let (language, count) = counts.iter().max_by_key(|(_, count)| count.count)?;
+            if count.count < 2 || count.supports.len() < 2 || count.count * 2 <= total {
+                return None;
+            }
+            Some(crate::language::LanguageContext {
+                language: language.clone(),
+                end_sample: count.supports.iter().map(|a| a.end_sample).max()?,
+                evidence: Some(crate::language::LanguageContextEvidence {
+                    scope: if track.is_some() {
+                        "speaker_main_language"
+                    } else {
+                        "meeting_main_language"
+                    },
+                    speaker_track_id: track,
+                    language_epoch: target.rest["language_epoch"].as_i64()?,
+                    interpretation_generation: 0,
+                    capture_source: target.capture_source.clone(),
+                    stream_generation: target.rest.get("stream_generation").and_then(Value::as_i64),
+                    anchors: count.supports.clone(),
+                }),
+            })
+        };
+        speaker_track(target)
+            .and_then(|track| {
+                group
+                    .speakers
+                    .get(&track)
+                    .and_then(|counts| choose(counts, Some(track.clone())))
+            })
+            .or_else(|| choose(&group.meeting, None))
+    }
+}
+/// Convenience for one isolated saved request. Accuracy workers retain one
+/// summary for their entire operation instead of rebuilding it per passage.
+pub fn saved_language_context(
+    rows: &[Segment],
+    target: &Segment,
+) -> Option<crate::language::LanguageContext> {
+    MainLanguageSummary::from_segments(rows).context(rows, target)
+}
+fn collect_main_language(rows: &[Segment]) -> Option<MainLanguageSummary> {
+    use crate::language::LanguageContextAnchor;
+
+    let track = |row: &Segment| {
+        let candidates = row.rest.get("source_speaker_candidates")?.as_array()?;
+        (candidates.len() == 1)
+            .then(|| candidates[0].as_str().map(str::to_owned))
+            .flatten()
+            .filter(|id| !id.is_empty() && id != "unknown")
+    };
+    let mut summary = MainLanguageSummary::default();
+    let mut votes = Vec::new();
+    for row in rows {
+        let Ok((row_start, row_end)) = segment_bounds(row) else {
+            continue;
+        };
+        let accepted_end = row
+            .rest
+            .get("canonical_text_end_sample")
+            .and_then(Value::as_i64)
+            .unwrap_or(row_end);
+        let prefix = row_start < accepted_end && accepted_end < row_end;
+        if row.separation.is_some()
+            || row.canonical_utterance_id.is_none()
+            || row.text.trim().is_empty()
+            || row
+                .protected_fields
+                .as_ref()
+                .is_some_and(|fields| fields.iter().any(|field| field != "text"))
+            || (!prefix
+                && row
+                    .transcription_review
+                    .as_ref()
+                    .is_some_and(|v| v["partial_text"] == true))
+            || (!prefix
+                && row
+                    .rest
+                    .get("canonical_unresolved")
+                    .is_some_and(|v| !v.is_null()))
+            || (!prefix && row.rest.get("audio_state").is_some_and(|v| !v.is_null()))
+            || row.rest.get("language_mode").and_then(Value::as_str) != Some(languages::AUTOMATIC)
+        {
+            continue;
+        }
+        let Some(acoustic) = &row.acoustic_evidence else {
+            continue;
+        };
+        if acoustic["complete"] != true
+            || acoustic["decision"] != "speech"
+            || acoustic["evidence_error"] != false
+            || acoustic["start_sample"]
+                .as_i64()
+                .is_none_or(|a| a > row_start)
+            || acoustic["end_sample"].as_i64().is_none_or(|b| b < row_end)
+            || !matches!(
+                row.rest.get("canonical_state").and_then(Value::as_str),
+                Some("sealed" | "open")
+            )
+            || (row.rest["canonical_state"] == "open"
+                && row
+                    .rest
+                    .get("canonical_text_end_sample")
+                    .and_then(Value::as_i64)
+                    .is_none())
+        {
+            continue;
+        }
+        let Some(probes) = row
+            .language_detection
+            .as_ref()
+            .and_then(|v| v["probes"].as_array())
+        else {
+            continue;
+        };
+        let detection = row.language_detection.as_ref().expect("probes checked");
+        if detection["mode"] == "manual" {
+            continue;
+        }
+        let witnesses = detection["context_witnesses"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice);
+        for (probe_index, probe) in probes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (Some(i), p))
+            .chain(witnesses.iter().take(2).map(|p| (None, p)))
+        {
+            let (Some(a), Some(b), Some(language)) = (
+                probe["start_sample"].as_i64(),
+                probe["end_sample"].as_i64(),
+                probe["language"].as_str(),
+            ) else {
+                continue;
+            };
+            let decision = &probe["decision"];
+            if a < row_start
+                || b <= a
+                || b - a > (crate::language::PROBE_SECONDS * RATE as f64).ceil() as i64
+                || b > row_end
+                || b > accepted_end
+                || acoustic["uncertain_regions"]
+                    .as_array()
+                    .is_some_and(|regions| {
+                        regions.iter().any(|region| {
+                            region["start_sample"]
+                                .as_i64()
+                                .is_some_and(|start| start < b)
+                                && region["end_sample"].as_i64().is_some_and(|end| end > a)
+                        })
+                    })
+                || !languages::is_supported(language)
+                || decision["mode"] != "auto"
+                || decision["reason"] != "detected"
+                || decision["detector_error"] == true
+                || !decision["context_evidence"].is_null()
+                || !crate::language::is_confident_detection(
+                    decision["probability"].as_f64().unwrap_or(0.),
+                    decision["margin"].as_f64().unwrap_or(0.),
+                )
+            {
+                continue;
+            }
+            let vote = (
+                language.to_owned(),
+                track(row),
+                LanguageContextAnchor {
+                    utterance_id: row.canonical_utterance_id.clone().expect("checked"),
+                    row_start_sample: row_start,
+                    speaker_track_id: track(row),
+                    start_sample: a,
+                    end_sample: b,
+                    machine_revision: row.machine_revision.unwrap_or(0),
+                    audio_revision: row.audio_revision.unwrap_or(0),
+                    probe_sha256: sha256_hex(
+                        serde_json::to_string(probe).unwrap_or_default().as_bytes(),
+                    ),
+                    probe_index,
+                },
+            );
+            if let Some(key) = summary_key(row) {
+                votes.push((key, vote, true));
+            }
+        }
+    }
+    votes.sort_by_key(|(_, vote, _)| (vote.2.start_sample, vote.2.end_sample));
+    let mut ranges = std::collections::BTreeMap::new();
+    for (key, vote, publishable) in votes {
+        let physical = (key.clone(), vote.2.start_sample, vote.2.end_sample);
+        match ranges.entry(physical) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some((key, vote, publishable)));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if entry
+                    .get()
+                    .as_ref()
+                    .is_some_and(|(_, prior, _)| prior.0 != vote.0 || prior.1 != vote.1)
+                {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+    for (key, vote, publishable) in ranges.into_values().flatten() {
+        summary.add_owned(key, vote, publishable);
+    }
+    Some(summary)
+}
+
+fn choose_language_context(
+    votes: Vec<(
+        String,
+        Option<String>,
+        crate::language::LanguageContextAnchor,
+    )>,
+    target_track: Option<&str>,
+    epoch: i64,
+    capture_source: Option<Value>,
+    stream_generation: Option<i64>,
+) -> Option<crate::language::LanguageContext> {
+    use crate::language::{LanguageContext, LanguageContextAnchor, LanguageContextEvidence};
+    let mut ranges: std::collections::BTreeMap<
+        (i64, i64),
+        Option<(String, Option<String>, LanguageContextAnchor)>,
+    > = std::collections::BTreeMap::new();
+    for vote in votes {
+        let key = (vote.2.start_sample, vote.2.end_sample);
+        match ranges.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(Some(vote));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if entry
+                    .get()
+                    .as_ref()
+                    .is_some_and(|prior| prior.0 != vote.0 || prior.1 != vote.1)
+                {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+    let mut through = -1;
+    let votes: Vec<_> = ranges
+        .into_values()
+        .flatten()
+        .filter(|(_, _, anchor)| {
+            if anchor.start_sample < through {
+                return false;
+            }
+            through = anchor.end_sample;
+            true
+        })
+        .collect();
+    let choose = |speaker: Option<&str>| {
+        let eligible: Vec<_> = votes
+            .iter()
+            .filter(|(_, track, _)| speaker.is_none_or(|id| track.as_deref() == Some(id)))
+            .collect();
+        let mut counts = std::collections::BTreeMap::new();
+        for (language, _, _) in &eligible {
+            *counts.entry(language.as_str()).or_insert(0usize) += 1;
+        }
+        let (language, count) = counts.into_iter().max_by_key(|(_, count)| *count)?;
+        if count < 2 || count * 2 <= eligible.len() {
+            return None;
+        }
+        let anchors: Vec<_> = eligible
+            .iter()
+            .filter(|(code, _, _)| code == language)
+            .rev()
+            .take(2)
+            .map(|(_, _, anchor)| anchor.clone())
+            .collect();
+        Some(LanguageContext {
+            language: language.into(),
+            end_sample: anchors.iter().map(|a| a.end_sample).max()?,
+            evidence: Some(LanguageContextEvidence {
+                scope: if speaker.is_some() {
+                    "speaker_main_language"
+                } else {
+                    "meeting_main_language"
+                },
+                speaker_track_id: speaker.map(str::to_owned),
+                language_epoch: epoch,
+                interpretation_generation: 0,
+                capture_source: capture_source.clone(),
+                stream_generation,
+                anchors,
+            }),
+        })
+    };
+    target_track
+        .and_then(|id| choose(Some(id)))
+        .or_else(|| choose(None))
+}
+
+fn preceding_probe_values(probes: &[Value], start: i64) -> impl Iterator<Item = &Value> {
+    // The owning Refinement keeps this snapshot ordered by probe end, including
+    // overlapping contexts. Lookup touches only the preceding 60-second suffix.
+    let through =
+        probes.partition_point(|probe| probe["end_sample"].as_i64().unwrap_or(i64::MAX) <= start);
+    probes[..through]
+        .iter()
+        .rev()
+        .take_while(move |probe| {
+            probe["end_sample"]
+                .as_i64()
+                .is_some_and(|end| start - end <= crate::language::RECENT_CONTEXT_SAMPLES)
+        })
+        .filter(move |probe| {
+            probe["end_sample"].as_i64().is_some_and(|end| {
+                (0..=crate::language::RECENT_CONTEXT_SAMPLES).contains(&(start - end))
+            })
+        })
+}
+
+fn same_anchor_window_context(
+    original: &Segment,
+    probes: &[Value],
+    start: i64,
+    internal: bool,
+) -> Option<crate::language::LanguageContext> {
+    let (first, last) = segment_bounds(original).ok()?;
+    let mut votes = Vec::new();
+    for probe in preceding_probe_values(probes, start) {
+        let (Some(a), Some(b), Some(language)) = (
+            probe["start_sample"].as_i64(),
+            probe["end_sample"].as_i64(),
+            probe["language"].as_str(),
+        ) else {
+            continue;
+        };
+        let decision = &probe["decision"];
+        if a < first
+            || b <= a
+            || b > last
+            || !languages::is_supported(language)
+            || decision["mode"] != "auto"
+            || decision["reason"] != "detected"
+            || decision["detector_error"] == true
+            || !decision["context_evidence"].is_null()
+            || !crate::language::is_confident_detection(
+                decision["probability"].as_f64().unwrap_or(0.),
+                decision["margin"].as_f64().unwrap_or(0.),
+            )
+        {
+            continue;
+        }
+        votes.push((
+            language.into(),
+            None,
+            crate::language::LanguageContextAnchor {
+                utterance_id: original.canonical_utterance_id.clone()?,
+                row_start_sample: first,
+                speaker_track_id: speaker_track(original),
+                start_sample: a,
+                end_sample: b,
+                machine_revision: original.machine_revision.unwrap_or(0),
+                audio_revision: original.audio_revision.unwrap_or(0),
+                probe_sha256: sha256_hex(probe.to_string().as_bytes()),
+                probe_index: None,
+            },
+        ));
+    }
+    let mut context = choose_language_context(
+        votes,
+        None,
+        original.rest["language_epoch"].as_i64()?,
+        original.capture_source.clone(),
+        original
+            .rest
+            .get("stream_generation")
+            .and_then(Value::as_i64),
+    )?;
+    if internal {
+        context.evidence.as_mut()?.scope = "same_anchor_direct_windows";
+    }
+    Some(context)
+}
+
+fn context_anchor_row<'a>(rows: &'a [Segment], id: &str, start: i64) -> Option<&'a Segment> {
+    let from = rows.partition_point(|row| round_samples(row.start) < start);
+    rows[from..]
+        .iter()
+        .take_while(|row| round_samples(row.start) == start)
+        .find(|row| row.canonical_utterance_id.as_deref() == Some(id))
+}
+
+/// Recheck only the selected direct witnesses before publishing borrowed text.
+/// Display-name changes are neutral; source/epoch/track/edit changes supersede it.
+pub fn borrowed_context_current(rows: &[Segment], candidate: &Segment) -> bool {
+    let Some(detection) = &candidate.language_detection else {
+        return true;
+    };
+    let mut decisions = vec![detection];
+    if let Some(probes) = detection["probes"].as_array() {
+        decisions.extend(probes.iter().map(|probe| &probe["decision"]));
+    }
+    for evidence in decisions
+        .into_iter()
+        .filter_map(|decision| decision.get("context_evidence"))
+    {
+        let Some(anchors) = evidence["anchors"].as_array() else {
+            return false;
+        };
+        for anchor in anchors {
+            let Some(id) = anchor["utterance_id"].as_str() else {
+                return false;
+            };
+            let Some(row) =
+                context_anchor_row(rows, id, anchor["row_start_sample"].as_i64().unwrap_or(-1))
+            else {
+                return false;
+            };
+            if row
+                .protected_fields
+                .as_ref()
+                .is_some_and(|fields| fields.iter().any(|field| field != "text"))
+                // Append-only audio growth advances the row revision while
+                // leaving the selected acoustic prefix unchanged. Geometry and
+                // its exact direct receipt remain the publication authority.
+                || row.audio_revision.unwrap_or(0)
+                    < anchor["audio_revision"].as_i64().unwrap_or(i64::MAX)
+                || anchor["start_sample"].as_i64().is_none_or(|start| {
+                    start < round_samples(row.start)
+                })
+                || anchor["end_sample"].as_i64().is_none_or(|end| {
+                    end > round_samples(row.end)
+                        || (evidence["scope"] != "same_anchor_direct_windows"
+                            && end > row.rest["canonical_text_end_sample"].as_i64().unwrap_or(-1))
+                })
+                || row.capture_source.as_ref().unwrap_or(&Value::Null)
+                    != &evidence["capture_source"]
+                || row.rest.get("language_epoch") != evidence.get("language_epoch")
+                || row.rest.get("stream_generation").unwrap_or(&Value::Null)
+                    != &evidence["stream_generation"]
+                || row.rest.get("language_mode").and_then(Value::as_str)
+                    != Some(languages::AUTOMATIC)
+                || row.language_detection.as_ref().is_some_and(|d| d["mode"] == "manual")
+                || serde_json::json!(speaker_track(row)) != anchor["speaker_track_id"]
+                || (evidence["scope"] == "speaker_main_language"
+                    && row.rest["source_speaker_candidates"]
+                        != serde_json::json!([evidence["speaker_track_id"]]))
+            {
+                return false;
+            }
+            let receipt = if evidence["scope"] == "same_anchor_direct_windows" {
+                if candidate.canonical_utterance_id.as_deref() != Some(id) {
+                    return false;
+                }
+                candidate.language_detection.as_ref()
+            } else {
+                row.language_detection.as_ref()
+            };
+            let Some(probes) = receipt.and_then(|d| d["probes"].as_array()) else {
+                return false;
+            };
+            let matches = |probe: &Value| {
+                probe["start_sample"] == anchor["start_sample"]
+                    && probe["end_sample"] == anchor["end_sample"]
+                    && sha256_hex(probe.to_string().as_bytes()) == anchor["probe_sha256"]
+            };
+            let exact = receipt
+                .and_then(|d| d["context_witnesses"].as_array())
+                .is_some_and(|witnesses| witnesses.iter().take(2).any(matches))
+                || if let Some(index) = anchor["probe_index"].as_u64() {
+                    probes.get(index as usize).is_some_and(matches)
+                } else {
+                    probes.iter().rev().any(matches)
+                };
+            if !exact {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Fresh decode of one saved canonical anchor. It owns no live stream state and
 /// retains the recorded speaker/activity identity instead of creating new tracks.
 pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
@@ -1132,6 +1729,16 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
     original: &Segment,
     pcm: &[f32],
     vocabulary: Option<&crate::alignment::Vocabulary>,
+) -> Result<Segment, LiveError> {
+    refine_saved_passage_with_context(models, original, pcm, vocabulary, None)
+}
+
+fn refine_saved_passage_with_context<M: Models + ?Sized + 'static>(
+    models: &M,
+    original: &Segment,
+    pcm: &[f32],
+    vocabulary: Option<&crate::alignment::Vocabulary>,
+    language_context: Option<crate::language::LanguageContext>,
 ) -> Result<Segment, LiveError> {
     let (start, end) = saved_bounds(original)?;
     if end - start > MAX_DECODE_SAMPLES || end - start != pcm.len() as i64 {
@@ -1143,8 +1750,16 @@ pub fn refine_saved_passage<M: Models + ?Sized + 'static>(
         .as_str()
         .expect("checked mode");
     let processed = processed_catalog(original);
-    let decoded = crate::import::refine_passage_source(models, pcm, language, start, processed)
-        .map_err(LiveError::from)?;
+    let decoded = crate::import::refine_context_source(
+        models,
+        pcm,
+        language,
+        start,
+        processed,
+        None,
+        language_context,
+    )
+    .map_err(LiveError::from)?;
     let mut candidate = saved_candidate(
         original,
         decoded.text,
@@ -1240,6 +1855,23 @@ pub fn refine_saved_recording<M: Models + ?Sized + 'static>(
     context::refine(models, original, reader, vocabulary)
 }
 
+pub fn refine_saved_recording_with_context<M: Models + ?Sized + 'static>(
+    models: &M,
+    original: &Segment,
+    reader: &RecordingReader,
+    vocabulary: Option<&crate::alignment::Vocabulary>,
+    language_context: Option<crate::language::LanguageContext>,
+    interpretation_generation: u64,
+) -> Result<Segment, LiveError> {
+    let mut refinement = SavedRefinement::with_language_context(original, language_context)?;
+    refinement.set_interpretation_generation(interpretation_generation);
+    loop {
+        if let Some(candidate) = refinement.step(models, reader, vocabulary)? {
+            return Ok(candidate);
+        }
+    }
+}
+
 fn saved_bounds(original: &Segment) -> Result<(i64, i64), LiveError> {
     let (start, end) = segment_bounds(original)?;
     let language = original
@@ -1272,16 +1904,75 @@ fn saved_candidate(
     original: &Segment,
     text: String,
     detected_language: Option<String>,
-    detection: Value,
+    mut detection: Value,
     end: i64,
     review: bool,
     transcription_review: Option<Value>,
 ) -> Result<Segment, LiveError> {
+    // A saved donor can itself be decoded using its selected direct prefix.
+    // Carry only those two exact receipts, without changing current routing.
+    let mut witnesses = Vec::new();
+    let anchors = detection
+        .get("context_evidence")
+        .into_iter()
+        .chain(
+            detection["probes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|probe| probe["decision"].get("context_evidence")),
+        )
+        .flat_map(|e| e["anchors"].as_array().into_iter().flatten());
+    for anchor in
+        anchors.filter(|a| a["utterance_id"].as_str() == original.canonical_utterance_id.as_deref())
+    {
+        if witnesses.len() == 2 {
+            break;
+        }
+        let Some(prior) = original.language_detection.as_ref() else {
+            break;
+        };
+        let mut source = anchor["probe_index"]
+            .as_u64()
+            .and_then(|index| {
+                prior["probes"]
+                    .as_array()
+                    .and_then(|p| p.get(index as usize))
+            })
+            .into_iter()
+            .chain(
+                prior["context_witnesses"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(2),
+            );
+        if let Some(probe) = source.find(|probe| {
+            probe["start_sample"] == anchor["start_sample"]
+                && probe["end_sample"] == anchor["end_sample"]
+                && sha256_hex(probe.to_string().as_bytes()) == anchor["probe_sha256"]
+                && probe["decision"]["mode"] == "auto"
+                && probe["decision"]["reason"] == "detected"
+                && probe["decision"]["context_evidence"].is_null()
+                && crate::language::is_confident_detection(
+                    probe["decision"]["probability"].as_f64().unwrap_or(0.),
+                    probe["decision"]["margin"].as_f64().unwrap_or(0.),
+                )
+        }) {
+            if !witnesses.contains(probe) {
+                witnesses.push(probe.clone());
+            }
+        }
+    }
+    if !witnesses.is_empty() {
+        detection["context_witnesses"] = serde_json::json!(witnesses);
+    }
     let mut candidate = original.clone();
     crate::edit::clear_alignment_bundle(&mut candidate);
     candidate.text = text;
     candidate.language = detected_language;
     candidate.language_detection = Some(detection);
+    candidate.rest.remove("refinement_issue");
     candidate.review = Some(
         review
             || candidate.speaker == "multiple_speakers"
@@ -1338,6 +2029,9 @@ pub fn publish_saved_passage(
     original: &Segment,
     candidate: &Segment,
 ) -> Result<bool, LiveError> {
+    if !borrowed_context_current(&document.segments, candidate) {
+        return Ok(false);
+    }
     let Some(current) = document
         .segments
         .iter_mut()
@@ -1433,7 +2127,9 @@ pub fn edited_boundary(document: &Document, candidate: &Segment) -> Option<Edite
 
 /// Keep fields [`crate::edit::edit_passage`] marked protected when a canonical candidate arrives.
 pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Document {
-    if edited_boundary(document, candidate).is_some() {
+    if edited_boundary(document, candidate).is_some()
+        || !borrowed_context_current(&document.segments, candidate)
+    {
         return document.clone();
     }
     let mut document = document.clone();
@@ -1704,7 +2400,7 @@ impl<M: Models> Recognizer for ModelRecognizer<M> {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct DecodeProgress {
     end_sample: i64,
     audio_revision: i64,
@@ -1713,6 +2409,7 @@ struct DecodeProgress {
 
 /// Accepted disjoint cores of the currently growing utterance. The final core
 /// remains an active tail until later audio requires another bounded cut.
+#[derive(Clone)]
 struct CompletedCores {
     end_sample: i64,
     text: String,
@@ -1736,6 +2433,11 @@ pub struct Engine<M: Models> {
     book: UtteranceBook,
     last_decoded: HashMap<String, DecodeProgress>,
     published: HashMap<String, Segment>,
+    main_language: MainLanguageSummary,
+    language_interpretation_generation: u64,
+    language_ownership_initialized: bool,
+    last_context_decode: Option<(String, i64, i64, DecodeProgress)>,
+    context_retry_used: Option<(String, i64, i64)>,
     next_utterance: usize,
     vad: Option<Handle>,
     diar: Option<Handle>,
@@ -1823,6 +2525,11 @@ impl<M: Models + 'static> Engine<M> {
             book,
             last_decoded: HashMap::new(),
             published: HashMap::new(),
+            main_language: MainLanguageSummary::default(),
+            language_interpretation_generation: 0,
+            language_ownership_initialized: false,
+            last_context_decode: None,
+            context_retry_used: None,
             next_utterance: 0,
             vad: None,
             diar: None,
@@ -2459,6 +3166,12 @@ impl<M: Models + 'static> Engine<M> {
         let stamp = self.language_at(row.start_sample);
         let length = row.end_sample - row.start_sample;
         let mut progress = self.last_decoded.remove(identity).unwrap_or_default();
+        self.last_context_decode = Some((
+            identity.into(),
+            row.end_sample,
+            row.audio_revision,
+            progress.clone(),
+        ));
         if length <= MAX_DECODE_SAMPLES {
             self.decode_short(&row, &stamp.language)?;
         } else {
@@ -2471,7 +3184,39 @@ impl<M: Models + 'static> Engine<M> {
         Ok(())
     }
 
+    fn context_witnesses(&self, row: &Utterance) -> Vec<crate::language::ProbeEvent> {
+        // Retain only the selected exact direct self-donor receipts. A routed
+        // replacement may change probe windows without changing owned audio.
+        let mut witnesses = Vec::new();
+        if let (Some(context), Some(prior)) = (
+            self.language_context(row.start_sample),
+            &row.language_detection,
+        ) {
+            for anchor in context
+                .evidence
+                .into_iter()
+                .flat_map(|e| e.anchors)
+                .filter(|a| a.utterance_id == row.id)
+                .take(2)
+            {
+                if let Some(probe) = anchor.probe_index.and_then(|index| prior.probes.get(index)).into_iter().chain(prior.context_witnesses.iter().take(2)).find(|p| {
+                    p.start_sample == anchor.start_sample && p.end_sample == anchor.end_sample
+                        && sha256_hex(serde_json::json!({"start_sample":p.start_sample,"end_sample":p.end_sample,"language":p.language,"decision":crate::import::detection_value(&p.decision),"review":p.review}).to_string().as_bytes()) == anchor.probe_sha256
+                        && p.decision.mode == crate::language::DetectionMode::Auto
+                        && p.decision.reason == crate::language::DetectionReason::Detected
+                        && p.decision.context_evidence.is_none()
+                        && crate::language::is_confident_detection(p.decision.probability.unwrap_or(0.),p.decision.margin.unwrap_or(0.))
+                        && row.text_end_sample.is_some_and(|end| p.end_sample <= end)
+                }) {
+                    witnesses.push(probe.clone());
+                }
+            }
+        }
+        witnesses
+    }
+
     fn decode_short(&mut self, row: &Utterance, language: &str) -> Result<(), LiveError> {
+        let witnesses = self.context_witnesses(row);
         let passages = self.transcribe_span(
             row.start_sample,
             row.end_sample,
@@ -2505,7 +3250,8 @@ impl<M: Models + 'static> Engine<M> {
         let stored = self.book.rows.get_mut(&row.id).expect("row");
         let mut decisions = Vec::new();
         crate::language::append_passage_decisions(&mut decisions, &passages, row.start_sample);
-        if let Some(summary) = crate::language::summarize_decisions(decisions) {
+        if let Some(mut summary) = crate::language::summarize_decisions(decisions) {
+            summary.detection.context_witnesses = witnesses;
             stored.language = summary.language;
             stored.language_detection = Some(summary.detection);
             stored.review = summary.review || passages.iter().any(|passage| passage.review);
@@ -2530,6 +3276,7 @@ impl<M: Models + 'static> Engine<M> {
         language: &str,
         progress: &mut DecodeProgress,
     ) -> Result<(), LiveError> {
+        let witnesses = self.context_witnesses(row);
         let start = progress
             .completed
             .as_ref()
@@ -2616,7 +3363,8 @@ impl<M: Models + 'static> Engine<M> {
         self.book
             .apply_model(&row.id, &text, DecodeStage::Live, complete)?;
         let stored = self.book.rows.get_mut(&row.id).expect("row");
-        if let Some(summary) = crate::language::summarize_decisions(decisions) {
+        if let Some(mut summary) = crate::language::summarize_decisions(decisions) {
+            summary.detection.context_witnesses = witnesses;
             stored.language = summary.language;
             stored.language_detection = Some(summary.detection);
             stored.review = review || summary.review;
@@ -2631,6 +3379,178 @@ impl<M: Models + 'static> Engine<M> {
         Ok(())
     }
 
+    /// Called at the existing publication boundary only after an edit changes
+    /// acoustic ownership/interpretation. Ordinary audio/name updates are free.
+    pub fn refresh_language_ownership(&mut self, rows: &[Segment], generation: u64) {
+        if !self.language_ownership_initialized
+            || self.language_interpretation_generation != generation
+        {
+            self.main_language = MainLanguageSummary::from_segments(rows);
+            self.language_interpretation_generation = generation;
+            self.language_ownership_initialized = true;
+        }
+    }
+
+    /// Re-enter the existing decoder once for a rejected owned endpoint, even
+    /// after EOF. The previous accepted core prefix remains outside this retry.
+    pub fn retry_language_context(
+        &mut self,
+        rejected: &Segment,
+        accepted: Option<&Segment>,
+    ) -> Result<Option<Vec<EngineEvent>>, LiveError> {
+        let Some(row) = self.book.rows.get(&rejected.id).cloned() else {
+            return Ok(None);
+        };
+        let key = (row.id.clone(), row.end_sample, row.audio_revision);
+        if self.context_retry_used.as_ref() == Some(&key)
+            || row.end_sample != rejected.rest["end_sample"].as_i64().unwrap_or(-1)
+            || Some(row.audio_revision) != rejected.audio_revision
+            || !row.protected_fields.is_empty()
+            || self.language_at(row.start_sample).language != languages::AUTOMATIC
+        {
+            return Ok(None);
+        }
+        // A later decoded row may have replaced this single endpoint snapshot.
+        // Refuse that retry rather than replaying an accepted long prefix.
+        let Some((id, end, audio, progress)) = self.last_context_decode.as_ref() else {
+            return Ok(None);
+        };
+        if id != &key.0 || *end != key.1 || *audio != key.2 {
+            return Ok(None);
+        }
+        if progress.completed.as_ref().is_some_and(|prefix| {
+            accepted.is_none_or(|prior| {
+                prefix.end_sample
+                    > prior.rest["canonical_text_end_sample"]
+                        .as_i64()
+                        .unwrap_or(-1)
+                    || !prior.text.starts_with(&prefix.text)
+            })
+        }) {
+            return Ok(None);
+        }
+        let (_, _, _, progress) = self.last_context_decode.take().expect("matched endpoint");
+        self.last_decoded.insert(row.id.clone(), progress);
+        self.context_retry_used = Some(key);
+        self.events.clear();
+        self.decode(&row.id)?;
+        self.published.remove(&row.id);
+        self.publish(self.book.rows[&row.id].clone())?;
+        Ok(Some(std::mem::take(&mut self.events)))
+    }
+
+    fn remember_language(&mut self, row: &Utterance, candidate: &Segment) {
+        use crate::language::{DetectionMode, DetectionReason, LanguageContextAnchor};
+        let Some(key) = summary_key(candidate) else {
+            return;
+        };
+        let through = self
+            .main_language
+            .groups
+            .get(&key)
+            .map_or(0, |group| group.through);
+        let Some(accepted_end) = row.text_end_sample else {
+            return;
+        };
+        let prefix = accepted_end < row.end_sample;
+        if !row.protected_fields.is_empty()
+            || row.text.trim().is_empty()
+            || self.language_at(row.start_sample).language != languages::AUTOMATIC
+            || (!prefix
+                && (row.transcription_review
+                    || row.canonical_unresolved.is_some()
+                    || row.audio_state.is_some()))
+        {
+            return;
+        }
+        let Some(detection) = &row.language_detection else {
+            return;
+        };
+        let probes = &detection.probes;
+        let from = probes.partition_point(|probe| probe.start_sample < through);
+        for (offset, probe) in probes[from..].iter().enumerate() {
+            let (a, b) = (probe.start_sample, probe.end_sample);
+            let Some(language) = probe
+                .language
+                .as_deref()
+                .filter(|code| languages::is_supported(code))
+            else {
+                continue;
+            };
+            let decision = &probe.decision;
+            if a < row.start_sample
+                || b <= a
+                || b - a > (crate::language::PROBE_SECONDS * RATE as f64).ceil() as i64
+                || b > accepted_end
+                || b > row.end_sample
+                || decision.mode != DetectionMode::Auto
+                || decision.reason != DetectionReason::Detected
+                || decision.detector_error
+                || decision.context_evidence.is_some()
+                || !crate::language::is_confident_detection(
+                    decision.probability.unwrap_or(0.),
+                    decision.margin.unwrap_or(0.),
+                )
+            {
+                continue;
+            }
+            let Ok(admission) = self.ledger.lock().expect("speech ledger").admission(a, b) else {
+                continue;
+            };
+            if !admission.complete
+                || admission.decision != SpeechDecision::Speech
+                || admission.evidence_error
+                || !admission.uncertain_regions.is_empty()
+            {
+                continue;
+            }
+            self.main_language.add(key.clone(), (
+                    language.into(),
+                    (row.speaker_candidates.len() == 1).then(|| row.speaker_candidates[0].clone()).filter(|id| id != "unknown" && !id.is_empty()),
+                    LanguageContextAnchor {
+                        utterance_id: row.id.clone(),
+                        row_start_sample: row.start_sample,
+                        speaker_track_id: (row.speaker_candidates.len() == 1).then(|| row.speaker_candidates[0].clone()).filter(|id| id != "unknown" && !id.is_empty()),
+                        start_sample: a,
+                        end_sample: b,
+                        machine_revision: candidate.machine_revision.unwrap_or(row.machine_revision),
+                        audio_revision: candidate.audio_revision.unwrap_or(row.audio_revision),
+                        probe_sha256: sha256_hex(serde_json::json!({"start_sample":a,"end_sample":b,"language":probe.language,"decision":crate::import::detection_value(decision),"review":probe.review}).to_string().as_bytes()),
+                        probe_index: Some(from + offset),
+                    },
+                ));
+        }
+    }
+    fn language_context(&self, start: i64) -> Option<crate::language::LanguageContext> {
+        let through = self
+            .book
+            .order
+            .partition_point(|id| self.book.rows[id].start_sample <= start);
+        let target = self
+            .book
+            .rows
+            .get(self.book.order.get(through.checked_sub(1)?)?)?;
+        if start >= target.end_sample {
+            return None;
+        }
+        let mut projected = project_segment(target, &self.language_at(start));
+        projected.capture_source = self.config.source_id.as_ref().zip(self.config.capture_catalog_sha256.as_ref()).map(|(source,catalog)| serde_json::json!({"catalog_sha256":catalog,"source_id":source,"source_revision":1}));
+        projected.rest.insert(
+            "stream_generation".into(),
+            serde_json::json!(self.config.recovery.as_ref().map_or(0, |r| r.generation)),
+        );
+        let mut context = self.main_language.context_for(&projected)?;
+        context.evidence.as_mut()?.interpretation_generation =
+            self.language_interpretation_generation;
+        for anchor in &mut context.evidence.as_mut()?.anchors {
+            let row = self.book.rows.get(&anchor.utterance_id)?;
+            if row.protected_fields.iter().any(|field| field != "text") {
+                return None;
+            }
+        }
+        Some(context)
+    }
+
     fn transcribe_span(
         &self,
         start: i64,
@@ -2640,6 +3560,11 @@ impl<M: Models + 'static> Engine<M> {
         padding: (u32, u32),
     ) -> Result<Vec<Passage>, LiveError> {
         let pcm = self.read_pcm(start, end)?;
+        let context = if language == languages::AUTOMATIC {
+            self.language_context(start)
+        } else {
+            None
+        };
         let failure = Arc::new(Mutex::new(None));
         let detector = if language == languages::AUTOMATIC {
             Some(Box::new(ModelDetector {
@@ -2657,7 +3582,7 @@ impl<M: Models + 'static> Engine<M> {
                 models: Arc::clone(&self.models),
                 failure: failure.clone(),
             }),
-            None,
+            context,
         )
         .map_err(|error| LiveError::Detail(error.to_string()))?;
         let result = transcriber
@@ -2772,6 +3697,7 @@ impl<M: Models + 'static> Engine<M> {
         if self.published.get(&row.id) == Some(&candidate) {
             return Ok(());
         }
+        self.remember_language(&row, &candidate);
         self.published.insert(row.id.clone(), candidate.clone());
         self.fast_sequence += 1;
         self.events.push(EngineEvent::CanonicalRevision {
@@ -3049,6 +3975,23 @@ pub struct SourceRuntime<M: Models> {
 }
 
 impl<M: Models + 'static> SourceRuntime<M> {
+    pub fn refresh_language_ownership(&mut self, rows: &[Segment], generation: u64) {
+        for engine in &mut self.engines {
+            engine.refresh_language_ownership(rows, generation);
+        }
+    }
+    pub fn retry_language_context(
+        &mut self,
+        rejected: &Segment,
+        accepted: Option<&Segment>,
+    ) -> Result<Option<Vec<EngineEvent>>, LiveError> {
+        for engine in &mut self.engines {
+            if engine.book.rows.contains_key(&rejected.id) {
+                return engine.retry_language_context(rejected, accepted);
+            }
+        }
+        Ok(None)
+    }
     pub fn inbox(&self) -> Arc<Mutex<Inbox>> {
         Arc::clone(&self.inbox)
     }
@@ -3383,7 +4326,9 @@ mod tests {
                 candidates: Vec::new(),
                 detector_error: false,
                 context_end_sample: None,
+                context_evidence: None,
                 probes: Vec::new(),
+                context_witnesses: Vec::new(),
             },
             review: false,
             language_review: false,
@@ -5052,6 +5997,117 @@ mod tests {
     }
 
     #[test]
+    fn context_feedback_preserves_owned_prefix_and_refuses_unmatched_endpoints() {
+        let mut engine = TestEngine::new(
+            EngineConfig::new("context-feedback", "auto"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        engine.models.clock_text.store(true, Ordering::Relaxed);
+        engine.append_pcm(&clock_pcm(42 * RATE));
+        let mut document = empty_document();
+        for event in engine.handle(notice(0, 30 * RATE, 0)).unwrap() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                document = apply_canonical_candidate(&document, &candidate);
+            }
+        }
+        let prior = document.segments[0].clone();
+        let mut rejected = None;
+        for event in engine.handle(notice(30 * RATE, 36 * RATE, 0)).unwrap() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                rejected = Some(candidate);
+            }
+        }
+        let rejected = rejected.unwrap();
+        assert!(
+            engine
+                .last_context_decode
+                .as_ref()
+                .unwrap()
+                .3
+                .completed
+                .is_some()
+        );
+        let calls = engine.models.transcribe_calls.load(Ordering::SeqCst);
+        let mut changed_prefix = prior.clone();
+        changed_prefix.text = "A different accepted prefix".into();
+        assert!(
+            engine
+                .retry_language_context(&rejected, Some(&changed_prefix))
+                .unwrap()
+                .is_none(),
+            "a mismatched accepted prefix cannot be replayed from its origin"
+        );
+        assert_eq!(engine.models.transcribe_calls.load(Ordering::SeqCst), calls);
+        document = apply_canonical_candidate(&document, &rejected);
+        let accepted = document.segments[0].clone();
+        let mut latest = None;
+        for event in engine.handle(notice(36 * RATE, 42 * RATE, 0)).unwrap() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                latest = Some(candidate);
+            }
+        }
+        let calls = engine.models.transcribe_calls.load(Ordering::SeqCst);
+        assert!(
+            engine
+                .retry_language_context(&rejected, Some(&prior))
+                .unwrap()
+                .is_none(),
+            "only the captured endpoint may re-enter the decoder"
+        );
+        assert_eq!(engine.models.transcribe_calls.load(Ordering::SeqCst), calls);
+        // 42s is half a Silero frame beyond the observation watermark, so
+        // ordinary growth has not yet reached the six-second long-core tick.
+        // The real flush boundary produces the next matching decode snapshot.
+        for event in engine
+            .handle(LiveCommand::Flush {
+                request_id: None,
+                through_sample: None,
+            })
+            .unwrap()
+        {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                latest = Some(candidate);
+            }
+        }
+        let latest = latest.unwrap();
+        let snapshot = engine.last_context_decode.as_ref().unwrap();
+        assert_eq!(
+            (&snapshot.0, snapshot.1, snapshot.2),
+            (
+                &latest.id,
+                latest.rest["end_sample"].as_i64().unwrap(),
+                latest.audio_revision.unwrap()
+            )
+        );
+        let prefix = snapshot.3.completed.as_ref().unwrap();
+        assert!(
+            prefix.end_sample <= accepted.rest["canonical_text_end_sample"].as_i64().unwrap(),
+            "cached prefix end {} beyond server accepted {}",
+            prefix.end_sample,
+            accepted.rest["canonical_text_end_sample"]
+        );
+        assert!(
+            accepted.text.starts_with(&prefix.text),
+            "server accepted {:?} differs from cached prefix {:?}",
+            accepted.text,
+            prefix.text
+        );
+        let crops_before = engine.models.transcription_crops.lock().unwrap().len();
+        assert!(
+            engine
+                .retry_language_context(&latest, Some(&accepted))
+                .unwrap()
+                .is_some()
+        );
+        let crops = engine.models.transcription_crops.lock().unwrap();
+        assert!(
+            crops[crops_before].0 > crops[0].0,
+            "the accepted core prefix is retained"
+        );
+    }
+
+    #[test]
     fn growing_live_cores_keep_decisions_and_reset_at_edit_source_and_language_boundaries() {
         for source in SOURCE_IDS {
             let mut config = EngineConfig::new("growing-source", "auto");
@@ -5268,6 +6324,626 @@ mod tests {
             manual.language_detection.as_ref().unwrap()["reason"],
             "override"
         );
+    }
+
+    #[test]
+    fn live_uncertain_crop_borrows_actual_prior_engine_probe_receipts() {
+        for pause_seconds in [2, 65] {
+            let prior_end = (6 + pause_seconds) * RATE;
+            let mut engine = TestEngine::new(
+                EngineConfig::new("actual-language-context", "auto"),
+                FakeModels::english(),
+            )
+            .unwrap();
+            engine.append_pcm(
+                &[
+                    loud((6 * RATE) as usize),
+                    quiet((pause_seconds * RATE) as usize),
+                ]
+                .concat(),
+            );
+            let prior = engine
+                .handle(LiveCommand::Audio(AudioNotice {
+                    start_sample: 0,
+                    end_sample: prior_end,
+                    language_epoch: 0,
+                    language: "auto".into(),
+                }))
+                .unwrap();
+            let priors = revisions(&prior);
+            let accepted = priors
+                .iter()
+                .rev()
+                .find(|row| row.rest["canonical_state"] == "sealed")
+                .unwrap();
+            let probes = accepted.language_detection.as_ref().unwrap()["probes"]
+                .as_array()
+                .unwrap();
+            assert!(probes.len() >= 2);
+            assert!(probes.iter().all(|p| p["decision"]["reason"] == "detected"));
+            engine
+                .models
+                .probe_scores
+                .lock()
+                .unwrap()
+                .extend((0..4).map(|_| {
+                    Ok(LanguageProbeOut {
+                        codes: vec!["ru".into(), "en".into()],
+                        probabilities: vec![0.51, 0.49],
+                    })
+                }));
+            engine.append_pcm(&loud((3 * RATE) as usize));
+            let mut next = engine
+                .handle(LiveCommand::Audio(AudioNotice {
+                    start_sample: prior_end,
+                    end_sample: prior_end + 3 * RATE,
+                    language_epoch: 0,
+                    language: "auto".into(),
+                }))
+                .unwrap();
+            next.extend(engine.handle(LiveCommand::Stop).unwrap());
+            let rows = revisions(&next);
+            let borrowed = rows.iter().rev().find(|row| row.id != accepted.id).unwrap();
+            assert_eq!(borrowed.language.as_deref(), Some("en"));
+            let evidence = &borrowed.language_detection.as_ref().unwrap()["context_evidence"];
+            assert_eq!(evidence["scope"], "speaker_main_language");
+            assert!(evidence["anchors"].as_array().unwrap().iter().all(|a| {
+                a["utterance_id"] == accepted.canonical_utterance_id.clone().unwrap()
+                    && probes.iter().any(|p| {
+                        p["start_sample"] == a["start_sample"] && p["end_sample"] == a["end_sample"]
+                    })
+            }));
+            assert!(borrowed.rest.get("canonical_unresolved").is_none());
+        }
+    }
+
+    #[test]
+    fn growing_live_language_donor_keeps_its_exact_accepted_probe_prefix() {
+        let mut engine = TestEngine::new(
+            EngineConfig::new("growing-language-donor", "auto"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        engine.append_pcm(&loud((7 * RATE) as usize));
+        let mut document = empty_document();
+        for event in engine.handle(notice(0, 7 * RATE, 0)).unwrap() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                document = apply_canonical_candidate(&document, &candidate);
+            }
+        }
+        let original = document.segments[0].clone();
+        assert!(!original.text.is_empty());
+        assert!(
+            original.language_detection.as_ref().unwrap()["probes"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 2
+        );
+        engine
+            .models
+            .probe_scores
+            .lock()
+            .unwrap()
+            .extend((0..4).map(|_| {
+                Ok(LanguageProbeOut {
+                    codes: vec!["ru".into(), "en".into()],
+                    probabilities: vec![0.51, 0.49],
+                })
+            }));
+        engine.append_pcm(&loud((3 * RATE) as usize));
+        for event in engine.handle(notice(7 * RATE, 10 * RATE, 0)).unwrap() {
+            if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                assert!(borrowed_context_current(&document.segments, &candidate));
+                document = apply_canonical_candidate(&document, &candidate);
+            }
+        }
+        assert!(document.segments[0].audio_revision > original.audio_revision);
+        assert_eq!(
+            document.segments[0].language_detection.as_ref().unwrap()["reason"],
+            "recent_context"
+        );
+        assert_eq!(
+            document.segments[0].language_detection.as_ref().unwrap()["context_witnesses"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            document.segments[0].language_detection.as_ref().unwrap()["context_witnesses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|probe| probe["decision"]["reason"] == "detected"
+                    && probe["decision"]["context_evidence"].is_null())
+        );
+        engine.models.probe_scores.lock().unwrap().clear();
+        engine
+            .models
+            .probe_scores
+            .lock()
+            .unwrap()
+            .extend((0..4).map(|_| {
+                Ok(LanguageProbeOut {
+                    codes: vec!["ru".into(), "en".into()],
+                    probabilities: vec![0.51, 0.49],
+                })
+            }));
+        let stopped = engine.handle(LiveCommand::Stop).unwrap();
+        let candidates = revisions(&stopped);
+        let borrowed = candidates
+            .iter()
+            .rev()
+            .find(|row| !row.text.is_empty())
+            .unwrap();
+        assert_eq!(borrowed.language.as_deref(), Some("en"));
+        assert_eq!(
+            borrowed.language_detection.as_ref().unwrap()["reason"],
+            "recent_context"
+        );
+        assert!(
+            borrowed_context_current(&document.segments, borrowed),
+            "ordinary owned append keeps exact earlier acoustic evidence"
+        );
+        let mut duplicate = (*borrowed).clone();
+        let detection = duplicate.language_detection.as_mut().unwrap();
+        let direct = detection["context_witnesses"].as_array().unwrap().clone();
+        detection["probes"].as_array_mut().unwrap().extend(direct);
+        let original_summary = MainLanguageSummary::from_segments(std::slice::from_ref(borrowed));
+        let duplicate_summary = MainLanguageSummary::from_segments(&[duplicate]);
+        assert_eq!(
+            original_summary.groups.values().next().unwrap().meeting["en"].count,
+            duplicate_summary.groups.values().next().unwrap().meeting["en"].count,
+            "one-time sealed summary never counts the same physical direct probe twice"
+        );
+        let mut shrunk = document.segments.clone();
+        let supports = borrowed.language_detection.as_ref().unwrap()["context_evidence"]["anchors"]
+            .as_array()
+            .unwrap();
+        shrunk[0].end = supports
+            .iter()
+            .map(|anchor| anchor["end_sample"].as_i64().unwrap())
+            .min()
+            .unwrap() as f64
+            / RATE as f64
+            - 0.001;
+        assert!(
+            !borrowed_context_current(&shrunk, borrowed),
+            "retained JSON cannot authorize a probe outside shrunken owned audio"
+        );
+        let mut retimed = document.segments.clone();
+        retimed[0].start += 0.001;
+        assert!(!borrowed_context_current(&retimed, borrowed));
+    }
+
+    #[test]
+    fn uncertain_language_uses_speaker_then_meeting_evidence_without_crossing_guards() {
+        // Accepted direct detections are retained inputs. The candidate crop is
+        // decoded through the real router with scripted acoustic model replies.
+        // This proves routing and ownership, not native language-model quality.
+        for (case, main, other, expected) in [
+            ("speaker", "en", "de", Some("en")),
+            ("speaker", "de", "en", Some("de")),
+            ("spelling", "en", "de", Some("en")),
+            ("sparse", "en", "de", Some("en")),
+            ("confident_switch", "en", "de", Some("de")),
+            ("confident_unsupported", "en", "de", None),
+            ("epoch", "en", "de", None),
+            ("borrowed", "en", "de", None),
+            ("manual", "en", "de", Some("fr")),
+        ] {
+            let mut engine = TestEngine::new(
+                EngineConfig::new("language-context-matrix", "auto"),
+                FakeModels::english(),
+            )
+            .unwrap();
+            engine.append_pcm(&loud((21 * RATE) as usize));
+            engine
+                .handle(LiveCommand::Audio(AudioNotice {
+                    start_sample: 0,
+                    end_sample: 21 * RATE,
+                    language_epoch: 0,
+                    language: "auto".into(),
+                }))
+                .unwrap();
+            // The target's last partial Silero frame must be observed before
+            // this saved-evidence routing replay. Audio(21s) alone stops at
+            // 20.992s; otherwise the final crop correctly remains Pending.
+            engine.handle(LiveCommand::Stop).unwrap();
+            assert!(
+                engine
+                    .ledger
+                    .lock()
+                    .unwrap()
+                    .admission(18 * RATE, 21 * RATE)
+                    .unwrap()
+                    .complete
+            );
+            let template = engine.book.rows.values().next().unwrap().clone();
+            engine.book.rows.clear();
+            engine.book.order.clear();
+            engine.published.clear();
+            engine.main_language = MainLanguageSummary::default();
+            // The meeting majority deliberately disagrees with speaker_0.
+            // Sparse speaker_0 has one independent anchor and uses the meeting.
+            for index in 0..6 {
+                let mut row = template.clone();
+                row.id = format!("accepted-{index}");
+                row.start_sample = index * 3 * RATE;
+                row.end_sample = (index + 1) * 3 * RATE;
+                row.text_end_sample = Some(row.end_sample);
+                row.language_epoch = i64::from(case == "epoch");
+                row.state = UtteranceState::Sealed;
+                row.text = format!("Accepted direct words {index}");
+                row.protected_fields.clear();
+                row.transcription_review = false;
+                row.canonical_unresolved = None;
+                row.audio_state = None;
+                row.text_audio_anchor = Some(timing::AudioAnchor {
+                    start_sample: row.start_sample,
+                    end_sample: row.end_sample,
+                });
+                row.review = false;
+                let speaker_zero = if case == "sparse" {
+                    index == 0
+                } else {
+                    index < 2
+                };
+                row.speaker_candidates = vec![
+                    if speaker_zero {
+                        "speaker_0"
+                    } else {
+                        "speaker_1"
+                    }
+                    .into(),
+                ];
+                let language = if case == "sparse" {
+                    if speaker_zero { other } else { main }
+                } else if speaker_zero {
+                    main
+                } else {
+                    other
+                };
+                row.language = Some(language.into());
+                let mut detection = speech_passage(0., 3., "Accepted", 0).language_detection;
+                if case == "borrowed" {
+                    detection.reason = DetectionReason::RecentContext;
+                    detection.context_end_sample = Some(row.start_sample);
+                }
+                detection.probes = vec![crate::language::ProbeEvent {
+                    start_sample: row.start_sample,
+                    end_sample: row.end_sample,
+                    language: Some(language.into()),
+                    decision: detection.clone(),
+                    review: case == "borrowed",
+                }];
+                row.language_detection = Some(detection);
+                engine.book.order.push(row.id.clone());
+                engine.book.rows.insert(row.id.clone(), row.clone());
+                engine.publish(row).unwrap();
+            }
+            // Prime through the same publication-feedback owner used by the
+            // host, with a legitimate retained stream-0 snapshot. A recovery
+            // stream-1 target has a different summary key and cannot borrow it.
+            let mut accepted: Vec<_> = engine.published.values().cloned().collect();
+            accepted.sort_by(|left, right| left.start.total_cmp(&right.start));
+            engine.refresh_language_ownership(&accepted, 0);
+            if case == "spelling" {
+                let donor = engine.book.rows.get_mut("accepted-0").unwrap();
+                donor.text = "Corrected donor spelling".into();
+                donor.protected_fields.push("text".into());
+                donor.machine_revision += 1;
+            }
+            let mut candidate = template;
+            candidate.id = "candidate".into();
+            candidate.start_sample = 18 * RATE;
+            candidate.end_sample = 21 * RATE;
+            candidate.language_epoch = 0;
+            candidate.text.clear();
+            candidate.language = None;
+            candidate.language_detection = None;
+            candidate.speaker_candidates = vec!["speaker_0".into()];
+            engine.book.order.push(candidate.id.clone());
+            engine.book.rows.insert(candidate.id.clone(), candidate);
+            let (codes, probabilities) = match case {
+                "confident_switch" => (vec![other.into(), main.into()], vec![0.99, 0.01]),
+                "confident_unsupported" => (vec!["ru".into(), main.into()], vec![0.99, 0.01]),
+                _ => (vec!["ru".into(), main.into()], vec![0.51, 0.49]),
+            };
+            engine.models.probe_scores.lock().unwrap().clear();
+            engine
+                .models
+                .probe_scores
+                .lock()
+                .unwrap()
+                .push_back(Ok(LanguageProbeOut {
+                    codes,
+                    probabilities,
+                }));
+            engine
+                .models
+                .transcription_languages
+                .lock()
+                .unwrap()
+                .clear();
+            let passages = engine
+                .transcribe_span(
+                    18 * RATE,
+                    21 * RATE,
+                    if case == "manual" { "fr" } else { "auto" },
+                    &[],
+                    (0, 0),
+                )
+                .unwrap();
+            assert_eq!(passages.len(), 1, "{case}/{main}");
+            assert_eq!(passages[0].language.as_deref(), expected, "{case}/{main}");
+            let calls = engine.models.transcription_languages.lock().unwrap();
+            assert_eq!(
+                calls.as_slice(),
+                expected.into_iter().collect::<Vec<_>>(),
+                "{case}/{main}"
+            );
+            if matches!(case, "speaker" | "spelling" | "sparse") {
+                assert_eq!(
+                    passages[0].language_detection.reason,
+                    DetectionReason::RecentContext,
+                    "{case}/{main}"
+                );
+                assert!(passages[0].language_detection.context_end_sample.is_some());
+                assert_eq!(
+                    passages[0]
+                        .language_detection
+                        .context_evidence
+                        .as_ref()
+                        .unwrap()
+                        .scope,
+                    if case != "sparse" {
+                        "speaker_main_language"
+                    } else {
+                        "meeting_main_language"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn saved_language_context_requires_independent_fresh_owned_acoustic_evidence() {
+        let row = |id: &str, start: i64, end: i64| {
+            let mut segment = crate::transcript::bare_segment(
+                id,
+                start as f64 / RATE as f64,
+                end as f64 / RATE as f64,
+                "speaker_0",
+                "Direct accepted words",
+            );
+            segment.canonical_utterance_id = Some(id.into());
+            segment.language = Some("en".into());
+            segment.capture_source = Some(
+                serde_json::json!({"catalog_sha256":"owned","source_id":"microphone","source_revision":1}),
+            );
+            segment.rest.extend(
+                serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+                    "start_sample":start,"end_sample":end,"canonical_text_end_sample":end,
+                    "language_mode":"auto","language_epoch":0,"stream_generation":0,
+                    "canonical_state":"sealed","source_speaker_candidates":["speaker_0"]
+                }))
+                .unwrap(),
+            );
+            let passage = speech_passage(
+                0.,
+                (end - start) as f64 / RATE as f64,
+                "Direct accepted words",
+                start,
+            );
+            segment.acoustic_evidence = Some(speech::admission_value(&passage.acoustic_evidence));
+            let mut detection = passage.language_detection;
+            detection.probes = vec![crate::language::ProbeEvent {
+                start_sample: start,
+                end_sample: end,
+                language: Some("en".into()),
+                decision: detection.clone(),
+                review: false,
+            }];
+            segment.language_detection = Some(crate::import::detection_value(&detection));
+            segment
+        };
+        for case in [
+            "qualified",
+            "foreign_overlap",
+            "duplicate",
+            "overlap",
+            "conflict",
+            "source",
+            "stream",
+            "epoch",
+            "manual",
+            "borrowed",
+            "partial",
+            "acoustic",
+            "protected",
+            "stale",
+            "future",
+        ] {
+            let mut first = row("first", 0, 3 * RATE);
+            let mut second = row("second", 3 * RATE, 6 * RATE);
+            let mut target = row("target", 9 * RATE, 12 * RATE);
+            let mut extra = Vec::new();
+            match case {
+                "foreign_overlap" => {
+                    first = row("recent-long", 0, 76 * RATE);
+                    let mut a = first.language_detection.as_ref().unwrap()["probes"][0].clone();
+                    a["start_sample"] = Value::from(70 * RATE);
+                    a["end_sample"] = Value::from(73 * RATE);
+                    let mut b = a.clone();
+                    b["start_sample"] = Value::from(73 * RATE);
+                    b["end_sample"] = Value::from(76 * RATE);
+                    first.language_detection.as_mut().unwrap()["probes"] =
+                        serde_json::json!([a, b]);
+                    second = row("foreign-short", 5 * RATE, 10 * RATE);
+                    second.capture_source.as_mut().unwrap()["source_id"] = Value::from("system");
+                    target = row("target", 77 * RATE, 80 * RATE);
+                }
+                "duplicate" => second = row("copy", 0, 3 * RATE),
+                "overlap" => second = row("overlap", RATE, 4 * RATE),
+                "conflict" => {
+                    let mut copy = first.clone();
+                    copy.language_detection.as_mut().unwrap()["probes"][0]["language"] =
+                        Value::from("de");
+                    extra.push(copy);
+                }
+                "source" => {
+                    second.capture_source.as_mut().unwrap()["source_id"] = Value::from("system")
+                }
+                "stream" => {
+                    second
+                        .rest
+                        .insert("stream_generation".into(), Value::from(1));
+                }
+                "epoch" => {
+                    second.rest.insert("language_epoch".into(), Value::from(1));
+                }
+                "manual" => {
+                    second
+                        .rest
+                        .insert("language_mode".into(), Value::from("en"));
+                }
+                "borrowed" => {
+                    second.language_detection.as_mut().unwrap()["probes"][0]["decision"]["reason"] =
+                        Value::from("recent_context")
+                }
+                "partial" => {
+                    second.transcription_review = Some(serde_json::json!({"partial_text":true}))
+                }
+                "acoustic" => {
+                    second.acoustic_evidence.as_mut().unwrap()["complete"] = Value::Bool(false)
+                }
+                "protected" => second.protected_fields = Some(vec!["text".into()]),
+                "stale" => target = row("target", 73 * RATE, 76 * RATE),
+                "future" => {
+                    first = row("first", 3 * RATE, 6 * RATE);
+                    second = row("second", 6 * RATE, 9 * RATE);
+                    target = row("target", 0, 3 * RATE);
+                }
+                _ => {}
+            }
+            let mut rows = vec![first, second];
+            rows.extend(extra);
+            let context = saved_language_context(&rows, &target);
+            assert_eq!(
+                context.is_some(),
+                matches!(
+                    case,
+                    "qualified" | "foreign_overlap" | "stale" | "future" | "protected"
+                ),
+                "{case}"
+            );
+            if let Some(context) = context {
+                assert_eq!(context.language, "en");
+                let evidence = context.evidence.unwrap();
+                assert_eq!(evidence.anchors.len(), 2);
+                assert_eq!(evidence.speaker_track_id.as_deref(), Some("speaker_0"));
+                assert_eq!(evidence.capture_source, target.capture_source);
+                if case == "foreign_overlap" {
+                    continue;
+                }
+                // The saved crop clock is translated at the real router seam.
+                let models = FakeModels::english();
+                models.probe_scores.lock().unwrap().extend((0..2).map(|_| {
+                    Ok(LanguageProbeOut {
+                        codes: vec!["ru".into(), "en".into()],
+                        probabilities: vec![0.51, 0.49],
+                    })
+                }));
+                target.language = None;
+                let decoded = refine_saved_passage_with_context(
+                    &models,
+                    &target,
+                    &loud((3 * RATE) as usize),
+                    None,
+                    saved_language_context(&rows, &target),
+                )
+                .unwrap();
+                assert_eq!(decoded.language.as_deref(), Some("en"));
+                let decision = decoded.language_detection.clone().unwrap();
+                assert_eq!(
+                    decision["context_end_sample"],
+                    if case == "future" { 9 * RATE } else { 6 * RATE }
+                );
+                assert_eq!(
+                    decision["context_evidence"]["scope"],
+                    "speaker_main_language"
+                );
+                assert_eq!(
+                    decision["probes"][0]["start_sample"],
+                    round_samples(target.start)
+                );
+                if matches!(case, "stale" | "future") {
+                    continue;
+                }
+                let mut candidate = decoded.clone();
+                candidate.language_detection = Some(decision);
+                assert!(borrowed_context_current(&rows, &candidate));
+                let mut spelling = rows.clone();
+                spelling[0].text = "Protected donor spelling".into();
+                spelling[0].protected_fields = Some(vec!["text".into()]);
+                spelling[0].machine_revision = Some(spelling[0].machine_revision.unwrap_or(0) + 1);
+                assert!(borrowed_context_current(&spelling, &candidate));
+                assert!(
+                    saved_language_context(&spelling, &target).is_some(),
+                    "exactly two immutable acoustic supports survive spelling-only edits"
+                );
+                for change in ["speaker", "source", "epoch", "probe"] {
+                    let mut changed = rows.clone();
+                    match change {
+                        "text" => {
+                            changed[0].text = "Protected donor edit".into();
+                            changed[0].protected_fields = Some(vec!["text".into()]);
+                        }
+                        "speaker" => {
+                            changed[0].speaker = "different-track".into();
+                            changed[0].protected_fields = Some(vec!["speaker".into()]);
+                        }
+                        "source" => {
+                            changed[0].capture_source.as_mut().unwrap()["source_revision"] =
+                                Value::from(2)
+                        }
+                        "epoch" => {
+                            changed[0]
+                                .rest
+                                .insert("language_epoch".into(), Value::from(1));
+                        }
+                        "revision" => changed[0].machine_revision = Some(1),
+                        "probe" => {
+                            changed[0].language_detection.as_mut().unwrap()["probes"][0]["decision"]
+                                ["probability"] = Value::from(0.95)
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        !borrowed_context_current(&changed, &candidate),
+                        "selected donor {change}"
+                    );
+                    let mut document = crate::transcript::bare_document(
+                        &[("speaker_0", "Renamed speaker")],
+                        [changed, vec![target.clone()]].concat(),
+                    );
+                    assert!(
+                        !publish_saved_passage(&mut document, &target, &candidate).unwrap(),
+                        "selected donor {change}"
+                    );
+                    let mut fresh = crate::transcript::bare_document(
+                        &[("speaker_0", "Renamed speaker")],
+                        [rows.clone(), vec![target.clone()]].concat(),
+                    );
+                    assert!(
+                        publish_saved_passage(&mut fresh, &target, &candidate).unwrap(),
+                        "unchanged/fresh retry after {change}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

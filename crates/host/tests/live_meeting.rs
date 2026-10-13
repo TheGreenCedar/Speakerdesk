@@ -186,10 +186,13 @@ impl Running {
         id
     }
     async fn start(&self, sources: Value) -> String {
+        self.start_language(sources, "en").await
+    }
+    async fn start_language(&self, sources: Value, language: &str) -> String {
         let response = self
             .post(
                 "api/meetings",
-                json!({"name":"Disposable live replay","language":"en","sources":sources}),
+                json!({"name":"Disposable live replay","language":language,"sources":sources}),
             )
             .await;
         assert_eq!(response.status(), 202, "{}", response.text().await.unwrap());
@@ -2172,22 +2175,100 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
             assert_eq!(row["language"], language);
             assert_eq!(row["language_mode"], captured_mode);
             if case == "uncertain" {
-                // Complete same-language contexts retain their routing uncertainty
-                // without discarding the acoustically owned words and timing.
+                // The preceding accepted direct context now establishes the
+                // main language. Weak scores stay visible with exact support;
+                // borrowing does not discard acoustically owned words/timing.
                 assert_eq!(row["review"], true);
                 let detection = &row["language_detection"];
-                assert_eq!(detection["reason"], "best_effort");
+                assert_eq!(detection["reason"], "recent_context");
                 assert_eq!(detection["probability"], f64::from(0.55_f32));
                 let probes = detection["probes"].as_array().unwrap();
                 assert!(probes.iter().all(|probe| probe["language"] == "de"));
                 assert!(probes.iter().any(|probe| {
                     probe["review"] == true
-                        && probe["decision"]["reason"] == "best_effort"
+                        && probe["decision"]["reason"] == "recent_context"
                         && probe["decision"]["probability"] == f64::from(0.55_f32)
                 }));
                 assert!(probes.iter().any(|probe| {
                     probe["review"] == false && probe["decision"]["reason"] == "detected"
                 }));
+                for probe in probes
+                    .iter()
+                    .filter(|probe| probe["decision"]["reason"] == "recent_context")
+                {
+                    assert_eq!(probe["decision"]["probability"], f64::from(0.55_f32));
+                    assert_eq!(probe["decision"]["candidates"][0]["language"], "de");
+                    assert_eq!(probe["decision"]["candidates"][1]["language"], "fr");
+                    assert_eq!(
+                        probe["decision"]["margin"],
+                        f64::from(0.55_f32) - f64::from(0.45_f32)
+                    );
+                    let evidence = &probe["decision"]["context_evidence"];
+                    assert_eq!(evidence["scope"], "same_anchor_direct_windows");
+                    assert_eq!(evidence["language_epoch"], old["language_epoch"]);
+                    assert_eq!(evidence["capture_source"], old["capture_source"]);
+                    assert_eq!(evidence["stream_generation"], old["stream_generation"]);
+                    assert_eq!(
+                        evidence["interpretation_generation"].as_u64(),
+                        Some(after["language_context_generation"].as_u64().unwrap_or(0))
+                    );
+                    let anchors = evidence["anchors"].as_array().unwrap();
+                    assert_eq!(anchors.len(), 2);
+                    assert!(
+                        anchors[0]["end_sample"].as_i64().unwrap()
+                            <= anchors[1]["start_sample"].as_i64().unwrap()
+                            || anchors[1]["end_sample"].as_i64().unwrap()
+                                <= anchors[0]["start_sample"].as_i64().unwrap(),
+                        "independent direct supports do not overlap"
+                    );
+                    for anchor in anchors {
+                        assert_eq!(anchor["utterance_id"], old["canonical_utterance_id"]);
+                        assert!(
+                            anchor["end_sample"].as_i64().unwrap()
+                                <= probe["start_sample"].as_i64().unwrap()
+                        );
+                        let support = probes
+                            .iter()
+                            .find(|support| {
+                                support["start_sample"] == anchor["start_sample"]
+                                    && support["end_sample"] == anchor["end_sample"]
+                                    && format!(
+                                        "{:x}",
+                                        Sha256::digest(support.to_string().as_bytes())
+                                    ) == anchor["probe_sha256"].as_str().unwrap()
+                            })
+                            .expect("borrowed context names an exact accepted direct receipt");
+                        assert_eq!(support["language"], "de");
+                        assert_eq!(support["decision"]["mode"], "auto");
+                        assert_eq!(support["decision"]["reason"], "detected");
+                        assert!(support["decision"]["context_evidence"].is_null());
+                        assert!(support["decision"]["probability"].as_f64().unwrap() >= 0.9);
+                        assert!(support["decision"]["margin"].as_f64().unwrap() >= 0.2);
+                    }
+                }
+                assert!(
+                    row["refinement_issue"].is_null(),
+                    "accepted readable uncertainty has no repair blocker"
+                );
+                let mut borrowed_only: speakerdesk_core::document::Segment =
+                    serde_json::from_value(row.clone()).unwrap();
+                let borrowed_detection = borrowed_only.language_detection.as_mut().unwrap();
+                borrowed_detection["probes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|probe| probe["decision"]["reason"] == "recent_context");
+                borrowed_detection
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("context_witnesses");
+                assert!(
+                    speakerdesk_core::live::saved_language_context(
+                        std::slice::from_ref(&borrowed_only),
+                        &borrowed_only
+                    )
+                    .is_none(),
+                    "borrowed output never establishes a new main-language vote"
+                );
             }
             assert_eq!(row["reading_alignment"]["language"], language);
             assert_eq!(
@@ -2297,8 +2378,30 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
                 assert_eq!(after["document"], before["document"]);
                 assert_eq!(after["refinement_status"], "paused");
             } else {
+                let mut retained = after["document"].clone();
+                if case == "mixed" {
+                    let issue = retained["segments"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("refinement_issue")
+                        .expect("mixed language failure has an owned passage action");
+                    assert_eq!(issue["kind"], "language");
+                    assert_eq!(issue["reason"], "mixed");
+                    let prior: speakerdesk_core::document::Segment =
+                        serde_json::from_value(old.clone()).unwrap();
+                    assert_eq!(
+                        issue["segment_version"],
+                        speakerdesk_core::live::segment_version(&prior)
+                    );
+                    assert!(
+                        issue["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("language ownership")
+                    );
+                }
                 assert_eq!(
-                    after["document"], before["document"],
+                    retained, before["document"],
                     "{case} must retain previous legible words"
                 );
                 assert_eq!(after["refinement_status"], "unresolved", "{case}");
@@ -2935,126 +3038,145 @@ async fn rolling_accuracy_default_sources_language_recovery_and_shutdown_matrix(
 
 #[tokio::test]
 async fn rolling_long_context_yields_to_live_audio_before_its_last_crop() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    fs::write(root.join("fixture-ctc"), b"synthetic overlap ownership").unwrap();
-    fs::create_dir(root.join("coarse-alignment")).unwrap();
-    fs::write(
-        root.join("coarse-alignment/tokens.txt"),
-        include_str!("testdata/ctc-tokens.txt"),
-    )
-    .unwrap();
-    let host = Running::open(root, false).await;
-    let id = host.start_live_only(json!(["microphone"])).await;
-    let path = format!("api/jobs/{id}");
-    for stage in 1..=4 {
-        trigger(root, stage);
-        host.wait(&path, |job| {
-            job["duration"].as_f64().unwrap_or(0.) >= f64::from(stage * 7) - 0.5
-        })
-        .await;
-    }
-    assert_eq!(
-        host.post(&format!("api/meetings/{id}/pause"), json!({}))
-            .await
-            .status(),
-        202
-    );
-    host.wait(&path, |job| job["pause_flush"]["status"] == "complete")
-        .await;
-    let response = host
-        .client
-        .patch(format!("{}api/meetings/{id}/language", host.url))
-        .header("X-Speakerdesk-Token", &host.token)
-        .json(&json!({"language":"fr","language_revision":0}))
-        .send()
-        .await
+    for mode in ["en", "auto"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("fixture-ctc"), b"synthetic overlap ownership").unwrap();
+        fs::create_dir(root.join("coarse-alignment")).unwrap();
+        fs::write(
+            root.join("coarse-alignment/tokens.txt"),
+            include_str!("testdata/ctc-tokens.txt"),
+        )
         .unwrap();
-    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
-    let before = host
-        .wait(&path, |job| job["language_acknowledged_revision"] == 1)
-        .await;
-    let old = before["document"]["segments"][0].clone();
-    assert_eq!(old["end_sample"], 448000);
-    fs::write(root.join("context-replay.json"),json!([
+        let host = Running::open(root, false).await;
+        let id = host.start_language(json!(["microphone"]), mode).await;
+        assert_eq!(
+            host.post(&format!("api/jobs/{id}/refinement/pause"), json!({}))
+                .await
+                .status(),
+            200
+        );
+        let path = format!("api/jobs/{id}");
+        for stage in 1..=4 {
+            trigger(root, stage);
+            host.wait(&path, |job| {
+                job["duration"].as_f64().unwrap_or(0.) >= f64::from(stage * 7) - 0.5
+            })
+            .await;
+        }
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        host.wait(&path, |job| job["pause_flush"]["status"] == "complete")
+            .await;
+        let response = host
+            .client
+            .patch(format!("{}api/meetings/{id}/language", host.url))
+            .header("X-Speakerdesk-Token", &host.token)
+            .json(&json!({"language":"fr","language_revision":0}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+        let before = host
+            .wait(&path, |job| job["language_acknowledged_revision"] == 1)
+            .await;
+        let old = before["document"]["segments"][0].clone();
+        assert_eq!(old["end_sample"], 448000);
+        fs::write(root.join("context-replay.json"),json!([
         {"text":"start repeat bridge extra","request_samples":275200,"start_sample":0,"end_sample":272000,
-         "words":[["start",16000],["repeat",192000],["bridge",208000],["extra",256000]]},
+         "words":[["start",16000],["repeat",192000],["bridge",208000],["extra",256000]],"probe":{"codes":["en","de"],"probabilities":[0.99,0.01]}},
         {"text":"repeat bridge finish repeat","request_samples":275200,"start_sample":176000,"end_sample":448000,
-         "words":[["repeat",192000],["bridge",208000],["finish",352000],["repeat",416000]]}
+         "words":[["repeat",192000],["bridge",208000],["finish",352000],["repeat",416000]],"probe":{"codes":["ru","en"],"probabilities":[0.51,0.49]}}
     ]).to_string()).unwrap();
-    fs::write(root.join("hold-live-asr"), b"hold each scripted context").unwrap();
-    assert_eq!(
-        host.post(&format!("{path}/refinement/resume"), json!({}))
-            .await
-            .status(),
-        202
-    );
-    wait_file(&root.join("context-started-0")).await;
-    assert_eq!(
-        host.post(&format!("api/meetings/{id}/resume"), json!({}))
-            .await
-            .status(),
-        202
-    );
-    trigger(root, 5);
-    host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 34.5)
-        .await;
-    fs::write(
-        root.join("release-context-0"),
-        b"finish first physical context",
-    )
-    .unwrap();
-    wait_file(&root.join("context-started-1")).await;
-    let progress = host.get("api/meeting").await;
-    assert!(
-        progress["processed_seconds"].as_f64().unwrap() > 28.,
-        "live saved-audio observations must advance before the next accuracy context: {progress}"
-    );
-    let held = host.get(&path).await;
-    assert_eq!(
-        held["document"]["segments"][0]["text"], old["text"],
-        "only a complete anchor may replace published words"
-    );
-    fs::write(root.join("release-context-1"), b"finish final context").unwrap();
-    let accepted = host
-        .wait(&path, |job| {
-            job["document"]["segments"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["id"] == old["id"] && row["refinement_state"] == "refined")
-        })
-        .await;
-    let row = accepted["document"]["segments"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["id"] == old["id"])
-        .unwrap()
-        .clone();
-    assert_eq!(row["text"], "start repeat bridge finish repeat");
-    assert!(row["reading_turns"].is_array());
-    assert_eq!(
-        fs::read_to_string(root.join("context-crops"))
-            .unwrap()
-            .lines()
-            .count(),
-        2
-    );
-    fs::remove_file(root.join("hold-live-asr")).unwrap();
-    let final_job = host.stop(&id).await;
-    assert_eq!(final_job["status"], "ready", "{final_job}");
-    assert_eq!(
-        final_job["document"]["segments"]
+        fs::write(root.join("hold-live-asr"), b"hold each scripted context").unwrap();
+        assert_eq!(
+            host.post(&format!("{path}/refinement/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        wait_file(&root.join("context-started-0")).await;
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        trigger(root, 5);
+        host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 34.5)
+            .await;
+        fs::write(
+            root.join("release-context-0"),
+            b"finish first physical context",
+        )
+        .unwrap();
+        wait_file(&root.join("context-started-1")).await;
+        let progress = host.get("api/meeting").await;
+        assert!(
+            progress["processed_seconds"].as_f64().unwrap() > 28.,
+            "live saved-audio observations must advance before the next accuracy context: {progress}"
+        );
+        let held = host.get(&path).await;
+        assert_eq!(
+            held["document"]["segments"][0]["text"], old["text"],
+            "only a complete anchor may replace published words"
+        );
+        fs::write(root.join("release-context-1"), b"finish final context").unwrap();
+        let accepted = host
+            .wait(&path, |job| {
+                job["document"]["segments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["id"] == old["id"] && row["refinement_state"] == "refined")
+            })
+            .await;
+        let row = accepted["document"]["segments"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|r| r["id"] == old["id"])
-            .unwrap(),
-        &row
-    );
-    assert_eq!(final_job["canonical_observed_sample"], 560513);
-    host.close(root).await;
+            .find(|row| row["id"] == old["id"])
+            .unwrap()
+            .clone();
+        assert_eq!(row["text"], "start repeat bridge finish repeat");
+        assert!(row["reading_turns"].is_array());
+        if mode == "auto" {
+            assert!(
+                row["language_detection"]["probes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|probe| probe["decision"]["context_evidence"]["scope"]
+                        == "same_anchor_direct_windows"),
+                "later weak window must use accepted direct preceding context: {row}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("context-crops"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        fs::remove_file(root.join("hold-live-asr")).unwrap();
+        let final_job = host.stop(&id).await;
+        assert_eq!(final_job["status"], "ready", "{final_job}");
+        assert_eq!(
+            final_job["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == old["id"])
+                .unwrap(),
+            &row
+        );
+        assert_eq!(final_job["canonical_observed_sample"], 560513);
+        host.close(root).await;
+    }
 }
 
 #[tokio::test]
@@ -3114,6 +3236,631 @@ async fn rolling_accuracy_pause_is_serviced_while_final_models_drain() {
     assert_eq!(
         finished["document"]["segments"][0]["text"],
         "Replay transcript"
+    );
+    host.close(root).await;
+}
+
+#[tokio::test]
+async fn accepted_language_repair_resumes_remaining_saved_accuracy_once() {
+    for case in [
+        "remaining",
+        "last",
+        "queued_name_save",
+        "cancelled",
+        "retained_unsupported",
+        "retained_detector",
+    ] {
+        let retained = case.starts_with("retained_");
+        let dual = !retained && case != "last";
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let host = Running::open(root, dual).await;
+        let started = host.post("api/meetings", json!({"name":"Disposable language repair replay","language":"auto","sources": if dual { json!(["microphone","system"]) } else { json!(["microphone"]) }})).await;
+        assert_eq!(started.status(), 202, "{}", started.text().await.unwrap());
+        let id = host.wait("api/meeting", |job| job["id"].is_string()).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let path = format!("api/jobs/{id}");
+        assert_eq!(
+            host.post(&format!("{path}/refinement/pause"), json!({}))
+                .await
+                .status(),
+            200
+        );
+        if !retained || case == "retained_detector" {
+            fs::write(
+                root.join("replay-probe.json"),
+                if retained {
+                    json!({"codes":["en","de"],"probabilities":[0.7,0.3]})
+                } else {
+                    json!({"codes":["ru","en"],"probabilities":[0.99,0.01]})
+                }
+                .to_string(),
+            )
+            .unwrap();
+        }
+        trigger(root, 1);
+        host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
+            .await;
+        let before = host.stop(&id).await;
+        if retained {
+            assert!(
+                !before["document"]["segments"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .is_empty()
+            );
+            fs::write(
+                root.join("replay-probe.json"),
+                if case == "retained_detector" {
+                    json!({"codes":[],"probabilities":[]})
+                } else {
+                    json!({"codes":["ru","en"],"probabilities":[0.99,0.01]})
+                }
+                .to_string(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            host.post(&format!("{path}/refinement/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        let failed = host
+            .wait(&path, |job| {
+                job["refinement_status"] == "unresolved" && job["inference_owned"] == false
+            })
+            .await;
+        let rows = failed["document"]["segments"].as_array().unwrap();
+        assert_eq!(
+            rows.len(),
+            if dual { 2 } else { 1 },
+            "one language-blocked anchor per retained source"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["text"].as_str().unwrap().is_empty() != retained
+                    && row["language_mode"] == "auto")
+        );
+        for row in rows {
+            assert_eq!(row["refinement_issue"]["kind"], "language", "{case}: {row}");
+            assert_eq!(
+                row["refinement_issue"]["reason"],
+                if case == "retained_detector" {
+                    "detector_error"
+                } else {
+                    "unsupported"
+                }
+            );
+            let typed: speakerdesk_core::document::Segment =
+                serde_json::from_value(row.clone()).unwrap();
+            assert_eq!(
+                row["refinement_issue"]["segment_version"],
+                speakerdesk_core::live::segment_version(&typed)
+            );
+            if retained {
+                assert_eq!(row["text"], before["document"]["segments"][0]["text"]);
+                assert_eq!(
+                    row["language_detection"],
+                    before["document"]["segments"][0]["language_detection"],
+                    "saved failure retains the original readable detection"
+                );
+            }
+        }
+        let repaired_id = rows[0]["id"].as_str().unwrap().to_owned();
+        let remaining_id = dual.then(|| rows[1]["id"].as_str().unwrap().to_owned());
+        let captured_epoch = rows[0]["language_epoch"].clone();
+        let captured_source = rows[0]["capture_source"].clone();
+        fs::write(root.join("replay-transcript"), "Accepted language repair").unwrap();
+        assert_eq!(
+            host.post(
+                &format!("{path}/retry"),
+                json!({"revision":failed["revision"],"segment_id":repaired_id,"language":"en"})
+            )
+            .await
+            .status(),
+            202
+        );
+        let ready = host
+            .wait(&path, |job| {
+                job["inference_owned"] == false
+                    && job["document"]["segments"][0]["retry_candidate"]["text"]
+                        == "Accepted language repair"
+            })
+            .await;
+        assert_eq!(
+            ready["refinement_status"], "unresolved",
+            "a proposed repair is not acceptance"
+        );
+        if matches!(case, "queued_name_save" | "cancelled") {
+            fs::write(
+                root.join("hold-live-asr"),
+                b"hold unrelated retry before repair callback",
+            )
+            .unwrap();
+            assert_eq!(
+                host.post(
+                    &format!("{path}/retry"),
+                    json!({"revision":ready["revision"],"segment_id":remaining_id,"language":"en"})
+                )
+                .await
+                .status(),
+                202
+            );
+            wait_file(&root.join("edit-asr-started")).await;
+        }
+        let ready = host.get(&path).await;
+        let mut document = ready["document"].clone();
+        let repaired = &mut document["segments"][0];
+        repaired["text"] = json!("Accepted language repair");
+        repaired["language"] = json!("en");
+        repaired["language_detection"] = json!({"mode":"manual","reason":"passage_retry"});
+        repaired["transcription_review"] = Value::Null;
+        repaired["retry_candidate"]["accepted_at"] = json!(1.);
+        fs::write(
+            root.join("replay-probe.json"),
+            json!({"codes":["en","de"],"probabilities":[0.99,0.01]}).to_string(),
+        )
+        .unwrap();
+        fs::write(root.join("replay-transcript"), "Remaining accuracy words").unwrap();
+        fs::write(root.join("transcribe-crops"), b"").unwrap();
+        let saved = host
+            .client
+            .put(format!("{}{path}/transcript", host.url))
+            .header("X-Speakerdesk-Token", &host.token)
+            .json(&json!({"revision":ready["revision"],"document":document}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+        if matches!(case, "queued_name_save" | "cancelled") {
+            let accepted = host.get(&path).await;
+            let mut document = accepted["document"].clone();
+            let track = document["segments"][0]["speaker"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            document["speakers"][&track] = json!("Unrelated display rename");
+            // The same accepted ID while unresolved is persistence, not another
+            // continuation. An unrelated name/save cannot invalidate queued work.
+            let repeated = host
+                .client
+                .put(format!("{}{path}/transcript", host.url))
+                .header("X-Speakerdesk-Token", &host.token)
+                .json(&json!({"revision":accepted["revision"],"document":document}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(repeated.status(), 200);
+            if case == "cancelled" {
+                host.close(root).await;
+                fs::remove_file(root.join("hold-live-asr")).unwrap();
+                let reopened = Running::open(root, dual).await;
+                let retained = reopened.get(&path).await;
+                assert_eq!(
+                    retained["document"]["segments"][0]["text"],
+                    "Accepted language repair"
+                );
+                assert_eq!(retained["document"]["segments"][1]["text"], "");
+                assert_eq!(
+                    fs::read_to_string(root.join("transcribe-crops"))
+                        .unwrap()
+                        .lines()
+                        .count(),
+                    0,
+                    "shutdown supersedes queued automatic accuracy"
+                );
+                reopened.close(root).await;
+                continue;
+            }
+            fs::remove_file(root.join("hold-live-asr")).unwrap();
+        }
+        let complete = host
+            .wait(&path, |job| {
+                job["refinement_status"] == "complete" && job["inference_owned"] == false
+            })
+            .await;
+        let repaired = complete["document"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == repaired_id)
+            .unwrap();
+        assert_eq!(repaired["text"], "Accepted language repair");
+        assert_eq!(repaired["protected_fields"], json!(["text"]));
+        assert_eq!(
+            repaired["language_mode"], "auto",
+            "repair does not rewrite the captured epoch mode"
+        );
+        assert_eq!(repaired["language_epoch"], captured_epoch);
+        assert_eq!(repaired["capture_source"], captured_source);
+        if let Some(remaining_id) = remaining_id {
+            let remaining = complete["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == remaining_id)
+                .unwrap();
+            assert_eq!(remaining["text"], "Remaining accuracy words");
+            assert_eq!(remaining["refinement_state"], "refined");
+        }
+        assert_eq!(
+            complete["document"]["segments"].as_array().unwrap().len(),
+            if dual { 2 } else { 1 }
+        );
+        let calls = fs::read_to_string(root.join("transcribe-crops")).unwrap();
+        assert_eq!(
+            calls.lines().count(),
+            usize::from(dual),
+            "only the unprotected remaining anchor is decoded"
+        );
+        assert!(
+            complete["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["refinement_issue"].is_null()),
+            "accepted repair and successful remaining publication clear owned issues: {case}"
+        );
+        // A repeated save of the accepted receipt is ordinary persistence, not a
+        // second request to run accuracy. Checkpointed words and counts stay fixed.
+        let repeated = host
+            .client
+            .put(format!("{}{path}/transcript", host.url))
+            .header("X-Speakerdesk-Token", &host.token)
+            .json(&json!({"revision":complete["revision"],"document":complete["document"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), 200);
+        let repeated: Value = repeated.json().await.unwrap();
+        assert_eq!(host.get(&path).await["revision"], repeated["revision"]);
+        assert_eq!(
+            fs::read_to_string(root.join("transcribe-crops")).unwrap(),
+            calls
+        );
+        host.close(root).await;
+    }
+}
+
+#[tokio::test]
+async fn saved_main_language_refreshes_superseded_context_without_overwriting_controls() {
+    // Real disposable HTTP/child ownership with retained direct acoustic-shaped
+    // rows. Language scores are scripted; no native language-quality claim.
+    for case in ["donor", "target", "pause", "majority"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let host = Running::open(root, false).await;
+        let response = host.post("api/meetings", json!({"name":"Language witness boundary","language":"auto","sources":["microphone"]})).await;
+        assert_eq!(response.status(), 202);
+        let id = host.wait("api/meeting", |job| job["id"].is_string()).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let path = format!("api/jobs/{id}");
+        assert_eq!(
+            host.post(&format!("{path}/refinement/pause"), json!({}))
+                .await
+                .status(),
+            200
+        );
+        for stage in 1..=4 {
+            trigger(root, stage);
+            host.wait(&path, |job| {
+                job["duration"].as_f64().unwrap_or(0.) >= f64::from(stage * 7) - 0.5
+            })
+            .await;
+        }
+        let before = host.stop(&id).await;
+        let template = before["document"]["segments"][0].clone();
+        let actual_probes = template["language_detection"]["probes"].as_array().unwrap();
+        assert!(actual_probes.len() >= 7, "{before}");
+        let mut rows = Vec::new();
+        for index in 0..8 {
+            let mut row = template.clone();
+            let start = index * 3 * 16000;
+            let end = start + 3 * 16000;
+            let row_id = format!("language-owned-{index}");
+            row["id"] = json!(row_id);
+            row["canonical_utterance_id"] = json!(row_id);
+            row["start"] = json!(index as f64 * 3.);
+            row["end"] = json!((index + 1) as f64 * 3.);
+            row["start_sample"] = json!(start);
+            row["end_sample"] = json!(end);
+            row["canonical_text_end_sample"] = json!(end);
+            row["canonical_state"] = json!("sealed");
+            row["protected_fields"] = json!([]);
+            row["machine_revision"] = json!(1);
+            row["canonical_machine_revision"] = json!(1);
+            row["canonical_unresolved"] = Value::Null;
+            row["audio_state"] = Value::Null;
+            row["transcription_review"] = Value::Null;
+            row["reading_alignment"] = Value::Null;
+            row["alignment"] = Value::Null;
+            let language = if index < 4 { "en" } else { "de" };
+            let track = if index < 4 { "speaker_0" } else { "speaker_1" };
+            row["speaker"] = json!(if index == 7 { "unassigned" } else { track });
+            row["source_speaker_candidates"] = json!([if index == 7 {
+                if case == "majority" {
+                    "speaker_2"
+                } else {
+                    "speaker_0"
+                }
+            } else {
+                track
+            }]);
+            row["text"] = json!(if index == 7 {
+                "".to_owned()
+            } else {
+                format!("Direct acoustic words {index}")
+            });
+            row["language"] = if index == 7 {
+                Value::Null
+            } else {
+                json!(language)
+            };
+            let mut probe = actual_probes[index.min(6)].clone();
+            probe["start_sample"] = json!(start);
+            probe["end_sample"] = json!(end);
+            probe["language"] = json!(language);
+            probe["decision"]["mode"] = json!("auto");
+            probe["decision"]["reason"] = json!("detected");
+            probe["decision"]["probability"] = json!(0.99);
+            probe["decision"]["margin"] = json!(0.98);
+            probe["decision"]["context_evidence"] = Value::Null;
+            row["language_detection"] = json!({"mode":"auto","reason":"detected","probability":0.99,"margin":0.98,"probes":[probe]});
+            rows.push(row);
+        }
+        {
+            use speakerdesk_core::{ids::JobId, store::SqliteJobStore};
+            let mut store = SqliteJobStore::open(root.join("data/speakerdesk.sqlite")).unwrap();
+            store
+                .update_job(&JobId::parse(&id).unwrap(), |job| {
+                    job.document.as_mut().unwrap().segments =
+                        serde_json::from_value(json!(rows)).unwrap();
+                    job.document
+                        .as_mut()
+                        .unwrap()
+                        .speakers
+                        .insert("speaker_1".into(), "Other speaker".into());
+                    job.document
+                        .as_mut()
+                        .unwrap()
+                        .speakers
+                        .insert("unassigned".into(), "Unknown speaker".into());
+                    speakerdesk_core::transcript::validate(
+                        &serde_json::to_value(job.document.as_ref().unwrap()).unwrap(),
+                        job.duration.unwrap(),
+                    )
+                    .expect("seeded owned rows form a valid editable transcript");
+                    job.extra.get_mut("rolling_refinement").unwrap()["completed"] = json!({});
+                    for row in &job.document.as_ref().unwrap().segments[..7] {
+                        job.extra.get_mut("rolling_refinement").unwrap()["completed"][&row.id] =
+                            json!(speakerdesk_core::live::segment_version(row));
+                    }
+                    Ok::<_, speakerdesk_core::error::StoreError>(())
+                })
+                .unwrap();
+        }
+        fs::write(
+            root.join("replay-probe.json"),
+            json!({"codes":["ru","en"],"probabilities":[0.51,0.49]}).to_string(),
+        )
+        .unwrap();
+        fs::write(root.join("replay-transcript"), "Fresh main language words").unwrap();
+        fs::write(root.join("transcribe-crops"), b"").unwrap();
+        fs::write(root.join("hold-live-asr"), b"hold selected borrowed decode").unwrap();
+        assert_eq!(
+            host.post(&format!("{path}/refinement/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        wait_file(&root.join("edit-asr-started")).await;
+        let held = host.get(&path).await;
+        if case == "pause" {
+            assert_eq!(
+                host.post(&format!("{path}/refinement/pause"), json!({}))
+                    .await
+                    .status(),
+                200
+            );
+            host.wait(&path, |job| {
+                job["refinement_status"] == "paused" && job["inference_owned"] == false
+            })
+            .await;
+        } else if case == "majority" {
+            let mut document = held["document"].clone();
+            // A non-selected donor changes interpretation: the cached 4:3
+            // meeting majority becomes a tie, although both supports survive.
+            document["segments"][0]["language"] = json!("de");
+            document["segments"][0]["language_detection"] =
+                json!({"mode":"manual","reason":"passage_retry"});
+            let response = host
+                .client
+                .put(format!("{}{path}/transcript", host.url))
+                .header("X-Speakerdesk-Token", &host.token)
+                .json(&json!({"revision":held["revision"],"document":document}))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status();
+            assert_eq!(status, 200, "{case}: {}", response.text().await.unwrap());
+        } else {
+            let index = if case == "target" { 7 } else { 3 };
+            let row = &held["document"]["segments"][index];
+            let response = host.client.patch(format!("{}{path}/segments/{}", host.url, row["id"].as_str().unwrap())).header("X-Speakerdesk-Token", &host.token).json(&json!({"segment_revision":row["machine_revision"],"changes":if case == "target" { json!({"text":"Protected target words"}) } else { json!({"speaker":"speaker_1"}) }})).send().await.unwrap();
+            let status = response.status();
+            assert_eq!(status, 200, "{case}: {}", response.text().await.unwrap());
+        }
+        fs::remove_file(root.join("hold-live-asr")).unwrap();
+        let finished = host
+            .wait(&path, |job| job["inference_owned"] == false)
+            .await;
+        let target = &finished["document"]["segments"][7];
+        let calls = fs::read_to_string(root.join("transcribe-crops"))
+            .unwrap()
+            .lines()
+            .count();
+        match case {
+            "donor" => {
+                assert_eq!(target["text"], "Fresh main language words");
+                assert_eq!(finished["refinement_status"], "complete");
+                assert_eq!(calls, 2, "one fresh context reattempt");
+            }
+            "target" => {
+                assert_eq!(target["text"], "Protected target words");
+                assert_eq!(calls, 1);
+            }
+            "pause" => {
+                assert_eq!(target["text"], "");
+                assert_eq!(finished["refinement_status"], "paused");
+                assert_eq!(calls, 1);
+            }
+            "majority" => {
+                assert_eq!(target["text"], "");
+                assert_eq!(finished["refinement_status"], "unresolved");
+                assert_eq!(calls, 1, "no repeated decode with an unqualified tie");
+            }
+            _ => unreachable!(),
+        }
+        host.close(root).await;
+    }
+}
+
+#[tokio::test]
+async fn eof_language_context_rejection_retries_the_owned_tail_without_new_audio() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::write(root.join("stage-1-samples"), (16 * 16000).to_string()).unwrap();
+    fs::write(root.join("stage-2-samples"), (2 * 16000).to_string()).unwrap();
+    fs::write(
+        root.join("fixture-silence.json"),
+        json!([[6 * 16000, 8 * 16000], [14 * 16000, 16 * 16000]]).to_string(),
+    )
+    .unwrap();
+    let host = Running::open(root, false).await;
+    let id = host.start_language(json!(["microphone"]), "auto").await;
+    let path = format!("api/jobs/{id}");
+    assert_eq!(
+        host.post(&format!("{path}/refinement/pause"), json!({}))
+            .await
+            .status(),
+        200
+    );
+    trigger(root, 1);
+    // A flush drains the final silence boundary without ending this epoch.
+    wait_file(&root.join("sent-1")).await;
+    assert_eq!(
+        host.post(&format!("api/meetings/{id}/pause"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    let before = host
+        .wait(&path, |job| job["pause_flush"]["status"] == "complete")
+        .await;
+    let priors = before["document"]["segments"].as_array().unwrap();
+    assert_eq!(
+        priors.len(),
+        2,
+        "two accepted direct speech islands: {before}"
+    );
+    assert!(
+        priors
+            .iter()
+            .all(|row| row["canonical_state"] == "sealed"
+                && !row["text"].as_str().unwrap().is_empty())
+    );
+    let donor = priors[1].clone();
+    let calls_before = fs::read_to_string(root.join("transcribe-crops"))
+        .unwrap()
+        .lines()
+        .count();
+    fs::write(
+        root.join("replay-probe.json"),
+        json!({"codes":["ru","en"],"probabilities":[0.51,0.49]}).to_string(),
+    )
+    .unwrap();
+    fs::write(root.join("replay-transcript"), "Fresh EOF words").unwrap();
+    fs::write(
+        root.join("hold-live-asr"),
+        b"hold only the final short tail",
+    )
+    .unwrap();
+    assert_eq!(
+        host.post(&format!("api/meetings/{id}/resume"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    trigger(root, 2);
+    wait_file(&root.join("sent-2")).await;
+    assert_eq!(
+        host.post(&format!("api/meetings/{id}/stop"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    wait_file(&root.join("edit-asr-started")).await;
+    let held = host.get(&path).await;
+    assert_eq!(held["status"], "finishing");
+    let held_tail = held["document"]["segments"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert!(
+        held_tail["start_sample"].as_i64().unwrap() >= donor["end_sample"].as_i64().unwrap(),
+        "new owned tail follows the accepted donor, including observed VAD hysteresis"
+    );
+    assert_eq!(
+        held_tail["text"], "",
+        "the provisional EOF tail has no accepted ASR words"
+    );
+    assert!(held_tail["canonical_text_end_sample"].is_null());
+    let tail_id = held_tail["id"].clone();
+    let changed = host.client.patch(format!("{}{path}/segments/{}", host.url, donor["id"].as_str().unwrap())).header("X-Speakerdesk-Token", &host.token).json(&json!({"segment_revision":donor["machine_revision"],"changes":{"end":donor["end"].as_f64().unwrap()-0.001}})).send().await.unwrap();
+    let status = changed.status();
+    assert_eq!(status, 200, "{}", changed.text().await.unwrap());
+    fs::remove_file(root.join("hold-live-asr")).unwrap();
+    let finished = host
+        .wait(&path, |job| {
+            job["status"] == "ready" && job["inference_owned"] == false
+        })
+        .await;
+    let rows = finished["document"]["segments"].as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        3,
+        "EOF retry publishes the saved owned tail: {finished}"
+    );
+    let tail = rows.last().unwrap();
+    assert_eq!(
+        tail["id"], tail_id,
+        "feedback publishes the existing owned provisional endpoint"
+    );
+    assert_eq!(tail["canonical_state"], "sealed");
+    assert_eq!(tail["text"], "Fresh EOF words");
+    assert_eq!(tail["language"], "en");
+    assert_eq!(
+        tail["language_detection"]["context_evidence"]["interpretation_generation"],
+        finished["language_context_generation"]
+    );
+    assert_eq!(
+        finished["refinement_status"], "paused",
+        "feedback does not enable accuracy"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("transcribe-crops"))
+            .unwrap()
+            .lines()
+            .count()
+            - calls_before,
+        2,
+        "one rejected decode plus one guarded fresh EOF retry"
     );
     host.close(root).await;
 }

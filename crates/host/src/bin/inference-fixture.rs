@@ -208,13 +208,19 @@ fn main() {
                     } else {
                         *received / 512 * 512
                     };
+                    let silence: Vec<(u64, u64)> = std::fs::read(root.join("fixture-silence.json"))
+                        .ok()
+                        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+                        .unwrap_or_default();
                     let mut frames = Vec::new();
                     while *observed < end {
                         let next = (*observed + 512).min(end);
                         frames.push(speakerdesk_core::ipc::VadFrame {
                             start: *observed,
                             end: next,
-                            raw_p: if root.join("fixture-overlap").exists()
+                            raw_p: if silence.iter().any(|(a, b)| *observed >= *a && next <= *b) {
+                                0.
+                            } else if root.join("fixture-overlap").exists()
                                 && capture_vad == Some(handle.session)
                                 && *observed >= 4 * 16000
                                 && (!root.join("fixture-live-continuity").exists()
@@ -224,7 +230,9 @@ fn main() {
                             } else {
                                 0.99
                             },
-                            norm_p: if root.join("fixture-overlap").exists()
+                            norm_p: if silence.iter().any(|(a, b)| *observed >= *a && next <= *b) {
+                                0.
+                            } else if root.join("fixture-overlap").exists()
                                 && capture_vad == Some(handle.session)
                                 && *observed >= 4 * 16000
                                 && (!root.join("fixture-live-continuity").exists()

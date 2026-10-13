@@ -10,6 +10,68 @@ test('pending retry prevents duplicate retries while the saved transcript stays 
   f.run('delete selected.passage_retry;renderSegments()');
   assert.equal(retry().disabled,false);
 });
+test('accepted retry card retires after save acknowledgement while failed saves keep repair recovery',async()=>{
+  for(const outcome of ['accepted','accepted_draft','removed','failed','conflict']) {
+    const f=frontend(path.resolve(__dirname,'..'));f.seed(2);f.context.outcome=outcome;
+    f.run(`selected.kind='meeting';selected.rolling_refinement={version:1};selected.refinement_status='unresolved';
+      doc.segments[0].language_detection={mode:'auto',reason:'detected'};
+      doc.segments[0].refinement_issue={kind:'language',reason:'unsupported',message:'Choose the spoken language.'};
+      doc.segments[0].retry_candidate={id:'repair-accepted',start:0,end:10,speaker:'s0',text:'Words 0',language:'en'};
+      doc.segments[1].retry_candidate={id:'repair-pending',start:10,end:20,speaker:'s0',text:'Other candidate words',language:'en'};
+      selected.document=structuredClone(doc);renderSegments();
+      window.requests=[];fetch=async(path,options={})=>{
+        if(options.method!=='PUT'){
+          const latest=structuredClone(selected);latest.revision++;latest.document.segments[0].text='New authoritative words';
+          return {ok:true,status:200,json:async()=>latest};
+        }
+        const body=JSON.parse(options.body);requests.push(body);
+        if(outcome==='failed' || outcome==='conflict')return {ok:false,status:outcome==='conflict'?409:500,json:async()=>({error:outcome==='conflict'?'This transcript changed.':'Could not save.'})};
+        const next=structuredClone(selected);next.revision++;next.document=body.document;next.refinement_status='complete';
+        const row=next.document.segments[0];row.protected_fields=['text'];row.machine_revision++;
+        delete row.refinement_issue;
+        if(outcome==='removed')delete row.retry_candidate;else row.retry_candidate.accepted_at=1000;
+        if(outcome==='accepted_draft')await new Promise(resolve=>window.releaseSavedResponse=resolve);
+        return {ok:true,status:200,json:async()=>next};
+      };`);
+    const use=button(f,'Use this text');use.focus();use.click();
+    assert.equal(f.run('doc.segments[0].text'),'Words 0','same words can repair the explicit language');
+    assert.equal(f.run('doc.segments[0].language_detection.reason'),'passage_retry');
+    assert.ok(f.document.getElementById('segments').children[0].querySelector('.retry-result'),'local selection is not a saved acceptance');
+    assert.ok(f.document.getElementById('segments').children[0].querySelector('.passage-issue'),'the blocker remains until the repair is saved');
+    if(outcome==='failed' || outcome==='conflict') {
+      await assert.rejects(f.run('save({quiet:true})'),/save|changed/i);
+      assert.equal(f.run('dirty'),true);
+      assert.ok(f.document.getElementById('segments').children[0].querySelector('.retry-result'),'failed or conflicting save retains the candidate action');
+      assert.equal(f.run('selected.document.segments[0].retry_candidate.accepted_at'),undefined);
+      use.blur();f.run('renderSegments()');
+      assert.ok(f.document.getElementById('segments').children[0].querySelector('.retry-result'),'rebuilding after a failed save does not hide the locally stamped acceptance');
+      assert.ok(f.document.getElementById('segments').children[0].querySelector('.passage-issue'));
+    } else {
+      const saving=f.run('save({quiet:true})');
+      const text=f.document.getElementById('segments').children[0].querySelector('textarea');
+      if(outcome==='accepted_draft') {
+        text.focus();text.value='Newer correction while saving';text.dispatchEvent({type:'input'});text.setSelectionRange(2,8);
+        f.run('releaseSavedResponse()');
+      }
+      await saving;
+      assert.equal(f.run('dirty'),outcome==='accepted_draft');
+      assert.equal(f.document.getElementById('segments').children[0].querySelector('.retry-result'),null,'acknowledged repair is no longer presented as pending, even on the focused card');
+      assert.equal(f.document.getElementById('segments').children[0].querySelector('.passage-issue'),null,'the acknowledged repair also clears the focused inline blocker');
+      assert.equal(f.run('selected.document.segments[0].language_detection.reason'),'passage_retry');
+      assert.equal(f.run('selected.document.segments[0].refinement_issue'),undefined);
+      assert.equal(f.run('doc.segments[0].refinement_issue'),undefined);
+      if(outcome!=='removed')assert.equal(f.run('selected.document.segments[0].retry_candidate.accepted_at'),1000,'the accepted receipt remains available as evidence');
+      if(outcome==='accepted_draft') {
+        assert.equal(f.document.activeElement,text);assert.equal(f.document.getElementById('segments').children[0].querySelector('textarea'),text);
+        assert.equal(text.value,'Newer correction while saving');assert.equal(f.run('doc.segments[0].text'),text.value);
+        assert.equal(text.selectionStart,2);assert.equal(text.selectionEnd,8);
+        assert.equal(f.run('selected.document.segments[0].text'),'Words 0','the acknowledgement belongs to the submitted repair, not the newer draft');
+      }
+    }
+    assert.ok(f.document.getElementById('segments').children[1].querySelector('.retry-result'),'another pending candidate remains actionable');
+    assert.equal(f.run('doc.segments[1].retry_candidate.id'),'repair-pending');
+  }
+});
 for(const update of ['retry candidate','separation candidate','voice metadata'])test(`${update} can advance revision before dirty words autosave without stranding or overwriting them`,async()=>{
   for(const conflict of [null,'text','speaker','boundary','name','status','duration','second_save']) {
     const f=frontend(path.resolve(__dirname,'..'));f.seed(1);

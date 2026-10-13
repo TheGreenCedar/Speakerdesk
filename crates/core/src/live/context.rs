@@ -333,9 +333,18 @@ pub struct Refinement {
     audio_hash: Sha256,
     review: bool,
     transcription_review: Option<Value>,
+    language_context: Option<crate::language::LanguageContext>,
+    retained_probes: Vec<Value>,
+    interpretation_generation: u64,
 }
 impl Refinement {
     pub fn new(original: &Segment) -> Result<Self, LiveError> {
+        Self::with_language_context(original, None)
+    }
+    pub fn with_language_context(
+        original: &Segment,
+        language_context: Option<crate::language::LanguageContext>,
+    ) -> Result<Self, LiveError> {
         let (start, end) = saved_bounds(original)?;
         let requests = if end - start <= MAX_DECODE_SAMPLES {
             Vec::new()
@@ -352,6 +361,51 @@ impl Refinement {
                 language_epoch: original.rest["language_epoch"].as_i64().unwrap_or(0),
             })?
         };
+        let prefix = original
+            .rest
+            .get("canonical_text_end_sample")
+            .and_then(Value::as_i64)
+            .is_some_and(|through| start < through && through < end);
+        let mut retained_probes = if !original.text.trim().is_empty()
+            && (prefix
+                || (original
+                    .transcription_review
+                    .as_ref()
+                    .is_none_or(|v| v["partial_text"] != true)
+                    && original
+                        .rest
+                        .get("canonical_unresolved")
+                        .is_none_or(Value::is_null)
+                    && original.rest.get("audio_state").is_none_or(Value::is_null)))
+        {
+            original
+                .language_detection
+                .as_ref()
+                .and_then(|d| d["probes"].as_array())
+                .into_iter()
+                .flatten()
+                .filter(|p| {
+                    p["decision"]["reason"] == "detected"
+                        && p["decision"]["mode"] == "auto"
+                        && p["end_sample"].as_i64().is_some_and(|b| {
+                            b <= original
+                                .rest
+                                .get("canonical_text_end_sample")
+                                .and_then(Value::as_i64)
+                                .unwrap_or(end)
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        retained_probes.sort_by_key(|p| {
+            (
+                p["end_sample"].as_i64().unwrap_or(i64::MAX),
+                p["start_sample"].as_i64().unwrap_or(i64::MAX),
+            )
+        });
         Ok(Self {
             original: original.clone(),
             start,
@@ -365,7 +419,20 @@ impl Refinement {
             audio_hash: Sha256::new(),
             review: false,
             transcription_review: None,
+            language_context,
+            retained_probes,
+            interpretation_generation: 0,
         })
+    }
+    pub fn set_interpretation_generation(&mut self, generation: u64) {
+        self.interpretation_generation = generation;
+        if let Some(evidence) = self
+            .language_context
+            .as_mut()
+            .and_then(|context| context.evidence.as_mut())
+        {
+            evidence.interpretation_generation = generation;
+        }
     }
     pub fn step<M: Models + ?Sized + 'static>(
         &mut self,
@@ -383,8 +450,14 @@ impl Refinement {
                 .map_err(|e| LiveError::Detail(e.to_string()))
         };
         if end - start <= MAX_DECODE_SAMPLES {
-            return refine_saved_passage(models, original, &read(start, end)?, vocabulary)
-                .map(Some);
+            return refine_saved_passage_with_context(
+                models,
+                original,
+                &read(start, end)?,
+                vocabulary,
+                self.language_context.clone(),
+            )
+            .map(Some);
         }
         let mode = original.rest["language_mode"]
             .as_str()
@@ -409,11 +482,31 @@ impl Refinement {
             request.start_sample,
             processed,
             Some(padding),
+            if mode == languages::AUTOMATIC {
+                same_anchor_window_context(original, &self.probes, request.start_sample, true)
+                    .or_else(|| {
+                        same_anchor_window_context(
+                            original,
+                            &self.retained_probes,
+                            request.start_sample,
+                            false,
+                        )
+                    })
+                    .or_else(|| self.language_context.clone())
+                    .map(|mut context| {
+                        if let Some(evidence) = context.evidence.as_mut() {
+                            evidence.interpretation_generation = self.interpretation_generation;
+                        }
+                        context
+                    })
+            } else {
+                None
+            },
         )
         .map_err(LiveError::from)?;
-        let language = source.language.ok_or(LiveError::Message(
-            "Long context accuracy needs unambiguous language ownership; previous words and audio are retained.",
-        ))?;
+        let language = source.language.ok_or_else(|| LiveError::Language {reason:"mixed",message:
+            "Long context accuracy needs unambiguous language ownership; previous words and audio are retained.".into(),
+        })?;
         let (text, decision) = (source.text, source.detection);
         self.review |= source.review;
         if self.transcription_review.is_none() {
@@ -424,14 +517,26 @@ impl Refinement {
             .as_ref()
             .is_some_and(|prior| prior != &language)
         {
-            return Err(LiveError::Message(
-                "Long context accuracy requires consistent language ownership throughout; previous words and audio are retained.",
-            ));
+            return Err(LiveError::Language { reason:"mixed",message:
+                "Long context accuracy requires consistent language ownership throughout; previous words and audio are retained.".into(),
+            });
         }
         self.selected_language
             .get_or_insert_with(|| language.clone());
         if let Some(events) = decision["probes"].as_array() {
-            self.probes.extend(events.iter().cloned());
+            for event in events {
+                let key = (
+                    event["end_sample"].as_i64().unwrap_or(i64::MAX),
+                    event["start_sample"].as_i64().unwrap_or(i64::MAX),
+                );
+                let index = self.probes.partition_point(|p| {
+                    (
+                        p["end_sample"].as_i64().unwrap_or(i64::MAX),
+                        p["start_sample"].as_i64().unwrap_or(i64::MAX),
+                    ) <= key
+                });
+                self.probes.insert(index, event.clone());
+            }
         }
         if self.detection.as_ref().is_none_or(|prior| {
             decision["probability"].as_f64().unwrap_or(1.)

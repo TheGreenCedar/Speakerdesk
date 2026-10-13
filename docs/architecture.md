@@ -41,6 +41,10 @@ The store is `<storage>/speakerdesk.sqlite` (`core/src/store/`). On first start 
 
 Live text comes from the serial recording worker. Saved and live accuracy passes reuse the parent operation and the serial worker. Each candidate owns one original audio anchor and its captured language mode and epoch. Publication compares the passage with its current stored version and replaces only that slot. Names, neighbouring passages and source order stay as they are, and protected edits always win.
 
+A failed language recheck preserves the existing words and language evidence and attaches a passage-specific issue only while its operation, source and passage version remain current. The editor uses that issue to expose the language repair beside retained words. Successful publication, an accepted repair or a change to the passage's authority clears it; ordinary naming changes do not.
+
+Language context is derived from direct acoustic observations belonging to the same source, language epoch and stream generation. A qualified speaker main language takes precedence over the meeting main language; display names and saved-person assignments do not identify the acoustic track. Pauses do not erase the main language, and saved refinement can use later observed speech. Borrowed decisions carry their supporting observations and never become independent votes. The Engine and accuracy operation own compact summaries; relevant interpretation edits invalidate them through one job generation. Spelling and display-name edits do not force history rescans. Live decoding and saved refinement use the same selection rule, with crop clocks translated only at the import adapter boundary.
+
 - Pause invalidates publication before it cancels. Admission stays held until the worker exits.
 - Complete supported-language output may retain routing warnings. Short mixed-language output keeps per-language timing receipts; long context composition still requires consistent language ownership and unambiguous timing.
 - Stop drains live EOF before running the remaining accuracy work and retries failed live anchors once. Shared recording control retains this limit across worker recovery.

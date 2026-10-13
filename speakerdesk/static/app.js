@@ -484,6 +484,25 @@ function savedPassageSignature(segment) {
   return JSON.stringify([segment,doc.speakers,doc.provenance,selected.speaker_assignments?.[segment.speaker],
     ['preparing','processing','queued'].includes(selected.status),!!selected.passage_retry,!!selected.passage_separation]);
 }
+function savedRetryAccepted(segment,saved) {
+  const candidate=segment.retry_candidate;
+  if(!candidate)return false;
+  saved ??= selected.document?.segments.find(row=>row.id===segment.id);
+  return saved?.retry_candidate?.id===candidate.id && Number.isFinite(saved.retry_candidate.accepted_at);
+}
+function refreshAcknowledgedPassageRepair(card,segment,saved) {
+  if(!card)return;
+  // A focused card keeps its textarea, but a saved acceptance is no longer an action.
+  if(!segment.retry_candidate || savedRetryAccepted(segment,saved))card.querySelector('.retry-result')?.remove();
+  if(!segment.refinement_issue && !languageBlockedPassage(segment)) {
+    const issue=card.querySelector('.passage-issue');
+    if(issue) {
+      issue.remove();
+      const summary=card.querySelector('.passage-repair > summary');
+      if(summary)summary.textContent='Repair passage';
+    }
+  }
+}
 function savedCard(segment) {
   const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;card.dataset.speaker=segment.speaker;
   const avatar=node('span',undefined,'speaker-avatar');avatar.setAttribute('aria-hidden','true');updateSpeakerAvatar(avatar,segment.speaker);
@@ -563,6 +582,7 @@ function renderSegments() {
       const stale=String(card.dataset.signature!==signature);if(card.dataset.stale!==stale)card.dataset.stale=stale;
     }
     retained.add(card);if(card!==cursor)host.insertBefore(card,cursor);cursor=card.nextSibling;
+    refreshAcknowledgedPassageRepair(card,segment);
     refreshReadingTurnView(card,segment);
     refreshPassageSeparation(card,segment);
     setPassageClass(card,'active',segment.id===inspected);
@@ -577,7 +597,14 @@ function renderSegments() {
 }
 function appendPassageRepair(body,segment,reason,visibleSource=()=>true) {
   if(!isLive()) {
-    const repair=node('details',undefined,'passage-repair');repair.append(node('summary','Repair passage'));
+    const blocked=languageBlockedPassage(segment);
+    if(blocked) {
+      const issue=segment.refinement_issue?.kind==='language'?segment.refinement_issue:null;
+      const cause=issue?.reason || segment.language_detection?.reason;
+      const explanation=cause==='unsupported'?'The detected language is not supported. If it was detected incorrectly, choose the language spoken here.':cause==='detector_error'?'Language detection failed for this passage. Choose the language spoken here to retry.':cause==='mixed'?'This passage contains language changes that the accuracy pass could not resolve. Choose the language for the part you want to retry.':'The language could not be confirmed for this passage. Choose it below to transcribe the saved audio.';
+      body.append(node('p',explanation+(segment.text.trim()?' Your current words are kept.':''),'passage-review passage-issue'));
+    }
+    const repair=node('details',undefined,'passage-repair');repair.open=blocked;repair.append(node('summary',blocked?'Choose passage language':'Repair passage'));
     const tools=node('div',undefined,'passage-retry'), language=node('select');
     language.setAttribute('aria-label',`Choose language to retry passage at ${time(segment.start)}`);
     const choose=node('option','Choose passage language');choose.value='';language.append(choose);
@@ -609,6 +636,17 @@ function appendPassageRepair(body,segment,reason,visibleSource=()=>true) {
       finally{retrying=false;if(selected)setStatus();}
     });
     tools.append(language,retry);repair.append(tools);body.append(repair);
+    if(blocked && drafts)repair.append(node('p','Save or discard your passage corrections before choosing a language.','passage-review'));
+    if(blocked && tooLong) {
+      repair.append(node('p','A passage retry can cover up to 24.5 seconds. Adjust this passage’s timing to the words you want to retry, or enter a correction directly.','passage-review'));
+      const timing=node('button','Adjust passage timing','text-button');timing.disabled=busy || retryPending || drafts || !visibleSource();
+      timing.addEventListener('click',()=>{
+        const canAdjust=()=>!isLive() && !hasPassageDrafts() && !hasPendingPassageSaves() && !selected.passage_retry && !selected.passage_separation && !['preparing','processing','queued'].includes(selected.status) && doc.segments.find(row=>row.id===segment.id)===segment && visibleSource();
+        if(!canAdjust())return;
+        const card=body.closest('.segment');if(!card)return;
+        showInspector(segment,card,true,canAdjust);$('segment-details').querySelector('input')?.focus();
+      });repair.append(timing);
+    }
     if(selected.passage_retry?.segment_id===segment.id) {
       const cancel=node('button','Cancel passage retry');
       cancel.addEventListener('click',async()=>{
@@ -629,7 +667,7 @@ function appendPassageRepair(body,segment,reason,visibleSource=()=>true) {
       tools.append(reviewed);
     }
     const candidate=segment.retry_candidate;
-    if(candidate) {
+    if(candidate && !savedRetryAccepted(segment)) {
       const result=node('div',undefined,'retry-result');
       result.append(node('p',candidate.error || `Retry result (${config.languages[candidate.language]}). Listen before choosing this text.`));
       if(candidate.text) {
@@ -841,7 +879,16 @@ function appendPassageEvidence(host,segment) {
   evidence.append(text);host.append(evidence);
 }
 function showTranscriptPassage(segment) {
-  return !!segment.text.trim() || !!segment.separation_candidate || selected?.passage_separation?.segment_id===segment.id || passageDrafts.has(segment.id) || !!recoverablePassageDrafts.get(segment.id)?.text.trim() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
+  return !!segment.text.trim() || languageBlockedPassage(segment) || !!segment.separation_candidate || selected?.passage_separation?.segment_id===segment.id || passageDrafts.has(segment.id) || !!recoverablePassageDrafts.get(segment.id)?.text.trim() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
+}
+function languageBlockedPassage(segment) {
+  if(isLive() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited')return false;
+  if(segment.refinement_issue?.kind==='language')return true;
+  return !segment.text.trim() && !isEmptyNonSpeechPlaceholder(segment) &&
+    ['uncertain','change_pending','needs_language','unsupported','mixed'].includes(segment.language_detection?.reason);
+}
+function unresolvedLanguagePassages() {
+  return selected?.status==='ready' && selected.refinement_status==='unresolved' ? (doc?.segments || []).filter(languageBlockedPassage) : [];
 }
 function isEmptyNonSpeechPlaceholder(segment) {
   // Presentation only: legacy no-word hints do not establish verified silence
@@ -950,7 +997,7 @@ function updatePlaybackHighlight() {
   playingCards=active;
 }
 function icon(name) { const element=node('i');element.dataset.lucide=name;return element; }
-function showInspector(segment,card,force=false) {
+function showInspector(segment,card,force=false,visibleSource=()=>true) {
   document.querySelectorAll('.segment.active').forEach(item => item.classList.remove('active'));
   card.classList.add('active');
   if(narrowLayout() && !force && $('inspector').hidden)return;
@@ -960,7 +1007,10 @@ function showInspector(segment,card,force=false) {
     const field=node('label',label,'segment-detail-field'), input=node('input');
     input.type='number';input.min=0;input.max=selected.duration;input.step='.01';input.value=segment[key].toFixed(2);
     const hint=node('small',passageTime(segment[key]),'time-hint');
-    input.addEventListener('change',() => { segment[key]=Number(input.value);segment.timing='user_edited';hint.textContent=passageTime(segment[key]);changed();renderSegments(); });
+    input.addEventListener('change',() => {
+      if(!visibleSource()){notice('Finish pending passage edits or retries, then open the current passage’s timing again.',true);return;}
+      segment[key]=Number(input.value);segment.timing='user_edited';hint.textContent=passageTime(segment[key]);changed();renderSegments();
+    });
     field.append(input,hint);details.append(field);
   }
   appendPassageEvidence(details,segment);
@@ -1006,6 +1056,8 @@ async function save({quiet = false} = {}) {
         else delete segment.retry_candidate;
         if(saved.separation_candidate)segment.separation_candidate=structuredClone(saved.separation_candidate);
         else delete segment.separation_candidate;
+        if(!saved.refinement_issue)delete segment.refinement_issue;
+        refreshAcknowledgedPassageRepair(playbackCards.get(segment.id),segment,saved);
       }
     }
     if (generation === editGeneration) {
