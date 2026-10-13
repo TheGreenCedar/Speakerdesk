@@ -366,6 +366,40 @@ fn confirm_in(
     body: &Map<String, Value>,
 ) -> Result<Value, HttpError> {
     editing_job(&job, body, Some(track))?;
+    let all_person_tracks = match body.get("all_person_tracks") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => {
+            return Err(HttpError::new(
+                StatusCode::BAD_REQUEST,
+                messages::INVALID_REQUEST,
+            ));
+        }
+    };
+    let tracks = if all_person_tracks {
+        let assignments = job["speaker_assignments"]
+            .as_object()
+            .ok_or_else(|| HttpError::new(StatusCode::BAD_REQUEST, messages::INVALID_REQUEST))?;
+        let person = assignments
+            .get(track)
+            .and_then(|value| value["person_id"].as_str())
+            .filter(|person| !person.is_empty())
+            .ok_or_else(|| HttpError::new(StatusCode::BAD_REQUEST, messages::INVALID_REQUEST))?;
+        assignments
+            .iter()
+            .filter(|(id, assignment)| {
+                assignment["person_id"].as_str() == Some(person)
+                    && job["document"]["speakers"].get(id.as_str()) == assignment.get("name")
+                    && assignment["name"].is_string()
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        vec![track.to_string()]
+    };
+    if !tracks.iter().any(|id| id == track) {
+        return Err(HttpError::new(StatusCode::CONFLICT, messages::NAME_STALE));
+    }
     let suggestion = selected_suggestion(catalog, &job, body, track)?;
     let (person_id, name) = resolve_name(&catalog.people, body, suggestion.as_ref())?;
     if let Some(suggestion) = suggestion.as_ref() {
@@ -380,30 +414,32 @@ fn confirm_in(
         .as_ref()
         .map(suggestion_evidence)
         .unwrap_or(Value::Null);
-    let assignment = people::SpeakerAssignment {
-        person_id: person_id.clone(),
-        meeting_id: jid.to_string(),
-        track_id: track.to_string(),
-        name: name.clone(),
-        confirmed: Some(true),
-        source: source.to_string(),
-    };
-    set_speaker(&mut job, track, &name)?;
-    {
-        let assignments = ensure_object(&mut job, "speaker_assignments")?;
-        assignments.insert(
-            track.to_string(),
-            assignment_json(&assignment, unix_now(), evidence),
-        );
-    }
-    let kept = without_track(&job, track)?;
-    job["voice_suggestions"] = json!(kept);
-    {
-        let checks = ensure_object(&mut job, "voice_checks")?;
-        checks.insert(
-            track.to_string(),
-            json!({ "id": new_id(), "status": "manual" }),
-        );
+    for track in tracks {
+        let assignment = people::SpeakerAssignment {
+            person_id: person_id.clone(),
+            meeting_id: jid.to_string(),
+            track_id: track.to_string(),
+            name: name.clone(),
+            confirmed: Some(true),
+            source: source.to_string(),
+        };
+        set_speaker(&mut job, &track, &name)?;
+        {
+            let assignments = ensure_object(&mut job, "speaker_assignments")?;
+            assignments.insert(
+                track.to_string(),
+                assignment_json(&assignment, unix_now(), evidence.clone()),
+            );
+        }
+        let kept = without_track(&job, &track)?;
+        job["voice_suggestions"] = json!(kept);
+        {
+            let checks = ensure_object(&mut job, "voice_checks")?;
+            checks.insert(
+                track.to_string(),
+                json!({ "id": new_id(), "status": "manual" }),
+            );
+        }
     }
     let revision = job_revision(&job)?;
     job["revision"] = json!(revision + 1);
@@ -1987,6 +2023,156 @@ mod tests {
             .unwrap();
         assert_eq!(assigned.status(), 200);
         pid
+    }
+
+    #[tokio::test]
+    async fn person_scope_changes_all_assigned_tracks_and_passage_scope_can_split_them() {
+        let state = AppState::new();
+        let root = state.data_dir().to_path_buf();
+        let jid = "7".repeat(32);
+        let mut seeded = intro_job(&jid);
+        seeded["document"]["speakers"] = json!({
+            "speaker_0":"Speaker 1", "speaker_1":"Speaker 2", "speaker_2":"Ada", "speaker_3":"Ada"
+        });
+        seeded["document"]["segments"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id":"second", "speaker":"speaker_1", "start":3.0, "end":6.0, "text":"More words."
+            }));
+        let original_segments = seeded["document"]["segments"].clone();
+        write_job(&state, &jid, seeded);
+        let running = voice_server(&state).await;
+        let mut person_ids = Vec::new();
+        for _ in 0..2 {
+            let person: Value = running
+                .client
+                .post(running.url("/api/people"))
+                .json(&json!({"name":"Ada"}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            person_ids.push(person["id"].as_str().unwrap().to_owned());
+        }
+        assert_ne!(person_ids[0], person_ids[1]);
+        for (revision, track, person) in [
+            (0, "speaker_0", 0),
+            (1, "speaker_1", 0),
+            (2, "speaker_2", 1),
+        ] {
+            let response = running
+                .client
+                .post(running.url(&format!("/api/jobs/{jid}/speakers/{track}/identity")))
+                .json(&json!({"revision":revision,"person_id":person_ids[person]}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+        }
+        let response = running
+            .client
+            .post(running.url(&format!("/api/jobs/{jid}/speakers/speaker_1/identity")))
+            .json(&json!({"revision":3,"name":"Meeting guest","all_person_tracks":true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let grouped: Value = response.json().await.unwrap();
+        assert_eq!(grouped["revision"], 4);
+        assert_eq!(
+            grouped["document"]["speakers"]["speaker_0"],
+            "Meeting guest"
+        );
+        assert_eq!(
+            grouped["document"]["speakers"]["speaker_1"],
+            "Meeting guest"
+        );
+        assert_eq!(grouped["document"]["speakers"]["speaker_2"], "Ada");
+        assert_eq!(grouped["document"]["speakers"]["speaker_3"], "Ada");
+        assert_eq!(grouped["document"]["segments"], original_segments);
+        assert!(grouped["speaker_assignments"]["speaker_0"]["person_id"].is_null());
+        assert!(grouped["speaker_assignments"]["speaker_1"]["person_id"].is_null());
+        for flag in [json!("true"), json!(1), Value::Null] {
+            let invalid = running
+                .client
+                .post(running.url(&format!("/api/jobs/{jid}/speakers/speaker_0/identity")))
+                .json(&json!({"revision":4,"name":"Wrong","all_person_tracks":flag}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(invalid.status(), 400, "scope must be an explicit boolean");
+        }
+        for (revision, track) in [(4, "speaker_0"), (5, "speaker_1")] {
+            let response = running
+                .client
+                .post(running.url(&format!("/api/jobs/{jid}/speakers/{track}/identity")))
+                .json(&json!({"revision":revision,"person_id":person_ids[0]}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+        }
+        let reassigned = running
+            .client
+            .post(running.url(&format!("/api/jobs/{jid}/speakers/speaker_0/identity")))
+            .json(&json!({"revision":6,"person_id":person_ids[1],"all_person_tracks":true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reassigned.status(), 200);
+        let reassigned: Value = reassigned.json().await.unwrap();
+        for track in ["speaker_0", "speaker_1", "speaker_2"] {
+            assert_eq!(
+                reassigned["speaker_assignments"][track]["person_id"],
+                person_ids[1]
+            );
+        }
+        let stale = running
+            .client
+            .post(running.url(&format!("/api/jobs/{jid}/speakers/speaker_0/identity")))
+            .json(&json!({"revision":6,"name":"Stale","all_person_tracks":true}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), 409);
+        let split = running
+            .client
+            .post(running.url(&format!("/api/jobs/{jid}/speakers/speaker_1/identity")))
+            .json(&json!({"revision":7,"name":"Local correction","all_person_tracks":false}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(split.status(), 200);
+        let split: Value = split.json().await.unwrap();
+        assert!(split["speaker_assignments"]["speaker_1"]["person_id"].is_null());
+        assert_eq!(
+            split["speaker_assignments"]["speaker_0"]["person_id"],
+            person_ids[1]
+        );
+        assert_eq!(split["document"]["segments"], original_segments);
+        running.shutdown().await;
+        drop(state);
+        let reopened = AppState::open(&root).unwrap();
+        let running = voice_server(&reopened).await;
+        let exported: Value = running
+            .client
+            .get(running.url(&format!("/api/jobs/{jid}/export/json")))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            exported["speaker_assignments"],
+            split["speaker_assignments"]
+        );
+        assert_eq!(exported["segments"], original_segments);
+        assert_eq!(exported["speakers"]["speaker_1"], "Local correction");
+        running.shutdown().await;
     }
 
     #[tokio::test]

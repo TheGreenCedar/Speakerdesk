@@ -249,18 +249,38 @@ function passageCountLabel() {
 function renderFollowLive() {
   $('follow-live').hidden = !isLive() || followingLive;
 }
-function nameSpeaker(id) {
+function nameSpeaker(id,allPersonTracks=false) {
   if(updateFrozen){notice('Cancel the update before changing a speaker name.',true);return;}
-  flushSave().then(() => openNamePicker(id)).catch(error => notice(error.message, true));
+  flushSave().then(() => openNamePicker(id,allPersonTracks)).catch(error => notice(error.message, true));
+}
+function speakerPerson(id) {
+  if(id==='unassigned' || id==='multiple_speakers')return null;
+  const assignment=selected.speaker_assignments?.[id];
+  // A local name draft breaks its saved assignment, just as transcript save does.
+  return typeof assignment?.person_id==='string' && assignment.person_id && assignment.name===doc.speakers[id]
+    ? assignment.person_id : null;
+}
+function speakerIdentity(id) {
+  const person=speakerPerson(id);
+  return person?`person:${person}`:`track:${id}`;
+}
+function visibleSpeakers() {
+  const seen=new Set();
+  return Object.keys(doc.speakers).filter(id=>{
+    const identity=speakerIdentity(id);if(seen.has(identity))return false;
+    seen.add(identity);return true;
+  });
 }
 function speakerLabel(id) {
   if(id==='unassigned')return 'Speaker unassigned';
+  const person=speakerPerson(id);
+  if(person)id=Object.keys(doc.speakers).find(track=>speakerPerson(track)===person);
   return doc.speakers[id] || 'Unknown speaker';
 }
 function speakerColor(id) {
   if(id==='unassigned' || id==='multiple_speakers')return -1;
-  // Track IDs include source and recovery namespaces. They are identities, not
-  // display ordinals; keep their color stable through names and key ordering.
+  // Named tracks share a person's color; unlinked track colors survive renaming.
+  id=speakerPerson(id)?speakerIdentity(id):id;
   let hash=0;for(const char of id)hash=(hash*31+char.codePointAt(0))>>>0;
   return hash%8;
 }
@@ -279,13 +299,13 @@ function refreshSpeakerRecognition(card,segment) {
   hint.title='Matched a saved voice. Choose the speaker name to correct it.';
   const top=card.querySelector('.segment-top');top.insertBefore(hint,top.querySelector('.segment-actions'));
 }
-function speakerNameControl(id,className='name-speaker') {
+function speakerNameControl(id,className='name-speaker',allPersonTracks=false) {
   const assigned=id!=='unassigned',label=speakerLabel(id);
   const control=node(assigned?'button':'span',label,className);control.dataset.speaker=id;
   if(assigned) {
     control.type='button';control.title='Name this speaker or remember their voice';
     control.setAttribute('aria-label',`Name or remember voice for ${label}`);
-    control.addEventListener('click',()=>nameSpeaker(id));
+    control.addEventListener('click',()=>nameSpeaker(id,allPersonTracks));
   }else {
     control.title='These words have no assigned speaker.';
     control.setAttribute('aria-label',label);
@@ -317,24 +337,30 @@ function renderSearchResults(visible, query) {
 }
 function speakerOptions(selectEl, current) {
   selectEl.replaceChildren();
-  for (const id of Object.keys(doc.speakers)) {
-    const option = node('option', speakerLabel(id)); option.value = id; option.selected = id === current; selectEl.append(option);
+  for (const id of visibleSpeakers()) {
+    const selected=speakerIdentity(id)===speakerIdentity(current);
+    const option = node('option', speakerLabel(id)); option.value = selected?current:id; option.selected = selected; selectEl.append(option);
   }
+}
+function renderSpeakerList() {
+  const host=$('speaker-list'),signature=JSON.stringify([doc.speakers,selected.speaker_assignments]);
+  if(host.dataset.signature===signature)return;
+  host.dataset.signature=signature;host.replaceChildren();
+  visibleSpeakers().forEach(id => {
+    const row = node('div', undefined, 'speaker-name');
+    const dot = node('span', undefined, 'speaker-dot'); dot.dataset.color = speakerColor(id);
+    const group=!!speakerPerson(id) && Object.keys(doc.speakers).some(track=>track!==id && speakerIdentity(track)===speakerIdentity(id));
+    const choose = speakerNameControl(id,'speaker-name-action name-speaker',group);
+    choose.replaceChildren(dot, node('span', speakerLabel(id)));
+    if(id!=='unassigned')choose.append(icon('pencil'));
+    row.append(choose); host.append(row);
+  });
 }
 function renderEditor() {
   $('inspector').hidden = true;
   $('editor').hidden = !doc; if (!doc) return;
   renderSaveState();
   $('segment-count').textContent = isLive() ? '' : passageCountLabel();
-  $('speaker-list').replaceChildren();
-  Object.keys(doc.speakers).forEach(id => {
-    const row = node('div', undefined, 'speaker-name');
-    const dot = node('span', undefined, 'speaker-dot'); dot.dataset.color = speakerColor(id);
-    const choose = speakerNameControl(id,'speaker-name-action name-speaker');
-    choose.replaceChildren(dot, node('span', speakerLabel(id)));
-    if(id!=='unassigned')choose.append(icon('pencil'));
-    row.append(choose); $('speaker-list').append(row);
-  });
   $('timing-note').textContent = doc.provenance?.timing || 'User supplied segment boundaries.';
   $('warnings').textContent = (doc.warnings || []).join(' '); $('warnings').hidden = !doc.warnings?.length;
   renderSegments();
@@ -417,13 +443,13 @@ function refreshReadingTurnView(card,segment) {
     text.addEventListener('input',()=>refreshReadingTurnView(card,current()));
   }
   const {host,text,button}=binding;
-  const signature=JSON.stringify([turns,doc.speakers,turns?.map(turn=>selected.speaker_assignments?.[turn.speaker]?.source)]);
+  const signature=JSON.stringify([turns,doc.speakers,selected.speaker_assignments]);
   if(signature!==binding.signature) {
     binding.signature=signature;host.replaceChildren();
     const groups=[];
     for(const turn of turns || []) {
       const previous=groups.at(-1);
-      if(previous && previous.speaker===turn.speaker && previous.attribution===turn.attribution) {
+      if(previous && speakerIdentity(previous.speaker)===speakerIdentity(turn.speaker) && previous.attribution===turn.attribution) {
         previous.text+=turn.text;previous.slices.push(turn);
         if(previous.start!==null && turn.start!==null && turn.end!==null)previous.end=turn.end;
         else previous.start=previous.end=null;
@@ -440,7 +466,7 @@ function refreshReadingTurnView(card,segment) {
     for(let index=0;index<groups.length;index++) {
       const turn=groups[index];
       while(turn.attribution==='single' && shortUnknown(groups[index+1]) &&
-            groups[index+2]?.attribution==='single' && groups[index+2].speaker===turn.speaker) {
+            groups[index+2]?.attribution==='single' && speakerIdentity(groups[index+2].speaker)===speakerIdentity(turn.speaker)) {
         const unknown=groups[index+1],following=groups[index+2];
         turn.text+=unknown.text+following.text;turn.slices.push(...unknown.slices,...following.slices);
         turn.includesUnassigned=true;
@@ -454,8 +480,9 @@ function refreshReadingTurnView(card,segment) {
       const row=node('section',undefined,'reading-turn');
       row.dataset.attribution=turn.includesUnassigned?'single_with_unassigned':turn.attribution;
       const label=node('div',undefined,'reading-turn-meta');label.append(node('span',readingTurnLabel(turn),'reading-turn-speaker'));
-      if(turn.attribution==='single' && selected.speaker_assignments?.[turn.speaker]?.source==='automatic_voice') {
-        const recognized=node('span','Recognized','review-tag');recognized.title='Matched a saved voice. Choose the speaker name to correct it.';label.append(recognized);
+      if(turn.attribution==='single' && turn.slices.some(slice=>selected.speaker_assignments?.[slice.speaker]?.source==='automatic_voice')) {
+        const allRecognized=turn.slices.every(slice=>selected.speaker_assignments?.[slice.speaker]?.source==='automatic_voice');
+        const recognized=node('span',allRecognized?'Recognized':'Includes recognized voice','review-tag');recognized.title='Matched a saved voice. Choose the passage speaker name to confirm or correct it.';label.append(recognized);
       }
       if(turn.includesUnassigned)label.append(node('span','Includes unassigned words','reading-unassigned-note'));
       if(turn.start!==null)label.append(node('span',passageTime(turn.start),'reading-turn-time'));
@@ -481,7 +508,7 @@ function refreshReadingTurnView(card,segment) {
   setPassageClass(card,'has-reading-turns',!!turns);setPassageClass(card,'editing-reading-turns',!reading);
 }
 function savedPassageSignature(segment) {
-  return JSON.stringify([segment,doc.speakers,doc.provenance,selected.speaker_assignments?.[segment.speaker],
+  return JSON.stringify([segment,doc.speakers,doc.provenance,selected.speaker_assignments,
     ['preparing','processing','queued'].includes(selected.status),!!selected.passage_retry,!!selected.passage_separation]);
 }
 function savedRetryAccepted(segment,saved) {
@@ -549,6 +576,7 @@ function savedCard(segment) {
   return card;
 }
 function renderSegments() {
+  renderSpeakerList();
   if(isLive() || hasPassageDrafts() || hasRecoverablePassageDrafts() || hasPendingPassageSaves() || doc.segments.some(segment=>segment.refinement_state==='provisional') || ['waiting','refining'].includes(selected.refinement_status)){renderLiveSegments();return;}
   $('pending-phrases').hidden=true;
   const pane=$('transcript-pane'),host=$('segments'),previousScroll=pane.scrollTop;
@@ -579,6 +607,13 @@ function renderSegments() {
     refreshAcknowledgedPassageRepair(card,segment);
     refreshReadingTurnView(card,segment);
     refreshPassageSeparation(card,segment);
+    const speakerSignature=JSON.stringify([segment.speaker,doc.speakers,selected.speaker_assignments]);
+    if(card.dataset.speakerSignature!==speakerSignature) {
+      card.dataset.speakerSignature=speakerSignature;card.dataset.speaker=segment.speaker;
+      speakerOptions(card.querySelector('.segment-top select'),segment.speaker);
+      updateSpeakerAvatar(card.querySelector('.speaker-avatar'),segment.speaker);
+      refreshSpeakerRecognition(card,segment);
+    }
     setPassageClass(card,'active',segment.id===inspected);
   }
   for(const child of Array.from(host.children))if(!retained.has(child))child.remove();
@@ -938,7 +973,7 @@ function groupConsecutivePassages(host) {
   let previous,previousSection;
   for(const card of host.children) {
     const section=card.dataset.transcriptSection || 'transcript',start=section!==previousSection;
-    const continuation=!start && previous && !card.dataset.separationEpisode && !previous.dataset.separationEpisode && !['unassigned','multiple_speakers'].includes(card.dataset.speaker) && previous.dataset.speaker===card.dataset.speaker;
+    const continuation=!start && previous && !card.dataset.separationEpisode && !previous.dataset.separationEpisode && !['unassigned','multiple_speakers'].includes(card.dataset.speaker) && speakerIdentity(previous.dataset.speaker)===speakerIdentity(card.dataset.speaker);
     setPassageClass(card,'speaker-continuation',!!continuation);
     setPassageClass(card,'passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
     setPassageClass(card,'retained-correction',section==='corrections');
@@ -1008,6 +1043,10 @@ function showInspector(segment,card,force=false,visibleSource=()=>true) {
   if(narrowLayout() && !force && $('inspector').hidden)return;
   $('inspector').hidden=false;
   const details=$('segment-details');details.replaceChildren();
+  if(segment.speaker!=='unassigned' && segment.speaker!=='multiple_speakers') {
+    const name=node('button','Name / remember voice','text-button passage-name-control');name.type='button';
+    name.addEventListener('click',()=>nameSpeaker(card.dataset.speaker));details.append(name);
+  }
   for(const [key,label] of [['start','Start time (seconds)'],['end','End time (seconds)']]) {
     const field=node('label',label,'segment-detail-field'), input=node('input');
     input.type='number';input.min=0;input.max=selected.duration;input.step='.01';input.value=segment[key].toFixed(2);

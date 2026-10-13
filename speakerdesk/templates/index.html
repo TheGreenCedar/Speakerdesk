@@ -34,11 +34,11 @@
     <p class="settings-note">Applying a name only changes this meeting. Link a saved person to recognize their voice in future meetings.</p>
     <div class="name-actions"><button id="name-apply" class="primary" type="submit">Apply name</button><button id="name-add-person" type="button" class="quiet">Save as new person</button></div>
   </form>
+  <button id="refresh-voice-clips" class="text-button" type="button">Refresh passages</button>
   <section id="name-voice-section">
     <div class="settings-divider"></div><h3>Remember voice <span class="optional">optional</span></h3>
     <p id="voice-note" class="settings-note" role="status"></p>
     <p id="voice-availability" class="settings-note" role="status"></p>
-    <button id="refresh-voice-clips" class="text-button" type="button">Refresh passages</button>
     <fieldset id="voice-clips" hidden><legend id="voice-clips-legend">Choose clean passages</legend><div id="voice-clip-list"></div></fieldset>
     <audio id="voice-preview" controls preload="metadata" hidden aria-label="Preview selected voice passage"></audio>
     <details id="voice-excluded" hidden><summary id="voice-excluded-summary">Unavailable passages</summary><ul id="voice-excluded-list"></ul></details>
