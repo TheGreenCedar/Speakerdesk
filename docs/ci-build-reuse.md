@@ -28,7 +28,8 @@ package verification.
 Dependency compatibility binds OS, runner image, architecture/host target, Rust,
 sccache, native C compiler, CMake/Ninja and Rust flags. On macOS it also binds
 Xcode, Swift, SDK and deployment target (15.0 in the producer; Rust's default in
-native CI unless explicitly set). The dependency contract covers the vendored MLX adapter, runtime fetch pins
+native CI unless explicitly set). The dependency contract covers the complete
+vendored MLX adapter, timestamp preparation script, runtime fetch pins
 and echo source/build guard. The maintained action additionally binds Cargo
 configuration, manifests/lockfiles and Rust environment. Application, UI, CI
 and documentation edits preserve unchanged dependency outputs. Native contract
@@ -42,14 +43,24 @@ build-script and library outputs when `cache-workspace-crates: true` is enabled.
 The original six application crates remain `default-members`; ordinary Cargo
 workspace defaults do not add the platform-specific adapter. Cargo checks
 source, feature, profile and build-script fingerprints before reusing restored
-outputs. Native tests and the desktop boundary can legitimately select distinct
-debug dependency variants, while release uses a separate profile; the cache can
-retain each compatible variant rather than rebuilding it on every run.
+outputs. Native tests, desktop debug tests and the three opt-in DSP probes use
+the same package selection and fixture features. They share one debug dependency
+graph; the default-feature desktop release build keeps its separate profile.
 The action removes top-level profile files and incremental directories before
 saving. It retains workspace libraries, build outputs and fingerprints, and can
 also retain hashed test/app binaries under `deps` whose names match package or
 library names. `cache-bin: false` excludes installed Cargo tools, not these
 target outputs. See the [pinned pruning implementation](https://github.com/Swatinem/rust-cache/blob/6323deb102c322ba6fcbdcafc7e3dddab59af2b6/src/cleanup.ts).
+
+Cargo build scripts compare native header modification times with their retained
+outputs. Fresh checkout times can therefore rebuild the unchanged vendored
+adapter and invalidate `mlx-rs` after an exact cache hit. Cached hosted Mac jobs
+prepare stable timestamps for tracked `vendor/mlx-sys` files before Cargo runs.
+The preparation recomputes the selected dependency key, checks the complete
+vendor tree is clean, and rejects untracked, ignored or symlink inputs. All
+vendored bytes, native tools and the preparation script bind that key, so a
+change prevents every dependency fallback. The timestamp step changes no source
+bytes and never runs in ordinary local builds or with `cache=false`.
 
 The pinned MLX 0.32.2 runtime is prepared and checked by its existing script at
 `.cache/native/mlx-0.32.2`, outside Cargo's pruned `target` tree. This prepared

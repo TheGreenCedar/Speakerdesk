@@ -25,6 +25,10 @@ def validate(directory):
                     assert re.fullmatch(r'[^@]+@[a-f0-9]{40}', action), f'Unpinned action: {action}'
                 if step.get('name') == 'Finish and report compiler cache':
                     assert CACHE_ENABLED in step.get('if', '').split(' && '), 'Uncached runs have no compiler server to stop'
+                if step.get('name') == 'Prepare stable vendored native source timestamps':
+                    assert CACHE_ENABLED in step.get('if', '').split(' && '), 'Uncached runs must keep ordinary source timestamps'
+                    assert step['env']['SPEAKERDESK_DEPENDENCY_KEY'] == '${{ steps.identity.outputs.dependency-key }}', 'Native timestamps require the selected complete dependency identity'
+                    assert name in {'rust-macos', 'apple'}, 'Native timestamps belong only to hosted Mac cache consumers'
                 if action.startswith('actions/cache/'):
                     assert CACHE_ENABLED in step.get('if', '').split(' && '), 'Uncached runs must skip restore/save'
                     paths = set(step['with']['path'].splitlines())
