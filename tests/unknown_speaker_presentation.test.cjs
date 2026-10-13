@@ -19,6 +19,13 @@ const label=card=>card.querySelector('.name-speaker')?.textContent ||
   card.querySelector('select').children.find(option=>option.selected)?.textContent;
 
 for(const status of ['ready','recording']) {
+  test(`${status}: mixed and unassigned audio never consume speaker badge numbers`,()=>{
+    const f=fixture(status,{multiple_speakers:'Multiple speakers',speaker_0:'Speaker 1',speaker_1:'Speaker 2',unassigned:'Unknown speaker'},['multiple_speakers','speaker_0','speaker_1','unassigned']);
+    assert.deepEqual(cards(f).map(c=>c.querySelector('.speaker-avatar').textContent),['…','S1','S2','?']);
+    assert.deepEqual(cards(f).map(c=>c.querySelector('.speaker-avatar').dataset.color),['-1','0','1','-1']);
+    f.run("doc.speakers={speaker_1:'Remembered name',speaker_0:'Speaker 1'};doc.segments=doc.segments.filter(s=>s.speaker==='speaker_0' || s.speaker==='speaker_1');renderEditor()");
+    assert.deepEqual(cards(f).map(c=>c.querySelector('.speaker-avatar').textContent),['S1','S2'],'Names and object ordering do not change stable track badges');
+  });
   test(`${status}: distinct unnamed stable tracks retain labels, IDs and same-owner continuation`,()=>{
     const f=fixture(status,{speaker_0:'Speaker 1',speaker_1:'Speaker 2'},['speaker_0','speaker_1','speaker_1','speaker_0']);
     assert.deepEqual(cards(f).map(c=>c.dataset.segmentId),['r0','r1','r2','r3']);
@@ -90,4 +97,32 @@ test('refinement changes a retained naming control without losing the typed corr
   f.run("doc.segments[0].speaker='unassigned';doc.segments[0].machine_revision=3;renderSegments()");
   assert.equal(label(c),'Speaker unassigned');assert.equal(c.querySelector('button.name-speaker'),null);
   assert.equal(c.querySelector('.speaker-avatar').textContent,'?');assert.equal(text.value,'Exact human correction');
+});
+
+test('live recognition updates names and hints while preserving a focused correction',()=>{
+  const f=fixture('recording',{speaker_0:'Speaker 1'},['speaker_0']);
+  const card=cards(f)[0],text=card.querySelector('textarea');
+  text.focus();text.value='My correction';text.dispatchEvent({type:'input'});text.setSelectionRange(2,5);
+  f.run("doc.speakers.speaker_0='Saved person';selected.speaker_assignments={speaker_0:{source:'automatic_voice'}};renderSegments()");
+  assert.equal(cards(f)[0],card);assert.equal(label(card),'Saved person');
+  assert.equal(card.querySelector('.recognized-speaker').textContent,'Recognized');
+  assert.equal(text.value,'My correction');assert.equal(f.document.activeElement,text);assert.equal(text.selectionStart,2);assert.equal(text.selectionEnd,5);
+  f.run("selected.speaker_assignments.speaker_0={source:'manual'};renderSegments()");
+  assert.equal(card.querySelector('.recognized-speaker'),null,'Manual correction removes the automatic-match hint');
+});
+
+for(const uuid of ['abcdef12-1111-1111-1111-111111111111','12345678-1111-1111-1111-111111111111'])test(`manual speaker badge survives save ordering and renaming (${uuid.slice(0,8)})`,()=>{
+  const f=fixture('ready',{multiple_speakers:'Multiple speakers',speaker_0:'Speaker 1',speaker_2:'Speaker 3',unassigned:'Unknown'},['speaker_0']);
+  f.context.crypto.randomUUID=()=>uuid;
+  f.run("wire();$('add-speaker').click();window.added=Object.keys(doc.speakers).find(id=>!['multiple_speakers','unassigned','speaker_0','speaker_2'].includes(id));doc.segments[0].speaker=added;renderEditor()");
+  assert.equal(label(cards(f)[0]),'Speaker 4');
+  assert.equal(cards(f)[0].querySelector('.speaker-avatar').textContent,'S4');
+  f.run("doc.speakers=Object.fromEntries(Object.entries(doc.speakers).sort(([a],[b])=>a.localeCompare(b)));doc.speakers[added]='Remembered person';renderEditor()");
+  assert.equal(label(cards(f)[0]),'Remembered person');
+  assert.equal(cards(f)[0].querySelector('.speaker-avatar').textContent,'S4');
+});
+test('adding a manual speaker keeps legacy track badges after persisted key ordering',()=>{
+  const f=fixture('ready',{s0:'First person',s1:'Second person'},['s0','s1']);
+  f.run("wire();$('add-speaker').click();doc.speakers=Object.fromEntries(Object.entries(doc.speakers).sort(([a],[b])=>a.localeCompare(b)));renderEditor()");
+  assert.deepEqual(cards(f).map(c=>c.querySelector('.speaker-avatar').textContent),['S1','S2']);
 });

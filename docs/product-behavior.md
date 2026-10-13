@@ -23,6 +23,9 @@ Silero v6 runs on two views of the original audio: raw, and a peak-conditioned v
 Owner: `core/src/live.rs`, `host/src/routes/refinement.rs`.
 
 - Live meetings show provisional text, which becomes canonical utterances as speech settles. Rolling refinement improves canonical text during the meeting. Stop runs a bounded larger-context pass before the meeting is finalized.
+- Complete words can finish the accuracy pass even when automatic language routing is uncertain. The language evidence stays in passage details; short passages containing multiple supported languages keep separate timing receipts. Empty, truncated, unsupported or failed results retain the previous words. Stop retries failed live passages once; it does not repeat failed work indefinitely.
+- Words remain in one chronological reading column as accuracy work finishes. Pending machine work does not create a manual **Needs review** region. The header reports queued, active, paused or incomplete accuracy work; specific uncertainty and repair options remain in passage details. A retained correction whose original passage was replaced stays in its own section.
+- Speaker badges follow stable track numbers. Mixed and unassigned audio do not take a speaker number; a recognized saved voice keeps the same badge while its name updates.
 - Refinement never overwrites a **protected edit** (user words, speaker or bounds). It never changes names or neighbouring passages, and never alters the original audio.
 - Transcript timing (supplied-text CTC) is required for transcription. It functionally covers all 14 languages, but its accuracy is calibrated in English only. CJK text uses character units. Units that are unsupported or uncertain stay unresolved instead of being guessed.
 
@@ -38,7 +41,7 @@ Owner: `host/src/routes/retry.rs`, `core/src/review.rs`, `core/src/export.rs`.
 
 Owner: `core/src/separation.rs`, `host/src/routes/separation.rs`.
 
-- After an import, saved accuracy pass or meeting finishes, Speakerdesk automatically processes unedited passages with observed overlap between exactly two voices, within one language setting and at most **24.5 s** long. This uses the optional, locally prepared separation model; it never downloads weights automatically. Capture, setup or a newer operation takes precedence over queued separation work.
+- During recording, Speakerdesk automatically processes completed, unedited passages with observed overlap between exactly two voices, within one language setting and at most **24.5 s** long. The existing recording worker drains pending live audio before each separation or transcription phase. An in-flight model request must finish before the worker can return to live processing. The same automatic processing runs after imports and saved accuracy work. It uses the optional, locally prepared separation model and never downloads weights automatically.
 - A successful attempt publishes two ordinary editable rows, each with its own generated audio and a **Check separated voices** hint. Both rows remain unassigned: output channel order does not identify a speaker, and current voice calibration does not qualify separated estimates for identity matching or voice enrollment. The original words and audio remain available in passage history, and an unchanged pair can restore the original passage.
 - Protected edits, stale source observations, pending candidates and already separated rows are skipped. Each original passage's source/model pair is attempted once automatically, including failed or interrupted attempts and restored originals. Failure, cancellation or edits during processing retain the current words and original recording. Estimates saved as pending candidates by an older runtime still offer explicit use or discard.
 
@@ -49,6 +52,7 @@ Owner: `core/src/people.rs`, `core/src/voice.rs`, `host/src/people_routes/`.
 - People stores reusable names. Naming a speaker track applies to the current meeting only, and never renames a person or changes a saved voice.
 - **Remember voice** is the single explicit consent action. It needs a confirmed person and at least two finalized, non-overlapping clips of **2–10 s** each. Long passages offer separate 6-second windows. Adding a name, downloading models, or confirming a recognition never enrolls a voice.
 - Recognition is on by default and can be turned off in Settings. Automatic matches are labelled Recognized and stay unconfirmed. They never create or update a profile. Profiles from an incompatible model identity are kept but take no part in recognition until the user replaces them with consent. **Forget voice** removes only the stored voice; names, recordings and text remain.
+- Saved-voice recognition runs during recording as soon as enough observed solo audio is available, including a stable prefix of an ongoing passage. It uses the same calibrated matching rules as saved recordings and yields to pending live audio between clips. Later source changes, manual naming, disabled recognition, or profile replacement/forgetting invalidate an outstanding match.
 - Introduction suggestions come from conservative English patterns ("I'm …", "my name is …") and need the user's confirmation.
 
 ## Updates and shortcuts

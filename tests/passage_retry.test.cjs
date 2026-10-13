@@ -190,6 +190,60 @@ test('published voices in the draft renderer keep normal naming and play their o
   assert.equal(old.querySelector('textarea').value,'My retained local correction');assert.equal(f.run("passageDrafts.get('r0').text"),'My retained local correction');
   assert.equal(button(f,'Use both voices')?.closest('.segment'),old);
 });
+test('live separated words stay readable and gain playback after Stop without dropping a correction',()=>{
+  const f=frontend(path.resolve(__dirname,'..'));f.seed(2,'recording');
+  f.run(`doc.segments.forEach((row,channel)=>Object.assign(row,{speaker:'unassigned',refinement_state:'separated',
+    separation:{episode_id:'e'.repeat(32),channel,origin_sample:0,length_samples:320000}}));renderSegments()`);
+  const host=f.document.getElementById('segments'),row=host.children[0],text=row.querySelector('textarea');
+  assert.equal(text.value,'Words 0');assert.equal(row.querySelector('.seek').disabled,true);
+  assert.match(row.querySelector('.separation-hint').textContent,/Voice A/);
+  assert.match(host.children[1].querySelector('.separation-hint').textContent,/Voice B/);
+  assert.equal(row.querySelector('.separation-history'),null,'Capture does not expose saved-only restoration actions');
+  text.focus();text.value='Live correction';text.dispatchEvent({type:'input'});text.setSelectionRange(2,5);
+  f.run("selected.status='ready';renderSegments()");
+  assert.equal(host.children[0],row);assert.equal(f.document.activeElement,text);assert.equal(text.value,'Live correction');
+  assert.equal(text.selectionStart,2);assert.equal(text.selectionEnd,5);assert.equal(row.querySelector('.seek').disabled,false);
+  const audio=row.querySelector('.separated-player');assert.ok(audio);row.querySelector('.seek').click();assert.equal(audio.currentTime,0);
+  assert.ok(row.querySelector('.separation-history'));
+});
+test('Stop reveals passage tools but never retries over unsaved or pending corrections',async()=>{
+  const f=frontend(path.resolve(__dirname,'..'));overlappingFixture(f);
+  f.run("selected.status='recording';doc.segments[0].refinement_state='provisional';renderSegments()");
+  const row=f.document.getElementById('segments').children[0],text=row.querySelector('textarea');
+  text.focus();text.value='Protected correction';text.dispatchEvent({type:'input'});text.setSelectionRange(2,5);
+  f.run("selected.status='ready';selected.refinement_status='unresolved';renderSegments()");
+  assert.ok(row.querySelector('.passage-repair'),'The stopped row must expose an explicit-language retry');
+  assert.ok(button(f,'Retry voice separation'),'The stopped row must expose overlap repair');
+  const retry=button(f,'Retry passage locally');assert.equal(retry.disabled,true);
+  f.run("window.requests=0;flushSave=async()=>{};api=async()=>{requests++;throw Error('Unexpected request')}");
+  retry.click();await Promise.all(retry.lastEventResults);
+  assert.equal(f.run('requests'),0);assert.equal(text.value,'Protected correction');assert.equal(f.document.activeElement,text);
+  assert.equal(text.selectionStart,2);assert.equal(text.selectionEnd,5);
+  f.run("passageDrafts.clear();passageSaveOperations.set(selected.id+':r0',{jid:selected.id,segment:doc.segments[0]});renderSegments()");
+  assert.equal(button(f,'Retry passage locally').disabled,true);
+  f.run("passageSaveOperations.clear();renderSegments()");
+  assert.equal(button(f,'Retry passage locally').disabled,false);
+});
+test('review cannot approve replacement words hidden behind a focused older passage',()=>{
+  const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
+  f.run("doc.segments[0].refinement_state='provisional';doc.segments[0].transcription_review={reason:'short_acoustic_context'};renderSegments()");
+  const text=f.document.getElementById('segments').children[0].querySelector('textarea');text.focus();
+  f.run("doc.segments[0]={...doc.segments[0],text:'New unseen replacement',machine_revision:2};renderSegments()");
+  assert.equal(text.value,'Words 0');assert.equal(f.run('hasPassageDrafts()'),false);
+  const review=button(f,'Mark words reviewed');assert.equal(review.disabled,true);
+  review.click();assert.equal(f.run('doc.segments[0].review_resolution'),undefined);
+  text.blur();f.run('renderSegments()');
+  const current=button(f,'Mark words reviewed');assert.equal(current.disabled,false);
+  current.click();assert.equal(f.run('doc.segments[0].review_resolution'),'words_reviewed');
+});
+test('a focused repair action rejects a newer passage even before its controls refresh',()=>{
+  const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
+  f.run("doc.segments[0].refinement_state='provisional';doc.segments[0].transcription_review={reason:'short_acoustic_context'};renderSegments()");
+  const review=button(f,'Mark words reviewed');review.focus();
+  f.run("doc.segments[0]={...doc.segments[0],text:'New unseen replacement',machine_revision:2};renderSegments()");
+  review.click();assert.equal(f.run('doc.segments[0].review_resolution'),undefined);
+  assert.equal(f.run('dirty'),false);
+});
 test('cancel uses the existing job route, retains words and freezes only the request',async()=>{
   const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
   f.run("selected.passage_retry={id:'pending',segment_id:'r0'};flushSave=async()=>{};window.request=null;api=async(path,options)=>{window.request={path,options};if(!$('editor').inert)throw Error('request must be frozen');const next=structuredClone(selected);delete next.passage_retry;return next;};setStatus();renderSegments()");

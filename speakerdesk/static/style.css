@@ -157,15 +157,12 @@
   .segment-actions{flex-wrap:wrap}
 }
 
-/* Regions stay separate even when an earlier epoch finishes after a later one. */
-.segment.live-provisional,.live-pending{background:#eef4ef}
-.segment.live-provisional{border-left:3px solid #8ab498;padding-left:8px;padding-right:8px}
+/* Machine processing never partitions the reading column into review tasks. */
+.live-pending{background:#eef4ef}
 .segment.transcript-section-start{padding-top:12px;border-top:1px solid var(--line)}
 .transcript-section-label{grid-column:1/-1;font-size:12px;line-height:1.45;font-weight:600;color:var(--muted)}
-.live-section-label{color:#28583d}
 .live-pending{padding:10px 12px;color:#28583d;border-left:3px solid #8ab498;font-size:12px}
-[data-theme=dark] .segment.live-provisional,[data-theme=dark] .live-pending{background:#23322b}
-[data-theme=dark] .live-section-label{color:#b4dbc1}
+[data-theme=dark] .live-pending{background:#23322b}
 [data-theme=dark] .live-pending{color:#b4dbc1}
 
 /* Speaker turns remain inside their canonical passage; one shared editor. */
