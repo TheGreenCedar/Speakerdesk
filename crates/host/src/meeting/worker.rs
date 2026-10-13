@@ -36,6 +36,7 @@ struct LanguageEpoch {
 pub(super) struct RecoveryPlan {
     pub boundary: StreamRecovery,
     history: Vec<LanguageEpoch>,
+    pause_request: Option<String>,
 }
 impl RecoveryPlan {
     pub fn prepare(job: &mut Job, through: i64) -> Result<Self, ApiError> {
@@ -175,6 +176,15 @@ impl RecoveryPlan {
                 source_boundaries,
             },
             history,
+            pause_request: job
+                .extra
+                .get("pause_flush")
+                .filter(|pause| {
+                    pause["status"] == "pending"
+                        && pause["through_sample"].as_i64() == Some(through)
+                })
+                .and_then(|pause| pause["request_id"].as_str())
+                .map(str::to_owned),
         })
     }
 }
@@ -254,8 +264,13 @@ pub(super) struct Worker {
     wake: mpsc::Sender<()>,
     pub result: watch::Receiver<Option<Result<(), LiveError>>>,
     task: tokio::task::JoinHandle<()>,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 impl Worker {
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+        self.wake();
+    }
     pub fn wake(&self) {
         let _ = self.wake.try_send(());
     }
@@ -548,6 +563,16 @@ fn publish(
                 fast_sequence,
             } => {
                 stream_update(app, id, op, generation, |job| {
+                    let Some(pause) = job.extra.get("pause_flush") else {
+                        return Ok(());
+                    };
+                    if pause["status"] != "pending"
+                        || pause["request_id"] != request_id
+                        || pause.get("through_sample").and_then(Value::as_i64)
+                            != Some(received_sample)
+                    {
+                        return Ok(());
+                    }
                     job.extra.insert("pause_flush".into(),json!({"request_id":request_id,"status":"complete","received_sample":received_sample,"available_sample":available_sample,"speech_observed_sample":speech_observed_sample,"fast_sequence":fast_sequence}));
                     Ok(())
                 })?;
@@ -604,9 +629,12 @@ pub(super) async fn worker(
     recovery: Option<RecoveryPlan>,
     rolling: crate::routes::refinement::Rolling,
 ) -> Result<Worker, LiveError> {
+    let operation = operation.child_scope();
+    let cancellation = operation.cancellation.clone();
+    let task_cancellation = cancellation.clone();
     let models = app
         .models()
-        .live_models(&operation.cancellation)
+        .live_models(&cancellation)
         .ok_or("Live models are unavailable")?;
     let alignment = app.models().live_alignment();
     let (init_tx, init_rx) = oneshot::channel();
@@ -658,7 +686,7 @@ pub(super) async fn worker(
                 let mut cursor = 0;
                 let mut epoch = 0;
                 while cursor < plan.boundary.through_sample || epoch + 1 < plan.history.len() {
-                    if operation.cancellation.is_cancelled() {
+                    if task_cancellation.is_cancelled() {
                         return Err(LiveError::Child(ChildError::Cancelled));
                     }
                     if epoch + 1 < plan.history.len()
@@ -711,7 +739,7 @@ pub(super) async fn worker(
                     cursor = next;
                 }
                 let events = engine.handle(LiveCommand::Flush {
-                    request_id: None,
+                    request_id: plan.pause_request,
                     through_sample: Some(cursor),
                 })?;
                 publish(
@@ -741,16 +769,20 @@ pub(super) async fn worker(
             let inbox = engine.inbox();
             let mut eof_published = false;
             loop {
+                if task_cancellation.is_cancelled() {
+                    return Err(LiveError::Child(ChildError::Cancelled));
+                }
                 if eof_published {
                     // A cooperative decode may have published EOF while yielding to capture.
-                    while enrichment.step(&operation, &id, &mut || Ok(()))?
-                        || accuracy.step(&app, &operation, &mut |job, prior, accepted| {
-                            engine.accept_language_publication(job, Some(prior), accepted);
-                        })?
+                    while !task_cancellation.is_cancelled()
+                        && (enrichment.step(&operation, &id, &mut || Ok(()))?
+                            || accuracy.step(&app, &operation, &mut |job, prior, accepted| {
+                                engine.accept_language_publication(job, Some(prior), accepted);
+                            })?)
                     {}
                     return Ok(());
                 }
-                if operation.cancellation.is_cancelled() {
+                if task_cancellation.is_cancelled() {
                     return Err(LiveError::Child(ChildError::Cancelled));
                 }
                 let mut progressed = false;
@@ -834,6 +866,7 @@ pub(super) async fn worker(
             wake,
             result,
             task,
+            cancellation,
         }),
         Err(_) => {
             task.await.map_err(|e| e.to_string())?;
@@ -920,6 +953,31 @@ impl Drop for Enrichment {
 mod tests {
     use super::*;
     use speakerdesk_core::store::JobStore;
+
+    #[test]
+    fn recovery_acknowledges_only_a_pending_pause_with_its_exact_physical_fence() {
+        for (status, fence, expected) in [
+            ("pending", None, false),
+            ("pending", Some(15999), false),
+            ("pending", Some(16000), true),
+            ("pending", Some(16001), false),
+            ("complete", Some(16000), false),
+            ("unavailable", Some(16000), false),
+        ] {
+            let id = JobId::parse("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").unwrap();
+            let mut job = super::super::meeting_job(id, "pause", "en", &["microphone".into()]);
+            job.extra.insert(
+                "pause_flush".into(),
+                json!({"status":status,"request_id":"pause-3","through_sample":fence}),
+            );
+            let plan = RecoveryPlan::prepare(&mut job, 16000).unwrap();
+            assert_eq!(
+                plan.pause_request.as_deref(),
+                expected.then_some("pause-3"),
+                "{status}/{fence:?}"
+            );
+        }
+    }
 
     #[test]
     fn recovery_boundary_follows_displayed_text_coverage_after_edit_and_later_model() {

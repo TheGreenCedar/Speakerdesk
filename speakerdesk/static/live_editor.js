@@ -26,6 +26,20 @@ function renderPassageSaveState(card) {
   card.classList.toggle('passage-saving',busy);
   card.querySelector('.save-passage').disabled=busy || !passageDrafts.has(card.dataset.segmentId);
   for(const selector of ['.keep-correction','.use-latest','.recover-correction'])card.querySelector(selector).disabled=busy;
+  renderSaveState();
+}
+async function savePassageDetails(segment,changes) {
+  if(isLive() || hasPassageDrafts() || hasPendingPassageSaves())throw new Error('Save or discard passage corrections before changing timing or speaker.');
+  const jid=selected.id,key=`${jid}:${segment.id}`,revision=segment.machine_revision ?? 0;
+  await flushSave();
+  if(selected?.id!==jid || doc.segments.find(row=>row.id===segment.id)?.machine_revision!==segment.machine_revision)throw new Error('This passage changed. Open its current details again.');
+  const operation={jid,segment:structuredClone(segment),changes:structuredClone(changes)};passageSaveOperations.set(key,operation);
+  try {
+    const result=await api(`/api/jobs/${jid}/segments/${encodeURIComponent(segment.id)}`,{method:'PATCH',body:JSON.stringify({segment_revision:revision,changes})});
+    if(selected?.id!==jid)return;
+    const index=doc.segments.findIndex(row=>row.id===segment.id);if(index>=0)doc.segments[index]=result.segment;
+    $('inspector').hidden=true;await poll();
+  } finally {passageSaveOperations.delete(key);if(selected?.id===jid){renderSegments();renderSaveState();}}
 }
 function renderRefinementStatus() {
   const saved=selected?.saved_refinement_available;
@@ -70,12 +84,9 @@ function liveCard(segment) {
   const avatar=node('span',undefined,'speaker-avatar');updateSpeakerAvatar(avatar,segment.speaker);avatar.setAttribute('aria-hidden','true');
   const body=node('div',undefined,'segment-body'),top=node('div',undefined,'segment-top');
   const identity=speakerNameControl(segment.speaker);
-  const timing=node(segment.separation?'button':'span',undefined,segment.separation?'seek':'rolling-time');
-  if(segment.separation) {
-    timing.disabled=!!isLive();
-    timing.append(icon('play'),node('span',time(segment.start)));
-    timing.addEventListener('click',()=>playSeparatedPassage(card,segment));
-  }else timing.textContent=time(segment.start);
+  const timing=node('button',undefined,'seek rolling-time');timing.type='button';timing.disabled=!!isLive();
+  timing.append(icon('play'),node('span',time(segment.start)));
+  timing.addEventListener('click',()=>{const current=doc.segments.find(row=>row.id===segment.id) || segment;if(current.separation)playSeparatedPassage(card,current);else playOriginalPassage(current);});
   timing.title=`${passageTime(segment.start)}–${passageTime(segment.end)}`;
   timing.setAttribute('aria-label',`Passage from ${passageTime(segment.start)} to ${passageTime(segment.end)}`);
   const state=segment.refinement_state || 'provisional';
@@ -104,6 +115,7 @@ function liveCard(segment) {
     const comparisonCopy=card.querySelector('.local-correction-copy');
     comparisonCopy.value=text.value;
     renderPassageSaveState(card);fitPassageTexts([comparisonCopy,text]);
+    $('save').hidden=false;
   });
   text.addEventListener('focus',()=>{followingLive=false;renderFollowLive();});
   const keep=node('button','Keep my correction','quiet'),recover=node('button','Recover my correction','quiet');
@@ -168,6 +180,14 @@ function liveCard(segment) {
   inspect.addEventListener('click',()=>{details.hidden=!details.hidden;details.open=!details.hidden;inspect.setAttribute('aria-expanded',String(details.open));});
   details.addEventListener('toggle',()=>{if(!details.open)details.hidden=true;inspect.setAttribute('aria-expanded',String(details.open));});
   const detailActions=node('div',undefined,'segment-actions');detailActions.append(inspect);top.append(detailActions);
+  const editDetails=node('button','Timing & speaker','segment-action');editDetails.type='button';editDetails.classList.add('saved-passage-details');editDetails.hidden=!!isLive();
+  editDetails.addEventListener('click',()=>{
+    if(hasPassageDrafts() || hasPendingPassageSaves()){notice('Save or discard passage corrections before changing timing or speaker.',true);return;}
+    const current=doc.segments.find(row=>row.id===segment.id);if(!current)return;
+    showInspector(current,card,true,()=>!isLive() && !hasPassageDrafts() && !hasPendingPassageSaves(),changes=>savePassageDetails(current,changes));
+    const label=node('label','Speaker','segment-detail-field'),speaker=node('select');speakerOptions(speaker,current.speaker);speaker.setAttribute('aria-label','Passage speaker');
+    speaker.addEventListener('change',()=>{speaker.disabled=true;savePassageDetails(current,{speaker:speaker.value}).catch(error=>notice(error.message,true)).finally(()=>{speaker.disabled=false;});});label.append(speaker);$('segment-details').append(label);
+  });detailActions.append(editDetails);
   if(segment.refinement_window) {
     const prior=node('button','Show prior words','text-button');
     prior.addEventListener('click',async()=>{
@@ -245,7 +265,8 @@ function renderLiveSegments() {
     refreshSpeakerRecognition(card,segment);
     card.querySelector('.passage-name-control').hidden=['unassigned','multiple_speakers'].includes(segment.speaker);
     refreshStoppedPassageRepair(card,segment,uiSignature);
-    if(segment.separation)card.querySelector('.seek').disabled=!!isLive();
+    card.querySelector('.seek').disabled=!!isLive();
+    card.querySelector('.saved-passage-details').hidden=!!isLive();
     if(card.dataset.uiSignature===uiSignature)continue;
     card.dataset.uiSignature=uiSignature;
     if(card.dataset.speaker!==segment.speaker)card.dataset.speaker=segment.speaker;

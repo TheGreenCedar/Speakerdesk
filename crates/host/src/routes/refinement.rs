@@ -9,11 +9,9 @@ const RETAINED: &str = "Accuracy pass paused. Saved words and audio are retained
 pub(crate) fn available(job: &Job) -> bool {
     job.status == "ready"
         && job.document.as_ref().is_some_and(|doc| {
-            doc.segments.iter().any(|s| {
-                s.separation.is_none()
-                    && s.canonical_utterance_id.is_some()
-                    && s.rest.get("canonical_state").and_then(Value::as_str) == Some("sealed")
-            })
+            doc.segments
+                .iter()
+                .any(speakerdesk_core::import::refinable_segment)
         })
 }
 
@@ -103,6 +101,7 @@ fn begin_guarded(
     }
     let mut store = app.store();
     let mut job = load_job(&store, &id, false)?;
+    let accepted_repair = expected.is_some();
     if let Some(((row_id, retry_id, authority), generation)) = expected {
         if !job.document.as_ref().is_some_and(|document| {
             document.segments.iter().any(|row| {
@@ -123,12 +122,16 @@ fn begin_guarded(
             return Err(ApiError::new(409, RETAINED));
         }
     }
-    if !available(&job) {
+    // Accepting the final blocked passage protects it from inference. The same
+    // guarded continuation must still finalize the now-empty accuracy plan.
+    if !available(&job) && !(accepted_repair && job.status == "ready") {
         return Err(ApiError::new(
             409,
             "Accuracy work currently requires a saved Ready recording with canonical passages.",
         ));
     }
+    speakerdesk_core::import::repair_import_metadata(&mut job)
+        .map_err(|error| ApiError::new(409, error.to_string()))?;
     if !job.extra.contains_key("rolling_refinement") {
         job.extra.insert(
             "rolling_refinement".into(),

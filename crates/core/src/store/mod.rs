@@ -80,7 +80,18 @@ CREATE TABLE voice_profiles (
 INSERT INTO voice_profiles SELECT person_id,model_id,revision,artifact_sha256,dimension,centroid,
  COALESCE(json_extract(enrollment, '$.version'), CAST(profile_version AS TEXT)),consented_at,enrollment FROM old_voice_profiles;
 DROP TABLE old_voice_profiles;
-"), M::up("ALTER TABLE people ADD COLUMN voice_generation INTEGER NOT NULL DEFAULT 0;")])
+"), M::up("ALTER TABLE people ADD COLUMN voice_generation INTEGER NOT NULL DEFAULT 0;"), M::up("
+ALTER TABLE jobs ADD COLUMN has_refinable_passages INTEGER NOT NULL DEFAULT 0;
+UPDATE jobs SET has_refinable_passages = EXISTS (
+ SELECT 1 FROM json_each(document, '$.segments')
+ WHERE json_extract(value, '$.canonical_utterance_id') IS NOT NULL
+ AND json_extract(value, '$.canonical_state') = 'sealed'
+ AND json_extract(value, '$.separation') IS NULL
+ AND COALESCE(json_array_length(value, '$.protected_fields'), 0) = 0
+ AND COALESCE(json_extract(value, '$.timing'), '') != 'audio_coverage'
+ AND COALESCE(json_extract(value, '$.audio_state'), '') NOT IN ('digital_silence','constant_signal','model_non_speech')
+);
+")])
 }
 
 pub fn apply_pragmas(connection: &Connection) -> Result<(), StoreError> {
@@ -121,7 +132,7 @@ mod tests {
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let tables: Vec<String> = connection
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()

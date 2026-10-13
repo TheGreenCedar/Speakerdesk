@@ -254,10 +254,10 @@ test('restart uses server default over old local storage and new-meeting request
   await Promise.all(f.document.getElementById('meeting-form').lastEventResults);assert.equal(f.run('newMeetingMode'),'fr');
 });
 
-test('Settings persists the same state; active Settings selection uses the live epoch route',async()=>{
+test('Settings default changes leave the active meeting language unchanged',async()=>{
   const f=frontend(root);f.seed();f.run("config.default_language='en';renderStartState=()=>{};refreshMeeting=async()=>{};window.requests=[];api=async(path,options)=>{requests.push(path);const b=JSON.parse(options.body);return path==='/api/preferences/language'?{default_language:b.language}:{language:b.language,default_language:b.language,language_revision:1,language_acknowledged_revision:0,language_history:[{start_sample:3200}]};};$('language').value='fr'");
   await f.run('changeDefaultLanguage()');assert.equal(f.run('config.default_language'),'fr');assert.equal(f.run('requests[0]'),'/api/preferences/language');
-  f.run("meeting={id:selected.id,status:'paused',language:'fr',language_revision:0};$('language').value='auto'");await f.run('changeDefaultLanguage()');assert.equal(f.run('config.default_language'),'auto');assert.ok(f.run('requests[1]').endsWith('/language'));assert.equal(f.run('meeting.language'),'auto');
+  f.run("meeting={id:selected.id,status:'paused',language:'fr',language_revision:0};$('language').value='auto'");await f.run('changeDefaultLanguage()');assert.equal(f.run('config.default_language'),'auto');assert.equal(f.run('requests[1]'),'/api/preferences/language');assert.equal(f.run('meeting.language'),'fr');assert.equal(f.run('meeting.language_revision'),0);
   f.run("meeting=null;api=async()=>{throw Error('persist failed')};$('language').value='fr'");await assert.rejects(f.run('changeDefaultLanguage()'),/persist failed/);assert.equal(f.run("$('language').value"),'auto');
 });
 

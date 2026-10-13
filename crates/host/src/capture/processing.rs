@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use super::{CaptureError, PROCESSED};
 
 pub(super) const EXPORT: &str = "apple_processed_mono16k_v1";
+pub(super) const PROGRESS: &str = "audio_queue_fence_v1";
 const CAPABILITY: &str = "apple_input_node_output_route_v1";
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -20,6 +21,7 @@ struct Qualification {
     helper_sha256: String,
     export_contract: String,
     capability_version: String,
+    progress_contract: String,
 }
 
 #[derive(Clone)]
@@ -72,6 +74,7 @@ impl Helper {
                 if value.helper_sha256 != sha256
                     || value.export_contract != EXPORT
                     || value.capability_version != CAPABILITY
+                    || value.progress_contract != PROGRESS
                 {
                     return Err(invalid("Capture capability differs from its built helper."));
                 }

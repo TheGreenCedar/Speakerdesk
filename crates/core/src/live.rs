@@ -11,6 +11,7 @@ pub use context::Refinement as SavedRefinement;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -58,6 +59,8 @@ const AUTHORITATIVE_MAX: i64 = 320_000;
 /// `authoritative_tail.POLICY`.
 pub const AUTHORITATIVE_POLICY: &str = "authoritative_tail_last_supported_boundary_v2";
 const MAX_CONTROL_MESSAGES: usize = 128;
+const LIVE_EVIDENCE_SAMPLES: i64 = 2 * MAX_DECODE_SAMPLES;
+const LANGUAGE_EVIDENCE_SAMPLES: i64 = 120 * RATE;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum LiveError {
@@ -347,6 +350,7 @@ pub struct UtteranceBook {
     active: Option<String>,
     closed: bool,
     uncertain_sample_count: i64,
+    retired_end: i64,
 }
 
 impl UtteranceBook {
@@ -367,6 +371,7 @@ impl UtteranceBook {
             active: None,
             closed: false,
             uncertain_sample_count: 0,
+            retired_end: 0,
         })
     }
 
@@ -468,7 +473,8 @@ impl UtteranceBook {
                     .last()
                     .and_then(|id| self.rows.get(id))
                     .map(|row| row.end_sample)
-                    .unwrap_or(0);
+                    .unwrap_or(self.retired_end)
+                    .max(self.retired_end);
                 let begin = self
                     .epoch_start
                     .max(previous_end)
@@ -1154,10 +1160,14 @@ struct MainLanguageGroup {
     meeting: std::collections::BTreeMap<String, MainLanguageCount>,
     speakers:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, MainLanguageCount>>,
+    compacted_before: i64,
+    archived_through: i64,
 }
 #[derive(Default)]
 struct MainLanguageCount {
     supports: std::collections::BTreeSet<LanguageRange>,
+    archived: usize,
+    witnesses: Vec<LanguageVote>,
 }
 type LanguageRange = (i64, i64);
 type LanguageVote = (
@@ -1202,7 +1212,8 @@ impl MainLanguageGroup {
             .selected
             .range(..first)
             .next_back()
-            .map_or(0, |(range, _)| range.1);
+            .map_or(self.archived_through, |(range, _)| range.1)
+            .max(self.archived_through);
         let counts = |counts: &mut std::collections::BTreeMap<String, MainLanguageCount>,
                       language: &str,
                       range: LanguageRange,
@@ -1212,7 +1223,7 @@ impl MainLanguageGroup {
                 count.supports.insert(range);
             } else if let Some(count) = counts.get_mut(language) {
                 count.supports.remove(&range);
-                if count.supports.is_empty() {
+                if count.supports.is_empty() && count.archived == 0 {
                     counts.remove(language);
                 }
             }
@@ -1255,7 +1266,55 @@ impl MainLanguageGroup {
                 }
             }
         }
-        self.through = self.selected.keys().next_back().map_or(0, |range| range.1);
+        self.through = self
+            .selected
+            .keys()
+            .next_back()
+            .map_or(self.archived_through, |range| range.1)
+            .max(self.archived_through);
+    }
+
+    fn compact_before(&mut self, through: i64) {
+        if through <= self.compacted_before {
+            return;
+        }
+        let old: Vec<_> = self
+            .selected
+            .iter()
+            .filter(|(range, _)| range.1 <= through)
+            .map(|(range, vote)| (*range, vote.clone()))
+            .collect();
+        let archive = |count: &mut MainLanguageCount, range: LanguageRange, vote: &LanguageVote| {
+            if count.supports.remove(&range) {
+                count.archived += 1;
+                count.witnesses.push(vote.clone());
+                if count.witnesses.len() > 2 {
+                    count.witnesses.remove(0);
+                }
+            }
+        };
+        for (range, vote) in old {
+            archive(
+                self.meeting.get_mut(&vote.0).expect("selected language"),
+                range,
+                &vote,
+            );
+            if let Some(track) = &vote.1 {
+                archive(
+                    self.speakers
+                        .get_mut(track)
+                        .expect("selected speaker")
+                        .get_mut(&vote.0)
+                        .expect("selected language"),
+                    range,
+                    &vote,
+                );
+            }
+            self.selected.remove(&range);
+            self.archived_through = self.archived_through.max(range.1);
+        }
+        self.observations.retain(|range, _| range.1 > through);
+        self.compacted_before = through;
     }
 }
 fn summary_key(row: &Segment) -> Option<String> {
@@ -1276,6 +1335,52 @@ fn speaker_track(row: &Segment) -> Option<String> {
         .filter(|id| !id.is_empty() && id != "unknown")
 }
 impl MainLanguageSummary {
+    fn compact_before(&mut self, through: i64) {
+        for group in self.groups.values_mut() {
+            group.compact_before(through);
+        }
+    }
+    fn witness_rows(&self) -> std::collections::HashSet<String> {
+        let mut rows = std::collections::HashSet::new();
+        for group in self.groups.values() {
+            for counts in std::iter::once(&group.meeting).chain(group.speakers.values()) {
+                for count in counts.values() {
+                    for vote in &count.witnesses {
+                        rows.insert(vote.2.utterance_id.clone());
+                    }
+                    for range in count.supports.iter().rev().take(2) {
+                        if let Some(vote) = group.selected.get(range) {
+                            rows.insert(vote.2.utterance_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+        rows
+    }
+    fn needs_rebuild(&self, prior: Option<&Segment>, accepted: &Segment) -> bool {
+        let old = main_language_votes(prior.map_or(&[][..], std::slice::from_ref));
+        let new = main_language_votes(std::slice::from_ref(accepted));
+        let old_ids: std::collections::BTreeSet<_> = old
+            .iter()
+            .map(|(_, vote)| language_vote_identity(vote))
+            .collect();
+        let new_ids: std::collections::BTreeSet<_> = new
+            .iter()
+            .map(|(_, vote)| language_vote_identity(vote))
+            .collect();
+        old.iter()
+            .filter(|(_, vote)| !new_ids.contains(&language_vote_identity(vote)))
+            .chain(
+                new.iter()
+                    .filter(|(_, vote)| !old_ids.contains(&language_vote_identity(vote))),
+            )
+            .any(|(key, vote)| {
+                self.groups
+                    .get(key)
+                    .is_some_and(|group| vote.2.start_sample < group.compacted_before)
+            })
+    }
     pub fn from_segments(rows: &[Segment]) -> Self {
         let mut summary = Self::default();
         for (key, vote) in main_language_votes(rows) {
@@ -1384,21 +1489,32 @@ impl MainLanguageSummary {
         let group = self.groups.get(&summary_key(target)?)?;
         let choose = |counts: &std::collections::BTreeMap<String, MainLanguageCount>,
                       track: Option<String>| {
-            let total: usize = counts.values().map(|count| count.supports.len()).sum();
+            let total: usize = counts
+                .values()
+                .map(|count| count.supports.len() + count.archived)
+                .sum();
             let (language, count) = counts
                 .iter()
-                .max_by_key(|(_, count)| count.supports.len())?;
-            if count.supports.len() < 2 || count.supports.len() * 2 <= total {
+                .max_by_key(|(_, count)| count.supports.len() + count.archived)?;
+            let selected = count.supports.len() + count.archived;
+            if selected < 2 || selected * 2 <= total {
                 return None;
             }
-            let mut anchors = count
-                .supports
-                .iter()
-                .rev()
-                .take(2)
-                .filter_map(|range| group.selected.get(range).map(|vote| vote.2.clone()))
-                .collect::<Vec<_>>();
-            anchors.reverse();
+            let mut anchors =
+                count
+                    .witnesses
+                    .iter()
+                    .map(|vote| vote.2.clone())
+                    .chain(
+                        count.supports.iter().rev().take(2).filter_map(|range| {
+                            group.selected.get(range).map(|vote| vote.2.clone())
+                        }),
+                    )
+                    .collect::<Vec<_>>();
+            anchors.sort_by_key(|a| (a.start_sample, a.end_sample));
+            if anchors.len() > 2 {
+                anchors.drain(..anchors.len() - 2);
+            }
             Some(crate::language::LanguageContext {
                 language: language.clone(),
                 end_sample: anchors.iter().map(|a| a.end_sample).max()?,
@@ -1912,11 +2028,7 @@ fn refine_saved_passage_with_context<M: Models + ?Sized + 'static>(
                     &part.language,
                 ) {
                     Ok(alignment) => alignment,
-                    Err(
-                        error @ (ChildError::ProcessLost { .. }
-                        | ChildError::Timeout
-                        | ChildError::Cancelled),
-                    ) => return Err(error.into()),
+                    Err(error) if error.is_lifecycle_failure() => return Err(error.into()),
                     Err(_) => {
                         serde_json::json!({"status":"unavailable","reason":"model_error","language":part.language,
                         "raw_text":part.text,"audio_anchor":{"start_sample":part.start_sample,"end_sample":part.end_sample}})
@@ -1958,11 +2070,7 @@ fn refine_saved_passage_with_context<M: Models + ?Sized + 'static>(
         }
         match vocabulary.align(models, pcm, &candidate.text, start, &detected_language) {
             Ok(alignment) => crate::alignment::attach(&mut candidate, alignment),
-            Err(
-                error @ (ChildError::ProcessLost { .. }
-                | ChildError::Timeout
-                | ChildError::Cancelled),
-            ) => return Err(error.into()),
+            Err(error) if error.is_lifecycle_failure() => return Err(error.into()),
             Err(_) => {
                 candidate.rest.insert(
                     "reading_alignment".into(),
@@ -2484,7 +2592,9 @@ struct ModelDetector<M: Models> {
 impl<M: Models> LanguageDetector for ModelDetector<M> {
     fn detect(&mut self, pcm: &[f32]) -> Result<Vec<(String, f64)>, crate::language::RouteError> {
         let probe = self.models.language_probe(pcm).map_err(|error| {
-            *self.failure.lock().expect("model failure") = Some(error);
+            if error.is_lifecycle_failure() {
+                *self.failure.lock().expect("model failure") = Some(error);
+            }
             crate::language::RouteError::Detector
         })?;
         if probe.codes.len() != probe.probabilities.len() || probe.codes.is_empty() {
@@ -2513,7 +2623,9 @@ impl<M: Models> Recognizer for ModelRecognizer<M> {
             .models
             .transcribe(pcm, language, (0, 0))
             .map_err(|error| {
-                *self.failure.lock().expect("model failure") = Some(error);
+                if error.is_lifecycle_failure() {
+                    *self.failure.lock().expect("model failure") = Some(error);
+                }
                 crate::language::RouteError::Recognition
             })?;
         let raw = if text.raw_text.is_empty() {
@@ -2546,6 +2658,29 @@ struct CompletedCores {
     review: bool,
 }
 
+#[derive(Default)]
+struct ProvisionalCadence {
+    seconds: f64,
+    measurements: u64,
+}
+impl ProvisionalCadence {
+    fn observe(&mut self, elapsed: Duration) {
+        let seconds = elapsed.as_secs_f64();
+        self.seconds = if self.measurements == 0 {
+            seconds
+        } else {
+            self.seconds * 0.75 + seconds * 0.25
+        };
+        self.measurements = self.measurements.saturating_add(1);
+    }
+    fn interval(&self, long: bool) -> i64 {
+        let minimum = if long { 6. } else { 3. };
+        // Spend at most half of a provisional cadence on the measured decode.
+        // Forced canonical/flush/EOF work never waits for this interval.
+        ((self.seconds * 2.).clamp(minimum, 12.) * RATE as f64).ceil() as i64
+    }
+}
+
 /// Canonical resident engine. PCM stays on disk; weights stay behind `M`.
 pub struct Engine<M: Models> {
     config: EngineConfig,
@@ -2571,6 +2706,9 @@ pub struct Engine<M: Models> {
     vad: Option<Handle>,
     diar: Option<Handle>,
     ledger: Arc<Mutex<SpeechLedger>>,
+    admission_prefixes: HashMap<String, Admission>,
+    rechecked_prefixes: Mutex<HashMap<String, Admission>>,
+    provisional_cadence: ProvisionalCadence,
     word_alignment: Option<Arc<crate::alignment::Vocabulary>>,
     events: Vec<EngineEvent>,
 }
@@ -2663,6 +2801,9 @@ impl<M: Models + 'static> Engine<M> {
             vad: None,
             diar: None,
             ledger: Arc::new(Mutex::new(ledger)),
+            admission_prefixes: HashMap::new(),
+            rechecked_prefixes: Mutex::new(HashMap::new()),
+            provisional_cadence: ProvisionalCadence::default(),
             word_alignment: None,
             events: Vec::new(),
         })
@@ -2705,6 +2846,10 @@ impl<M: Models + 'static> Engine<M> {
 
     pub fn handle(&mut self, message: LiveCommand) -> Result<Vec<EngineEvent>, LiveError> {
         self.events.clear();
+        // Feedback for the preceding event batch has completed before the next
+        // ordered command. Keep no obsolete decoder retry snapshot beyond it.
+        self.last_context_decode = None;
+        self.release_evidence()?;
         match message {
             LiveCommand::Audio(notice) => self.on_audio(notice)?,
             LiveCommand::Flush {
@@ -3114,6 +3259,142 @@ impl<M: Models + 'static> Engine<M> {
             .map_err(|error| LiveError::Detail(error.to_string()))
     }
 
+    fn row_admission(&self, row: &Utterance, end: i64) -> Result<Admission, LiveError> {
+        let ledger = self.ledger.lock().expect("speech ledger");
+        if let Some(prefix) = self
+            .rechecked_prefixes
+            .lock()
+            .expect("rechecked prefixes")
+            .get(&row.id)
+            && prefix.start_sample == row.start_sample
+            && prefix.end_sample <= end
+        {
+            if prefix.end_sample == end {
+                return Ok(prefix.clone());
+            }
+            let tail = ledger.admission(prefix.end_sample, end)?;
+            if tail.complete {
+                return Ok(speech::join_admissions(prefix.clone(), tail)?);
+            }
+        }
+        if let Some(prefix) = self.admission_prefixes.get(&row.id)
+            && prefix.start_sample == row.start_sample
+            && prefix.end_sample <= end
+        {
+            if prefix.end_sample == end {
+                return Ok(prefix.clone());
+            }
+            let tail = ledger.admission(prefix.end_sample, end)?;
+            return if tail.complete {
+                Ok(speech::join_admissions(prefix.clone(), tail)?)
+            } else {
+                Ok(pending_admission(row.start_sample, end))
+            };
+        }
+        Ok(ledger.admission(row.start_sample, end)?)
+    }
+
+    fn release_evidence(&mut self) -> Result<(), LiveError> {
+        let mut earliest = self.received.saturating_sub(LIVE_EVIDENCE_SAMPLES).max(0);
+        earliest = earliest.min(self.book.cursor());
+        for id in &self.book.order[self.next_utterance..] {
+            let row = &self.book.rows[id];
+            let start = self
+                .last_decoded
+                .get(id)
+                .and_then(|p| p.completed.as_ref())
+                .map_or(row.start_sample, |p| p.end_sample);
+            let accepted = start.min(row.text_end_sample.unwrap_or(row.start_sample));
+            // An indefinitely incomplete tail stays recoverable from saved PCM,
+            // rather than owning unbounded raw observations in RAM.
+            if self.received - accepted <= LIVE_EVIDENCE_SAMPLES {
+                earliest = earliest.min(accepted);
+            }
+        }
+        let boundary = {
+            let ledger = self.ledger.lock().expect("speech ledger");
+            let count = ledger.frames().partition_point(|f| f.end <= earliest);
+            count.checked_sub(1).map(|i| ledger.frames()[i].end)
+        };
+        if let Some(boundary) = boundary {
+            for id in &self.book.order[self.next_utterance..] {
+                let row = &self.book.rows[id];
+                if row.start_sample < boundary && boundary <= row.end_sample {
+                    let admission = self.row_admission(row, boundary)?;
+                    if admission.complete {
+                        self.admission_prefixes.insert(id.clone(), admission);
+                    }
+                }
+            }
+            self.ledger
+                .lock()
+                .expect("speech ledger")
+                .discard_before(boundary);
+        }
+        self.admission_prefixes
+            .retain(|id, _| self.book.order[self.next_utterance..].contains(id));
+        self.rechecked_prefixes
+            .lock()
+            .expect("rechecked prefixes")
+            .retain(|id, _| self.book.order[self.next_utterance..].contains(id));
+        let through = self.received.saturating_sub(LANGUAGE_EVIDENCE_SAMPLES);
+        self.main_language.compact_before(through);
+        let mut epochs: std::collections::HashSet<_> = self.book.order[self.next_utterance..]
+            .iter()
+            .map(|id| self.book.rows[id].language_epoch)
+            .collect();
+        epochs.insert(self.timeline.last().expect("timeline").epoch);
+        let source=self.config.source_id.as_ref().zip(self.config.capture_catalog_sha256.as_ref()).map(|(source,catalog)|serde_json::json!({"catalog_sha256":catalog,"source_id":source,"source_revision":1}));
+        let stream = self.config.recovery.as_ref().map_or(0, |r| r.generation);
+        self.main_language.groups.retain(|key, _| {
+            serde_json::from_str::<Value>(key).ok().is_some_and(|key| {
+                key[0].as_i64().is_some_and(|epoch| epochs.contains(&epoch))
+                    && key[1] == source.as_ref().unwrap_or(&Value::Null).clone()
+                    && key[2] == stream
+            })
+        });
+        let mut keep = self.main_language.witness_rows();
+        keep.extend(self.book.order[self.next_utterance..].iter().cloned());
+        let processed: std::collections::HashSet<_> = self.book.order[..self.next_utterance]
+            .iter()
+            .cloned()
+            .collect();
+        self.book.rows.retain(|id, row| {
+            if keep.contains(id) {
+                true
+            } else {
+                self.book.retired_end = self.book.retired_end.max(row.end_sample);
+                false
+            }
+        });
+        self.book.order.retain(|id| self.book.rows.contains_key(id));
+        self.next_utterance = self
+            .book
+            .order
+            .iter()
+            .take_while(|id| processed.contains(*id))
+            .count();
+        if self.book.order.capacity() > self.book.order.len().max(64) * 2 {
+            self.book.order.shrink_to(self.book.order.len().max(64));
+        }
+        if self.book.rows.capacity() > self.book.rows.len().max(64) * 2 {
+            self.book.rows.shrink_to(self.book.rows.len().max(64));
+        }
+        let earliest = self
+            .book
+            .rows
+            .values()
+            .map(|r| r.start_sample)
+            .min()
+            .unwrap_or(self.book.cursor());
+        let prior = self
+            .timeline
+            .partition_point(|stamp| stamp.start_sample <= earliest)
+            .saturating_sub(1);
+        self.timeline.drain(..prior);
+        Ok(())
+    }
+
     fn prefix_speaker(&self, local: &str) -> Result<String, LiveError> {
         let speaker = match &self.config.source_id {
             Some(source) => speaker_id(source, local),
@@ -3203,12 +3484,14 @@ impl<M: Models + 'static> Engine<M> {
                 || (length >= 6 * RATE
                     && (last.is_none()
                         || (decode_open
-                            && row.end_sample - last.expect("decoded").end_sample >= 3 * RATE)));
+                            && row.end_sample - last.expect("decoded").end_sample
+                                >= self.provisional_cadence.interval(false))));
             let long_unaligned = length > MAX_DECODE_SAMPLES;
             if long_unaligned && row.state == UtteranceState::Open && !final_pass {
                 due = last.is_none()
                     || (decode_open
-                        && row.end_sample - last.expect("decoded").end_sample >= 6 * RATE);
+                        && row.end_sample - last.expect("decoded").end_sample
+                            >= self.provisional_cadence.interval(true));
             }
             let decode =
                 changed && due && !row.protected_fields.iter().any(|field| field == "text");
@@ -3233,8 +3516,8 @@ impl<M: Models + 'static> Engine<M> {
             let tail = row
                 .speaker_activity
                 .as_ref()
-                .and_then(|activity| activity.regions.last())
-                .map_or(row.start_sample, |region| region.start_sample);
+                .and_then(|activity| activity.observed_end_sample)
+                .unwrap_or(row.start_sample);
             earliest = earliest.min(tail);
         }
         let expired = self
@@ -3267,13 +3550,12 @@ impl<M: Models + 'static> Engine<M> {
         {
             return Ok(());
         }
-        // The last region may have ended at a temporary VAD watermark inside a
-        // diarization turn. Rebuild it with the new suffix, preserving exact turn
-        // boundaries rather than introducing a boundary on every audio packet.
+        // Observed ownership is immutable; merge equal suffixes rather than
+        // rebuilding the whole final region after every audio packet.
         let start = activity
-            .regions
-            .pop()
-            .map_or(row.start_sample, |region| region.start_sample);
+            .observed_end_sample
+            .unwrap_or(row.start_sample)
+            .max(row.start_sample);
         let first = self
             .turns
             .partition_point(|turn| round_samples(turn.end) <= start);
@@ -3285,7 +3567,16 @@ impl<M: Models + 'static> Engine<M> {
                 }
             }
         }
-        activity.regions.extend(regions);
+        for region in regions {
+            if let Some(last) = activity.regions.last_mut()
+                && last.end_sample == region.start_sample
+                && last.speakers == region.speakers
+            {
+                last.end_sample = region.end_sample;
+            } else {
+                activity.regions.push(region);
+            }
+        }
         activity.observed_end_sample = Some(observed);
         Ok(())
     }
@@ -3301,11 +3592,14 @@ impl<M: Models + 'static> Engine<M> {
             row.audio_revision,
             progress.clone(),
         ));
-        if length <= MAX_DECODE_SAMPLES {
-            self.decode_short(&row, &stamp.language)?;
+        let started = Instant::now();
+        let decoded = if length <= MAX_DECODE_SAMPLES {
+            self.decode_short(&row, &stamp.language)
         } else {
-            self.decode_cores(&row, &stamp.language, &mut progress)?;
-        }
+            self.decode_cores(&row, &stamp.language, &mut progress)
+        };
+        self.provisional_cadence.observe(started.elapsed());
+        decoded?;
         let row = self.book.rows.get(identity).expect("row");
         progress.end_sample = row.end_sample;
         progress.audio_revision = row.audio_revision;
@@ -3347,6 +3641,7 @@ impl<M: Models + 'static> Engine<M> {
     fn decode_short(&mut self, row: &Utterance, language: &str) -> Result<(), LiveError> {
         let witnesses = self.context_witnesses(row);
         let passages = self.transcribe_span(
+            &row.id,
             row.start_sample,
             row.end_sample,
             language,
@@ -3457,6 +3752,7 @@ impl<M: Models + 'static> Engine<M> {
         for pair in edges.windows(2) {
             let request = request_for(&anchor, pair[0], pair[1], pair[0], pair[1]);
             let passages = self.transcribe_span(
+                &row.id,
                 request.start_sample,
                 request.end_sample,
                 language,
@@ -3530,8 +3826,13 @@ impl<M: Models + 'static> Engine<M> {
     ) {
         if !self.language_ownership_initialized
             || self.language_interpretation_generation != generation
+            || self.main_language.needs_rebuild(prior, accepted)
         {
-            self.refresh_language_ownership(rows, generation);
+            self.main_language = MainLanguageSummary::from_segments(rows);
+            self.main_language
+                .compact_before(self.received.saturating_sub(LANGUAGE_EVIDENCE_SAMPLES));
+            self.language_interpretation_generation = generation;
+            self.language_ownership_initialized = true;
         } else {
             self.main_language.accept_publication(prior, accepted);
         }
@@ -3689,8 +3990,11 @@ impl<M: Models + 'static> Engine<M> {
         context.evidence.as_mut()?.interpretation_generation =
             self.language_interpretation_generation;
         for anchor in &mut context.evidence.as_mut()?.anchors {
-            let row = self.book.rows.get(&anchor.utterance_id)?;
-            if row.protected_fields.iter().any(|field| field != "text") {
+            if let Some(row) = self.book.rows.get(&anchor.utterance_id) {
+                if row.protected_fields.iter().any(|field| field != "text") {
+                    return None;
+                }
+            } else if !self.language_ownership_initialized {
                 return None;
             }
         }
@@ -3699,6 +4003,7 @@ impl<M: Models + 'static> Engine<M> {
 
     fn transcribe_span(
         &self,
+        identity: &str,
         start: i64,
         end: i64,
         language: &str,
@@ -3706,6 +4011,31 @@ impl<M: Models + 'static> Engine<M> {
         padding: (u32, u32),
     ) -> Result<Vec<Passage>, LiveError> {
         let pcm = self.read_pcm(start, end)?;
+        let oldest = {
+            let ledger = self.ledger.lock().expect("speech ledger");
+            ledger
+                .frames()
+                .first()
+                .map_or(ledger.end_sample(), |f| f.start)
+        };
+        let evidence = if start < oldest {
+            let ledger = self.recheck_speech(start, &pcm)?;
+            let admission = ledger.admission(start, end)?;
+            if let Some(row) = self.book.rows.get(identity) {
+                let mut prefixes = self.rechecked_prefixes.lock().expect("rechecked prefixes");
+                if start == row.start_sample {
+                    prefixes.insert(row.id.clone(), admission);
+                } else if let Some(prior) = prefixes.get(&row.id)
+                    && prior.end_sample == start
+                {
+                    let joined = speech::join_admissions(prior.clone(), admission)?;
+                    prefixes.insert(row.id.clone(), joined);
+                }
+            }
+            Arc::new(Mutex::new(ledger))
+        } else {
+            Arc::clone(&self.ledger)
+        };
         let context = if language == languages::AUTOMATIC {
             self.language_context(start)
         } else {
@@ -3722,7 +4052,7 @@ impl<M: Models + 'static> Engine<M> {
         };
         let mut transcriber = SpeechTranscriber::new(
             language,
-            Box::new(SharedLedger(Arc::clone(&self.ledger))),
+            Box::new(SharedLedger(evidence)),
             detector,
             Box::new(ModelRecognizer {
                 models: Arc::clone(&self.models),
@@ -3747,6 +4077,58 @@ impl<M: Models + 'static> Engine<M> {
             return Err(error.into());
         }
         result
+    }
+
+    fn recheck_speech(&self, origin: i64, pcm: &[f32]) -> Result<SpeechLedger, LiveError> {
+        let mut ledger = if let Some(contract) = &self.config.processed_microphone_contract {
+            SpeechLedger::with_processed_microphone(origin, contract)?
+        } else {
+            SpeechLedger::new(origin)?
+        };
+        let conditioning = self
+            .config
+            .processed_microphone_contract
+            .as_ref()
+            .map(|_| GainPolicy { peak: None });
+        let handle = self.models.vad_open(conditioning)?;
+        let result = (|| {
+            for start in (0..pcm.len()).step_by(speech::FRAME_SAMPLES) {
+                let end = (start + speech::FRAME_SAMPLES).min(pcm.len());
+                let feed = self
+                    .models
+                    .vad_feed(handle, &pcm[start..end], end == pcm.len())?;
+                if feed.received != end as u64 || feed.observed > feed.received {
+                    return Err(LiveError::Message("Invalid saved speech recheck endpoint."));
+                }
+                for frame in feed.frames {
+                    if frame.start >= frame.end
+                        || frame.end > feed.observed
+                        || frame.end - frame.start > speech::FRAME_SAMPLES as u64
+                    {
+                        return Err(LiveError::Message("Invalid saved speech recheck evidence."));
+                    }
+                    ledger.append_pcm(
+                        origin + frame.start as i64,
+                        &pcm[frame.start as usize..frame.end as usize],
+                        f64::from(frame.raw_p),
+                        f64::from(frame.norm_p),
+                    )?;
+                }
+                if ledger.end_sample() != origin + feed.observed as i64 {
+                    return Err(LiveError::Message(
+                        "Incomplete saved speech recheck evidence.",
+                    ));
+                }
+            }
+            if ledger.end_sample() != origin + pcm.len() as i64 {
+                return Err(LiveError::Message(
+                    "Incomplete saved speech recheck evidence.",
+                ));
+            }
+            Ok(ledger)
+        })();
+        let closed = self.models.vad_close(handle).map_err(LiveError::from);
+        result.and_then(|ledger| closed.map(|()| ledger))
     }
 
     fn publish(&mut self, row: Utterance) -> Result<(), LiveError> {
@@ -3778,11 +4160,7 @@ impl<M: Models + 'static> Engine<M> {
             );
         }
         if row.state == UtteranceState::Sealed {
-            let admission = self
-                .ledger
-                .lock()
-                .expect("speech ledger")
-                .admission(row.start_sample, row.end_sample)?;
+            let admission = self.row_admission(&row, row.end_sample)?;
             candidate.acoustic_evidence = Some(speech::admission_value(&admission));
             let admitted = admission.complete
                 && admission.uncertain_regions.is_empty()
@@ -3820,11 +4198,7 @@ impl<M: Models + 'static> Engine<M> {
                         language,
                     ) {
                         Ok(aligned) => crate::alignment::attach(&mut candidate, aligned),
-                        Err(
-                            error @ (ChildError::ProcessLost { .. }
-                            | ChildError::Timeout
-                            | ChildError::Cancelled),
-                        ) => return Err(error.into()),
+                        Err(error) if error.is_lifecycle_failure() => return Err(error.into()),
                         Err(_) => {
                             candidate.rest.insert(
                                 "reading_alignment".into(),
@@ -5103,6 +5477,8 @@ mod tests {
         transcription_crops: Mutex<Vec<(f32, usize)>>,
         clock_text: AtomicBool,
         transcription_results: Mutex<VecDeque<AsrText>>,
+        transcription_errors: Mutex<VecDeque<Option<ChildError>>>,
+        decode_delay_ms: AtomicUsize,
         vad_sessions: Mutex<BTreeMap<u64, (u64, Vec<f32>)>>,
         next_session: AtomicUsize,
         fail_diar_open: AtomicBool,
@@ -5129,6 +5505,8 @@ mod tests {
                 transcription_crops: Mutex::new(Vec::new()),
                 clock_text: AtomicBool::new(false),
                 transcription_results: Mutex::new(VecDeque::new()),
+                transcription_errors: Mutex::new(VecDeque::new()),
+                decode_delay_ms: AtomicUsize::new(0),
                 vad_sessions: Mutex::new(BTreeMap::new()),
                 next_session: AtomicUsize::new(1),
                 fail_diar_open: AtomicBool::new(false),
@@ -5300,6 +5678,10 @@ mod tests {
             _padding: (u32, u32),
         ) -> Result<AsrText, ChildError> {
             self.transcribe_calls.fetch_add(1, Ordering::SeqCst);
+            let delay = self.decode_delay_ms.load(Ordering::Relaxed);
+            if delay > 0 {
+                std::thread::sleep(Duration::from_millis(delay as u64));
+            }
             self.transcription_crops
                 .lock()
                 .unwrap()
@@ -5308,6 +5690,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(language.into());
+            if let Some(Some(error)) = self.transcription_errors.lock().unwrap().pop_front() {
+                return Err(error);
+            }
             if let Some(result) = self.transcription_results.lock().unwrap().pop_front() {
                 return Ok(result);
             }
@@ -5435,6 +5820,334 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn long_live_stream_releases_raw_evidence_and_sealed_engine_copies() {
+        let mut engine = TestEngine::new(
+            EngineConfig::new("bounded-state", "en"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        let mut document = empty_document();
+        for _ in 0..90 {
+            for pcm in [loud(RATE as usize), vec![0.; RATE as usize]] {
+                let start = engine.recording.writer.frames() as i64;
+                engine.append_pcm(&pcm);
+                for event in engine.handle(notice(start, start + RATE, 0)).unwrap() {
+                    if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                        document = apply_canonical_candidate(&document, &candidate);
+                    }
+                }
+            }
+        }
+        assert!(
+            document.segments.len() >= 80,
+            "accepted transcript remains durable outside the engine"
+        );
+        assert!(
+            engine.ledger.lock().unwrap().frames().len() <= 1600,
+            "raw VAD evidence must not grow with the whole meeting"
+        );
+        assert!(
+            engine.book.rows.len() <= 8,
+            "sealed words already published must not stay as engine copies"
+        );
+        assert!(
+            engine.ledger.lock().unwrap().retained_frame_capacity() <= 4096,
+            "retained heap capacity is bounded too"
+        );
+    }
+
+    #[test]
+    fn compact_language_totals_survive_long_pause_and_keep_bounded_witnesses() {
+        let mut engine = TestEngine::new(
+            EngineConfig::new("language-memory", "auto"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        for _ in 0..80 {
+            for pcm in [loud(RATE as usize), vec![0.; RATE as usize]] {
+                let start = engine.recording.writer.frames() as i64;
+                engine.append_pcm(&pcm);
+                engine.handle(notice(start, start + RATE, 0)).unwrap();
+            }
+        }
+        for _ in 0..140 {
+            let start = engine.recording.writer.frames() as i64;
+            engine.append_pcm(&vec![0.; RATE as usize]);
+            engine.handle(notice(start, start + RATE, 0)).unwrap();
+        }
+        let group = engine.main_language.groups.values().next().unwrap();
+        assert!(group.meeting["en"].archived >= 70);
+        assert_eq!(group.meeting["en"].witnesses.len(), 2);
+        assert!(group.observations.len() <= 2);
+        assert!(engine.book.rows.len() <= 4);
+        engine
+            .models
+            .probe_scores
+            .lock()
+            .unwrap()
+            .push_back(Ok(LanguageProbeOut {
+                codes: vec!["en".into(), "fr".into()],
+                probabilities: vec![0.4, 0.6],
+            }));
+        let start = engine.recording.writer.frames() as i64;
+        engine.append_pcm(&loud(RATE as usize));
+        engine.handle(notice(start, start + RATE, 0)).unwrap();
+        engine.append_pcm(&vec![0.; RATE as usize]);
+        let events = engine
+            .handle(notice(start + RATE, start + 2 * RATE, 0))
+            .unwrap();
+        let row = revisions(&events).into_iter().last().unwrap();
+        assert_eq!(row.language.as_deref(), Some("en"));
+        assert_eq!(
+            row.language_detection.as_ref().unwrap()["context_evidence"]["scope"],
+            "speaker_main_language"
+        );
+    }
+
+    #[test]
+    fn continuous_long_speech_keeps_complete_admission_after_frame_eviction_and_eof() {
+        let mut engine = TestEngine::new(
+            EngineConfig::new("continuous-memory", "en"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        for _ in 0..140 {
+            let start = engine.recording.writer.frames() as i64;
+            engine.append_pcm(&loud(RATE as usize));
+            engine.handle(notice(start, start + RATE, 0)).unwrap();
+        }
+        assert!(engine.ledger.lock().unwrap().frames().len() <= 1600);
+        assert!(engine.turns.len() <= 2);
+        let events = engine.handle(LiveCommand::Stop).unwrap();
+        let row = revisions(&events).into_iter().last().unwrap();
+        assert_eq!(row.acoustic_evidence.as_ref().unwrap()["complete"], true);
+        assert_eq!(row.acoustic_evidence.as_ref().unwrap()["start_sample"], 0);
+        assert_eq!(
+            row.acoustic_evidence.as_ref().unwrap()["end_sample"],
+            140 * RATE
+        );
+        assert!(!row.text.is_empty());
+    }
+
+    #[test]
+    fn delayed_canonical_consumer_keeps_unconsumed_evidence_until_eof() {
+        let mut engine = TestEngine::new(
+            EngineConfig::new("delayed-consumer", "en"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        engine.models.delayed_diar.store(true, Ordering::Relaxed);
+        for _ in 0..60 {
+            let start = engine.recording.writer.frames() as i64;
+            engine.append_pcm(&loud(RATE as usize));
+            engine.handle(notice(start, start + RATE, 0)).unwrap();
+        }
+        assert_eq!(engine.book.cursor(), 0);
+        assert_eq!(
+            engine
+                .ledger
+                .lock()
+                .unwrap()
+                .frames()
+                .first()
+                .unwrap()
+                .start,
+            0
+        );
+        let events = engine.handle(LiveCommand::Stop).unwrap();
+        assert_eq!(engine.book.cursor(), 60 * RATE);
+        assert!(revisions(&events).iter().any(|row| !row.text.is_empty()
+            && row.acoustic_evidence.as_ref().unwrap()["complete"] == true));
+    }
+
+    #[test]
+    fn late_protected_correction_rechecks_discarded_continuation_after_private_core_failure() {
+        let mut engine = TestEngine::new(
+            EngineConfig::new("late-correction", "en"),
+            FakeModels::english(),
+        )
+        .unwrap();
+        engine.models.clock_text.store(true, Ordering::Relaxed);
+        engine.append_pcm(&clock_pcm(121 * RATE));
+        for second in 0..48 {
+            engine
+                .push(notice(second * RATE, (second + 1) * RATE, 0))
+                .unwrap();
+        }
+        engine
+            .push(LiveCommand::Flush {
+                request_id: None,
+                through_sample: None,
+            })
+            .unwrap();
+        let mut document = empty_document();
+        while let Some(events) = engine.poll().unwrap() {
+            for event in events {
+                if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                    document = apply_canonical_candidate(&document, &candidate);
+                }
+            }
+        }
+        let id = document.segments[0].id.clone();
+        let public = document.segments[0].rest["canonical_text_end_sample"]
+            .as_i64()
+            .unwrap();
+        assert!(public >= 47 * RATE);
+        engine.models.transcription_results.lock().unwrap().extend([
+            AsrText {
+                text: "complete core one".into(),
+                raw_text: "complete core one".into(),
+                token_count: 1,
+            },
+            AsrText {
+                text: "complete core two".into(),
+                raw_text: "complete core two".into(),
+                token_count: 1,
+            },
+            AsrText {
+                text: "complete core three".into(),
+                raw_text: "complete core three".into(),
+                token_count: 1,
+            },
+            AsrText {
+                text: "incomplete tail".into(),
+                raw_text: "incomplete tail".into(),
+                token_count: 448,
+            },
+        ]);
+        for second in 48..121 {
+            engine
+                .push(notice(second * RATE, (second + 1) * RATE, 0))
+                .unwrap();
+        }
+        while let Some(events) = engine.poll().unwrap() {
+            for event in events {
+                if let EngineEvent::CanonicalRevision { candidate, .. } = event {
+                    document = apply_canonical_candidate(&document, &candidate);
+                }
+            }
+        }
+        assert_eq!(
+            document.segments[0].rest["canonical_text_end_sample"],
+            public
+        );
+        assert!(
+            engine.last_decoded[&id]
+                .completed
+                .as_ref()
+                .unwrap()
+                .end_sample
+                > public
+        );
+        engine.append_pcm(&loud(RATE as usize));
+        engine.handle(notice(121 * RATE, 122 * RATE, 0)).unwrap();
+        assert!(
+            engine
+                .ledger
+                .lock()
+                .unwrap()
+                .frames()
+                .first()
+                .unwrap()
+                .start
+                > public
+        );
+        let primary = (engine.vad, engine.diar);
+        let edited=crate::edit::edit_passage(crate::edit::PassageEditInput {status:"recording",duration:122.,revision:1,document:Some(&document),segment_id:&id,
+            body:&serde_json::json!({"segment_revision":document.segments[0].machine_revision,"changes":{"text":"Protected correction"}}),now:2.}).unwrap();
+        let rejected = project_segment(&engine.book.rows[&id], &engine.language_at(0));
+        let boundary = edited_boundary(&edited.document, &rejected).unwrap();
+        assert_eq!(boundary.end_sample, public);
+        engine.models.clock_text.store(false, Ordering::Relaxed);
+        engine.continue_edited(&boundary).unwrap();
+        assert_eq!((engine.vad, engine.diar), primary);
+        assert_eq!(engine.models.vad_sessions.lock().unwrap().len(), 1);
+        let events = engine.handle(LiveCommand::Stop).unwrap();
+        let tail = revisions(&events)
+            .into_iter()
+            .find(|row| row.start == (public as f64 / RATE as f64))
+            .unwrap();
+        assert!(!tail.text.is_empty());
+        assert_eq!(tail.acoustic_evidence.as_ref().unwrap()["complete"], true);
+        assert_eq!(
+            tail.acoustic_evidence.as_ref().unwrap()["start_sample"],
+            public
+        );
+        assert_eq!((engine.vad, engine.diar), (None, None));
+        assert_eq!(primary.0.unwrap().generation, primary.1.unwrap().generation);
+        assert_eq!(edited.document.segments[0].text, "Protected correction");
+    }
+
+    #[test]
+    fn ordinary_live_probe_and_asr_failures_keep_the_same_stream_for_later_healthy_audio() {
+        for stage in ["probe", "asr"] {
+            let mut engine = TestEngine::new(
+                EngineConfig::new(stage, if stage == "probe" { "auto" } else { "en" }),
+                FakeModels::english(),
+            )
+            .unwrap();
+            if stage == "probe" {
+                engine
+                    .models
+                    .probe_scores
+                    .lock()
+                    .unwrap()
+                    .push_back(Err(ChildError::failed("crop detector failed", false)));
+            } else {
+                engine
+                    .models
+                    .transcription_errors
+                    .lock()
+                    .unwrap()
+                    .push_back(Some(ChildError::failed("crop ASR failed", false)));
+            }
+            engine.append_pcm(&loud((16 * RATE) as usize));
+            engine.handle(notice(0, 8 * RATE, 0)).unwrap();
+            let handles = (engine.vad, engine.diar);
+            let events = engine.handle(notice(8 * RATE, 16 * RATE, 0)).unwrap();
+            assert!(
+                revisions(&events).iter().any(|row| !row.text.is_empty()),
+                "{stage}"
+            );
+            assert_eq!((engine.vad, engine.diar), handles);
+        }
+    }
+
+    #[test]
+    fn provisional_cadence_measures_decode_cost_and_never_delays_forced_flush() {
+        let mut engine =
+            TestEngine::new(EngineConfig::new("cadence", "en"), FakeModels::english()).unwrap();
+        engine.models.decode_delay_ms.store(2, Ordering::Relaxed);
+        engine.append_pcm(&loud((18 * RATE) as usize));
+        engine.handle(notice(0, 8 * RATE, 0)).unwrap();
+        assert!(engine.provisional_cadence.measurements > 0);
+        assert!(engine.provisional_cadence.seconds >= 0.002);
+        // Two slow measured observations exceed the cap despite EWMA warmup.
+        for _ in 0..2 {
+            engine.provisional_cadence.observe(Duration::from_secs(20));
+        }
+        assert_eq!(engine.provisional_cadence.interval(false), 12 * RATE);
+        let calls = engine.models.transcribe_calls.load(Ordering::Relaxed);
+        engine.handle(notice(8 * RATE, 12 * RATE, 0)).unwrap();
+        assert_eq!(
+            engine.models.transcribe_calls.load(Ordering::Relaxed),
+            calls
+        );
+        engine
+            .handle(LiveCommand::Flush {
+                request_id: None,
+                through_sample: None,
+            })
+            .unwrap();
+        assert!(engine.models.transcribe_calls.load(Ordering::Relaxed) > calls);
+        for _ in 0..40 {
+            engine.provisional_cadence.observe(Duration::from_millis(1));
+        }
+        assert_eq!(engine.provisional_cadence.interval(false), 3 * RATE);
+        assert_eq!(engine.provisional_cadence.interval(true), 6 * RATE);
     }
 
     #[test]
@@ -6830,6 +7543,7 @@ mod tests {
                 .clear();
             let passages = engine
                 .transcribe_span(
+                    "candidate",
                     18 * RATE,
                     21 * RATE,
                     if case == "manual" { "fr" } else { "auto" },

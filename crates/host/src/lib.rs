@@ -8,6 +8,7 @@ pub mod native;
 mod native_updates;
 pub mod people_routes;
 pub mod routes;
+pub mod recovery;
 pub mod setup;
 pub mod worker;
 

@@ -143,14 +143,39 @@ impl ApplicationModels for NativeModels {
             .map_err(|e| e.to_string())
     }
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String> {
+        self.infer_progress(job, cancellation, None, &mut |progress| {
+            Ok(progress.rows.to_vec())
+        })
+    }
+    fn import_identity(&self) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(env!("CARGO_PKG_VERSION"));
+        hash.update(include_bytes!("model-artifacts.json"));
+        Some(format!("bounded-import-v1:{:x}", hash.finalize()))
+    }
+    fn infer_progress(
+        &self,
+        job: &Job,
+        cancellation: &CancellationToken,
+        resume: Option<&speakerdesk_core::import::ImportResume>,
+        publish: &mut dyn FnMut(
+            speakerdesk_core::import::ImportProgress<'_>,
+        ) -> Result<
+            Vec<speakerdesk_core::document::Segment>,
+            speakerdesk_core::import::ImportError,
+        >,
+    ) -> Result<Document, String> {
         let path = recording_path(&self.root, job).map_err(|e| e.to_string())?;
-        let pcm = audio::read_pcm16(path).map_err(|e| e.to_string())?;
+        let reader = audio::RecordingReader::open(path).map_err(|e| e.to_string())?;
         let alignment = self.alignment.read().expect("alignment capability").clone();
-        speakerdesk_core::import::import_recording(
+        speakerdesk_core::import::import_reader(
             &self.supervisor.models(cancellation.clone()),
-            &pcm,
+            &reader,
             &job.language,
             alignment.as_deref(),
+            resume,
+            publish,
         )
         .map_err(|e| e.to_string())
     }
@@ -608,7 +633,7 @@ async fn serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app = AppState::open(storage)?;
     if app.store().preference("default_language")?.is_none() {
-        app.store().set_preference("default_language", "en")?;
+        app.store().set_preference("default_language", "auto")?;
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -739,10 +764,12 @@ async fn serve(
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
+        .merge(crate::recovery::routes())
         .route("/", get(index))
         .route("/static/{*path}", get(asset))
         .route("/api/jobs/{jid}/audio", get(playback))
         .route("/api/preferences/language", patch(language))
+        .route("/api/preferences", patch(preferences))
         .route("/api/setup", get(setup).post(start_setup))
         .route("/api/setup/cancel", axum::routing::post(cancel_setup))
         .route(
@@ -753,9 +780,50 @@ pub(crate) fn routes() -> Router<AppState> {
 }
 
 async fn index(State(app): State<AppState>) -> Html<String> {
+    let theme = app
+        .store()
+        .preference("theme")
+        .ok()
+        .flatten()
+        .filter(|theme| matches!(theme.as_str(), "system" | "light" | "dark"))
+        .unwrap_or_else(|| "system".into());
     Html(
-        include_str!("../../../speakerdesk/templates/index.html").replace("{{token}}", app.token()),
+        include_str!("../../../speakerdesk/templates/index.html")
+            .replace("{{token}}", app.token())
+            .replace("{{theme}}", &theme),
     )
+}
+
+async fn preferences(State(app): State<AppState>, body: Bytes) -> Response {
+    let value: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"Invalid preference."})),
+            )
+                .into_response();
+        }
+    };
+    let Some(theme) = value
+        .get("theme")
+        .and_then(serde_json::Value::as_str)
+        .filter(|theme| matches!(*theme, "system" | "light" | "dark"))
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"Choose System, Light or Dark."})),
+        )
+            .into_response();
+    };
+    match app.store().set_preference("theme", theme) {
+        Ok(()) => Json(json!({"theme":theme})).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":error.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 async fn asset(RoutePath(path): RoutePath<String>) -> Response {

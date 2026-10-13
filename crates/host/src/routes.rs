@@ -40,6 +40,7 @@ use crate::admission::{Activity, Admission as UpdateAdmission};
 use crate::http::{security_headers, token_header};
 use crate::worker::JobWorker;
 
+mod import_progress;
 pub(crate) mod refinement;
 mod retry;
 pub(crate) mod separation;
@@ -76,6 +77,7 @@ const PRIVATE_FIELDS: &[&str] = &[
     "boundary_candidates",
     "rolling_inflight",
     "fast_retained_candidate",
+    "import_checkpoint",
 ];
 const EXPORT_KINDS: &[&str] = &["txt", "srt", "vtt", "json"];
 const AUDIO_EXTENSIONS: &[&str] = &[
@@ -97,6 +99,21 @@ pub trait ApplicationModels: Send + Sync {
         None
     }
     fn infer(&self, job: &Job, cancellation: &CancellationToken) -> Result<Document, String>;
+    fn import_identity(&self) -> Option<String> {
+        None
+    }
+    fn infer_progress(
+        &self,
+        job: &Job,
+        cancellation: &CancellationToken,
+        _resume: Option<&speakerdesk_core::import::ImportResume>,
+        _publish: &mut dyn FnMut(
+            speakerdesk_core::import::ImportProgress<'_>,
+        )
+            -> Result<Vec<Segment>, speakerdesk_core::import::ImportError>,
+    ) -> Result<Document, String> {
+        self.infer(job, cancellation)
+    }
     fn retry_passage(
         &self,
         _pcm: &[f32],
@@ -193,6 +210,21 @@ pub trait ApplicationModels: Send + Sync {
 /// Turns an uploaded file into a duration in seconds.
 pub trait AudioPrep: Send + Sync {
     fn prepare(&self, directory: &Path, job: &Job) -> Result<f64, String>;
+    fn prepare_cancellable(
+        &self,
+        directory: &Path,
+        job: &Job,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<f64, String> {
+        if cancelled() {
+            return Err("Audio preparation cancelled.".into());
+        }
+        let result = self.prepare(directory, job);
+        if cancelled() {
+            return Err("Audio preparation cancelled.".into());
+        }
+        result
+    }
 }
 
 /// Infer returns the setup message and does not touch a model runtime.
@@ -215,11 +247,47 @@ pub struct WavPrepare;
 
 impl AudioPrep for WavPrepare {
     fn prepare(&self, directory: &Path, job: &Job) -> Result<f64, String> {
+        self.prepare_cancellable(directory, job, &|| false)
+    }
+    fn prepare_cancellable(
+        &self,
+        directory: &Path,
+        job: &Job,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<f64, String> {
         let Some(source_name) = job.source_file.as_deref() else {
             return Err(messages::AUDIO_PREP_FAILED.to_string());
         };
         let folder = media_write_directory(directory, job);
         fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        // The operation exclusively owns preparation. A prior process may have
+        // exited between decode and atomic installation; retain source/audio.
+        for entry in fs::read_dir(&folder).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if name.starts_with(".speakerdesk-audio-")
+                && (name.ends_with(".decode") || name.ends_with(".part"))
+                && kind.is_file()
+            {
+                fs::remove_file(entry.path()).map_err(|e| e.to_string())?;
+            } else if kind.is_dir()
+                && name.strip_prefix(".speakerdesk-audio-").is_some_and(|id| {
+                    id.len() == 36
+                        && id.bytes().enumerate().all(|(index, byte)| {
+                            if matches!(index, 8 | 13 | 18 | 23) {
+                                byte == b'-'
+                            } else {
+                                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                            }
+                        })
+                })
+            {
+                // afconvert uses an equally private per-attempt directory.
+                fs::remove_dir_all(entry.path()).map_err(|e| e.to_string())?;
+            }
+        }
         let source_root = job
             .extra
             .get("legacy_media_root")
@@ -229,7 +297,7 @@ impl AudioPrep for WavPrepare {
             .join(job.id.as_str());
         let source = confined_file(&source_root, source_name).map_err(|e| e.to_string())?;
         let destination = folder.join("audio.wav");
-        match audio::normalize(&source, &destination) {
+        match audio::normalize_cancellable(&source, &destination, cancelled) {
             Ok(duration) => Ok(duration),
             Err(AudioError::Message(message)) => Err(message.to_string()),
             Err(_) => Err(messages::AUDIO_PREP_FAILED.to_string()),
@@ -310,6 +378,7 @@ impl AppState {
         }
         let mut store = SqliteJobStore::open(database)?;
         store.recover(ACTIVE)?;
+        recover_deletions(&data_dir, &mut store)?;
         separation::cleanup(&data_dir, &store)?;
         Ok(Self {
             native: Arc::new(std::sync::OnceLock::new()),
@@ -522,6 +591,12 @@ fn begin_operation(
     job: &mut Job,
     activity: Activity,
 ) -> Result<OperationGuard, ApiError> {
+    if job.extra.get("deletion_pending").and_then(Value::as_bool) == Some(true) {
+        return Err(ApiError::new(
+            409,
+            "Retry Delete to finish removing this recording.",
+        ));
+    }
     if admission.closed() {
         return Err(ApiError::new(409, messages::UPDATE_RESERVED));
     }
@@ -566,6 +641,7 @@ fn begin_operation(
         id: job.id.clone(),
         generation,
         cancellation,
+        parent: None,
     })
 }
 
@@ -700,6 +776,9 @@ async fn config(State(app): State<AppState>) -> Response {
         Json(json!({
             "languages": language_choices(),
             "default_language": default_language,
+            "theme": app.store().preference("theme").ok().flatten()
+                .filter(|theme| matches!(theme.as_str(), "system" | "light" | "dark"))
+                .unwrap_or_else(|| "system".into()),
             "readiness": readiness_json(&issues, app.automatic_language_ready(), app.alignment_ready()),
             "decoder": if cfg!(target_os = "macos") { "Symphonia and macOS AudioToolbox" } else { "Symphonia" },
         }))
@@ -751,27 +830,51 @@ async fn create_jobs(State(app): State<AppState>, request: Request) -> Response 
             _ => {}
         }
     }
-    blocking(move || match accept_uploads(&app, &language, files) {
-        Ok(created) => {
-            for job in &created {
-                let lease = match app.admission.lease(Activity::Import) {
-                    Ok(lease) => lease,
-                    Err(error) => return error_response(StatusCode::CONFLICT, error.message()),
-                };
-                let shared = Arc::clone(&app.shared);
-                let id = job.id.clone();
-                app.worker.enqueue(move || {
-                    let _lease = lease;
-                    prepare_job(&shared, &id);
-                });
+    blocking(move || {
+        let lease = match app.admission.lease(Activity::Import) {
+            Ok(lease) => Arc::new(lease),
+            Err(error) => return error_response(StatusCode::CONFLICT, error.message()),
+        };
+        match accept_uploads(&app, &language, files) {
+            Ok(created) => {
+                for job in &created {
+                    let lease = lease.clone();
+                    let shared = Arc::clone(&app.shared);
+                    let id = job.id.clone();
+                    let generation = job
+                        .extra
+                        .get("operation_generation")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let cancellation = CancellationToken::new();
+                    app.shared.operations.lock().expect("operations").insert(
+                        id.clone(),
+                        RunningOperation {
+                            generation,
+                            cancellation: cancellation.clone(),
+                            activity: Activity::Import,
+                        },
+                    );
+                    app.worker.enqueue(move || {
+                        let _lease = lease;
+                        let _operation = OperationGuard {
+                            shared: shared.clone(),
+                            id: id.clone(),
+                            generation,
+                            cancellation,
+                            parent: None,
+                        };
+                        prepare_job(&shared, &id);
+                    });
+                }
+                (
+                    StatusCode::CREATED,
+                    Json(created.iter().map(stored_job_json).collect::<Vec<_>>()),
+                )
+                    .into_response()
             }
-            (
-                StatusCode::CREATED,
-                Json(created.iter().map(stored_job_json).collect::<Vec<_>>()),
-            )
-                .into_response()
+            Err(error) => from_api(error),
         }
-        Err(error) => from_api(error),
     })
     .await
 }
@@ -846,6 +949,12 @@ async fn save_transcript(
             Err(error) => return from_api(error),
         };
         let result = app.store().update_job(&id, |job| {
+            if job.extra.get("import_resumable").and_then(Value::as_bool) == Some(true) {
+                return Err(ApiError::new(
+                    409,
+                    "Use passage corrections while import transcription is unfinished.",
+                ));
+            }
             let assignments = map_field(&job.extra, "speaker_assignments");
             let checks = map_field(&job.extra, "voice_checks");
             let outcome = edit::save_transcript(SaveInput {
@@ -1002,7 +1111,13 @@ async fn edit_passage(
         };
         let result = app.store().update_job(&id, |job| {
             let outcome = edit::edit_passage(PassageEditInput {
-                status: &job.status,
+                status: if job.kind == JobKind::Import
+                    && job.extra.get("import_resumable").and_then(Value::as_bool) == Some(true)
+                {
+                    "ready"
+                } else {
+                    &job.status
+                },
                 duration: job.duration.unwrap_or(0.0),
                 revision: job.revision,
                 document: job.document.as_ref(),
@@ -1082,8 +1197,11 @@ async fn delete_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
             Err(error) => return from_api(error),
         };
         let mut directory = app.shared.store.lock().expect("jobs");
-        let job = match load_job(&directory, &id, false) {
+        let mut job = match load_job(&directory, &id, false) {
             Ok(job) => job,
+            Err(error) if error.status == 404 => {
+                return Json(json!({"deleted":true})).into_response();
+            }
             Err(error) => return from_api(error),
         };
         if ACTIVE.contains(&job.status.as_str())
@@ -1096,19 +1214,85 @@ async fn delete_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
         {
             return error_response(StatusCode::CONFLICT, messages::DELETE_BUSY);
         }
-        if let Err(error) = directory.delete(&id) {
+        job.status = "deleting".into();
+        job.message = "Deleting recording…".into();
+        job.extra.insert("deletion_pending".into(), json!(true));
+        job.revision += 1;
+        if let Err(error) = directory.put(&job, None) {
             return store_failure(&error);
         }
         drop(directory);
-        let folder = media_write_directory(&app.shared.data_dir, &job);
-        if let Err(error) = fs::remove_dir_all(&folder)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(%error, "deleted job left native media for cleanup");
+        let removed = remove_owned_recording(&app.shared.data_dir, &job);
+        let mut directory = app.store();
+        match removed {
+            Ok(()) => match directory.delete(&id) {
+                Ok(_) => Json(json!({"deleted":true})).into_response(),
+                Err(error) => store_failure(&error),
+            },
+            Err(error) => {
+                if let Ok(Some(mut current)) = directory.get(&id, false) {
+                    current.status = "delete_failed".into();
+                    current.message =
+                        format!("Could not finish deleting recording: {error}. Retry Delete.");
+                    current.revision += 1;
+                    if let Err(error) = directory.put(&current, None) {
+                        return store_failure(&error);
+                    }
+                }
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Could not remove all recording data. Retry Delete to finish cleanup.",
+                )
+            }
         }
-        Json(json!({ "deleted": true })).into_response()
     })
     .await
+}
+
+fn remove_owned_recording(root: &Path, job: &Job) -> std::io::Result<()> {
+    crate::recovery::RecoveryStore::open(root)?.discard_job(job.id.as_str())?;
+    let folder = media_write_directory(root, job);
+    match fs::symlink_metadata(&folder) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+        Ok(metadata) if metadata.is_symlink() || !metadata.is_dir() => {
+            return Err(std::io::Error::other(
+                "Recording media is not an owned directory",
+            ));
+        }
+        Ok(_) => (),
+    }
+    match fs::remove_dir_all(folder) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn recover_deletions(root: &Path, store: &mut SqliteJobStore) -> Result<(), StoreError> {
+    for summary in store
+        .summaries()?
+        .into_iter()
+        .filter(|job| matches!(job.status.as_str(), "deleting" | "delete_failed"))
+    {
+        let Some(mut job) = store.get(&summary.id, false)? else {
+            continue;
+        };
+        if job.extra.get("deletion_pending").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        match remove_owned_recording(root, &job) {
+            Ok(()) => {
+                store.delete(&job.id)?;
+            }
+            Err(error) => {
+                job.status = "delete_failed".into();
+                job.message =
+                    format!("Could not finish deleting recording: {error}. Retry Delete.");
+                store.put(&job, None)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -> Response {
@@ -1139,7 +1323,13 @@ async fn run_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>) -
         {
             return error_response(StatusCode::CONFLICT, messages::JOB_ALREADY_RUNNING);
         }
-        if has_segments(&job) {
+        if job.extra.get("deletion_pending").and_then(Value::as_bool) == Some(true) {
+            return error_response(
+                StatusCode::CONFLICT,
+                "Retry Delete to finish removing this recording.",
+            );
+        }
+        if has_segments(&job) && !job.extra.contains_key("import_checkpoint") {
             return error_response(StatusCode::CONFLICT, messages::RERUN_WOULD_OVERWRITE);
         }
         if meeting_id(&app.shared).is_some() {
@@ -1199,7 +1389,15 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
             Ok(id) => id,
             Err(error) => return from_api(error),
         };
-        let result = app.store().update_job(&id, |job| {
+        let mut store = app.store();
+        match store.get(&id, false) {
+            Ok(Some(job)) if job.kind == JobKind::Import && job.status == "uploaded" => {
+                return Json(stored_job_json(&job)).into_response();
+            }
+            Err(error) => return store_failure(&error),
+            _ => (),
+        }
+        let result = store.update_job(&id, |job| {
             let running = app
                 .shared
                 .operations
@@ -1217,7 +1415,7 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
             });
             if !refinement
                 && (job.kind != JobKind::Import
-                    || !["queued", "processing"].contains(&job.status.as_str()))
+                    || !["preparing", "queued", "processing"].contains(&job.status.as_str()))
             {
                 return Err(ApiError::new(
                     409,
@@ -1242,7 +1440,8 @@ async fn cancel_job(State(app): State<AppState>, AxumPath(jid): AxumPath<String>
             }
             if !refinement {
                 job.status = "uploaded".into();
-                job.message = "Transcription cancelled. Saved audio is kept.".into();
+                job.message =
+                    "Processing cancelled. Uploaded audio and saved words are kept.".into();
             }
             let cancellation = running
                 .filter(|op| op.generation == generation)
@@ -1357,8 +1556,26 @@ fn prepare_job(shared: &Shared, id: &JobId) {
             _ => return,
         }
     };
+    if !matches!(job.status.as_str(), "preparing" | "queued") {
+        return;
+    }
+    let cancellation = shared
+        .operations
+        .lock()
+        .expect("operations")
+        .get(id)
+        .filter(|operation| {
+            job.extra
+                .get("operation_generation")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                == operation.generation
+        })
+        .map(|operation| operation.cancellation.clone())
+        .unwrap_or_default();
     let prepare = Arc::clone(&*shared.prepare.lock().expect("prepare"));
-    let result = prepare.prepare(&shared.data_dir, &job);
+    let result =
+        prepare.prepare_cancellable(&shared.data_dir, &job, &|| cancellation.is_cancelled());
     let _ = shared
         .store
         .lock()
@@ -1395,9 +1612,20 @@ pub(crate) struct OperationGuard {
     id: JobId,
     generation: u64,
     pub(crate) cancellation: CancellationToken,
+    // A child scope holds registration alive but never unregisters its owner.
+    parent: Option<Arc<OperationGuard>>,
 }
 
 impl OperationGuard {
+    pub(crate) fn child_scope(self: &Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            shared: self.shared.clone(),
+            id: self.id.clone(),
+            generation: self.generation,
+            cancellation: self.cancellation.child_token(),
+            parent: Some(self.clone()),
+        })
+    }
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
@@ -1465,6 +1693,9 @@ impl OperationGuard {
 
 impl Drop for OperationGuard {
     fn drop(&mut self) {
+        if self.parent.is_some() {
+            return;
+        }
         let mut operations = self.shared.operations.lock().expect("operations");
         if operations
             .get(&self.id)
@@ -1486,6 +1717,7 @@ fn execute_import(
         id: id.clone(),
         generation,
         cancellation: cancellation.clone(),
+        parent: None,
     };
     let current = shared.store.lock().expect("store").get(id, false);
     if !matches!(current, Ok(Some(ref job)) if job.status == "queued" && job.extra.get("operation_generation").and_then(Value::as_u64) == Some(generation))
@@ -1517,14 +1749,14 @@ fn execute_import(
         return;
     };
     let models = Arc::clone(&*shared.models.lock().expect("models"));
-    let inferred = models
-        .infer(&job, cancellation)
+    let inferred = import_progress::infer(shared, &operation, &job, models.as_ref())
         .and_then(|document| checked_document(document, job.duration.unwrap_or(0.0)));
     let mut store = shared.store.lock().expect("store");
     let result = store.update_job(id, |current| {
         if cancellation.is_cancelled()
             || current.status != "processing"
-            || current.revision != job.revision
+            || (current.revision != job.revision
+                && !current.extra.contains_key("import_checkpoint"))
             || current
                 .extra
                 .get("operation_generation")
@@ -1538,7 +1770,16 @@ fn execute_import(
         }
         match inferred {
             Ok(document) => {
-                current.document = Some(document);
+                if current.extra.contains_key("import_checkpoint") {
+                    if let Some(retained) = &mut current.document {
+                        retained.provenance = document.provenance;
+                        retained.warnings = document.warnings;
+                    }
+                } else {
+                    current.document = Some(document);
+                }
+                current.extra.remove("import_checkpoint");
+                current.extra.remove("import_resumable");
                 current.status = "ready".into();
                 current.message = messages::TRANSCRIPT_READY.into();
             }
@@ -1929,6 +2170,118 @@ mod tests {
     const JOB_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const JOB_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+    #[tokio::test]
+    async fn rejected_upload_admission_creates_no_stuck_jobs_or_owned_media() {
+        let state = AppState::new();
+        let setup = state.admission.lease(super::Activity::Setup).unwrap();
+        let running = Running::spawn(state.clone()).await;
+        let (content_type, body) = multipart("en", &[("clip.wav", tiny_wav().as_slice())]);
+        let rejected = running
+            .authed(running.client.post(running.url("/api/jobs")))
+            .header("content-type", content_type.clone())
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), 409);
+        assert!(state.store().summaries().unwrap().is_empty());
+        assert!(
+            !std::fs::read_dir(state.data_dir())
+                .unwrap()
+                .any(|entry| entry.unwrap().file_type().unwrap().is_dir())
+        );
+        drop(setup);
+        let accepted = running
+            .authed(running.client.post(running.url("/api/jobs")))
+            .header("content-type", content_type)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), 201);
+        state.drain();
+        assert_eq!(state.store().summaries().unwrap()[0].status, "uploaded");
+        running.shutdown().await;
+    }
+
+    #[test]
+    fn cancelling_a_worker_scope_keeps_its_recording_owner_registered() {
+        let app = AppState::new();
+        let mut job = job(JOB_A, "ready", 0.);
+        app.insert_job(job.clone());
+        let owner = Arc::new(
+            app.begin_recording_operation(&mut app.store(), &mut job)
+                .unwrap(),
+        );
+        let child = owner.child_scope();
+        child.cancellation.cancel();
+        assert!(!owner.cancellation.is_cancelled());
+        drop(child);
+        assert!(app.shared.operations.lock().unwrap().contains_key(&job.id));
+        let child = owner.child_scope();
+        drop(owner);
+        assert!(app.shared.operations.lock().unwrap().contains_key(&job.id));
+        drop(child);
+        assert!(!app.shared.operations.lock().unwrap().contains_key(&job.id));
+    }
+
+    #[tokio::test]
+    async fn deletion_failure_retains_intent_and_restart_finishes_owned_media_cleanup() {
+        let state = AppState::new();
+        let id = JobId::parse(JOB_A).unwrap();
+        state.insert_job(job(JOB_A, "ready", 1.));
+        let recovery = crate::recovery::RecoveryStore::open(state.data_dir()).unwrap();
+        let draft = json!({"schema_version":1,"job_id":JOB_A,"has_unsaved":true,
+            "document":{"segments":[{"text":"Private correction"}]}});
+        recovery.save(&"d".repeat(32), 1, &draft).unwrap();
+        let media = state.data_dir().join(JOB_A);
+        // A conflicting file is deterministic even under privileged test users.
+        std::fs::write(&media, b"not a media directory").unwrap();
+        let running = Running::spawn(state.clone()).await;
+        let response = running
+            .authed(
+                running
+                    .client
+                    .delete(running.url(&format!("/api/jobs/{JOB_A}"))),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 500);
+        let retained = state.store().get(&id, false).unwrap().unwrap();
+        assert_eq!(retained.status, "delete_failed");
+        assert_eq!(retained.extra["deletion_pending"], true);
+        assert!(media.is_file());
+        assert!(recovery.list().unwrap().is_empty());
+        assert!(recovery.save(&"e".repeat(32), 2, &draft).unwrap().is_none());
+        assert!(
+            state
+                .store()
+                .update_job(&id, |job| {
+                    job.name = "wrong".into();
+                    Ok::<_, speakerdesk_core::error::StoreError>(())
+                })
+                .is_err()
+        );
+        std::fs::remove_file(&media).unwrap();
+        std::fs::create_dir(&media).unwrap();
+        std::fs::write(media.join("audio.wav"), b"retained audio").unwrap();
+        super::recover_deletions(state.data_dir(), &mut state.store()).unwrap();
+        assert!(state.store().get(&id, false).unwrap().is_none());
+        assert!(!media.exists());
+        let response = running
+            .authed(
+                running
+                    .client
+                    .delete(running.url(&format!("/api/jobs/{JOB_A}"))),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        running.shutdown().await;
+    }
+
     struct Running {
         base: String,
         client: reqwest::Client,
@@ -2256,7 +2609,16 @@ mod tests {
         std::fs::write(folder.join("audio.wav"), &audio).unwrap();
         let mut stored = job(JOB_A, "ready", 1.0);
         stored.extra.insert("legacy_media_root".into(), json!(root));
+        let derived = root.join("derived").join(JOB_A);
+        std::fs::create_dir_all(&derived).unwrap();
+        let stale = derived.join(".speakerdesk-audio-09093390-fcfb-45d3-a834-dac0e2fefb4e");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("audio.wav"), b"interrupted conversion").unwrap();
+        let decoded = derived.join(".speakerdesk-audio-interrupted.decode");
+        std::fs::write(&decoded, b"interrupted decode").unwrap();
         super::AudioPrep::prepare(&super::WavPrepare, &root, &stored).unwrap();
+        assert!(!stale.exists());
+        assert!(!decoded.exists());
         assert!(root.join("derived").join(JOB_A).join("audio.wav").is_file());
         assert_eq!(std::fs::read(folder.join("audio.wav")).unwrap(), audio);
         state.insert_job(stored);
@@ -2395,6 +2757,20 @@ mod tests {
             assert_eq!(persisted.extra["operation_generation"], 2);
             assert_eq!(persisted.status, "uploaded");
             assert!(persisted.document.is_none());
+            let repeated = running
+                .authed(
+                    running
+                        .client
+                        .post(running.url(&format!("/api/jobs/{JOB_A}/cancel"))),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(repeated.status(), 200);
+            assert_eq!(
+                state.store().get(&id, false).unwrap().unwrap().revision,
+                persisted.revision
+            );
             assert!(
                 state.shared.operations.lock().unwrap().contains_key(&id),
                 "acknowledgement is not completion"

@@ -178,6 +178,7 @@ pub struct SpeechLedger {
     input_policy: String,
     conditioning_sha256: Option<String>,
     frames: Vec<Frame>,
+    discarded_counts: InspectionCounts,
 }
 
 pub fn speech_issues(verified: bool) -> &'static [&'static str] {
@@ -350,6 +351,12 @@ impl SpeechLedger {
             input_policy: input_policy.to_owned(),
             conditioning_sha256,
             frames: Vec::new(),
+            discarded_counts: InspectionCounts {
+                speech_samples: 0,
+                uncertain_samples: 0,
+                negative_constant_samples: 0,
+                model_negative_samples: 0,
+            },
         })
     }
 
@@ -359,6 +366,28 @@ impl SpeechLedger {
 
     pub fn frames(&self) -> &[Frame] {
         &self.frames
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_frame_capacity(&self) -> usize {
+        self.frames.capacity()
+    }
+
+    /// Release observations no decoder owns, without resetting hysteresis or
+    /// the previous PCM value. Queries behind this boundary remain unverified.
+    pub(crate) fn discard_before(&mut self, through: i64) {
+        let count = self.frames.partition_point(|frame| frame.end <= through);
+        for frame in &self.frames[..count] {
+            count_frame(&mut self.discarded_counts, frame);
+        }
+        self.frames.drain(..count);
+        self.origin = self
+            .frames
+            .first()
+            .map_or(self.end_sample, |frame| frame.start);
+        if self.frames.capacity() > self.frames.len().max(1024) * 2 {
+            self.frames.shrink_to(self.frames.len().max(1024));
+        }
     }
 
     pub fn input_policy(&self) -> &str {
@@ -486,27 +515,9 @@ impl SpeechLedger {
     }
 
     pub fn inspection_counts(&self) -> InspectionCounts {
-        let mut counts = InspectionCounts {
-            speech_samples: 0,
-            uncertain_samples: 0,
-            negative_constant_samples: 0,
-            model_negative_samples: 0,
-        };
+        let mut counts = self.discarded_counts;
         for frame in &self.frames {
-            let samples = frame.end - frame.start;
-            if frame.speaking {
-                counts.speech_samples += samples;
-            } else if frame.observation.is_none() {
-                counts.uncertain_samples += samples;
-            } else if frame
-                .observation
-                .as_ref()
-                .is_some_and(|item| item.constant_value.is_some())
-            {
-                counts.negative_constant_samples += samples;
-            } else {
-                counts.model_negative_samples += samples;
-            }
+            count_frame(&mut counts, frame);
         }
         counts
     }
@@ -536,6 +547,86 @@ impl SpeechLedger {
             }
         })
     }
+}
+
+fn count_frame(counts: &mut InspectionCounts, frame: &Frame) {
+    let samples = frame.end - frame.start;
+    if frame.speaking {
+        counts.speech_samples += samples;
+    } else if frame.observation.is_none() {
+        counts.uncertain_samples += samples;
+    } else if frame
+        .observation
+        .as_ref()
+        .is_some_and(|o| o.constant_value.is_some())
+    {
+        counts.negative_constant_samples += samples;
+    } else {
+        counts.model_negative_samples += samples;
+    }
+}
+
+/// A frozen canonical prefix keeps one aggregate, rather than all VAD frames.
+pub(crate) fn join_admissions(
+    mut prefix: Admission,
+    tail: Admission,
+) -> Result<Admission, SpeechError> {
+    if prefix.end_sample != tail.start_sample
+        || prefix.source != tail.source
+        || prefix.model_revision != tail.model_revision
+        || !prefix.complete
+        || !tail.complete
+    {
+        return Err(SpeechError::InvalidEvidence);
+    }
+    let merge = |left: &mut Vec<SampleSpan>, right: Vec<SampleSpan>| {
+        for span in right {
+            if let Some(last) = left.last_mut()
+                && last.end_sample == span.start_sample
+            {
+                last.end_sample = span.end_sample;
+            } else {
+                left.push(span);
+            }
+        }
+    };
+    prefix.end_sample = tail.end_sample;
+    prefix.observed_until_sample = prefix.observed_until_sample.max(tail.observed_until_sample);
+    prefix.maximum_probability = prefix
+        .maximum_probability
+        .zip(tail.maximum_probability)
+        .map(|(a, b)| a.max(b));
+    prefix.maximum_model_probability = prefix
+        .maximum_model_probability
+        .zip(tail.maximum_model_probability)
+        .map(|(a, b)| a.max(b));
+    if prefix.input_policy != tail.input_policy
+        || prefix.conditioning_sha256 != tail.conditioning_sha256
+    {
+        prefix.input_policy = None;
+        prefix.conditioning_sha256 = None;
+        prefix.maximum_model_probability = None;
+    }
+    merge(&mut prefix.speech_regions, tail.speech_regions);
+    merge(&mut prefix.uncertain_regions, tail.uncertain_regions);
+    merge(
+        &mut prefix.model_negative_regions,
+        tail.model_negative_regions,
+    );
+    prefix.evidence_error |= tail.evidence_error;
+    prefix.decision = if !prefix.speech_regions.is_empty() {
+        SpeechDecision::Speech
+    } else {
+        SpeechDecision::NoSpeech
+    };
+    if prefix.decision == SpeechDecision::NoSpeech && prefix.input_policy.is_some() {
+        prefix.negative_signal_state = Some(NEGATIVE_SIGNAL_STATE.into());
+        prefix.classification_scope = Some(CLASSIFICATION_SCOPE.into());
+    } else {
+        prefix.negative_signal_state = None;
+        prefix.classification_scope = None;
+    }
+    Ok(prefix)
 }
 
 fn pending_admission(start: i64, end: i64, observed_until: i64) -> Admission {

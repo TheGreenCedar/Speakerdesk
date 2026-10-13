@@ -554,6 +554,17 @@ fn owned_directory(root: &Path, directory: &Path) -> bool {
 /// Reconcile only this feature's files after recovering the durable job state.
 pub(super) fn cleanup(root: &Path, store: &SqliteJobStore) -> Result<(), StoreError> {
     for summary in store.summaries()? {
+        if ![
+            root.join(summary.id.as_str()).join("separated"),
+            root.join("derived")
+                .join(summary.id.as_str())
+                .join("separated"),
+        ]
+        .iter()
+        .any(|directory| owned_directory(root, directory))
+        {
+            continue;
+        }
         let Some(job) = store.get(&summary.id, false)? else {
             continue;
         };

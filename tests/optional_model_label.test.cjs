@@ -70,7 +70,7 @@ test('optional separation download and installed repair use the dedicated setup 
     api=async(path,options)=>{if(options){requests.push({path,options});setupFixture.separation.active=true;}return structuredClone(setupFixture)};`);
   await f.run('refreshSetup()');
   let action=f.document.getElementById('model-list').querySelector('button');assert.match(action.textContent,/Download separation/);assert.equal(action.disabled,false);
-  assert.match(f.document.getElementById('model-list').textContent,/Once enabled, automatically separates saved passages where two voices overlap/);
+  assert.match(f.document.getElementById('model-list').textContent,/Separates saved passages where two voices overlap/);
   assert.equal(f.run('requests.length'),0);
   action.click();await Promise.all(action.lastEventResults);assert.equal(f.run('requests[0].path'),'/api/setup/separation');assert.equal(f.run('requests[0].options.method'),'POST');
   assert.equal(f.run('languageReady("en")'),true);assert.equal(f.document.getElementById('model-list').querySelector('button').disabled,true);

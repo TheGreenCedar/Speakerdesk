@@ -14,10 +14,19 @@ use tauri_plugin_shell::{
 mod exports;
 #[cfg(target_os = "macos")]
 mod menus;
+mod recovery;
 mod update_control;
 mod update_location;
 mod updates;
 use exports::{ExportDownloads, ExportJob, Finished};
+fn runtime_is_current(app: &tauri::AppHandle, generation: u64) -> bool {
+    app.state::<RuntimeChild>()
+        .0
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .generation
+        == generation
+}
 
 fn export_nonce(url: &tauri::Url, port: u16) -> Option<String> {
     if port == 0
@@ -294,6 +303,11 @@ fn start_runtime(app: &tauri::AppHandle) -> Result<(), String> {
                         handle.exit(if payload.code == Some(0) { 0 } else { 1 });
                         continue;
                     }
+                    if opened && runtime_is_current(&handle, generation) {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.eval("window.speakerdeskHostUnavailable?.('The local processing service stopped. Your saved recordings are retained.');");
+                        }
+                    }
                     updates.event(updates::Event::Terminated(
                         generation,
                         payload.code == Some(0) && payload.signal.is_none(),
@@ -302,11 +316,23 @@ fn start_runtime(app: &tauri::AppHandle) -> Result<(), String> {
                         handle.dialog().message("Speakerdesk could not start its local processing service. Close the app and try again.").title("Unable to start").show(|_| {});
                     }
                 }
-                CommandEvent::Error(_) => updates.event(updates::Event::TransportLost(generation)),
+                CommandEvent::Error(_) => {
+                    if opened && runtime_is_current(&handle, generation) {
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.eval("window.speakerdeskHostUnavailable?.('The local processing service connection was lost.');");
+                        }
+                    }
+                    updates.event(updates::Event::TransportLost(generation));
+                }
                 _ => {}
             }
         }
         if !terminated {
+            if opened && runtime_is_current(&handle, generation) {
+                if let Some(window) = handle.get_webview_window("main") {
+                    let _ = window.eval("window.speakerdeskHostUnavailable?.('The local processing service connection was lost.');");
+                }
+            }
             updates.event(updates::Event::TransportLost(generation));
         }
     });
@@ -374,11 +400,12 @@ fn main() {
             let storage=std::env::var_os("SPEAKERDESK_HOME").map(std::path::PathBuf::from).unwrap_or(app.path().app_data_dir()?);
             let models=std::env::var_os("SPEAKERDESK_NATIVE_MODELS").map(PathBuf::from);
             std::fs::create_dir_all(&storage)?;
+            app.manage(recovery::Recovery::open(&storage)?);
             app.state::<ExportDownloads>().protect_storage(&storage)?;
             let port = Arc::new(AtomicU16::new(0));
             let navigation_port = port.clone();
             let download_port = port.clone();
-            WebviewWindowBuilder::new(app,"main",WebviewUrl::App("index.html".into()))
+            let window=WebviewWindowBuilder::new(app,"main",WebviewUrl::App("index.html".into()))
                 .title("Speakerdesk").inner_size(1280.0,800.0).min_inner_size(1000.0,680.0)
                 .initialization_script(if cfg!(target_os = "macos") {
                     "window.speakerdeskNativeExport = true; window.speakerdeskNativeUpdater = true; window.speakerdeskNativeMenu = true;"
@@ -412,11 +439,18 @@ fn main() {
                     }
                     true
                 }).build()?;
+            let close_handle=app.handle().clone();window.on_window_event(move|event|{
+                if let tauri::WindowEvent::CloseRequested{api,..}=event {
+                    if close_handle.state::<updates::Updates>().protects_exit() || close_handle.state::<updates::Updates>().replacing_bundle(){api.prevent_close();close_handle.exit(0);}
+                    else if !close_handle.state::<recovery::Recovery>().approved(){api.prevent_close();recovery::close(&close_handle);}
+                }
+            });
             let capture_helper=app.path().resource_dir()?.join("speakerdesk-capture");
             let executable = std::env::current_exe()?;
             app.manage(RuntimeSettings::new(storage, models, capture_helper, executable, port));
             app.manage(updates::Updates::start(app.handle().clone()));
             start_runtime(app.handle()).map_err(std::io::Error::other)?;
+            recovery::start(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!()).expect("Speakerdesk startup failed");
@@ -429,6 +463,7 @@ fn main() {
                 app.dialog().message("Speakerdesk is waiting for its local service to stop safely before updating. Keep the app open; no recording work will be killed by the updater.").title("Update in progress").show(|_| {});
                 return;
             }
+            if !app.state::<recovery::Recovery>().approved(){api.prevent_exit();recovery::close(app);return;}
             app.state::<ExportDownloads>().shutdown();
             {
                 let runtime = app.state::<RuntimeChild>();
@@ -486,6 +521,7 @@ mod runtime_tests {
                 serde_json::to_vec(&serde_json::json!({
                     "helper_sha256":"1bb259b6f174a8e110b54a5713d09965effe3ce5de48f1747e5925e493d9025b",
                     "export_contract":"apple_processed_mono16k_v1",
+                    "progress_contract":"audio_queue_fence_v1",
                     "capability_version":"apple_input_node_output_route_v1"
                 })).unwrap()).unwrap();
             Self(path)

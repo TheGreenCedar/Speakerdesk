@@ -28,6 +28,7 @@ const PRIVATE_FIELDS: &[&str] = &[
     "boundary_candidates",
     "rolling_inflight",
     "fast_retained_candidate",
+    "import_checkpoint",
 ];
 
 const JOB_COLUMNS: &str = "\
@@ -37,8 +38,8 @@ checkpoint_duration, revision, created, updated, document, meeting, private";
 const INSERT_JOB: &str = "\
 INSERT OR REPLACE INTO jobs (
   id, kind, name, status, message, language, source_file, duration,
-  checkpoint_duration, revision, created, updated, document, meeting, private
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)";
+  checkpoint_duration, revision, created, updated, document, meeting, private, has_refinable_passages
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)";
 
 pub struct SqliteJobStore {
     connection: Connection,
@@ -113,6 +114,12 @@ impl SqliteJobStore {
         };
         let checkpoint = stored.checkpoint;
         let mut job = for_view(stored, false);
+        if job.extra.get("deletion_pending").and_then(Value::as_bool) == Some(true) {
+            return Err(StoreError::message(
+                "This recording is being deleted. Retry Delete to finish cleanup.",
+            )
+            .into());
+        }
         let revision = job.revision;
         let result = update(&mut job)?;
         job.revision = revision
@@ -327,6 +334,32 @@ impl JobStore for SqliteJobStore {
     }
 
     fn get(&self, id: &JobId, metadata: bool) -> Result<Option<Job>, StoreError> {
+        if metadata {
+            let columns = JOB_COLUMNS.replace(
+                "document, meeting, private",
+                "NULL AS document, meeting, NULL AS private, has_refinable_passages",
+            );
+            return self
+                .connection
+                .query_row(
+                    &format!("SELECT {columns} FROM jobs WHERE id=?1"),
+                    [id.as_str()],
+                    |row| {
+                        let mut stored = stored_from_row(row)?;
+                        if stored.job.status == "ready"
+                            && row.get::<_, bool>("has_refinable_passages")?
+                        {
+                            stored
+                                .job
+                                .extra
+                                .insert("saved_refinement_available".into(), Value::Bool(true));
+                        }
+                        Ok(for_view(stored, true))
+                    },
+                )
+                .optional()
+                .map_err(StoreError::from);
+        }
         let Some(stored) = fetch_job(&self.connection, id.as_str())? else {
             return Ok(None);
         };
@@ -413,8 +446,24 @@ impl JobStore for SqliteJobStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let jobs = fetch_all(&transaction)?;
-        for stored in jobs {
+        let statuses =
+            serde_json::to_string(active).map_err(|e| StoreError::message(e.to_string()))?;
+        let ids = {
+            let mut statement = transaction.prepare("SELECT id FROM jobs WHERE checkpoint_duration IS NOT NULL
+                OR status IN (SELECT value FROM json_each(?1))
+                OR json_type(meeting, '$.passage_separation') IS NOT NULL
+                OR COALESCE(json_type(meeting, '$.passage_retry'), 'null') != 'null'
+                OR (json_extract(meeting, '$.refinement_status') IN ('waiting','refining') AND json_extract(meeting, '$.rolling_refinement') IS NOT NULL)
+                OR EXISTS (SELECT 1 FROM json_each(meeting, '$.voice_checks') WHERE json_extract(value, '$.status')='checking')")?;
+            statement
+                .query_map([statuses], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let jobs = ids
+            .iter()
+            .map(|id| fetch_job(&transaction, id))
+            .collect::<Result<Vec<_>, _>>()?;
+        for stored in jobs.into_iter().flatten() {
             if let Some(job) = recover_one(stored, active) {
                 insert_job(&transaction, &job, None)?;
             }
@@ -449,6 +498,9 @@ pub(crate) fn insert_job(
             document,
             meeting,
             private,
+            job.document
+                .as_ref()
+                .is_some_and(|doc| doc.segments.iter().any(crate::import::refinable_segment)),
         ],
     )?;
     Ok(())
@@ -484,16 +536,6 @@ fn fetch_job(connection: &Connection, id: &str) -> Result<Option<StoredJob>, Sto
         return Ok(None);
     };
     Ok(Some(stored_from_row(row)?))
-}
-
-fn fetch_all(connection: &Connection) -> Result<Vec<StoredJob>, StoreError> {
-    let mut statement = connection.prepare(&format!("SELECT {JOB_COLUMNS} FROM jobs"))?;
-    let mut rows = statement.query([])?;
-    let mut jobs = Vec::new();
-    while let Some(row) = rows.next()? {
-        jobs.push(stored_from_row(row)?);
-    }
-    Ok(jobs)
 }
 
 fn stored_from_row(row: &rusqlite::Row<'_>) -> Result<StoredJob, rusqlite::Error> {
@@ -617,6 +659,11 @@ fn recover_one(stored: StoredJob, active: &[&str]) -> Option<Job> {
             JobKind::Import => messages::IMPORT_INTERRUPTED.to_string(),
         };
         job.updated = unix_time();
+        if let Some(pause) = job.extra.get_mut("pause_flush") {
+            if pause["status"] == "pending" {
+                pause["status"] = Value::String("unavailable".into());
+            }
+        }
         changed = true;
     }
     if pause_rolling_refinement(&mut job.extra) {
@@ -794,6 +841,90 @@ mod tests {
         let mut store = SqliteJobStore::open_in_memory().unwrap();
         store.initialize().unwrap();
         store
+    }
+
+    #[test]
+    fn metadata_and_idle_recovery_do_not_parse_transcript_or_private_payload() {
+        let mut store = open();
+        let saved = job(IMPORT_ID, JobKind::Import, "ready", 1.);
+        store.put(&saved, None).unwrap();
+        store.connection.execute("UPDATE jobs SET document = 'invalid transcript JSON', private = 'invalid private JSON' WHERE id = ?1", [IMPORT_ID]).unwrap();
+        assert!(
+            store
+                .get(&saved.id, true)
+                .unwrap()
+                .unwrap()
+                .document
+                .is_none()
+        );
+        assert!(store.get(&saved.id, false).is_err());
+        // Recovery selects status/meeting ownership, never a finished transcript.
+        store.recover(&["processing"]).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE jobs SET status = 'processing' WHERE id = ?1",
+                [IMPORT_ID],
+            )
+            .unwrap();
+        assert!(store.recover(&["processing"]).is_err());
+    }
+
+    #[test]
+    #[ignore = "Local metadata cost measurement; prints timings without a machine-specific threshold"]
+    fn measure_metadata_projection_on_a_long_transcript() {
+        let mut store = open();
+        let mut saved = job(IMPORT_ID, JobKind::Import, "ready", 1.);
+        saved.document.as_mut().unwrap().segments = (0..4000).map(|index| serde_json::from_value(serde_json::json!({
+            "id":format!("row-{index}"),"start":index as f64,"end":index as f64+1.,"speaker":"speaker_0",
+            "text":"A retained transcript passage with direct acoustic observations.",
+            "canonical_utterance_id":format!("row-{index}"),"canonical_state":"sealed",
+            "language_detection":{"mode":"auto","reason":"detected","language":"en","probability":0.99,"margin":0.98}
+        })).unwrap()).collect();
+        saved.duration = Some(4000.);
+        store.put(&saved, None).unwrap();
+        let bytes = serde_json::to_vec(saved.document.as_ref().unwrap())
+            .unwrap()
+            .len();
+        let full = std::time::Instant::now();
+        for _ in 0..100 {
+            std::hint::black_box(store.get(&saved.id, false).unwrap());
+        }
+        let full = full.elapsed();
+        let metadata = std::time::Instant::now();
+        for _ in 0..100 {
+            let job = store.get(&saved.id, true).unwrap().unwrap();
+            assert!(job.document.is_none());
+            std::hint::black_box(job);
+        }
+        eprintln!(
+            "4000 passages / {bytes} transcript bytes / 100 reads: full document {:?}; metadata {:?}",
+            full,
+            metadata.elapsed()
+        );
+    }
+
+    #[test]
+    fn deletion_intent_prevents_edits_and_pending_pause_cannot_survive_restart() {
+        let mut store = open();
+        let mut saved = job(MEETING_ID, JobKind::Meeting, "paused", 1.);
+        saved.extra.insert(
+            "pause_flush".into(),
+            json!({"status":"pending","request_id":"pause-1","through_sample":16000}),
+        );
+        store.put(&saved, None).unwrap();
+        store.recover(&["paused"]).unwrap();
+        let mut saved = store.get(&saved.id, false).unwrap().unwrap();
+        assert_eq!(saved.extra["pause_flush"]["status"], "unavailable");
+        saved.extra.insert("deletion_pending".into(), json!(true));
+        store.put(&saved, None).unwrap();
+        assert!(
+            store
+                .update_job(&saved.id, |_| -> Result<(), crate::error::StoreError> {
+                    panic!("deletion must reject before edit callback")
+                })
+                .is_err()
+        );
     }
 
     #[test]

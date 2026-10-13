@@ -6,10 +6,50 @@ import ScreenCaptureKit
 import CoreMedia
 import CoreGraphics
 
+// Pure admission state; neither the audio tap nor a delayed timer can grow a queue unboundedly.
+final class CaptureFlowControl {
+    struct Fence { let epoch: UInt64; let time: Double }
+    private let lock = NSLock()
+    private let byteLimit: Int
+    private var copiedBytes = 0
+    private var epoch: UInt64 = 0
+    private var pending = false
+    private var fencesEnabled = false
+    private var sequence: UInt64 = 0
+    init(byteLimit: Int = 8 * 1024 * 1024) { self.byteLimit = byteLimit }
+    func reserveCopy(_ bytes: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard bytes > 0, bytes <= byteLimit - copiedBytes else { return false }
+        copiedBytes += bytes; return true
+    }
+    func releaseCopy(_ bytes: Int) {
+        lock.lock(); defer { lock.unlock() }; copiedBytes -= bytes
+        precondition(copiedBytes >= 0)
+    }
+    func requestFence(at time: Double) -> Fence? {
+        lock.lock(); defer { lock.unlock() }
+        guard fencesEnabled && !pending else { return nil }; pending = true
+        return Fence(epoch: epoch, time: time)
+    }
+    func completeFence(_ fence: Fence) -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        guard fence.epoch == epoch else { return nil }
+        pending = false; sequence += 1; return sequence
+    }
+    func invalidateFences() {
+        lock.lock(); defer { lock.unlock() }; epoch += 1; pending = false; fencesEnabled = false
+    }
+    func enableFences() {
+        lock.lock(); defer { lock.unlock() }; epoch += 1; pending = false; fencesEnabled = true
+    }
+}
+
 final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let output = DispatchQueue(label: "speakerdesk.capture.output")
     private let audioQueue = DispatchQueue(label: "speakerdesk.capture.audio")
     private let stateLock = NSLock()
+    private let flow = CaptureFlowControl()
+    private let outputSlots = DispatchSemaphore(value: 32)
     private let stopOwner = AppleCaptureStopOwner()
     private var engine = AVAudioEngine()
     private var stream: SCStream?
@@ -41,8 +81,11 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         sampleRate: 16000, channels: 2, interleaved: true)!
 
     func emit(_ value: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: value) else { return }
+        // This never runs on the real-time microphone tap. Backpressure keeps output bounded.
+        outputSlots.wait()
         output.async {
-            guard let data = try? JSONSerialization.data(withJSONObject: value) else { return }
+            defer { self.outputSlots.signal() }
             FileHandle.standardOutput.write(data + Data([10]))
         }
     }
@@ -54,12 +97,23 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         var packet:[String:Any] = ["type":"error","error":value.localizedDescription,
               "domain":value.domain,"code":value.code,"startup_phase":phase,
               "pending_system_chunks":pendingSystemChunks.count]
-        for key in ["failed_checks","capture_observation"] {
+        for key in ["failed_checks","capture_observation","unaccepted_callback_frames"] {
             if let observation=value.userInfo[key] {packet[key]=observation}
         }
         emit(packet)
     }
     private func hostSeconds() -> Double { AVAudioTime.seconds(forHostTime: mach_absolute_time()) }
+    private func enqueueProgressFence() {
+        guard stateLock.withLock({active && (processingJobID == nil || processingAnnounced)}) else {return}
+        // Capture time at ingress, then fence all earlier queued conversions.
+        guard let fence=flow.requestFence(at:elapsed()) else {return}
+        audioQueue.async { [self] in
+            guard let sequence=flow.completeFence(fence),
+                  stateLock.withLock({active && !paused && !failed}) else {return}
+            emit(["type":"clock","time":fence.time,"paused":false,
+                  "producer_fence":"audio_queue_fence_v1","sequence":sequence])
+        }
+    }
     private func elapsed() -> Double {
         stateLock.withLock { max(0, (paused ? pausedAt : hostSeconds()) - startHost - pausedSeconds) }
     }
@@ -93,7 +147,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // The serial audio queue owns both converters; state snapshots use a lock.
         let timing = stateLock.withLock { (active, paused, captureGeneration, captureHostFloor, resumeBoundary) }
         guard timing.0 && timing.2 == generation && AppleMicrophoneResumeBoundary.accepts(timestamp,after:timing.3) &&
-            (!timing.1 || (source == "microphone" && timing.4 != nil)) && !stateLock.withLock({failed}) else { return }
+            (!timing.1 || (source == "microphone" && timing.4 != nil)) else { return }
         let targetFormat = source == "system" ? systemFormat : pcmFormat
         do {
             var retained = input
@@ -145,8 +199,16 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             if failed { return false };failed=true;return true
         }
         guard first else{return}
-        emitError(error)
-        Task.detached {await self.stop(emitStopped:false);self.drainOutput();exit(1)}
+        Task.detached {await self.stop(emitStopped:false);self.emitError(error);self.drainOutput();exit(1)}
+    }
+    private func failCopiedInput(_ error: Error) {
+        let first=stateLock.withLock { () -> Bool in
+            if failed {return false}; failed=true; return true
+        }
+        guard first else {return}
+        audioQueue.async {
+            Task.detached {await self.stop(emitStopped:false);self.emitError(error);self.drainOutput();exit(1)}
+        }
     }
     private func emitConverted(_ chunks: [ConvertedAudioChunk], source: String) throws {
         if source == "system", processingJobID != nil, !processingAnnounced {
@@ -182,6 +244,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             userInfo:[NSLocalizedDescriptionKey:"A meeting is already recording."]) }
         await stopOwner.reset()
         resetCaptureEpoch()
+        flow.invalidateFences()
         guard microphone || system else { throw NSError(domain:"MeetingCapture",code:2,
             userInfo:[NSLocalizedDescriptionKey:"Select a microphone or Mac audio."]) }
         if microphone {
@@ -237,15 +300,29 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 let generation=stateLock.withLock {captureGeneration}
                 node.installTap(onBus:0, bufferSize:2048, format:processingJobID == nil ? format : nil) { [weak self] buffer, time in
                     guard let self else { return }
+                    guard self.stateLock.withLock({ self.active && !self.failed }) else { return }
+                    let copiedBytes = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList).reduce(0) { $0 + Int($1.mDataByteSize) }
+                    guard self.flow.reserveCopy(copiedBytes) else {
+                        self.failCopiedInput(NSError(domain:"CaptureBackpressure",code:1,
+                            userInfo:[NSLocalizedDescriptionKey:"Microphone callbacks exceeded the bounded capture queue. Recording coverage is incomplete; accepted queued audio is retained.","unaccepted_callback_frames":Int(buffer.frameLength)]))
+                        return
+                    }
                     // The tap owns the buffer only for this callback; copy before asynchronous conversion.
-                    guard let copy = AVAudioPCMBuffer(pcmFormat:buffer.format, frameCapacity:buffer.frameLength) else { return }
+                    guard let copy = AVAudioPCMBuffer(pcmFormat:buffer.format, frameCapacity:buffer.frameLength) else {
+                        self.flow.releaseCopy(copiedBytes)
+                        self.failCopiedInput(NSError(domain:"CaptureBackpressure",code:2,userInfo:[NSLocalizedDescriptionKey:"Microphone callback could not be copied. Recording coverage is incomplete.","unaccepted_callback_frames":Int(buffer.frameLength)]))
+                        return
+                    }
                     copy.frameLength = buffer.frameLength
                     let src = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
                     let dst = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
                     for i in 0..<src.count { memcpy(dst[i].mData!, src[i].mData!, Int(src[i].mDataByteSize)) }
                     let observation=self.processingJobID == nil ? nil : observeAppleCapture(self.engine)
                     let timestamp = time.isHostTimeValid ? AVAudioTime.seconds(forHostTime:time.hostTime) : self.hostSeconds()
-                    self.audioQueue.async { self.packet(copy,source:"microphone",timestamp:timestamp,generation:generation,observation:observation) }
+                    self.audioQueue.async {
+                        defer { self.flow.releaseCopy(copiedBytes) }
+                        self.packet(copy,source:"microphone",timestamp:timestamp,generation:generation,observation:observation)
+                    }
                 }
                 engine.prepare()
                 // Slow graph negotiation is not captured audio. Keep the shared
@@ -268,13 +345,13 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
             if audioSuspended {audioQueue.resume();audioSuspended=false}
+            flow.enableFences()
             // Once the first microphone receipt is accepted, drain its PCM on
             // the existing sample clock while Mac audio startup is pending.
-            let ticker = DispatchSource.makeTimerSource(queue:output)
+            let ticker = DispatchSource.makeTimerSource(queue:DispatchQueue.global(qos:.utility))
             ticker.schedule(deadline:.now(), repeating:.milliseconds(250))
             ticker.setEventHandler { [weak self] in
-                guard let self, self.stateLock.withLock({ self.active && (self.processingJobID == nil || self.processingAnnounced) }) else { return }
-                self.emit(["type":"clock","time":self.elapsed(),"paused":self.stateLock.withLock({ self.paused })])
+                self?.enqueueProgressFence()
             }
             timer = ticker; ticker.resume()
             if processingJobID != nil {
@@ -310,6 +387,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func pause() async throws {
         let timing = stateLock.withLock { (active, paused, startHost, pausedSeconds) }
         guard timing.0 && !timing.1 else { return }
+        flow.invalidateFences()
         if let stream { try await stream.stopCapture() }
         if micEnabled { engine.pause() }
         // Drain copied audio before changing timeline state.
@@ -319,6 +397,8 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     func resume() async throws {
         guard stateLock.withLock({ active && paused }) else { return }
+        flow.invalidateFences()
+        flow.enableFences()
         if processingJobID != nil {
             var audioSuspended=false
             do {
@@ -365,6 +445,7 @@ final class MeetingCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         await stopOwner.run { [self] in
             guard stateLock.withLock({ active }) else { return }
             timer?.cancel(); timer = nil
+            flow.invalidateFences()
             if let stream { try? await stream.stopCapture() }
             if micEnabled { engine.stop(); engine.inputNode.removeTap(onBus:0) }
             finishConversion()
@@ -414,7 +495,8 @@ struct CaptureMain {
                 "bundle_identifier":Bundle.main.bundleIdentifier ?? "",
                 "microphone_usage":info["NSMicrophoneUsageDescription"] as? String ?? "",
                 "system_audio_usage":info["NSScreenCaptureUsageDescription"] as? String ?? "",
-                "capability_version":appleCaptureCapability,"export_contract":appleCaptureExport]
+                "capability_version":appleCaptureCapability,"export_contract":appleCaptureExport,
+                "progress_contract":"audio_queue_fence_v1"]
             let data = try! JSONSerialization.data(withJSONObject:value)
             FileHandle.standardOutput.write(data + Data([10]))
             exit(0)

@@ -12,7 +12,10 @@ if (info.get('capture_started') is not False
         or info.get('capability_version') != 'apple_input_node_output_route_v1'
         or info.get('export_contract') != 'apple_processed_mono16k_v1'):
     raise ValueError('Helper does not implement the reviewed Apple route contract.')
+if info.get('progress_contract') != 'audio_queue_fence_v1':
+    raise ValueError('Helper does not implement producer-qualified progress.')
 entry={'helper_sha256':hashlib.sha256(helper.read_bytes()).hexdigest(),
-       'export_contract':info['export_contract'],'capability_version':info['capability_version']}
+       'export_contract':info['export_contract'],'capability_version':info['capability_version'],
+       'progress_contract':info['progress_contract']}
 path=Path(str(helper)+'.capability.json')
 path.write_text(json.dumps(entry,sort_keys=True)+'\n')

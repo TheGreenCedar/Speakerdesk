@@ -17,6 +17,9 @@ async function main(){
     document:{schema_version:1,speakers:{s0:'Speaker 1'},segments:Array.from({length:6},(_,i)=>({id:`r${i}`,start:i*10,end:(i+1)*10,speaker:'s0',text:`Synthetic words from epoch ${Math.floor(i/2)}, passage ${i}.`,language_epoch:Math.floor(i/2),machine_revision:1,refinement_state:i%2?'provisional':'refined'}))}};
   job.document.segments.push({...job.document.segments[3],text:'Older duplicate',machine_revision:0});
   job.document.segments.reverse();
+  let recoveryReceipt={schema_version:1,snapshot:{schema_version:1,job_id:jid,name:'Recovery fixture',revision:1,has_unsaved:true,document:{segments:[{start:0,speaker:'Speaker 1',text:'Exact recovered human words.'}]},passage_drafts:[],recoverable_drafts:[],timing_drafts:[]}};
+  const recoveryId='a'.repeat(32)+'-'+jid;
+  const mutations=[];
   // Silent audio keeps the real player usable without touching a recording.
   const pcm=Buffer.alloc(44+60*16000*2);pcm.write('RIFF',0);pcm.writeUInt32LE(pcm.length-8,4);pcm.write('WAVEfmt ',8);pcm.writeUInt32LE(16,16);pcm.writeUInt16LE(1,20);pcm.writeUInt16LE(1,22);pcm.writeUInt32LE(16000,24);pcm.writeUInt32LE(32000,28);pcm.writeUInt16LE(2,32);pcm.writeUInt16LE(16,34);pcm.write('data',36);pcm.writeUInt32LE(pcm.length-44,40);
   let holdNext=false,held=null;
@@ -43,6 +46,15 @@ async function main(){
       }
       if(url.pathname==='/api/meeting'){send({status:'idle',duration:0,levels:{microphone:0,system:0},sources:[]});return;}
       if(url.pathname==='/api/people'){send({people:[],voice_available:false});return;}
+      if(url.pathname==='/api/recovery'){send({receipts:recoveryReceipt?[{id:recoveryId,name:'Recovery fixture',job_id:jid,revision:1}]:[]});return;}
+      if(url.pathname===`/api/recovery/${recoveryId}`){if(req.method==='DELETE'){recoveryReceipt=null;send({discarded:true});}else send(recoveryReceipt);return;}
+      if(url.pathname===`/api/jobs/${jid}/cancel`){job.status='uploaded';job.inference_owned=true;job.revision++;send(job);return;}
+      if(url.pathname===`/api/jobs/${jid}/run`){job.status='processing';job.inference_owned=true;job.revision++;send(job);return;}
+      if(url.pathname===`/api/jobs/${jid}/segments/r0` && req.method==='PATCH'){
+        let body='';for await(const part of req)body+=part;const request=JSON.parse(body),row=job.document.segments.find(row=>row.id==='r0');mutations.push(request);
+        if(request.segment_revision!==row.machine_revision){res.statusCode=409;send({error:'This passage changed'});return;}
+        Object.assign(row,request.changes);row.machine_revision++;row.refinement_state='edited';job.revision++;send({segment:row,revision:job.revision});return;
+      }
       if(url.pathname.endsWith('/identity-suggestions')){send({suggestions:[]});return;}
       if(url.pathname.endsWith('/audio')){res.setHeader('Content-Type','audio/wav');res.end(pcm);return;}
       if(url.pathname==='/api/setup'){send({models:[],status:'ready',ready:true,core_ready:true,supported:true,total_bytes:0,downloaded_bytes:0,voice:{available:false,enabled:false,status:'ready',message:'Synthetic fixture'}});return;}
@@ -67,7 +79,7 @@ async function main(){
     await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});
     await send('Page.navigate',{url:`${base}/?meeting=${jid}`});await wait('typeof selected!=="undefined" && selected?.id && !polling && !meetingPoll');
     const checks=[],measurements=[],source={sha256:{}};
-    for(const file of ['speakerdesk/static/app.js','speakerdesk/static/live_editor.js','speakerdesk/static/style.css'])source.sha256[file]=createHash('sha256').update(await readFile(join(root,file))).digest('hex');
+    for(const file of ['speakerdesk/static/app.js','speakerdesk/static/live_editor.js','speakerdesk/static/style.css','speakerdesk/static/recovery.js','speakerdesk/static/theme.js','speakerdesk/templates/index.html'])source.sha256[file]=createHash('sha256').update(await readFile(join(root,file))).digest('hex');
     if(mode==='--unknown-speakers') {
       const snapshots=require('./support/unknown_speaker_jobs.json'),partition=structuredClone(job);
       for(const status of ['ready','recording'])for(const [name,snapshot] of Object.entries(snapshots)) {
@@ -137,11 +149,46 @@ async function main(){
     await screenshot('partition-final-stop.png');
     checks.push('Live follow reaches latest pending tail; final Stop keeps unfinished words readable without a manual review region.');
     await evaluate("(async()=>{await api('/fixture/hold',{method:'POST'});window.oldPoll=poll();})()");await wait("api('/fixture/state').then(s=>s.held)");
-    job.refinement_status='complete';job.document.segments.forEach(s=>s.refinement_state='refined');job.revision++;
+    job.refinement_status='complete';job.document.segments.forEach(s=>s.refinement_state='refined');job.document.segments.sort((a,b)=>a.start-b.start || a.end-b.end || a.id.localeCompare(b.id));job.revision++;
     await evaluate("(async()=>{const next=await api('/api/jobs/'+selected.id);selected=next;doc=structuredClone(next.document);renderSegments();await api('/fixture/release',{method:'POST'});await oldPoll;})()");
     assert.equal(await evaluate('selected.revision'),job.revision);assert.equal(await evaluate("document.querySelectorAll('.live-provisional,.live-section-label').length"),0);
     assert.equal(await evaluate("document.querySelector('[data-segment-id=r5] textarea').value"),'Latest pending tail after Stop');
     checks.push('Held older HTTP poll cannot undo a newer fully processed document; completion preserves the same reading column.');
+    const canonicalBeforeRecovery=await evaluate('JSON.stringify(doc)');
+    await evaluate("loadRecoveryCopies();$('recovery-copies').open=true");
+    await wait("$('recovery-list').querySelector('button')");
+    await evaluate("$('recovery-list').querySelector('button').click()");
+    await wait("$('recovery-text').value.includes('Exact recovered human words.')");
+    assert.equal(await evaluate('JSON.stringify(doc)'),canonicalBeforeRecovery);
+    assert.equal(await evaluate("$('recovery-text').readOnly && document.activeElement===$('recovery-text')"),true);
+    await screenshot('recovery-review.png');
+    await evaluate("$('recovery-copies').open=false;$('recovery-text').blur()");
+    checks.push('Persisted recovery words are selectable/read-only and review leaves canonical transcript unchanged.');
+    job.kind='import';job.status='processing';job.import_resumable=true;job.inference_owned=true;job.import_progress={completed:2,total:6};job.refinement_status='complete';job.revision++;
+    await evaluate('poll()');
+    assert.equal(await evaluate("$('editor').inert"),false);assert.equal(await evaluate("$('add').hidden && $('import').disabled"),true);
+    await evaluate("(()=>{const row=$('segments').querySelector('[data-segment-id=r0]'),text=row.querySelector('textarea');text.focus();text.value='Protected partial import correction';text.dispatchEvent(new Event('input',{bubbles:true}));row.querySelector('.save-passage').click();})()");
+    await wait("!hasPassageDrafts() && !hasPendingPassageSaves() && doc.segments.find(row=>row.id==='r0').text==='Protected partial import correction'");
+    assert.equal(mutations.at(-1).changes.text,'Protected partial import correction');
+    await evaluate("$('cancel-job').click()");await wait("selected.status==='uploaded' && !polling");
+    assert.equal(await evaluate("$('cancel-job').disabled && !$('cancel-job').hidden && $('run').disabled"),true);
+    job.inference_owned=false;job.revision++;await evaluate('poll()');
+    assert.equal(await evaluate("!$('run').hidden && !$('run').disabled && $('run').textContent==='Resume transcription'"),true);
+    await screenshot('progressive-import-resume.png');
+    await evaluate("$('run').click()");await wait("selected.status==='processing' && startingJob===null");
+    assert.equal(await evaluate("doc.segments.find(row=>row.id==='r0').text"),'Protected partial import correction');
+    job.status='ready';job.inference_owned=false;job.import_resumable=false;job.import_progress={completed:6,total:6};job.document.segments.sort((a,b)=>a.start-b.start || a.end-b.end || a.id.localeCompare(b.id));job.revision++;await evaluate('poll()');
+    assert.equal(await evaluate("$('run').hidden"),true);
+    assert.equal(await evaluate("$('recording-dot').hasAttribute('hidden')"),true,'Lucide SVG recording dot must disappear after capture');
+    assert.deepEqual(await evaluate("Array.from($('segments').children).map(row=>Number(row.querySelector('.seek').title.match(/(\\d+):(\\d+)/)[2]))"),[0,20,30,40,50]);
+    checks.push('Progressive processing uses passage revision PATCH, retains corrected prefix through Cancel/ownership drain/Resume, then returns to saved controls.');
+    await evaluate("(()=>{const text=$('segments').querySelector('[data-segment-id=r0] textarea');text.value='Unsaved words before host failure';text.dispatchEvent(new Event('input',{bubbles:true}));window.speakerdeskHostUnavailable('Synthetic host failure');window.speakerdeskRecoverySnapshot(true);})()");
+    assert.equal(await evaluate("document.querySelector('main').inert && $('pause-meeting').disabled && $('stop-meeting').disabled"),true);
+    await evaluate("window.speakerdeskRecoveryFailed('Synthetic recovery write failure',true);$('recovery-copy-open').click()");
+    assert.equal(await evaluate("!document.querySelector('main').inert && !recoveryClosing"),true);
+    assert.equal(await evaluate("$('recovery-text').value.includes('Unsaved words before host failure')"),true);
+    await screenshot('recovery-disconnected.png');
+    checks.push('Native failure callback removes stale capture controls; exact-close snapshot freezes edits and failed persistence restores the same window for copying.');
     assert.deepEqual(errors,[]);await writeFile(join(output,'partition-browser-report.json'),JSON.stringify({fixture:'Disposable synthetic HTTP server + shipped UI + installed headless Chrome',modelsOrCaptureExecuted:false,source,checks,measurements,pageErrors:errors},null,2));
     console.log(JSON.stringify({checks,measurements,pageErrors:errors},null,2));
   }finally{

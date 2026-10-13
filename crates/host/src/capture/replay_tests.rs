@@ -191,7 +191,7 @@ fn helper(folder: &Path, qualified: bool, script: &str) -> PathBuf {
             folder.join("capture-helper.capability.json"),
             serde_json::to_vec(&json!({
             "helper_sha256":format!("{:x}",Sha256::digest(script.as_bytes())),
-            "export_contract":EXPORT,"capability_version":"apple_input_node_output_route_v1"}))
+            "export_contract":EXPORT,"capability_version":"apple_input_node_output_route_v1","progress_contract":"audio_queue_fence_v1"}))
             .unwrap(),
         )
         .unwrap();
@@ -225,6 +225,12 @@ fn receipt(path: &Path) -> Value {
 }
 
 fn accept(writer: &mut SourceWriter, value: &Value) -> Result<(), super::CaptureError> {
+    let mut value = value.clone();
+    // PCM fixtures predate this transport envelope; their samples/clocks stay unchanged.
+    if value["type"] == "clock" && value.get("producer_fence").is_none() {
+        value["producer_fence"] = json!("audio_queue_fence_v1");
+        value["sequence"] = json!(writer.next_fence_sequence());
+    }
     writer.accept(parse_event(&value.to_string()).unwrap())
 }
 
@@ -264,6 +270,50 @@ fn retained_pcm_matches_independent_v066_source_mixer() {
             accept(&mut writer, event).unwrap();
         }
         let snapshot = writer.finish();
+        if case["late_samples"].as_u64().unwrap() > 0 {
+            // This reference records the old loss. Keep it unchanged as a negative control.
+            assert!(snapshot.error.is_some());
+            assert_eq!(snapshot.repaired_from_sample, Some(0));
+            assert!(snapshot.derived_rebuilt);
+            assert_eq!(
+                u64::from(snapshot.committed_sample),
+                case["frames"].as_u64().unwrap()
+            );
+            let event = case["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|event| event["source"] == "system")
+                .unwrap();
+            let original = STANDARD.decode(event["pcm"].as_str().unwrap()).unwrap();
+            let original: Vec<f32> = original
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| f32::from_le_bytes(*bytes))
+                .collect();
+            let start = (event["time"].as_f64().unwrap() * 16000.).round_ties_even() as usize;
+            let retained = pcm(&folder.path().join("system_reference.wav"));
+            let original_prefix = speakerdesk_core::audio::pcm16_bytes(&original[..200]).unwrap();
+            assert_eq!(
+                &retained[start * 4..(start + 100) * 4],
+                original_prefix,
+                "late original source samples must survive"
+            );
+            let old = STANDARD
+                .decode(
+                    case["expected"]["system_reference"]["pcm16_base64"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_ne!(
+                &retained[start * 4..(start + 100) * 4],
+                &old[start * 4..(start + 100) * 4],
+                "old dropped-PCM negative control"
+            );
+            continue;
+        }
         assert!(
             snapshot.error.is_none(),
             "{}: {:?}",
@@ -316,6 +366,114 @@ fn retained_pcm_matches_independent_v066_source_mixer() {
             assert_eq!(processing.metadata["classification"], super::PROCESSED);
         }
     }
+}
+
+#[test]
+fn qualified_clock_requires_a_monotonic_producer_fence() {
+    let folder = TempDir::new().unwrap();
+    let path = helper(folder.path(), true, "fence replay");
+    let mut writer =
+        SourceWriter::create(config(folder.path(), true), Helper::inspect(&path).unwrap()).unwrap();
+    accept(&mut writer, &receipt(&path)).unwrap();
+    assert!(
+        writer
+            .accept(parse_event(r#"{"type":"clock","time":0.75}"#).unwrap())
+            .is_err()
+    );
+    let fence =
+        json!({"type":"clock","time":0.75,"producer_fence":"audio_queue_fence_v1","sequence":1});
+    writer
+        .accept(parse_event(&fence.to_string()).unwrap())
+        .unwrap();
+    assert!(
+        writer
+            .accept(parse_event(&fence.to_string()).unwrap())
+            .is_err()
+    );
+}
+
+#[test]
+fn late_pcm_repairs_sources_and_rebuilds_playable_audio_without_trusting_old_words() {
+    for dual in [false, true] {
+        let folder = TempDir::new().unwrap();
+        let path = helper(folder.path(), dual, "late PCM replay");
+        let mut writer =
+            SourceWriter::create(config(folder.path(), dual), Helper::inspect(&path).unwrap())
+                .unwrap();
+        if dual {
+            accept(&mut writer, &receipt(&path)).unwrap();
+        }
+        // Old independent clock behavior could commit silence before this source arrives.
+        accept(&mut writer, &json!({"type":"clock","time":0.75})).unwrap();
+        assert_eq!(writer.snapshot.raw_sample, 4000);
+        let source = if dual { "system" } else { "microphone" };
+        accept(&mut writer, &audio(source, 1000., &[0.25; 513], 1)).unwrap();
+        assert_eq!(writer.snapshot.committed_sample, 0);
+        assert_eq!(writer.snapshot.repaired_from_sample, Some(0));
+        assert!(!writer.snapshot.derived_rebuilt);
+        accept(&mut writer, &json!({"type":"stopped","time":0.25})).unwrap();
+        let snapshot = writer.finish();
+        assert!(snapshot.derived_rebuilt, "{:?}", snapshot.error);
+        assert!(snapshot.error.is_some());
+        assert_eq!(snapshot.late_samples, 513);
+        assert_eq!(snapshot.committed_sample, 4000);
+        let mut expected = vec![0u8; 4000 * 2];
+        expected[1000 * 2..1513 * 2].copy_from_slice(&[0, 32].repeat(513));
+        assert_eq!(pcm(&folder.path().join(format!("{source}.wav"))), expected);
+        assert_eq!(pcm(&folder.path().join("audio.wav")), expected);
+    }
+}
+
+#[test]
+fn failed_rebuild_truncates_stale_processed_audio_and_retains_original_packet_journal() {
+    let folder = TempDir::new().unwrap();
+    let path = helper(folder.path(), false, "repair failure replay");
+    let mut writer = SourceWriter::create(
+        config(folder.path(), false),
+        Helper::inspect(&path).unwrap(),
+    )
+    .unwrap();
+    accept(&mut writer, &json!({"type":"clock","time":0.75})).unwrap();
+    accept(&mut writer, &audio("microphone", 1000., &[0.25; 513], 1)).unwrap();
+    // Force only derived publication to fail; corrected originals must remain readable.
+    fs::write(folder.path().join("audio.repair.wav"), b"occupied").unwrap();
+    let snapshot = writer.finish();
+    assert!(!snapshot.derived_rebuilt);
+    assert_eq!(snapshot.committed_sample, 0);
+    assert!(
+        snapshot
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("repair did not finish")
+    );
+    assert!(folder.path().join("capture-late-pcm.jsonl").exists());
+    assert!(pcm(&folder.path().join("audio.wav")).is_empty());
+    assert_eq!(
+        &pcm(&folder.path().join("microphone.wav"))[2000..3026],
+        &[0, 32].repeat(513)
+    );
+}
+
+#[test]
+fn late_pcm_and_raw_write_failure_still_invalidate_old_derived_audio() {
+    let folder = TempDir::new().unwrap();
+    let path = helper(folder.path(), false, "late PCM plus raw write failure");
+    let mut writer = SourceWriter::create(
+        config(folder.path(), false),
+        Helper::inspect(&path).unwrap(),
+    )
+    .unwrap();
+    accept(&mut writer, &json!({"type":"clock","time":0.75})).unwrap();
+    accept(&mut writer, &audio("microphone", 1000., &[0.25; 513], 1)).unwrap();
+    writer.make_file_read_only("microphone");
+    accept(&mut writer, &audio("microphone", 4000., &[0.25; 513], 1)).unwrap();
+    assert!(accept(&mut writer, &json!({"type":"stopped","time":4513./16000.})).is_err());
+    let snapshot = writer.finish();
+    assert!(!snapshot.derived_rebuilt);
+    assert!(snapshot.error.is_some());
+    assert!(pcm(&folder.path().join("audio.wav")).is_empty());
+    assert!(folder.path().join("capture-late-pcm.jsonl").exists());
 }
 
 #[test]

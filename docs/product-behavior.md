@@ -31,6 +31,45 @@ Owner: `core/src/live.rs`, `host/src/routes/refinement.rs`.
 - Refinement never overwrites a **protected edit** (user words, speaker or bounds). It never changes names or neighbouring passages, and never alters the original audio.
 - Transcript timing (supplied-text CTC) is required for transcription. It functionally covers all 14 languages, but its accuracy is calibrated in English only. CJK text uses character units. Units that are unsupported or uncertain stay unresolved instead of being guessed.
 
+- An ordinary language, transcription or timing failure affects its passage; later
+  speech can still transcribe. A timing-model failure retains decoded words without
+  claiming resolved timing. Child loss and hardware/runtime failures still use the
+  recording recovery path.
+- Late audio or capture overload interrupts the meeting visibly. Already accepted
+  original audio is retained, and playback is repaired where possible. Corrections
+  survive repair; text and acoustic claims affected by the repaired audio are marked
+  incomplete instead of being silently trusted.
+
+## Imports and editing
+
+Owner: `core/src/import/pipeline.rs`, `host/src/routes/import_progress.rs`,
+`speakerdesk/static/app.js`, `speakerdesk/static/live_editor.js`.
+
+- Imports show accepted passages while the remaining audio is processing. Those
+  passages can be corrected immediately; later batches and Resume preserve the
+  accepted corrections. Whole-document replacement and structural controls wait
+  until the progressive import finishes.
+- Cancel stops preparation or import work and retains the source and any accepted
+  passages. Resume continues a compatible checkpoint; changing source or processing
+  identity invalidates stale work. Cancel is safe to repeat while ownership drains.
+- Imports retain their captured language setting and use the same main-language
+  policy and passage eligibility as live recordings and saved accuracy.
+- Timing edits are staged until valid and saved. Failed saves or failed navigation
+  retain the current words, timing drafts and playback. Saved accuracy can update
+  other passages while a correction remains focused. Save and export state includes
+  every outstanding draft, including invalid timing and recoverable corrections.
+- The native app keeps private recovery copies of unsaved corrections. On normal
+  close it waits for a durable copy; on failure it stays open with a copy path.
+  After a host restart, recovered corrections can be reviewed and copied without
+  automatically changing the saved transcript. Abrupt crashes may lose edits made
+  after the last periodic copy.
+- Delete removes owned recording media and retained recovery copies. Cleanup failure
+  remains visible as **Cleanup failed** and offers retry; it is not reported as
+  successful deletion. Original media from a migrated library remains read-only.
+- Theme follows the saved host preference across restarts. Service loss and startup
+  failure show an explicit status and retry/copy actions. Models controls preserve
+  focus as status refreshes, and recording controls remain reachable on narrow windows.
+
 ## Passage retry and review
 
 Owner: `host/src/routes/retry.rs`, `core/src/review.rs`, `core/src/export.rs`.
