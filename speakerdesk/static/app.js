@@ -255,16 +255,18 @@ function nameSpeaker(id) {
 }
 function speakerLabel(id) {
   if(id==='unassigned')return 'Speaker unassigned';
-  return doc.speakers[id] || (/^speaker_\d+$/.test(id)?`Speaker ${Number(id.slice(8))+1}`:'Unknown speaker');
+  return doc.speakers[id] || 'Unknown speaker';
 }
-function speakerIndex(id) {
+function speakerColor(id) {
   if(id==='unassigned' || id==='multiple_speakers')return -1;
-  const numbered=id.match(/^(?:speaker_(\d+)$|manual_(\d+)_)/);
-  if(numbered)return Number(numbered[1] ?? numbered[2]);
-  return Object.keys(doc.speakers).filter(key=>key!=='unassigned' && key!=='multiple_speakers' && !/^manual_\d+_/.test(key)).indexOf(id);
+  // Track IDs include source and recovery namespaces. They are identities, not
+  // display ordinals; keep their color stable through names and key ordering.
+  let hash=0;for(const char of id)hash=(hash*31+char.codePointAt(0))>>>0;
+  return hash%8;
 }
 function updateSpeakerAvatar(avatar,id) {
-  const index=speakerIndex(id),text=index<0?(id==='multiple_speakers'?'…':'?'):`S${index+1}`,color=String(index<0?-1:index%8);
+  const color=String(speakerColor(id)),label=speakerLabel(id),number=label.match(/^Speaker (\d+)$/);
+  const text=color==='-1'?(id==='multiple_speakers'?'…':'?'):number?`S${number[1]}`:label==='Unknown speaker'?'?':label.trim().split(/\s+/u).slice(0,2).map(part=>Array.from(part)[0]).join('').toLocaleUpperCase();
   if(avatar.textContent!==text)avatar.textContent=text;
   if(avatar.dataset.color!==color)avatar.dataset.color=color;
 }
@@ -327,7 +329,7 @@ function renderEditor() {
   $('speaker-list').replaceChildren();
   Object.keys(doc.speakers).forEach(id => {
     const row = node('div', undefined, 'speaker-name');
-    const dot = node('span', undefined, 'speaker-dot'); dot.dataset.color = speakerIndex(id) % 8;
+    const dot = node('span', undefined, 'speaker-dot'); dot.dataset.color = speakerColor(id);
     const choose = speakerNameControl(id,'speaker-name-action name-speaker');
     choose.replaceChildren(dot, node('span', speakerLabel(id)));
     if(id!=='unassigned')choose.append(icon('pencil'));
@@ -1228,9 +1230,10 @@ function wire() {
     document.querySelector('#segments .segment:last-child textarea')?.focus();
   });
   $('add-speaker').addEventListener('click', () => {
-    const index=Math.max(-1,...Object.keys(doc.speakers).map(speakerIndex))+1;
-    const id=`manual_${index}_${crypto.randomUUID()}`;
-    doc.speakers[id]=`Speaker ${index+1}`;changed();renderEditor();
+    const names=Object.entries(doc.speakers).filter(([id])=>id!=='unassigned' && id!=='multiple_speakers').map(([,name])=>name);
+    let number=names.length+1;while(names.includes(`Speaker ${number}`))number++;
+    const id=`manual_${crypto.randomUUID()}`;
+    doc.speakers[id]=`Speaker ${number}`;changed();renderEditor();
   });
   $('import').addEventListener('change', async () => {
     try {
