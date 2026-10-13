@@ -72,15 +72,18 @@ test('accepted retry card retires after save acknowledgement while failed saves 
     assert.equal(f.run('doc.segments[1].retry_candidate.id'),'repair-pending');
   }
 });
-for(const update of ['retry candidate','separation candidate','voice metadata'])test(`${update} can advance revision before dirty words autosave without stranding or overwriting them`,async()=>{
+for(const update of ['retry candidate','separation candidate','voice metadata','language issue','cleared language issue'])test(`${update} can advance revision before dirty words autosave without stranding or overwriting them`,async()=>{
   for(const conflict of [null,'text','speaker','boundary','name','status','duration','second_save']) {
-    const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
+    const f=frontend(path.resolve(__dirname,'..'));f.seed(2);
     f.context.conflict=conflict;f.context.update=update;
     f.run(`selected.kind='import';selected.status='ready';
       if(update==='retry candidate')selected.passage_retry={id:'pending',segment_id:'r0'};
+      if(update==='cleared language issue'){doc.segments[1].refinement_issue={kind:'language',reason:'uncertain'};selected.document=structuredClone(doc);}
       window.latest=structuredClone(selected);latest.revision++;delete latest.passage_retry;
       if(update==='retry candidate')latest.document.segments[0].retry_candidate={id:'pending',start:0,end:10,speaker:'s0',text:'Model candidate',language:'en'};
       else if(update==='separation candidate')latest.document.segments[0].separation_candidate={id:'pending',original:structuredClone(selected.document.segments[0]),voices:[{text:'Voice one',language:'en'},{text:'Voice two',language:'en'}]};
+      else if(update==='language issue')latest.document.segments[1].refinement_issue={kind:'language',reason:'uncertain'};
+      else if(update==='cleared language issue')delete latest.document.segments[1].refinement_issue;
       else latest.voice_checks={s0:{status:'unknown'}};
       if(conflict==='text')latest.document.segments[0].text='New authoritative words';
       if(conflict==='speaker')latest.document.segments[0].speaker='s1';
@@ -94,7 +97,9 @@ for(const update of ['retry candidate','separation candidate','voice metadata'])
         if(options.method!=='PUT')return {ok:true,status:200,json:async()=>structuredClone(latest)};
         const body=JSON.parse(options.body);puts.push(body);
         if(body.revision!==latest.revision || conflict==='second_save')return {ok:false,status:409,json:async()=>({error:'This transcript changed.'})};
+        const issue=latest.document.segments[1].refinement_issue;
         latest.document=body.document;
+        if(issue)latest.document.segments[1].refinement_issue=issue;else delete latest.document.segments[1].refinement_issue;
         if(update==='retry candidate')latest.document.segments[0].retry_candidate={id:'pending',start:0,end:10,speaker:'s0',text:'Model candidate',language:'en'};
         else if(update==='separation candidate')latest.document.segments[0].separation_candidate={id:'pending',original:structuredClone(selected.document.segments[0]),voices:[{text:'Voice one',language:'en'},{text:'Voice two',language:'en'}]};
         latest.revision++;return {ok:true,status:200,json:async()=>structuredClone(latest)};
@@ -109,9 +114,51 @@ for(const update of ['retry candidate','separation candidate','voice metadata'])
       assert.deepEqual(Array.from(f.run('puts.map(p=>p.revision)')),[1,2]);
       if(update==='retry candidate')assert.equal(f.run('doc.segments[0].retry_candidate.text'),'Model candidate');
       else if(update==='separation candidate')assert.equal(f.run('doc.segments[0].separation_candidate.voices[0].text'),'Voice one');
+      else if(update==='language issue'){
+        assert.equal(f.run('doc.segments[1].refinement_issue.reason'),'uncertain');
+        assert.match(f.document.getElementById('segments').children[1].querySelector('.passage-issue').textContent,/language could not be confirmed/,'server warning stays visible beside the unaffected passage while typing');
+      }
+      else if(update==='cleared language issue'){
+        assert.equal(f.run('doc.segments[1].refinement_issue'),undefined);
+        assert.equal(f.document.getElementById('segments').children[1].querySelector('.passage-issue'),null);
+      }
       else assert.equal(f.run('selected.voice_checks.s0.status'),'unknown');
     }
     assert.equal(f.run('doc.segments[0].text'),'My exact unsaved words');
+  }
+});
+test('saved language warnings follow the server while newer focused drafts stay unsaved',async()=>{
+  for(const clear of [false,true])for(const draft of ['text','boundary','speaker']) {
+    const f=frontend(path.resolve(__dirname,'..'));f.seed(2);f.context.clear=clear;
+    f.run(`if(clear)doc.segments[1].refinement_issue={kind:'language',reason:'uncertain'};
+      selected.document=structuredClone(doc);renderSegments();
+      fetch=async(path,options)=>{
+        const next=structuredClone(selected);next.revision++;next.document=JSON.parse(options.body).document;
+        if(clear)delete next.document.segments[1].refinement_issue;
+        else next.document.segments[1].refinement_issue={kind:'language',reason:'uncertain'};
+        await new Promise(resolve=>window.releaseSavedResponse=resolve);
+        return {ok:true,status:200,json:async()=>next};
+      };`);
+    const cards=f.document.getElementById('segments').children;
+    const first=cards[0].querySelector('textarea');first.value='Submitted edit';first.dispatchEvent({type:'input'});
+    const saving=f.run('save({quiet:true})');
+    let focused;
+    if(draft==='text') {
+      focused=cards[1].querySelector('textarea');focused.focus();focused.value='A newer draft';focused.dispatchEvent({type:'input'});focused.setSelectionRange(2,8);
+    }else if(draft==='speaker') {
+      focused=cards[1].querySelector('select');focused.focus();focused.value='s1';focused.dispatchEvent({type:'change'});
+    }else {
+      cards[1].querySelector('.passage-details-toggle').click();
+      focused=f.document.getElementById('segment-details').querySelectorAll('input')[1];focused.focus();focused.value='19';focused.dispatchEvent({type:'change'});
+    }
+    f.run('releaseSavedResponse()');await saving;
+    assert.equal(f.run('dirty'),true,`${draft}, clear=${clear}: newer draft stays dirty`);
+    assert.equal(f.document.activeElement,focused,'the save response must not steal focus');
+    const field=draft==='text'?'text':draft==='speaker'?'speaker':'end';
+    assert.equal(f.run(`doc.segments[1].${field}`),draft==='text'?'A newer draft':draft==='speaker'?'s1':19);
+    assert.equal(f.run('!!doc.segments[1].refinement_issue'),!clear,'warning follows the acknowledged row, independent of draft geometry');
+    assert.equal(!!f.document.getElementById('segments').children[1].querySelector('.passage-issue'),!clear,`${draft}, clear=${clear}: warning is visible`);
+    if(draft==='text'){assert.equal(focused.selectionStart,2);assert.equal(focused.selectionEnd,8);}
   }
 });
 

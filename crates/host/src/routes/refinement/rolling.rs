@@ -12,6 +12,8 @@ struct Control {
     active: Option<CancellationToken>,
     scan_from: Option<usize>,
     final_retry: bool,
+    language_summary: live::MainLanguageSummary,
+    language_generation: Option<u64>,
 }
 impl Rolling {
     pub fn new() -> Self {
@@ -21,6 +23,8 @@ impl Rolling {
             active: None,
             scan_from: None,
             final_retry: false,
+            language_summary: live::MainLanguageSummary::default(),
+            language_generation: None,
         })))
     }
     /// Called with the store lock after an accepted sealed publication. Coalesce
@@ -28,6 +32,13 @@ impl Rolling {
     pub fn changed(&self, index: usize) {
         let mut control = self.0.lock().expect("rolling control");
         control.scan_from = Some(control.scan_from.map_or(index, |old| old.min(index)));
+    }
+    /// Store publication owns both the discovery cursor and accepted language
+    /// memberships. Audio publication does not advance the edit generation.
+    pub fn published(&self, job: &Job, prior: Option<&Segment>, accepted: &Segment) {
+        let mut control = self.0.lock().expect("rolling control");
+        control.refresh_language(job);
+        control.language_summary.accept_publication(prior, accepted);
     }
     pub fn action(
         &self,
@@ -135,6 +146,17 @@ impl Rolling {
         self.0.lock().expect("rolling control").active = None;
     }
 }
+impl Control {
+    fn refresh_language(&mut self, job: &Job) {
+        let generation = context_generation(job);
+        if self.language_generation != Some(generation) {
+            self.language_summary = live::MainLanguageSummary::from_segments(
+                &job.document.as_ref().expect("document").segments,
+            );
+            self.language_generation = Some(generation);
+        }
+    }
+}
 
 struct Pending {
     original: Job,
@@ -148,8 +170,6 @@ struct Pending {
 pub(crate) struct Runner {
     rolling: Rolling,
     pending: Option<Pending>,
-    language_summary: live::MainLanguageSummary,
-    language_generation: Option<u64>,
     refreshed_context: Option<(String, String)>,
 }
 impl Drop for Runner {
@@ -164,8 +184,6 @@ impl Runner {
         Self {
             rolling,
             pending: None,
-            language_summary: live::MainLanguageSummary::default(),
-            language_generation: None,
             refreshed_context: None,
         }
     }
@@ -173,6 +191,7 @@ impl Runner {
         &mut self,
         app: &AppState,
         operation: &OperationGuard,
+        accepted_language: &mut impl FnMut(&Job, &Segment, &Segment),
     ) -> Result<bool, live::LiveError> {
         if self
             .pending
@@ -278,13 +297,11 @@ impl Runner {
                 return Ok(false);
             };
             let generation_now = context_generation(&original);
-            if self.language_generation != Some(generation_now) {
-                self.language_summary = live::MainLanguageSummary::from_segments(
-                    &original.document.as_ref().expect("document").segments,
-                );
-                self.language_generation = Some(generation_now);
-            }
-            let language_context = selected_context(&mut self.language_summary, &original, &prior);
+            let language_context = {
+                let mut control = self.rolling.0.lock().expect("rolling control");
+                control.refresh_language(&original);
+                selected_context(&mut control.language_summary, &original, &prior)
+            };
             // Keep the immutable audio/epoch snapshot, not another transcript history.
             original.document = None;
             original.extra.remove("refinement_history");
@@ -323,6 +340,7 @@ impl Runner {
                         generation,
                         &cancellation,
                         Err(error),
+                        accepted_language,
                     )?;
                     return Ok(true);
                 }
@@ -346,6 +364,7 @@ impl Runner {
             pending.generation,
             &pending.cancellation,
             result.map(|candidate| candidate.expect("complete")),
+            accepted_language,
         )?;
         Ok(true)
     }
@@ -359,6 +378,7 @@ impl Runner {
         generation: u64,
         cancellation: &CancellationToken,
         result: Result<Segment, live::LiveError>,
+        accepted_language: &mut impl FnMut(&Job, &Segment, &Segment),
     ) -> Result<(), live::LiveError> {
         let version = (prior.id.clone(), live::segment_version(prior));
         let allow_refresh = self.refreshed_context.as_ref() != Some(&version);
@@ -383,6 +403,18 @@ impl Runner {
                     .map_err(|e| ApiError::new(500, e.to_string()))?,
                 Err(_) => false,
             };
+            if accepted {
+                let row = current
+                    .document
+                    .as_ref()
+                    .expect("document")
+                    .segments
+                    .iter()
+                    .find(|row| row.id == prior.id)
+                    .expect("accepted passage");
+                self.rolling.published(current, Some(prior), row);
+                accepted_language(current, prior, row);
+            }
             if !accepted
                 && !matches!(
                     result,
@@ -422,8 +454,8 @@ impl Runner {
         self.rolling.release();
         if let Some((_, Some(index))) = published.map_err(|e| e.message)? {
             self.refreshed_context = Some(version);
-            self.language_generation = None;
             let mut control = self.rolling.0.lock().expect("rolling control");
+            control.language_generation = None;
             if control.enabled
                 && control.generation == generation
                 && !operation.cancellation.is_cancelled()

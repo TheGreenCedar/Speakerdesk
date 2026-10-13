@@ -3526,6 +3526,79 @@ async fn accepted_language_repair_resumes_remaining_saved_accuracy_once() {
 }
 
 #[tokio::test]
+async fn rolling_main_language_learns_later_speech_before_stop_retries() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::write(root.join("stage-1-samples"), (4 * 16000).to_string()).unwrap();
+    fs::write(root.join("stage-2-samples"), (8 * 16000).to_string()).unwrap();
+    fs::write(
+        root.join("fixture-silence.json"),
+        json!([[2 * 16000, 4 * 16000], [10 * 16000, 12 * 16000]]).to_string(),
+    )
+    .unwrap();
+    let weak = json!({"codes":["ru","en"],"probabilities":[0.51,0.49]});
+    fs::write(root.join("replay-probe.json"), weak.to_string()).unwrap();
+    let host = Running::open(root, false).await;
+    let id = host.start_language(json!(["microphone"]), "auto").await;
+    let path = format!("api/jobs/{id}");
+    trigger(root, 1);
+    let first = host
+        .wait(&path, |job| {
+            job["duration"].as_f64().unwrap_or(0.) >= 3.5
+                && job["refinement_status"] == "unresolved"
+        })
+        .await;
+    let earlier_id = first["document"]["segments"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(first["document"]["segments"][0]["text"], "");
+    fs::write(
+        root.join("replay-probe.json"),
+        json!({"codes":["en","de"],"probabilities":[0.99,0.01]}).to_string(),
+    )
+    .unwrap();
+    trigger(root, 2);
+    host.wait(&path, |job| {
+        let rows = job["document"]["segments"].as_array().unwrap();
+        job["duration"].as_f64().unwrap_or(0.) >= 11.5
+            && rows.len() >= 2
+            && rows.last().unwrap()["refinement_state"] == "refined"
+    })
+    .await;
+    fs::write(root.join("replay-probe.json"), weak.to_string()).unwrap();
+    let stopped = host.stop(&id).await;
+    let earlier = stopped["document"]["segments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == earlier_id)
+        .unwrap();
+    assert_eq!(stopped["refinement_status"], "complete", "{stopped}");
+    assert!(!earlier["text"].as_str().unwrap().is_empty());
+    assert_eq!(earlier["language"], "en");
+    assert_eq!(earlier["language_detection"]["reason"], "recent_context");
+    assert!(earlier["refinement_issue"].is_null());
+    let anchors = earlier["language_detection"]["context_evidence"]["anchors"]
+        .as_array()
+        .unwrap();
+    assert_eq!(anchors.len(), 2);
+    assert!(anchors.iter().all(|anchor| {
+        anchor["utterance_id"] != earlier["canonical_utterance_id"]
+            && anchor["start_sample"].as_i64().unwrap() >= 3 * 16000
+    }));
+    assert_eq!(
+        stopped["language_context_generation"].as_u64().unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        first["language_context_generation"].as_u64().unwrap_or(0),
+        0
+    );
+    host.close(root).await;
+}
+
+#[tokio::test]
 async fn saved_main_language_refreshes_superseded_context_without_overwriting_controls() {
     // Real disposable HTTP/child ownership with retained direct acoustic-shaped
     // rows. Language scores are scripted; no native language-quality claim.

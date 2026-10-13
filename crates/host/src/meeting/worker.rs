@@ -202,6 +202,27 @@ impl Engines {
             Self::Sources(engine) => engine.refresh_language_ownership(rows, generation),
         }
     }
+    fn accept_language_publication(
+        &mut self,
+        job: &Job,
+        prior: Option<&Segment>,
+        accepted: &Segment,
+    ) {
+        let rows = &job.document.as_ref().expect("document").segments;
+        let generation = job
+            .extra
+            .get("language_context_generation")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        match self {
+            Self::Single(engine) => {
+                engine.accept_language_publication(rows, generation, prior, accepted)
+            }
+            Self::Sources(engine) => {
+                engine.accept_language_publication(rows, generation, prior, accepted)
+            }
+        }
+    }
     fn retry_language_context(
         &mut self,
         rejected: &Segment,
@@ -429,14 +450,22 @@ fn publish(
                     {
                         changed = Some(changed.map_or(index, |old: usize| old.min(index)));
                     }
+                    let prior = document
+                        .segments
+                        .iter()
+                        .find(|row| row.id == candidate.id)
+                        .cloned();
                     job.document = Some(merged);
-                    engine.refresh_language_ownership(
-                        &job.document.as_ref().expect("document").segments,
-                        job.extra
-                            .get("language_context_generation")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0),
-                    );
+                    let accepted = job
+                        .document
+                        .as_ref()
+                        .expect("document")
+                        .segments
+                        .iter()
+                        .find(|row| row.id == candidate.id)
+                        .expect("accepted canonical passage");
+                    rolling.published(job, prior.as_ref(), accepted);
+                    engine.accept_language_publication(job, prior.as_ref(), accepted);
                     Ok(())
                 })?;
                 if let Some(accepted) = context_retry {
@@ -715,7 +744,9 @@ pub(super) async fn worker(
                 if eof_published {
                     // A cooperative decode may have published EOF while yielding to capture.
                     while enrichment.step(&operation, &id, &mut || Ok(()))?
-                        || accuracy.step(&app, &operation)?
+                        || accuracy.step(&app, &operation, &mut |job, prior, accepted| {
+                            engine.accept_language_publication(job, Some(prior), accepted);
+                        })?
                     {}
                     return Ok(());
                 }
@@ -782,7 +813,10 @@ pub(super) async fn worker(
                     }
                     progressed |= enriched;
                     if !enriched {
-                        let refined = accuracy.step(&app, &operation)?;
+                        let refined =
+                            accuracy.step(&app, &operation, &mut |job, prior, accepted| {
+                                engine.accept_language_publication(job, Some(prior), accepted);
+                            })?;
                         progressed |= refined;
                     }
                 }

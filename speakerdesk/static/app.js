@@ -494,14 +494,8 @@ function refreshAcknowledgedPassageRepair(card,segment,saved) {
   if(!card)return;
   // A focused card keeps its textarea, but a saved acceptance is no longer an action.
   if(!segment.retry_candidate || savedRetryAccepted(segment,saved))card.querySelector('.retry-result')?.remove();
-  if(!segment.refinement_issue && !languageBlockedPassage(segment)) {
-    const issue=card.querySelector('.passage-issue');
-    if(issue) {
-      issue.remove();
-      const summary=card.querySelector('.passage-repair > summary');
-      if(summary)summary.textContent='Repair passage';
-    }
-  }
+  const body=card.querySelector('.segment-body');
+  if(body)refreshPassageLanguageIssue(body,segment);
 }
 function savedCard(segment) {
   const card = node('article', undefined, 'segment'); card.dataset.segmentId = segment.id;card.dataset.speaker=segment.speaker;
@@ -595,15 +589,26 @@ function renderSegments() {
   renderSearchResults(visible,query);pane.scrollTop=previousScroll;
   renderIcons();refreshPlaybackCards();
 }
+function refreshPassageLanguageIssue(body,segment) {
+  const blocked=languageBlockedPassage(segment),repair=body.querySelector('.passage-repair');
+  let message=body.querySelector('.passage-issue');
+  if(blocked) {
+    const issue=segment.refinement_issue?.kind==='language'?segment.refinement_issue:null;
+    const cause=issue?.reason || segment.language_detection?.reason;
+    const explanation=cause==='unsupported'?'The detected language is not supported. If it was detected incorrectly, choose the language spoken here.':cause==='detector_error'?'Language detection failed for this passage. Choose the language spoken here to retry.':cause==='mixed'?'This passage contains language changes that the accuracy pass could not resolve. Choose the language for the part you want to retry.':'The language could not be confirmed for this passage. Choose it below to transcribe the saved audio.';
+    if(!message) {
+      message=node('p',undefined,'passage-review passage-issue');body.insertBefore(message,repair);
+      if(repair)repair.open=true;
+    }
+    message.textContent=explanation+(segment.text.trim()?' Your current words are kept.':'');
+  }else message?.remove();
+  const summary=repair?.querySelector('summary');
+  if(summary)summary.textContent=blocked?'Choose passage language':'Repair passage';
+  return blocked;
+}
 function appendPassageRepair(body,segment,reason,visibleSource=()=>true) {
   if(!isLive()) {
-    const blocked=languageBlockedPassage(segment);
-    if(blocked) {
-      const issue=segment.refinement_issue?.kind==='language'?segment.refinement_issue:null;
-      const cause=issue?.reason || segment.language_detection?.reason;
-      const explanation=cause==='unsupported'?'The detected language is not supported. If it was detected incorrectly, choose the language spoken here.':cause==='detector_error'?'Language detection failed for this passage. Choose the language spoken here to retry.':cause==='mixed'?'This passage contains language changes that the accuracy pass could not resolve. Choose the language for the part you want to retry.':'The language could not be confirmed for this passage. Choose it below to transcribe the saved audio.';
-      body.append(node('p',explanation+(segment.text.trim()?' Your current words are kept.':''),'passage-review passage-issue'));
-    }
+    const blocked=refreshPassageLanguageIssue(body,segment);
     const repair=node('details',undefined,'passage-repair');repair.open=blocked;repair.append(node('summary',blocked?'Choose passage language':'Repair passage'));
     const tools=node('div',undefined,'passage-retry'), language=node('select');
     language.setAttribute('aria-label',`Choose language to retry passage at ${time(segment.start)}`);
@@ -1037,13 +1042,13 @@ async function save({quiet = false} = {}) {
     catch(error) {
       if(error.status!==409)throw error;
       const latest=await api(`/api/jobs/${jid}`);
-      // Server candidates may advance revision; authoritative edits still conflict.
-      const withoutCandidates=document=>{
-        const copy=structuredClone(document);for(const segment of copy?.segments || []){delete segment.retry_candidate;delete segment.separation_candidate;}
+      // Server diagnostics and candidates may advance revision; authoritative edits still conflict.
+      const withoutServerResults=document=>{
+        const copy=structuredClone(document);for(const segment of copy?.segments || []){delete segment.retry_candidate;delete segment.separation_candidate;delete segment.refinement_issue;}
         return JSON.stringify(copy);
       };
       if(selected?.id!==jid || latest.status!==base.status || latest.duration!==base.duration ||
-        withoutCandidates(latest.document)!==withoutCandidates(base.document))throw error;
+        withoutServerResults(latest.document)!==withoutServerResults(base.document))throw error;
       result=await put(latest.revision);
     }
     if (selected?.id !== jid) return;
@@ -1051,14 +1056,16 @@ async function save({quiet = false} = {}) {
     const savedSegments=new Map(result.document.segments.map(segment=>[segment.id,segment]));
     for(const segment of doc.segments) {
       const saved=savedSegments.get(segment.id);
-      if(saved && saved.start===segment.start && saved.end===segment.end && saved.speaker===segment.speaker) {
+      if(!saved)continue;
+      if(saved.refinement_issue)segment.refinement_issue=structuredClone(saved.refinement_issue);
+      else delete segment.refinement_issue;
+      if(saved.start===segment.start && saved.end===segment.end && saved.speaker===segment.speaker) {
         if(saved.retry_candidate)segment.retry_candidate=structuredClone(saved.retry_candidate);
         else delete segment.retry_candidate;
         if(saved.separation_candidate)segment.separation_candidate=structuredClone(saved.separation_candidate);
         else delete segment.separation_candidate;
-        if(!saved.refinement_issue)delete segment.refinement_issue;
-        refreshAcknowledgedPassageRepair(playbackCards.get(segment.id),segment,saved);
       }
+      refreshAcknowledgedPassageRepair(playbackCards.get(segment.id),segment,saved);
     }
     if (generation === editGeneration) {
       dirty = false;
@@ -1066,7 +1073,7 @@ async function save({quiet = false} = {}) {
       // passage handlers stay attached; adopt the saved copy otherwise.
       if (!$('editor').contains(document.activeElement)) { doc = structuredClone(result.document); renderEditor(); }
     }
-    if((base.passage_retry || base.passage_separation) && $('editor').contains(document.activeElement))renderSegments();
+    if($('editor').contains(document.activeElement))renderSegments();
     setStatus();
     if (!quiet) notice('Saved on this Mac.');
   } finally { saving = false; renderSaveState(); if (dirty) scheduleAutosave(); }

@@ -507,7 +507,24 @@ fn execute(
                 match &result {
                     Ok(candidate) => match publish_candidate(current, &original, &prior, candidate)
                     {
-                        Ok(true) => {}
+                        Ok(true) => {
+                            let row = current
+                                .document
+                                .as_ref()
+                                .expect("document")
+                                .segments
+                                .iter()
+                                .find(|row| row.id == prior.id)
+                                .expect("accepted passage");
+                            if summary_generation == context_generation(current) {
+                                summary.accept_publication(Some(&prior), row);
+                            } else {
+                                summary = live::MainLanguageSummary::from_segments(
+                                    &current.document.as_ref().expect("document").segments,
+                                );
+                                summary_generation = context_generation(current);
+                            }
+                        }
                         Ok(false) => unresolved = true,
                         Err(error) => {
                             unresolved = true;

@@ -1140,8 +1140,8 @@ pub fn segment_version(segment: &Segment) -> String {
 }
 
 /// Compact direct-acoustic language counts owned by one Engine or accuracy
-/// operation. Borrowed/manual decisions never vote. Two exact supports per
-/// language retain publication provenance without copying transcript history.
+/// operation. Borrowed/manual decisions never vote. Physical probe memberships
+/// let accepted replacements update counts without copying transcript history.
 #[derive(Default)]
 pub struct MainLanguageSummary {
     groups: std::collections::BTreeMap<String, MainLanguageGroup>,
@@ -1149,20 +1149,115 @@ pub struct MainLanguageSummary {
 #[derive(Default)]
 struct MainLanguageGroup {
     through: i64,
+    observations: std::collections::BTreeMap<LanguageRange, Vec<LanguageVote>>,
+    selected: std::collections::BTreeMap<LanguageRange, LanguageVote>,
     meeting: std::collections::BTreeMap<String, MainLanguageCount>,
     speakers:
         std::collections::BTreeMap<String, std::collections::BTreeMap<String, MainLanguageCount>>,
 }
 #[derive(Default)]
 struct MainLanguageCount {
-    count: usize,
-    supports: Vec<crate::language::LanguageContextAnchor>,
+    supports: std::collections::BTreeSet<LanguageRange>,
 }
+type LanguageRange = (i64, i64);
 type LanguageVote = (
     String,
     Option<String>,
     crate::language::LanguageContextAnchor,
 );
+type LanguageVoteIdentity<'a> = (
+    &'a str,
+    Option<&'a str>,
+    (
+        &'a str,
+        i64,
+        Option<&'a str>,
+        i64,
+        i64,
+        &'a str,
+        Option<usize>,
+    ),
+);
+fn language_vote_identity(vote: &LanguageVote) -> LanguageVoteIdentity<'_> {
+    (
+        &vote.0,
+        vote.1.as_deref(),
+        (
+            &vote.2.utterance_id,
+            vote.2.row_start_sample,
+            vote.2.speaker_track_id.as_deref(),
+            vote.2.start_sample,
+            vote.2.end_sample,
+            &vote.2.probe_sha256,
+            vote.2.probe_index,
+        ),
+    )
+}
+fn same_language_vote(left: &LanguageVote, right: &LanguageVote) -> bool {
+    language_vote_identity(left) == language_vote_identity(right)
+}
+impl MainLanguageGroup {
+    fn reselect(&mut self, first: LanguageRange, last: LanguageRange) {
+        let mut through = self
+            .selected
+            .range(..first)
+            .next_back()
+            .map_or(0, |(range, _)| range.1);
+        let counts = |counts: &mut std::collections::BTreeMap<String, MainLanguageCount>,
+                      language: &str,
+                      range: LanguageRange,
+                      add: bool| {
+            if add {
+                let count = counts.entry(language.to_owned()).or_default();
+                count.supports.insert(range);
+            } else if let Some(count) = counts.get_mut(language) {
+                count.supports.remove(&range);
+                if count.supports.is_empty() {
+                    counts.remove(language);
+                }
+            }
+        };
+        for (&range, votes) in self.observations.range(first..) {
+            let was_selected = self.selected.contains_key(&range);
+            if let Some((language, track, _)) = self.selected.remove(&range) {
+                counts(&mut self.meeting, &language, range, false);
+                if let Some(track) = track {
+                    counts(
+                        self.speakers.entry(track).or_default(),
+                        &language,
+                        range,
+                        false,
+                    );
+                }
+            }
+            let vote = votes.first().filter(|first| {
+                range.0 >= through
+                    && votes
+                        .iter()
+                        .all(|vote| vote.0 == first.0 && vote.1 == first.1)
+            });
+            if let Some(vote) = vote {
+                self.selected.insert(range, vote.clone());
+                counts(&mut self.meeting, &vote.0, range, true);
+                if let Some(track) = &vote.1 {
+                    counts(
+                        self.speakers.entry(track.clone()).or_default(),
+                        &vote.0,
+                        range,
+                        true,
+                    );
+                }
+                through = range.1;
+                // An unchanged selected interval restores the old cutoff, so
+                // later overlap decisions cannot depend on this replacement.
+                if range > last && was_selected {
+                    break;
+                }
+            }
+        }
+        self.through = self.selected.keys().next_back().map_or(0, |range| range.1);
+    }
+}
 fn summary_key(row: &Segment) -> Option<String> {
     Some(
         serde_json::json!([
@@ -1182,35 +1277,82 @@ fn speaker_track(row: &Segment) -> Option<String> {
 }
 impl MainLanguageSummary {
     pub fn from_segments(rows: &[Segment]) -> Self {
-        collect_main_language(rows).unwrap_or_default()
+        let mut summary = Self::default();
+        for (key, vote) in main_language_votes(rows) {
+            let range = (vote.2.start_sample, vote.2.end_sample);
+            summary
+                .groups
+                .entry(key)
+                .or_default()
+                .observations
+                .entry(range)
+                .or_default()
+                .push(vote);
+        }
+        for group in summary.groups.values_mut() {
+            group.reselect((0, 0), (i64::MAX, i64::MAX));
+        }
+        summary
     }
     fn add(&mut self, key: String, vote: LanguageVote) {
-        self.add_owned(key, vote, true);
-    }
-    fn add_owned(
-        &mut self,
-        key: String,
-        (language, track, anchor): LanguageVote,
-        publishable: bool,
-    ) {
         let group = self.groups.entry(key).or_default();
-        if anchor.start_sample < group.through {
+        let range = (vote.2.start_sample, vote.2.end_sample);
+        if range.0 < group.through {
             return;
         }
-        group.through = anchor.end_sample;
-        let add = |counts: &mut std::collections::BTreeMap<String, MainLanguageCount>| {
-            let count = counts.entry(language.clone()).or_default();
-            count.count += 1;
-            if publishable {
-                if count.supports.len() == 2 {
-                    count.supports.remove(0);
+        group.observations.entry(range).or_default().push(vote);
+        group.reselect(range, range);
+    }
+    /// Called only for accepted publication. Ordinary disjoint replacements
+    /// touch their own probes; overlap changes walk only affected memberships.
+    pub fn accept_publication(&mut self, prior: Option<&Segment>, accepted: &Segment) {
+        let old = main_language_votes(prior.map_or(&[][..], std::slice::from_ref));
+        let new = main_language_votes(std::slice::from_ref(accepted));
+        let old_identities: std::collections::BTreeSet<_> = old
+            .iter()
+            .map(|(key, vote)| (key.as_str(), language_vote_identity(vote)))
+            .collect();
+        let new_identities: std::collections::BTreeSet<_> = new
+            .iter()
+            .map(|(key, vote)| (key.as_str(), language_vote_identity(vote)))
+            .collect();
+        let mut changed = std::collections::BTreeMap::new();
+        for (remove, observations, other) in [
+            (true, &old, &new_identities),
+            (false, &new, &old_identities),
+        ] {
+            for (key, vote) in observations {
+                if other.contains(&(key.as_str(), language_vote_identity(vote))) {
+                    continue;
                 }
-                count.supports.push(anchor.clone());
+                let range = (vote.2.start_sample, vote.2.end_sample);
+                let group = self.groups.entry(key.clone()).or_default();
+                let votes = group.observations.entry(range).or_default();
+                if remove {
+                    votes.retain(|current| !same_language_vote(current, vote));
+                } else if !votes
+                    .iter()
+                    .any(|current| same_language_vote(current, vote))
+                {
+                    votes.push(vote.clone());
+                }
+                let bounds = changed.entry(key.clone()).or_insert((range, range));
+                bounds.0 = bounds.0.min(range);
+                bounds.1 = bounds.1.max(range);
             }
-        };
-        add(&mut group.meeting);
-        if let Some(track) = track {
-            add(group.speakers.entry(track).or_default());
+        }
+        for (key, (first, last)) in changed {
+            let group = self.groups.get_mut(&key).expect("changed group");
+            group.reselect(first, last);
+            let removed: Vec<_> = group
+                .observations
+                .range(first..=last)
+                .filter(|(_, votes)| votes.is_empty())
+                .map(|(range, _)| *range)
+                .collect();
+            for range in removed {
+                group.observations.remove(&range);
+            }
         }
     }
     pub fn context(
@@ -1242,14 +1384,24 @@ impl MainLanguageSummary {
         let group = self.groups.get(&summary_key(target)?)?;
         let choose = |counts: &std::collections::BTreeMap<String, MainLanguageCount>,
                       track: Option<String>| {
-            let total: usize = counts.values().map(|count| count.count).sum();
-            let (language, count) = counts.iter().max_by_key(|(_, count)| count.count)?;
-            if count.count < 2 || count.supports.len() < 2 || count.count * 2 <= total {
+            let total: usize = counts.values().map(|count| count.supports.len()).sum();
+            let (language, count) = counts
+                .iter()
+                .max_by_key(|(_, count)| count.supports.len())?;
+            if count.supports.len() < 2 || count.supports.len() * 2 <= total {
                 return None;
             }
+            let mut anchors = count
+                .supports
+                .iter()
+                .rev()
+                .take(2)
+                .filter_map(|range| group.selected.get(range).map(|vote| vote.2.clone()))
+                .collect::<Vec<_>>();
+            anchors.reverse();
             Some(crate::language::LanguageContext {
                 language: language.clone(),
-                end_sample: count.supports.iter().map(|a| a.end_sample).max()?,
+                end_sample: anchors.iter().map(|a| a.end_sample).max()?,
                 evidence: Some(crate::language::LanguageContextEvidence {
                     scope: if track.is_some() {
                         "speaker_main_language"
@@ -1261,7 +1413,7 @@ impl MainLanguageSummary {
                     interpretation_generation: 0,
                     capture_source: target.capture_source.clone(),
                     stream_generation: target.rest.get("stream_generation").and_then(Value::as_i64),
-                    anchors: count.supports.clone(),
+                    anchors,
                 }),
             })
         };
@@ -1283,7 +1435,7 @@ pub fn saved_language_context(
 ) -> Option<crate::language::LanguageContext> {
     MainLanguageSummary::from_segments(rows).context(rows, target)
 }
-fn collect_main_language(rows: &[Segment]) -> Option<MainLanguageSummary> {
+fn main_language_votes(rows: &[Segment]) -> Vec<(String, LanguageVote)> {
     use crate::language::LanguageContextAnchor;
 
     let track = |row: &Segment| {
@@ -1293,7 +1445,6 @@ fn collect_main_language(rows: &[Segment]) -> Option<MainLanguageSummary> {
             .flatten()
             .filter(|id| !id.is_empty() && id != "unknown")
     };
-    let mut summary = MainLanguageSummary::default();
     let mut votes = Vec::new();
     for row in rows {
         let Ok((row_start, row_end)) = segment_bounds(row) else {
@@ -1423,33 +1574,11 @@ fn collect_main_language(rows: &[Segment]) -> Option<MainLanguageSummary> {
                 },
             );
             if let Some(key) = summary_key(row) {
-                votes.push((key, vote, true));
+                votes.push((key, vote));
             }
         }
     }
-    votes.sort_by_key(|(_, vote, _)| (vote.2.start_sample, vote.2.end_sample));
-    let mut ranges = std::collections::BTreeMap::new();
-    for (key, vote, publishable) in votes {
-        let physical = (key.clone(), vote.2.start_sample, vote.2.end_sample);
-        match ranges.entry(physical) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(Some((key, vote, publishable)));
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                if entry
-                    .get()
-                    .as_ref()
-                    .is_some_and(|(_, prior, _)| prior.0 != vote.0 || prior.1 != vote.1)
-                {
-                    entry.insert(None);
-                }
-            }
-        }
-    }
-    for (key, vote, publishable) in ranges.into_values().flatten() {
-        summary.add_owned(key, vote, publishable);
-    }
-    Some(summary)
+    votes
 }
 
 fn choose_language_context(
@@ -3390,6 +3519,23 @@ impl<M: Models + 'static> Engine<M> {
             self.language_ownership_initialized = true;
         }
     }
+    /// The host calls this after canonical or accuracy publication wins its
+    /// source/edit guards; rejected model output cannot replace accepted votes.
+    pub fn accept_language_publication(
+        &mut self,
+        rows: &[Segment],
+        generation: u64,
+        prior: Option<&Segment>,
+        accepted: &Segment,
+    ) {
+        if !self.language_ownership_initialized
+            || self.language_interpretation_generation != generation
+        {
+            self.refresh_language_ownership(rows, generation);
+        } else {
+            self.main_language.accept_publication(prior, accepted);
+        }
+    }
 
     /// Re-enter the existing decoder once for a rejected owned endpoint, even
     /// after EOF. The previous accepted core prefix remains outside this retry.
@@ -3978,6 +4124,17 @@ impl<M: Models + 'static> SourceRuntime<M> {
     pub fn refresh_language_ownership(&mut self, rows: &[Segment], generation: u64) {
         for engine in &mut self.engines {
             engine.refresh_language_ownership(rows, generation);
+        }
+    }
+    pub fn accept_language_publication(
+        &mut self,
+        rows: &[Segment],
+        generation: u64,
+        prior: Option<&Segment>,
+        accepted: &Segment,
+    ) {
+        for engine in &mut self.engines {
+            engine.accept_language_publication(rows, generation, prior, accepted);
         }
     }
     pub fn retry_language_context(
@@ -6493,8 +6650,12 @@ mod tests {
         let original_summary = MainLanguageSummary::from_segments(std::slice::from_ref(borrowed));
         let duplicate_summary = MainLanguageSummary::from_segments(&[duplicate]);
         assert_eq!(
-            original_summary.groups.values().next().unwrap().meeting["en"].count,
-            duplicate_summary.groups.values().next().unwrap().meeting["en"].count,
+            original_summary.groups.values().next().unwrap().meeting["en"]
+                .supports
+                .len(),
+            duplicate_summary.groups.values().next().unwrap().meeting["en"]
+                .supports
+                .len(),
             "one-time sealed summary never counts the same physical direct probe twice"
         );
         let mut shrunk = document.segments.clone();
@@ -6708,47 +6869,204 @@ mod tests {
         }
     }
 
+    fn accepted_language_row(id: &str, start: i64, end: i64) -> Segment {
+        let mut segment = crate::transcript::bare_segment(
+            id,
+            start as f64 / RATE as f64,
+            end as f64 / RATE as f64,
+            "speaker_0",
+            "Direct accepted words",
+        );
+        segment.canonical_utterance_id = Some(id.into());
+        segment.language = Some("en".into());
+        segment.capture_source = Some(
+            serde_json::json!({"catalog_sha256":"owned","source_id":"microphone","source_revision":1}),
+        );
+        segment.rest.extend(
+            serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+                "start_sample":start,"end_sample":end,"canonical_text_end_sample":end,
+                "language_mode":"auto","language_epoch":0,"stream_generation":0,
+                "canonical_state":"sealed","source_speaker_candidates":["speaker_0"]
+            }))
+            .unwrap(),
+        );
+        let passage = speech_passage(
+            0.,
+            (end - start) as f64 / RATE as f64,
+            "Direct accepted words",
+            start,
+        );
+        segment.acoustic_evidence = Some(speech::admission_value(&passage.acoustic_evidence));
+        let mut detection = passage.language_detection;
+        detection.probes = vec![crate::language::ProbeEvent {
+            start_sample: start,
+            end_sample: end,
+            language: Some("en".into()),
+            decision: detection.clone(),
+            review: false,
+        }];
+        segment.language_detection = Some(crate::import::detection_value(&detection));
+        segment
+    }
+
+    #[test]
+    fn accepted_language_publications_refresh_counts_and_physical_memberships() {
+        let row = accepted_language_row;
+        let set_language = |row: &mut Segment, language: &str| {
+            row.language = Some(language.into());
+            row.language_detection.as_mut().unwrap()["probes"][0]["language"] =
+                Value::from(language);
+        };
+        for case in [
+            "majority",
+            "borrowed",
+            "spelling",
+            "protected",
+            "source",
+            "epoch",
+            "stream",
+            "duplicate",
+            "conflict",
+            "overlap",
+        ] {
+            let mut rows: Vec<_> = (0..5)
+                .map(|index| {
+                    let mut row = row(
+                        &format!("direct-{index}"),
+                        index * 3 * RATE,
+                        (index + 1) * 3 * RATE,
+                    );
+                    if index >= 3 {
+                        set_language(&mut row, "de");
+                    }
+                    row.rest.insert(
+                        "source_speaker_candidates".into(),
+                        serde_json::json!(["speaker_0"]),
+                    );
+                    row
+                })
+                .collect();
+            let mut target = row("target", 24 * RATE, 27 * RATE);
+            target.rest.insert(
+                "source_speaker_candidates".into(),
+                serde_json::json!(["new-speaker"]),
+            );
+            if matches!(case, "duplicate" | "conflict" | "overlap") {
+                let mut extra = row("extra", 0, 3 * RATE);
+                if case == "overlap" {
+                    extra = row("extra", RATE, 4 * RATE);
+                }
+                rows.push(extra);
+            }
+            let mut summary = MainLanguageSummary::from_segments(&rows);
+            assert_eq!(
+                summary.context(&rows, &target).unwrap().language,
+                "en",
+                "{case}"
+            );
+            let index = if matches!(case, "duplicate" | "conflict") {
+                5
+            } else {
+                0
+            };
+            let prior = rows[index].clone();
+            match case {
+                "majority" | "conflict" => set_language(&mut rows[index], "de"),
+                "borrowed" | "duplicate" | "overlap" => {
+                    rows[index].language_detection.as_mut().unwrap()["probes"][0]["decision"]["reason"] =
+                        Value::from("recent_context");
+                }
+                "spelling" => {
+                    rows[index].text = "Protected spelling".into();
+                    rows[index].protected_fields = Some(vec!["text".into()]);
+                    rows[index].machine_revision = Some(7);
+                }
+                "protected" => rows[index].protected_fields = Some(vec!["speaker".into()]),
+                "source" => {
+                    rows[index].capture_source.as_mut().unwrap()["source_id"] =
+                        Value::from("system")
+                }
+                "epoch" => {
+                    rows[index]
+                        .rest
+                        .insert("language_epoch".into(), Value::from(1));
+                }
+                "stream" => {
+                    rows[index]
+                        .rest
+                        .insert("stream_generation".into(), Value::from(1));
+                }
+                _ => unreachable!(),
+            }
+            summary.accept_publication(Some(&prior), &rows[index]);
+            let expected = match case {
+                "majority" => Some("de"),
+                "spelling" | "duplicate" => Some("en"),
+                _ => None,
+            };
+            assert_eq!(
+                summary
+                    .context(&rows, &target)
+                    .map(|context| context.language),
+                expected.map(str::to_owned),
+                "{case}"
+            );
+            assert_eq!(
+                summary.context(&rows, &target),
+                saved_language_context(&rows, &target),
+                "{case}: incremental and initial ownership agree"
+            );
+            // Repeated receipt/revision publication cannot mint acoustic votes.
+            summary.accept_publication(Some(&rows[index]), &rows[index]);
+            assert_eq!(
+                summary.context(&rows, &target),
+                saved_language_context(&rows, &target),
+                "{case}: repeat publication"
+            );
+        }
+
+        let mut rows = Vec::new();
+        let mut summary = MainLanguageSummary::default();
+        let mut target = row("empty-target", 18 * RATE, 21 * RATE);
+        for index in 0..2 {
+            rows.push(row(
+                &format!("new-{index}"),
+                index * 3 * RATE,
+                (index + 1) * 3 * RATE,
+            ));
+            summary.accept_publication(None, rows.last().unwrap());
+            assert_eq!(summary.context(&rows, &target).is_some(), index == 1);
+        }
+        for index in 2..4 {
+            let mut accepted = row(
+                &format!("new-{index}"),
+                index * 3 * RATE,
+                (index + 1) * 3 * RATE,
+            );
+            set_language(&mut accepted, "de");
+            accepted.rest.insert(
+                "source_speaker_candidates".into(),
+                serde_json::json!(["new-speaker"]),
+            );
+            rows.push(accepted);
+            summary.accept_publication(None, rows.last().unwrap());
+        }
+        target.rest.insert(
+            "source_speaker_candidates".into(),
+            serde_json::json!(["new-speaker"]),
+        );
+        let context = summary.context(&rows, &target).unwrap();
+        assert_eq!(context.language, "de");
+        assert_eq!(context.evidence.unwrap().scope, "speaker_main_language");
+        assert_eq!(
+            summary.context(&rows, &target),
+            saved_language_context(&rows, &target)
+        );
+    }
+
     #[test]
     fn saved_language_context_requires_independent_fresh_owned_acoustic_evidence() {
-        let row = |id: &str, start: i64, end: i64| {
-            let mut segment = crate::transcript::bare_segment(
-                id,
-                start as f64 / RATE as f64,
-                end as f64 / RATE as f64,
-                "speaker_0",
-                "Direct accepted words",
-            );
-            segment.canonical_utterance_id = Some(id.into());
-            segment.language = Some("en".into());
-            segment.capture_source = Some(
-                serde_json::json!({"catalog_sha256":"owned","source_id":"microphone","source_revision":1}),
-            );
-            segment.rest.extend(
-                serde_json::from_value::<Map<String, Value>>(serde_json::json!({
-                    "start_sample":start,"end_sample":end,"canonical_text_end_sample":end,
-                    "language_mode":"auto","language_epoch":0,"stream_generation":0,
-                    "canonical_state":"sealed","source_speaker_candidates":["speaker_0"]
-                }))
-                .unwrap(),
-            );
-            let passage = speech_passage(
-                0.,
-                (end - start) as f64 / RATE as f64,
-                "Direct accepted words",
-                start,
-            );
-            segment.acoustic_evidence = Some(speech::admission_value(&passage.acoustic_evidence));
-            let mut detection = passage.language_detection;
-            detection.probes = vec![crate::language::ProbeEvent {
-                start_sample: start,
-                end_sample: end,
-                language: Some("en".into()),
-                decision: detection.clone(),
-                review: false,
-            }];
-            segment.language_detection = Some(crate::import::detection_value(&detection));
-            segment
-        };
+        let row = accepted_language_row;
         for case in [
             "qualified",
             "foreign_overlap",
