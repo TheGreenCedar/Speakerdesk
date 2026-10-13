@@ -8,30 +8,33 @@ Requires macOS 15 or newer on Apple Silicon. Model setup downloads about 2.2 GB 
 
 ## Interface previews
 
-These previews use invented names and text with silent fixture audio.
+The 0.7.1 interface with sample names, text and silent audio. [Capture details](docs/screenshots/README.md).
 
 ### Meeting
 
 Review speaker names, edit passages and export the transcript.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/meeting-dark.jpg">
-  <img alt="Speakerdesk meeting transcript with Priya and an unnamed second speaker, editable passages and playback controls" src="docs/screenshots/meeting-light.jpg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/meeting-dark-0.7.1.jpg">
+  <img alt="Speakerdesk 0.7.1 sample meeting with Priya and Alex, editable passages and playback controls" src="docs/screenshots/meeting-light-0.7.1.jpg">
 </picture>
 
 ### People
 
 Save names for future meetings.
 
-![People dialog with a saved Priya name and controls to add or rename a person](docs/screenshots/people-light.jpg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/people-dark-0.7.1.jpg">
+  <img alt="Speakerdesk 0.7.1 People dialog with sample saved names and voice profiles" src="docs/screenshots/people-light-0.7.1.jpg">
+</picture>
 
 ### Name picker
 
 Choose a saved person or apply a name to this meeting.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/name-picker-dark.jpg">
-  <img alt="Name picker with Priya selected from saved people and an Apply name button" src="docs/screenshots/name-picker-light.jpg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/name-picker-dark-0.7.1.jpg">
+  <img alt="Speakerdesk 0.7.1 name picker showing sample saved people and voice profile controls" src="docs/screenshots/name-picker-light-0.7.1.jpg">
 </picture>
 
 ## Development
