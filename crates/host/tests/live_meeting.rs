@@ -1600,7 +1600,17 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
             host.close(root).await;
             continue;
         }
-        let ready = host.get(&path).await;
+        let ready = if mode == "disabled" {
+            host.wait(&path, |v| {
+                v["document"]["segments"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty())
+            })
+            .await
+        } else {
+            wait_file(&root.join("voice-started")).await;
+            host.get(&path).await
+        };
         assert_eq!(ready["status"], "recording");
         let original_text = ready["document"]["segments"][0]["text"].clone();
         assert!(!original_text.as_str().unwrap().is_empty());
@@ -1615,7 +1625,6 @@ async fn completed_live_transcript_checks_saved_voices_without_owning_or_replaci
                 2
             );
         } else {
-            wait_file(&root.join("voice-started")).await;
             let blocked = host.get(&path).await;
             assert_eq!(blocked["inference_owned"], true);
             let passage = &blocked["document"]["segments"][0];
@@ -2079,7 +2088,7 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
             };
             fs::write(file, contexts.to_string()).unwrap();
         }
-        let completes = matches!(case, "complete" | "german" | "chinese");
+        let completes = matches!(case, "complete" | "german" | "chinese" | "uncertain");
         let held = matches!(case, "edit" | "pause");
         if held {
             fs::write(root.join("hold-live-asr"), b"hold final context").unwrap();
@@ -2131,6 +2140,24 @@ async fn saved_long_context_publication_timing_and_late_terminal_matrix() {
             };
             assert_eq!(row["language"], language);
             assert_eq!(row["language_mode"], captured_mode);
+            if case == "uncertain" {
+                // Complete same-language contexts retain their routing uncertainty
+                // without discarding the acoustically owned words and timing.
+                assert_eq!(row["review"], true);
+                let detection = &row["language_detection"];
+                assert_eq!(detection["reason"], "best_effort");
+                assert_eq!(detection["probability"], f64::from(0.55_f32));
+                let probes = detection["probes"].as_array().unwrap();
+                assert!(probes.iter().all(|probe| probe["language"] == "de"));
+                assert!(probes.iter().any(|probe| {
+                    probe["review"] == true
+                        && probe["decision"]["reason"] == "best_effort"
+                        && probe["decision"]["probability"] == f64::from(0.55_f32)
+                }));
+                assert!(probes.iter().any(|probe| {
+                    probe["review"] == false && probe["decision"]["reason"] == "detected"
+                }));
+            }
             assert_eq!(row["reading_alignment"]["language"], language);
             assert_eq!(
                 row["reading_alignment"]["score_calibration_id"],
