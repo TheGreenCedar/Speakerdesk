@@ -19,9 +19,14 @@ These mirror `.github/workflows/ci.yml`:
 ## Docs
 
 - `docs/architecture.md`: read before changing process, IPC, storage, refinement, capture or setup boundaries.
-- `docs/product-behavior.md`: update it in the same change when you change a user-visible rule.
+- `docs/product-behavior.md`: read before designing user-facing changes; update it in the same change when you change a user-visible rule.
 - `docs/releasing.md`: build, signing, promotion and website delivery.
 - `docs/ci-build-reuse.md`: read before changing CI caches or workflow trust boundaries.
+- `docs/architecture.md#inference-performance`: read before changing inference scheduling, placement or performance.
+
+Derive user-facing acceptance from the complete interaction as it evolves. Include recording progress, actionable repair, continuation after an accepted repair, and save/reopen persistence where the flow reaches them. Revisit acceptance when the interaction changes; resolving the reported symptom alone does not establish that the flow works.
+
+Separate background work, model uncertainty and failures requiring user action. Show a repairable problem beside the affected passage, explain its consequence and provide the repair there. Continue dependent work after a successful repair. Ordinary uncertainty must not become mandatory review; preserve explicit voice-enrollment consent and protected edits.
 
 ## Agent skills
 

@@ -31,6 +31,16 @@ The editor frontend lives in `speakerdesk/static/` and `speakerdesk/templates/` 
 - CTC scores carry audio length, valid frame count, frame hop/origin, explicit column IDs, model identity and vocabulary digest. Core owns the supplied-text alignment; model output never replaces Cohere's transcript text.
 - Numerical comparisons must identify the native MLX runtime and Metal library, not just the MLX version. The build pins the macOS 15 MLX 0.32.2 archive in `scripts/fetch_mlx_runtime.sh`, and `vendor/mlx-sys` patches the build to link it (see `vendor/mlx-sys/SPEAKERDESK.md`).
 
+### Inference performance
+
+For sustained inference-performance claims, evaluate live meetings with primary transcription and auxiliary work active. Observe publication progress for both, accumulated backlog and Stop completion; measure memory, energy and thermal behavior as required by the accepted comparison. Compare completed equivalent work, including final outputs and failures; elapsed time alone can hide deferred or omitted work.
+
+Reuse applicable measurements and keep new runs within the accepted scope and budget. For energy or battery claims, compare equivalent power-source and thermal conditions; report confounds rather than inferring a benefit from isolated model latency or a shorter Stop drain.
+
+Distinguish requested model/device policy from observed runtime placement. The serial worker and child described below are the current design; they do not prove that serialization is a runtime constraint. Require runtime evidence before treating a model, backend or device limitation as a reason to keep or change that design.
+
+Performance changes must preserve transcription and speaker accuracy, publication ownership, protected edits, continuation state, cancellation and recovery. Use the product rules in [Product behavior](product-behavior.md) as acceptance criteria for the same live interaction.
+
 ## Storage
 
 The store is `<storage>/speakerdesk.sqlite` (`core/src/store/`). On first start the host discovers a legacy `jobs.sqlite` and migrates it once into the new file without modifying it ([ADR-0002](adr/0002-one-way-sqlite-migration.md)). An existing native database wins. Migrated audio stays read-only, and native writes use copy-on-write media storage. The schema stores product fields only ([ADR-0003](adr/0003-product-fields-only.md)).

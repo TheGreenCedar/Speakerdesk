@@ -133,6 +133,23 @@ procedural macros and dependency build scripts that sccache cannot cache.
 Reuse an already required exact-source producer
 artifact for signing instead of rebuilding it merely for release.
 
+When warm-reuse proof is authorized:
+
+1. Wait for the successful trusted-main job's post-save to finish and confirm
+   what it saved. A restored key proves archive restoration only; Cargo still
+   decides whether to reuse each output.
+2. Run one permitted warm check at the same head, with comparable runner image,
+   toolchain, target, package selection, features and profile. Prefer an
+   already-required run; extra dispatches must fit the task's authorized scope
+   and budget. Repeated PR runs cannot populate the trusted main cache.
+3. Inspect actual dependency compilations in every relevant Cargo command,
+   including native tests, desktop tests and producer builds. Report restored
+   keys, remaining rebuilds, archive bytes and restore/save transfer time beside
+   build time. Judge reuse against the outputs that should be compatible;
+   zero compilations is not a universal acceptance condition.
+
+This verifies reuse; it does not by itself establish a controlled speedup.
+
 The implementation follows [CodeStory's pinned sccache and explicit trusted
 save pattern](https://github.com/TheGreenCedar/CodeStory/blob/424d56b1b5452555460d528f40d08a231ac72a92/.github/workflows/rust-ci.yml).
 [BatCave's maintained Rust-cache action](https://github.com/TheGreenCedar/BatCave/blob/2355d82b08a097259a67ccd789da032945768027/.github/workflows/validation.yml)
