@@ -2,7 +2,9 @@
 
 Accepted scope: implement the twelve-batch quality plan from the code review, starting
 from `9e251a1e7760cc421a1d3f859ca300344e68b92b`. Branch:
-`codex/reliability-and-workflow-quality`. No release or publication is part of this work.
+`codex/reliability-and-workflow-quality`. The implementation was completed locally;
+the subsequent owner request authorizes review, patch release 0.7.5, PR integration,
+signing, publication and installer/updater delivery through `docs/releasing.md`.
 
 | Batch | Scope | State |
 | --- | --- | --- |
@@ -187,3 +189,21 @@ the checksum-optimized candidate is
   DSP/capture evidence remains valid for unchanged code. No physical overlapping
   conversation, installed-app UI workflow, release package or publication was
   qualified by this follow-up; rendered checks used a disposable synthetic server.
+
+## Release review for 0.7.5
+
+Two Sol 6.1 reviewers examined the complete `9e251a1..408cf14` implementation range
+and connected callers. Backend review covered capture, live scheduling, import
+publication/resume, storage/recovery, setup and separation; frontend/native review
+covered editor ownership, drafts, audio/settings controls, Swift capture and Tauri
+recovery. No application release blockers remained. A proposed separation-response
+edit race was rejected after checking that the editor becomes inert synchronously
+before the request and existing document saves drain first.
+
+Release-path inspection found the central signer rejected the new capture
+`progress_contract` receipt. AppleRelease must admit the exact
+`audio_queue_fence_v1` contract through per-build registration and retain it when
+refreshing the signed helper hash. Its focused regression failed before that
+signer change; the updated signer policy suite passes 60 tests. Older approved
+receipts retain their existing contract. Signed artifact QA remains a separate
+gate after production of the exact main-branch release source.
