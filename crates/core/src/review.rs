@@ -1,4 +1,4 @@
-//! Review reasons and retained unassigned audio. Owned by the core-text agent.
+//! Review reasons and retained unassigned audio.
 
 use std::collections::HashSet;
 

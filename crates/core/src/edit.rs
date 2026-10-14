@@ -1,4 +1,4 @@
-//! PUT and PATCH rules. Owned by the core-text agent.
+//! Transcript replacement and passage edit rules, including protected fields.
 
 use std::collections::HashMap;
 

@@ -2,6 +2,9 @@
 
 Speakerdesk is one macOS executable that runs in three modes, plus a Swift capture helper. See [ADR-0001](adr/0001-rust-core-inference-child.md) for why inference lives in a separate process.
 
+For feature entry points, targeted checks and debugging paths, start with
+[Maintaining Speakerdesk](maintaining.md).
+
 | Mode | Entry | Owns |
 | --- | --- | --- |
 | Tauri shell (default) | `desktop/src-tauri/src/main.rs` | Window, native menus, exports, updater. Starts the host. |
@@ -17,7 +20,7 @@ Storage defaults to the app data directory (`SPEAKERDESK_HOME` overrides); `SPEA
 - `speakerdesk-host`: the axum process. It runs routes, the inference supervisor (`inference.rs`), capture transport/writer/processing, admission, setup and workers. The `fixtures` feature builds `speakerdesk-dev` and `inference-fixture` for tests.
 - `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring and the CTC timing model with mlx-rs, and runs ReDimNet through Core ML. Linux builds a protocol stub that reports `unavailable`.
 - `speakerdesk-echo`: buffering and reference clock for the pinned native WebRTC AEC3 library (`desktop/capture/echo`, built by `scripts/setup_echo.py`).
-- `xtask`: development commands (`cargo xtask --help`).
+- `xtask`: bundle verification, Python-sidecar checks and the native model comparison probe (`cargo xtask --help`).
 
 The editor frontend lives in `speakerdesk/static/` and `speakerdesk/templates/` and is embedded into the host with `rust-embed`. The JSON files under `speakerdesk/` are model and voice policy metadata. There is no Python at runtime.
 
@@ -64,6 +67,11 @@ copy leaves the window open. A crash can recover only the last durable snapshot.
 
 ## Imports
 
+The host lifecycle lives in `host/src/routes/imports.rs`: upload staging, audio
+preparation, queued execution and cancellation. `routes/import_progress.rs` owns
+atomic passage/checkpoint publication; shared operation ownership stays in
+`routes.rs`.
+
 Normalization is cancellable and writes through private staging. Canonical PCM
 copies and resampling use bounded buffers; other decoders spool mono samples to
 disk before bounded resampling. The import pipeline reads bounded source windows,
@@ -79,6 +87,10 @@ ownership when publishing rows. Legacy unambiguous import metadata is repaired a
 the start of a requested accuracy operation; reads and exports remain passive.
 
 ## Refinement and publication
+
+`core/src/live/language_context.rs` owns main-language evidence and witness
+freshness. The live engine and saved-refinement operation own when accepted
+results update that evidence; the module does not schedule model work.
 
 Live text comes from the serial recording worker. Saved and live accuracy passes reuse the parent operation and the serial worker. Each candidate owns one original audio anchor and its captured language mode and epoch. Publication compares the passage with its current stored version and replaces only that slot. Names, neighbouring passages and source order stay as they are, and protected edits always win.
 

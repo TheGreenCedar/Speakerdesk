@@ -1,8 +1,6 @@
-//! Speech admission ledger. Owned by the core-speech agent.
+//! Speech admission ledger and acoustic evidence rules.
 //!
 //! Frame decisions are pure functions of injected probabilities and PCM.
-//! Disk [`FrameArchive`](https://github.com/TheGreenCedar/Speakerdesk) journals stay
-//! in Python (port ledger D6).
 
 use thiserror::Error;
 

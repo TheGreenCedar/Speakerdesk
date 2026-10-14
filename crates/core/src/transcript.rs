@@ -1,4 +1,4 @@
-//! Transcript validation helpers beyond [`crate::document`]. Owned by the core-text agent.
+//! Transcript validation beyond the structural types in [`crate::document`].
 
 use std::collections::{BTreeMap, HashSet};
 

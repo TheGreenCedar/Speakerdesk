@@ -8,7 +8,8 @@ pub fn router(state: crate::routes::AppState) -> Router {
     crate::routes::router(state)
 }
 
-/// Headers every response keeps. The route agent applies these and must not change the values.
+/// Headers applied by the shared route guard, including on rejected requests.
+/// Values belong to `speakerdesk_core::security`.
 pub fn security_headers() -> [(&'static str, &'static str); 4] {
     [
         ("content-security-policy", CONTENT_SECURITY_POLICY),

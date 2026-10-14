@@ -2,7 +2,9 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 
+// 320 complete VAD frames keep feed boundaries unchanged across read blocks.
 const READ_SAMPLES: usize = 163_840;
 const DIAR_READ_SAMPLES: usize = 160_000;
 
@@ -66,7 +68,7 @@ pub fn import_reader<M: Models + ?Sized>(
 
 pub(super) trait ImportAudio {
     fn samples(&self) -> usize;
-    fn read(&self, start: usize, end: usize) -> Result<Vec<f32>, ImportError>;
+    fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [f32]>, ImportError>;
     fn diarize<M: Models + ?Sized>(&self, models: &M) -> Result<Vec<Turn>, ImportError>;
 }
 
@@ -75,8 +77,8 @@ impl ImportAudio for SliceAudio<'_> {
     fn samples(&self) -> usize {
         self.0.len()
     }
-    fn read(&self, start: usize, end: usize) -> Result<Vec<f32>, ImportError> {
-        Ok(self.0[start..end].to_vec())
+    fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [f32]>, ImportError> {
+        Ok(Cow::Borrowed(&self.0[start..end]))
     }
     fn diarize<M: Models + ?Sized>(&self, models: &M) -> Result<Vec<Turn>, ImportError> {
         models.diarize_window(self.0).map_err(child_err)
@@ -91,9 +93,10 @@ impl ImportAudio for ReaderAudio<'_> {
     fn samples(&self) -> usize {
         self.samples as usize
     }
-    fn read(&self, start: usize, end: usize) -> Result<Vec<f32>, ImportError> {
+    fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [f32]>, ImportError> {
         self.reader
             .read_samples(start as u32, end as u32, self.samples)
+            .map(Cow::Owned)
             .map_err(audio_error)
     }
     fn diarize<M: Models + ?Sized>(&self, models: &M) -> Result<Vec<Turn>, ImportError> {
@@ -553,52 +556,8 @@ fn admit_bounded<M: Models + ?Sized, A: ImportAudio>(
     let mut ledger = SpeechLedger::new(0).map_err(speech_err)?;
     let handle = models.vad_open(None).map_err(child_err)?;
     let result = (|| {
-        for block_start in (0..source.samples()).step_by(READ_SAMPLES) {
-            let block_end = (block_start + READ_SAMPLES).min(source.samples());
-            let block = source.read(block_start, block_end)?;
-            for offset in (block_start..block_end).step_by(speech::FRAME_SAMPLES) {
-                let end = (offset + speech::FRAME_SAMPLES).min(block_end);
-                let feed = models
-                    .vad_feed(
-                        handle,
-                        &block[offset - block_start..end - block_start],
-                        end == source.samples(),
-                    )
-                    .map_err(child_err)?;
-                if feed.received != end as u64 || feed.observed > feed.received {
-                    return Err(ImportError::new(messages::PROCESSING_FAILED));
-                }
-                for frame in feed.frames {
-                    if frame.start >= frame.end || frame.end > feed.observed {
-                        return Err(ImportError::new(messages::PROCESSING_FAILED));
-                    }
-                    if frame.start >= block_start as u64 && frame.end <= block_end as u64 {
-                        ledger
-                            .append_pcm(
-                                frame.start as i64,
-                                &block[frame.start as usize - block_start
-                                    ..frame.end as usize - block_start],
-                                f64::from(frame.raw_p),
-                                f64::from(frame.norm_p),
-                            )
-                            .map_err(speech_err)?;
-                    } else {
-                        let pcm = source.read(frame.start as usize, frame.end as usize)?;
-                        ledger
-                            .append_pcm(
-                                frame.start as i64,
-                                &pcm,
-                                f64::from(frame.raw_p),
-                                f64::from(frame.norm_p),
-                            )
-                            .map_err(speech_err)?;
-                    }
-                }
-                if ledger.end_sample() != feed.observed as i64 {
-                    return Err(ImportError::new(messages::PROCESSING_FAILED));
-                }
-            }
-        }
+        feed_speech(models, source, handle, &mut ledger)?;
+        // Imports report incomplete final coverage before considering close failures.
         if ledger.end_sample() != source.samples() as i64 {
             return Err(ImportError::new(messages::PROCESSING_FAILED));
         }
@@ -606,4 +565,54 @@ fn admit_bounded<M: Models + ?Sized, A: ImportAudio>(
     })();
     let closed = models.vad_close(handle).map_err(child_err);
     result.and_then(|ledger| closed.map(|()| ledger))
+}
+
+pub(super) fn feed_speech<M: Models + ?Sized, A: ImportAudio>(
+    models: &M,
+    source: &A,
+    handle: crate::ipc::Handle,
+    ledger: &mut SpeechLedger,
+) -> Result<(), ImportError> {
+    for block_start in (0..source.samples()).step_by(READ_SAMPLES) {
+        let block_end = (block_start + READ_SAMPLES).min(source.samples());
+        let block = source.read(block_start, block_end)?;
+        for offset in (block_start..block_end).step_by(speech::FRAME_SAMPLES) {
+            let end = (offset + speech::FRAME_SAMPLES).min(block_end);
+            let feed = models
+                .vad_feed(
+                    handle,
+                    &block[offset - block_start..end - block_start],
+                    end == source.samples(),
+                )
+                .map_err(child_err)?;
+            if feed.received != end as u64 || feed.observed > feed.received {
+                return Err(ImportError::new(messages::PROCESSING_FAILED));
+            }
+            for frame in feed.frames {
+                if frame.start >= frame.end || frame.end > feed.observed {
+                    return Err(ImportError::new(messages::PROCESSING_FAILED));
+                }
+                let pcm = if frame.start >= block_start as u64 && frame.end <= block_end as u64 {
+                    Cow::Borrowed(
+                        &block
+                            [frame.start as usize - block_start..frame.end as usize - block_start],
+                    )
+                } else {
+                    source.read(frame.start as usize, frame.end as usize)?
+                };
+                ledger
+                    .append_pcm(
+                        frame.start as i64,
+                        &pcm,
+                        f64::from(frame.raw_p),
+                        f64::from(frame.norm_p),
+                    )
+                    .map_err(speech_err)?;
+            }
+            if ledger.end_sample() != feed.observed as i64 {
+                return Err(ImportError::new(messages::PROCESSING_FAILED));
+            }
+        }
+    }
+    Ok(())
 }

@@ -1,4 +1,6 @@
 //! Saved-audio voice operations. The store is held only for snapshots and publication.
+use std::collections::BTreeMap;
+
 use super::{
     Catalog, HttpError, editing_job, from_people, invalid_job, json_object, not_found,
     readiness_fields, unix_now,
@@ -163,7 +165,7 @@ pub(super) async fn remember_voice(
                 .and_then(Value::as_str)
                 .ok_or_else(not_found)?
                 .to_owned();
-            run_voice(&app, &jid, &track, Some(&pid), &body)
+            run_voice(&app, &jid, &track, VoiceRequest::Enroll(&pid), &body)
         })())
     })
     .await
@@ -175,7 +177,10 @@ pub(super) async fn voice_suggestion(
     body: Bytes,
 ) -> Response {
     blocking(move || {
-        reply(json_object(&body).and_then(|body| run_voice(&app, &jid, &track, None, &body)))
+        reply(
+            json_object(&body)
+                .and_then(|body| run_voice(&app, &jid, &track, VoiceRequest::Check, &body)),
+        )
     })
     .await
 }
@@ -208,11 +213,28 @@ pub(super) fn selected_audio_unchanged(
     }))
 }
 
+enum VoiceRequest<'a> {
+    Enroll(&'a str),
+    Check,
+}
+
+enum VoicePublication<'a> {
+    Enroll {
+        person_id: &'a str,
+        generation: i64,
+    },
+    Check {
+        check_id: String,
+        profiles: BTreeMap<String, Value>,
+        profile_versions: BTreeMap<String, String>,
+    },
+}
+
 fn run_voice(
     app: &AppState,
     jid: &str,
     track: &str,
-    pid: Option<&str>,
+    request: VoiceRequest<'_>,
     body: &Map<String, Value>,
 ) -> Result<Value, HttpError> {
     let _lease = app
@@ -224,31 +246,36 @@ fn run_voice(
         .voice_policy()
         .ok_or_else(|| conflict("Voice recognition is not available in this build."))?;
     let id = JobId::parse(jid).map_err(|_| not_found())?;
-    let check_id = pid.is_none().then(super::new_id);
-    let (original, clips, generation, catalog, operation) = {
+    let (original, clips, publication, operation) = {
         let mut store = app.store();
         let mut job = store.get(&id, false)?.ok_or_else(not_found)?;
-        editing_job(
-            &serde_json::to_value(&job).map_err(invalid_job)?,
-            body,
-            Some(track),
-        )?;
+        editing_job(&job, body, Some(track))?;
         let catalog = Catalog::load(&store, Some(policy.clone()))?;
-        let generation = if let Some(pid) = pid {
-            catalog.people.get(pid).map_err(from_people)?;
-            if !confirmed(&job, track, pid) {
-                return Err(conflict(
-                    "Confirm this speaker as the person before remembering their voice.",
-                ));
+        let publication = match request {
+            VoiceRequest::Enroll(pid) => {
+                catalog.people.get(pid).map_err(from_people)?;
+                if !confirmed(&job, track, pid) {
+                    return Err(conflict(
+                        "Confirm this speaker as the person before remembering their voice.",
+                    ));
+                }
+                VoicePublication::Enroll {
+                    person_id: pid,
+                    generation: store.voice_generation(pid)?.ok_or_else(not_found)?,
+                }
             }
-            store.voice_generation(pid)?.ok_or_else(not_found)?
-        } else {
-            if assignment(&job, track).is_some() {
-                return Err(conflict(
-                    "This speaker already has a name. Choose a name correction to change it.",
-                ));
+            VoiceRequest::Check => {
+                if assignment(&job, track).is_some() {
+                    return Err(conflict(
+                        "This speaker already has a name. Choose a name correction to change it.",
+                    ));
+                }
+                VoicePublication::Check {
+                    check_id: super::new_id(),
+                    profiles: catalog.profiles,
+                    profile_versions: catalog.versions,
+                }
             }
-            0
         };
         let ids: Vec<String> =
             serde_json::from_value(body.get("segment_ids").cloned().unwrap_or(Value::Null))
@@ -257,7 +284,7 @@ fn run_voice(
                 })?;
         let clips = voice::clean_clips(&meeting(&job)?, track, &ids, policy.minimum_clips)
             .map_err(voice_error)?;
-        if let Some(check_id) = &check_id {
+        if let VoicePublication::Check { check_id, .. } = &publication {
             let checks = job
                 .extra
                 .entry("voice_checks")
@@ -276,7 +303,7 @@ fn run_voice(
         let operation = app
             .begin_refinement_operation(&mut store, &mut job)
             .map_err(|e| conflict(e.message))?;
-        (job, clips, generation, catalog, operation)
+        (job, clips, publication, operation)
     };
     let result = (|| {
         let vectors = embeddings(
@@ -291,72 +318,77 @@ fn run_voice(
         if app.admission.closed() || operation.cancellation.is_cancelled() {
             return Err(conflict("Voice operation cancelled."));
         }
-        if let Some(pid) = pid {
-            let draft =
-                voice::make_profile(&policy.model, &vectors, &clips).map_err(voice_error)?;
-            let profile = VoiceProfile {
-                person_id: pid.into(),
-                version: super::new_id(),
-                enrolled_at: unix_now(),
-                model: draft.model,
-                centroid: draft.centroid,
-                clips: draft.clips,
-                consent: draft.consent,
-            };
-            let published = store.publish_voice(&id, generation, &profile, |current| {
-                Ok::<_, HttpError>(
-                    operation.current(current)
-                        && confirmed(current, track, pid)
-                        && assignment(current, track) == assignment(&original, track)
-                        && selected_audio_unchanged(current, &original, &clips)?,
-                )
-            })?;
-            if !published {
-                return Err(conflict(
-                    "The voice or its source passages changed. Refresh and try again.",
-                ));
+        match &publication {
+            VoicePublication::Enroll {
+                person_id,
+                generation,
+            } => {
+                let pid = *person_id;
+                let draft =
+                    voice::make_profile(&policy.model, &vectors, &clips).map_err(voice_error)?;
+                let profile = VoiceProfile {
+                    person_id: pid.into(),
+                    version: super::new_id(),
+                    enrolled_at: unix_now(),
+                    model: draft.model,
+                    centroid: draft.centroid,
+                    clips: draft.clips,
+                    consent: draft.consent,
+                };
+                let published = store.publish_voice(&id, *generation, &profile, |current| {
+                    Ok::<_, HttpError>(
+                        operation.current(current)
+                            && confirmed(current, track, pid)
+                            && assignment(current, track) == assignment(&original, track)
+                            && selected_audio_unchanged(current, &original, &clips)?,
+                    )
+                })?;
+                if !published {
+                    return Err(conflict(
+                        "The voice or its source passages changed. Refresh and try again.",
+                    ));
+                }
+                Ok(json!({"remembered":true}))
             }
-            Ok(json!({"remembered":true}))
-        } else {
-            let profiles: Vec<VoiceProfile> = catalog
-                .profiles
-                .values()
-                .filter_map(|value| serde_json::from_value(value.clone()).ok())
-                .collect();
-            let matched = voice::propose_match(&policy.model, &policy, &vectors, &profiles)
-                .map_err(voice_error)?;
-            let current_catalog = Catalog::load(&store, Some(policy.clone()))?;
-            if current_catalog.versions != catalog.versions {
-                return Err(conflict("Saved voices changed. Try again."));
-            }
-            let (job, ()) = store
-                .update_job(&id, |current| {
-                    if !operation.current(current)
-                        || !pending_check(
-                            current,
-                            track,
-                            check_id.as_deref().expect("manual check"),
-                        )
-                        || assignment(current, track).is_some()
-                        || !selected_audio_unchanged(current, &original, &clips)?
-                    {
-                        return Err(conflict(
-                            "The source passages changed. Refresh and try again.",
-                        ));
-                    }
-                    let mut suggestions = current
-                        .extra
-                        .get("voice_suggestions")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    suggestions.retain(|s| s["track_id"] != track);
-                    if let Some(found) = &matched {
-                        let person = current_catalog
-                            .people
-                            .get(&found.person_id)
-                            .map_err(from_people)?;
-                        suggestions.push(json!({
+            VoicePublication::Check {
+                check_id,
+                profiles,
+                profile_versions,
+            } => {
+                let profiles: Vec<VoiceProfile> = profiles
+                    .values()
+                    .filter_map(|value| serde_json::from_value(value.clone()).ok())
+                    .collect();
+                let matched = voice::propose_match(&policy.model, &policy, &vectors, &profiles)
+                    .map_err(voice_error)?;
+                let current_catalog = Catalog::load(&store, Some(policy.clone()))?;
+                if &current_catalog.versions != profile_versions {
+                    return Err(conflict("Saved voices changed. Try again."));
+                }
+                let (job, ()) = store
+                    .update_job(&id, |current| {
+                        if !operation.current(current)
+                            || !pending_check(current, track, check_id)
+                            || assignment(current, track).is_some()
+                            || !selected_audio_unchanged(current, &original, &clips)?
+                        {
+                            return Err(conflict(
+                                "The source passages changed. Refresh and try again.",
+                            ));
+                        }
+                        let mut suggestions = current
+                            .extra
+                            .get("voice_suggestions")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        suggestions.retain(|s| s["track_id"] != track);
+                        if let Some(found) = &matched {
+                            let person = current_catalog
+                                .people
+                                .get(&found.person_id)
+                                .map_err(from_people)?;
+                            suggestions.push(json!({
                         "id": super::new_id(), "kind": "voice_match", "track_id": track,
                         "person_id": found.person_id, "name": person.name,
                         "match": {
@@ -366,26 +398,28 @@ fn run_voice(
                         },
                         "evidence": {"clips": clips}
                     }));
-                    }
-                    current
-                        .extra
-                        .insert("voice_suggestions".into(), json!(suggestions));
-                    current
-                        .extra
-                        .get_mut("voice_checks")
-                        .expect("current check")[track]["status"] = json!(if matched.is_some() {
-                        "matched"
-                    } else {
-                        "unknown"
-                    });
-                    Ok::<_, HttpError>(())
-                })?
-                .ok_or_else(not_found)?;
-            Ok(json!({"job":stored_job_json(&job),"matched":matched.is_some()}))
+                        }
+                        current
+                            .extra
+                            .insert("voice_suggestions".into(), json!(suggestions));
+                        current
+                            .extra
+                            .get_mut("voice_checks")
+                            .expect("current check")[track]["status"] =
+                            json!(if matched.is_some() {
+                                "matched"
+                            } else {
+                                "unknown"
+                            });
+                        Ok::<_, HttpError>(())
+                    })?
+                    .ok_or_else(not_found)?;
+                Ok(json!({"job":stored_job_json(&job),"matched":matched.is_some()}))
+            }
         }
     })();
     if result.is_err()
-        && let Some(check_id) = &check_id
+        && let VoicePublication::Check { check_id, .. } = &publication
     {
         let _ = app.store().update_job(&id, |current| {
             if !pending_check(current, track, check_id) {

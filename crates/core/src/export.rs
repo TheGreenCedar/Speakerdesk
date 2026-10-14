@@ -1,4 +1,4 @@
-//! txt, srt, vtt, and json exports. Owned by the core-text agent.
+//! TXT, SRT, VTT and JSON exports, retaining unresolved review reasons.
 
 use std::collections::BTreeMap;
 

@@ -1,4 +1,4 @@
-//! Exact-input memo for ASR, LID, and CTC. Owned by the core-speech agent.
+//! Exact-input memo for transcription, language detection and transcript timing.
 //!
 //! This is the resident exact-input LRU from `language_probe_cache.py`.
 //! Dropped ASR reuse profiles (qualification receipts, authority files) are not stored.

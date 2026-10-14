@@ -1,7 +1,13 @@
 //! Import progress is committed with its resume cursor before it reaches the editor.
-use super::*;
+use super::{ApplicationModels, OperationGuard, Shared, imports::checked_document};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use speakerdesk_core::import::{ImportError, ImportProgress, ImportResume};
+use speakerdesk_core::{
+    document::{Document, Job, Segment},
+    error::ApiError,
+};
+use std::{fs, io::Read, sync::Arc};
 
 pub(super) fn infer(
     shared: &Arc<Shared>,
@@ -135,7 +141,9 @@ fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{admission::Activity, routes::AppState};
     use speakerdesk_core::import::ImportPlan;
+    use speakerdesk_core::store::JobStore;
 
     #[test]
     fn accepted_import_rows_and_cursor_are_atomic_and_edits_survive_republication() {

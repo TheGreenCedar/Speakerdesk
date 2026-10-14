@@ -1,4 +1,4 @@
-//! Import pipeline. Owned by the import agent.
+//! Import planning, passage decoding and retry candidates.
 //!
 //! Diarization, speech admission, and transcription go through [`Models`].
 //! Optional supplied-text CTC timing uses the pinned vocabulary and original crop.
@@ -1531,44 +1531,10 @@ fn admit_source<M: Models + ?Sized>(
     let handle = models
         .vad_open(processed_microphone_catalog.map(|_| crate::ipc::GainPolicy { peak: None }))
         .map_err(child_err)?;
-    let mut offset = 0usize;
-    let mut failed: Option<ImportError> = None;
-    while offset < pcm.len() && failed.is_none() {
-        let end = (offset + speech::FRAME_SAMPLES).min(pcm.len());
-        let last = end == pcm.len();
-        match models.vad_feed(handle, &pcm[offset..end], last) {
-            Ok(feed) => {
-                if feed.received != end as u64 || feed.observed > feed.received {
-                    failed = Some(ImportError::new(messages::PROCESSING_FAILED));
-                    break;
-                }
-                for frame in feed.frames {
-                    let start = i64::try_from(frame.start).unwrap_or(-1);
-                    let frame_end = i64::try_from(frame.end).unwrap_or(-1);
-                    if start < 0 || frame_end <= start || frame.end > feed.observed {
-                        failed = Some(ImportError::new(messages::PROCESSING_FAILED));
-                        break;
-                    }
-                    if let Err(error) = ledger.append_pcm(
-                        start,
-                        &pcm[start as usize..frame_end as usize],
-                        f64::from(frame.raw_p),
-                        f64::from(frame.norm_p),
-                    ) {
-                        failed = Some(speech_err(error));
-                        break;
-                    }
-                }
-                if failed.is_none() && ledger.end_sample() != feed.observed as i64 {
-                    failed = Some(ImportError::new(messages::PROCESSING_FAILED));
-                }
-            }
-            Err(error) => failed = Some(child_err(error)),
-        }
-        offset = end;
-    }
+    let result = pipeline::feed_speech(models, &pipeline::SliceAudio(pcm), handle, &mut ledger);
     let closed = models.vad_close(handle).map_err(child_err);
-    failed.map_or(Ok(()), Err)?;
+    result?;
+    // Retry and saved crops prefer a close failure over incomplete final coverage.
     closed?;
     if ledger.end_sample() != pcm.len() as i64 {
         return Err(ImportError::new(messages::PROCESSING_FAILED));
@@ -1745,6 +1711,12 @@ pub(crate) mod tests {
         pub(crate) alignment: Option<(String, ipc::CtcScoresOut)>,
         failure: Option<(&'static str, crate::error::ChildError)>,
         observed_limit: Option<usize>,
+        vad_feed_overrides:
+            Mutex<std::collections::VecDeque<Result<VadFeedOut, crate::error::ChildError>>>,
+        vad_close_failure: Option<crate::error::ChildError>,
+        vad_conditioning: Mutex<Vec<Option<GainPolicy>>>,
+        vad_feeds: Mutex<Vec<(usize, bool)>>,
+        vad_closes: Mutex<usize>,
     }
 
     impl Scripted<'_> {
@@ -1760,6 +1732,11 @@ pub(crate) mod tests {
                 alignment: None,
                 failure: None,
                 observed_limit: None,
+                vad_feed_overrides: Mutex::new(Default::default()),
+                vad_close_failure: None,
+                vad_conditioning: Mutex::new(Vec::new()),
+                vad_feeds: Mutex::new(Vec::new()),
+                vad_closes: Mutex::new(0),
             }
         }
 
@@ -1968,6 +1945,209 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn import_and_retry_vad_replay_keep_receipts_eof_conditioning_and_first_failure() {
+        use crate::error::ChildError;
+        const BLOCK: usize = 163_840;
+        const FRAME: usize = 512;
+        let samples = BLOCK + 137;
+        let pcm = tone(samples);
+        let path = std::env::temp_dir().join(format!(
+            "speakerdesk-vad-replay-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let mut writer = crate::audio::RecordingWriter::create(&path).unwrap();
+        writer.write_samples(&pcm).unwrap();
+        drop(writer);
+        let reader = crate::audio::RecordingReader::open(&path).unwrap();
+        let frame = |start: usize, end: usize| VadFrame {
+            start: start as u64,
+            end: end as u64,
+            raw_p: 0.9,
+            norm_p: 0.9,
+            gain: 1.,
+            constant: false,
+        };
+        for route in ["reader", "retry"] {
+            for case in [
+                "delayed_cross_block",
+                "processed_microphone",
+                "received_mismatch",
+                "future_observed",
+                "noncontiguous",
+                "oversized",
+                "invalid_probability",
+                "missing_tail",
+                "missing_tail_and_close_failure",
+                "ordinary_failure",
+                "cancelled",
+                "timeout",
+                "child_loss",
+                "close_failure",
+            ] {
+                let mut feeds = (0..samples)
+                    .step_by(FRAME)
+                    .map(|start| {
+                        let end = (start + FRAME).min(samples);
+                        Ok(VadFeedOut {
+                            frames: vec![frame(start, end)],
+                            received: end as u64,
+                            observed: end as u64,
+                        })
+                    })
+                    .collect::<Vec<Result<VadFeedOut, ChildError>>>();
+                let mut expected = None;
+                let mut feed_count = feeds.len();
+                match case {
+                    "delayed_cross_block" => {
+                        let prior = feeds.len() - 2;
+                        feeds[prior].as_mut().unwrap().frames.clear();
+                        feeds[prior].as_mut().unwrap().observed = (BLOCK - FRAME) as u64;
+                        feeds.last_mut().unwrap().as_mut().unwrap().frames =
+                            vec![frame(BLOCK - FRAME, BLOCK), frame(BLOCK, samples)];
+                    }
+                    "received_mismatch" | "future_observed" => {
+                        let first = feeds[0].as_mut().unwrap();
+                        if case == "received_mismatch" {
+                            first.received += 1;
+                        } else {
+                            first.observed += 1;
+                        }
+                        expected = Some(super::ImportError::new(messages::PROCESSING_FAILED));
+                        feed_count = 1;
+                    }
+                    "noncontiguous" => {
+                        feeds[0].as_mut().unwrap().frames[0].start = 1;
+                        expected = Some(super::speech_err(
+                            crate::speech::SpeechError::InvalidEvidence,
+                        ));
+                        feed_count = 1;
+                    }
+                    "oversized" => {
+                        feeds[0].as_mut().unwrap().frames.clear();
+                        feeds[0].as_mut().unwrap().observed = 0;
+                        feeds[1].as_mut().unwrap().frames = vec![frame(0, 2 * FRAME)];
+                        expected = Some(super::speech_err(crate::speech::SpeechError::InvalidPcm));
+                        feed_count = 2;
+                    }
+                    "invalid_probability" => {
+                        feeds[0].as_mut().unwrap().frames[0].raw_p = f32::NAN;
+                        expected = Some(super::speech_err(
+                            crate::speech::SpeechError::InvalidProbability,
+                        ));
+                        feed_count = 1;
+                    }
+                    "missing_tail" | "missing_tail_and_close_failure" => {
+                        let last = feeds.last_mut().unwrap().as_mut().unwrap();
+                        last.frames.clear();
+                        last.observed = BLOCK as u64;
+                        expected = Some(
+                            if route == "retry" && case == "missing_tail_and_close_failure" {
+                                super::child_err(ChildError::failed("close VAD failure", false))
+                            } else {
+                                super::ImportError::new(messages::PROCESSING_FAILED)
+                            },
+                        );
+                    }
+                    "ordinary_failure" | "cancelled" | "timeout" | "child_loss" => {
+                        let error = match case {
+                            "ordinary_failure" => ChildError::failed("primary VAD failure", false),
+                            "cancelled" => ChildError::Cancelled,
+                            "timeout" => ChildError::Timeout,
+                            _ => ChildError::ProcessLost {
+                                message: "primary VAD child loss".into(),
+                            },
+                        };
+                        expected = Some(super::child_err(error.clone()));
+                        feeds[0] = Err(error);
+                        feed_count = 1;
+                    }
+                    "close_failure" => {
+                        expected = Some(super::child_err(ChildError::failed(
+                            "close VAD failure",
+                            false,
+                        )));
+                    }
+                    _ => {}
+                }
+                let mut models = Scripted::new(
+                    vec![Turn {
+                        start: 0.,
+                        end: seconds(samples as i64),
+                        speaker: "speaker_0".into(),
+                    }],
+                    vec![(0, samples)],
+                );
+                models.vad_feed_overrides.lock().unwrap().extend(feeds);
+                if expected.is_some() && case != "missing_tail" {
+                    models.vad_close_failure = Some(ChildError::failed("close VAD failure", false));
+                }
+                let processed =
+                    (route == "retry" && case == "processed_microphone").then(|| "a".repeat(64));
+                let result = if route == "reader" {
+                    super::import_reader(&models, &reader, "en", None, None, &mut |progress| {
+                        Ok(progress.rows.to_vec())
+                    })
+                    .map(|document| {
+                        document
+                            .segments
+                            .iter()
+                            .any(|row| !row.text.trim().is_empty())
+                    })
+                } else {
+                    super::retry_passage_source(
+                        &models,
+                        &pcm,
+                        0.,
+                        seconds(samples as i64),
+                        "en",
+                        processed.as_deref(),
+                    )
+                    .map(|candidate| !candidate.text.trim().is_empty())
+                };
+                if let Some(error) = expected {
+                    assert_eq!(result.unwrap_err(), error, "{route}/{case}");
+                    assert!(
+                        models.calls().is_empty(),
+                        "{route}/{case}: failed evidence must not reach ASR"
+                    );
+                } else {
+                    assert!(
+                        result.unwrap(),
+                        "{route}/{case}: accepted speech must produce words"
+                    );
+                    assert!(!models.calls().is_empty(), "{route}/{case}");
+                }
+                assert_eq!(
+                    *models.vad_closes.lock().unwrap(),
+                    1,
+                    "{route}/{case}: close even on replay failure"
+                );
+                assert_eq!(
+                    *models.vad_conditioning.lock().unwrap(),
+                    vec![processed.map(|_| GainPolicy { peak: None })],
+                    "{route}/{case}"
+                );
+                let actual = models.vad_feeds.lock().unwrap();
+                assert_eq!(
+                    actual.len(),
+                    feed_count,
+                    "{route}/{case}: stop at first failure"
+                );
+                for (index, &(size, last)) in actual.iter().enumerate() {
+                    let remaining = samples - index * FRAME;
+                    assert_eq!(size, remaining.min(FRAME), "{route}/{case}");
+                    assert_eq!(
+                        last,
+                        remaining <= FRAME,
+                        "{route}/{case}: final short feed owns EOF"
+                    );
+                }
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn reader_import_resumes_accepted_batches_without_replacing_protected_words() {
         let samples = 36 * 16000;
         let pcm = tone(samples);
@@ -2069,11 +2249,12 @@ pub(crate) mod tests {
             fn samples(&self) -> usize {
                 self.samples
             }
-            fn read(&self, start: usize, end: usize) -> Result<Vec<f32>, super::ImportError> {
+            fn read(&self, start: usize, end: usize) -> Result<Cow<'_, [f32]>, super::ImportError> {
                 self.largest.set(self.largest.get().max(end - start));
                 Ok((start..end)
                     .map(|index| ((index % 17) as f32 - 8.) / 1000.)
-                    .collect())
+                    .collect::<Vec<_>>()
+                    .into())
             }
             fn diarize<M: Models + ?Sized>(&self, _: &M) -> Result<Vec<Turn>, super::ImportError> {
                 Ok(vec![Turn {
@@ -2102,7 +2283,7 @@ pub(crate) mod tests {
             &self,
             conditioning: Option<GainPolicy>,
         ) -> Result<Handle, crate::error::ChildError> {
-            let _ = conditioning;
+            self.vad_conditioning.lock().unwrap().push(conditioning);
             *self.cursor.lock().unwrap() = 0;
             self.events.lock().unwrap().push(Event::Vad);
             Ok(Handle {
@@ -2114,8 +2295,12 @@ pub(crate) mod tests {
             &self,
             _handle: Handle,
             pcm: &[f32],
-            _last: bool,
+            last: bool,
         ) -> Result<VadFeedOut, crate::error::ChildError> {
+            self.vad_feeds.lock().unwrap().push((pcm.len(), last));
+            if let Some(feed) = self.vad_feed_overrides.lock().unwrap().pop_front() {
+                return feed;
+            }
             let mut cursor = self.cursor.lock().unwrap();
             let start = *cursor;
             let end = start + pcm.len();
@@ -2144,7 +2329,8 @@ pub(crate) mod tests {
             })
         }
         fn vad_close(&self, _handle: Handle) -> Result<(), crate::error::ChildError> {
-            Ok(())
+            *self.vad_closes.lock().unwrap() += 1;
+            self.vad_close_failure.clone().map_or(Ok(()), Err)
         }
         fn diar_open(&self, _preset: ipc::DiarPreset) -> Result<Handle, crate::error::ChildError> {
             *self.diar_cursor.lock().unwrap() = 0;
