@@ -5,11 +5,13 @@
 //! when symphonia reports an unsupported format or codec.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
-use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+#[cfg(test)]
+use hound::WavSpec;
+use hound::{SampleFormat, WavReader, WavWriter};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Async, FixedAsync, Resampler, SincInterpolationParameters, WindowFunction};
 use symphonia::core::audio::GenericAudioBufferRef;
@@ -83,6 +85,11 @@ fn quantize_pcm16(sample: f32) -> i16 {
 
 /// Duration of a canonical 16 kHz mono PCM16 WAV, after reading every sample.
 pub fn wav_duration(path: impl AsRef<Path>) -> Result<f64, AudioError> {
+    wav_duration_cancellable(path.as_ref(), &|| false)
+}
+
+fn wav_duration_cancellable(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<f64, AudioError> {
+    check_cancelled(cancelled)?;
     let mut reader = WavReader::open(path).map_err(map_open)?;
     let spec = reader.spec();
     if spec.channels != 1
@@ -97,9 +104,13 @@ pub fn wav_duration(path: impl AsRef<Path>) -> Result<f64, AudioError> {
     if !(duration > 0.0 && duration <= MAX_DURATION_SECONDS) {
         return Err(AudioError::message(DURATION_LIMIT));
     }
-    for sample in reader.samples::<i16>() {
+    for (index, sample) in reader.samples::<i16>().enumerate() {
+        if index % 8192 == 0 {
+            check_cancelled(cancelled)?;
+        }
         sample.map_err(map_sample)?;
     }
+    check_cancelled(cancelled)?;
     Ok(duration)
 }
 
@@ -160,33 +171,111 @@ pub fn normalize(
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,
 ) -> Result<f64, AudioError> {
+    normalize_cancellable(source, destination, &|| false)
+}
+
+/// A cancelled preparation never installs an incomplete recording or touches its source.
+pub fn normalize_cancellable(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<f64, AudioError> {
     let source = source.as_ref();
     let destination = destination.as_ref();
-    match wav_duration(source) {
-        Ok(_) => {
-            if source != destination {
-                fs::copy(source, destination)?;
+    check_cancelled(cancelled)?;
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staged = parent.join(format!(".speakerdesk-audio-{}.part", uuid::Uuid::new_v4()));
+    let decoded_path = parent.join(format!(
+        ".speakerdesk-audio-{}.decode",
+        uuid::Uuid::new_v4()
+    ));
+    let result = (|| {
+        match wav_duration_cancellable(source, cancelled) {
+            Ok(duration) => {
+                if source == destination {
+                    return Ok(duration);
+                }
+                let mut input = File::open(source)?;
+                let mut output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&staged)?;
+                let mut buffer = [0_u8; 65536];
+                loop {
+                    check_cancelled(cancelled)?;
+                    let count = input.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    output.write_all(&buffer[..count])?;
+                }
+                output.sync_all()?;
+                check_cancelled(cancelled)?;
+                fs::rename(&staged, destination)?;
+                return Ok(duration);
             }
-            return wav_duration(destination);
+            Err(AudioError::Message(DURATION_LIMIT)) => {
+                return Err(AudioError::message(DURATION_LIMIT));
+            }
+            Err(AudioError::Message(CANCELLED)) => return Err(AudioError::message(CANCELLED)),
+            Err(_) => {}
         }
-        Err(AudioError::Message(DURATION_LIMIT)) => {
-            return Err(AudioError::message(DURATION_LIMIT));
-        }
-        Err(_) => {}
-    }
-    let Some((rate, mono)) = decode_mono(source)? else {
-        #[cfg(target_os = "macos")]
-        return normalize_apple(source, destination);
-        #[cfg(not(target_os = "macos"))]
-        return Err(AudioError::message(DECODE_RECORDING));
-    };
-    let resampled = if mono.is_empty() {
-        Vec::new()
+        let decoded_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&decoded_path)?;
+        let mut decoded = BufWriter::new(decoded_file);
+        let outcome = decode_mono_cancellable(source, cancelled, &mut |chunk| {
+            for part in chunk.chunks(8192) {
+                check_cancelled(cancelled)?;
+                let bytes: Vec<u8> = part
+                    .iter()
+                    .flat_map(|sample| sample.to_le_bytes())
+                    .collect();
+                decoded.write_all(&bytes)?;
+            }
+            Ok(())
+        })?;
+        decoded.flush()?;
+        drop(decoded);
+        let Some((rate, samples)) = outcome else {
+            #[cfg(target_os = "macos")]
+            return normalize_apple_cancellable(source, destination, cancelled);
+            #[cfg(not(target_os = "macos"))]
+            return Err(AudioError::message(DECODE_RECORDING));
+        };
+        let mut decoded = BufReader::new(File::open(&decoded_path)?);
+        resample_to_wav(samples, rate, &staged, cancelled, &mut |count| {
+            let mut bytes = vec![0; count * 4];
+            decoded.read_exact(&mut bytes)?;
+            Ok(bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|sample| f32::from_le_bytes(*sample))
+                .collect())
+        })?;
+        let duration = wav_duration_cancellable(&staged, cancelled)?;
+        File::open(&staged)?.sync_all()?;
+        check_cancelled(cancelled)?;
+        fs::rename(&staged, destination)?;
+        Ok(duration)
+    })();
+    let _ = fs::remove_file(staged);
+    let _ = fs::remove_file(decoded_path);
+    result
+}
+
+const CANCELLED: &str = "Audio preparation cancelled.";
+fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), AudioError> {
+    if cancelled() {
+        Err(AudioError::message(CANCELLED))
     } else {
-        resample_mono(&mono, rate)?
-    };
-    write_pcm16_wav(destination, &resampled)?;
-    wav_duration(destination)
+        Ok(())
+    }
 }
 
 /// Copy a sample range. `start` and `end` are seconds, rounded half-to-even like Python `round`.
@@ -244,6 +333,7 @@ fn advance_frames(current: u32, add: u32) -> Result<u32, AudioError> {
 pub struct RecordingReader {
     file: Mutex<File>,
     data_offset: u64,
+    declared_samples: u32,
 }
 
 impl RecordingReader {
@@ -257,12 +347,23 @@ impl RecordingReader {
         {
             return Err(AudioError::message(EXPECTED_PCM));
         }
+        let declared_samples = reader.duration();
         let mut file = reader.into_inner();
         let data_offset = file.stream_position()?;
         Ok(Self {
             file: Mutex::new(file),
             data_offset,
+            declared_samples,
         })
+    }
+
+    /// Immutable imported audio is bounded by its WAV header and physical data.
+    pub fn import_samples(&self) -> Result<u32, AudioError> {
+        if self.declared_samples == 0 || self.declared_samples > MAX_FRAMES {
+            return Err(AudioError::message(DURATION_LIMIT));
+        }
+        self.require_samples(self.declared_samples)?;
+        Ok(self.declared_samples)
     }
 
     pub fn read_samples(
@@ -417,27 +518,11 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> Result<(), AudioEr
     }
 }
 
-fn write_pcm16_wav(path: &Path, samples: &[f32]) -> Result<(), AudioError> {
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate: SAMPLE_RATE,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
-    let mut writer = WavWriter::create(path, spec).map_err(map_open)?;
-    for sample in samples {
-        if !sample.is_finite() {
-            return Err(AudioError::message(FINITE_MONO));
-        }
-        writer
-            .write_sample(quantize_pcm16(*sample))
-            .map_err(map_open)?;
-    }
-    writer.finalize().map_err(map_open)?;
-    Ok(())
-}
-
-fn decode_mono(path: &Path) -> Result<Option<(u32, Vec<f32>)>, AudioError> {
+fn decode_mono_cancellable(
+    path: &Path,
+    cancelled: &dyn Fn() -> bool,
+    output: &mut dyn FnMut(&[f32]) -> Result<(), AudioError>,
+) -> Result<Option<(u32, usize)>, AudioError> {
     let file = File::open(path)?;
     let source = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -482,7 +567,9 @@ fn decode_mono(path: &Path) -> Result<Option<(u32, Vec<f32>)>, AudioError> {
     };
     let mut rate = params.sample_rate.filter(|rate| *rate > 0);
     let mut mono = Vec::new();
+    let mut samples = 0;
     loop {
+        check_cancelled(cancelled)?;
         let packet = match format.next_packet() {
             Ok(Some(packet)) => packet,
             Ok(None) => break,
@@ -510,10 +597,16 @@ fn decode_mono(path: &Path) -> Result<Option<(u32, Vec<f32>)>, AudioError> {
             }
             Some(_) => {}
         }
+        mono.clear();
         append_mono(&mut mono, &decoded)?;
+        samples += mono.len();
+        if samples as f64 / f64::from(spec_rate) > MAX_DURATION_SECONDS {
+            return Err(AudioError::message(DURATION_LIMIT));
+        }
+        output(&mono)?;
     }
     let rate = rate.ok_or(AudioError::message(DECODE_RECORDING))?;
-    Ok(Some((rate, mono)))
+    Ok(Some((rate, samples)))
 }
 
 #[cfg(target_os = "macos")]
@@ -536,10 +629,11 @@ impl Drop for AppleConversion {
 
 #[cfg(target_os = "macos")]
 impl AppleConversion {
-    fn wait(&mut self) -> Result<(), AudioError> {
+    fn wait_cancellable(&mut self, cancelled: &dyn Fn() -> bool) -> Result<(), AudioError> {
         let output = self.directory.join("audio.wav");
         let child = self.child.as_mut().expect("conversion child");
         loop {
+            check_cancelled(cancelled)?;
             if fs::metadata(&output).is_ok_and(|meta| meta.len() > MAX_APPLE_WAV_BYTES) {
                 return Err(AudioError::message(DURATION_LIMIT));
             }
@@ -563,7 +657,11 @@ impl AppleConversion {
 }
 
 #[cfg(target_os = "macos")]
-fn normalize_apple(source: &Path, destination: &Path) -> Result<f64, AudioError> {
+fn normalize_apple_cancellable(
+    source: &Path,
+    destination: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<f64, AudioError> {
     use std::os::unix::fs::DirBuilderExt;
     use std::process::{Command, Stdio};
     let source = fs::canonicalize(source)?;
@@ -591,8 +689,10 @@ fn normalize_apple(source: &Path, destination: &Path) -> Result<f64, AudioError>
             .stderr(Stdio::null())
             .spawn()?,
     );
-    conversion.wait()?;
-    let duration = wav_duration(&output)?;
+    conversion.wait_cancellable(cancelled)?;
+    let duration = wav_duration_cancellable(&output, cancelled)?;
+    File::open(&output)?.sync_all()?;
+    check_cancelled(cancelled)?;
     fs::rename(&output, destination)?;
     Ok(duration)
 }
@@ -626,8 +726,14 @@ fn append_mono(
     Ok(())
 }
 
-fn resample_mono(input: &[f32], from_rate: u32) -> Result<Vec<f32>, AudioError> {
-    if from_rate == 0 || input.is_empty() {
+fn resample_to_wav(
+    input_len: usize,
+    from_rate: u32,
+    destination: &Path,
+    cancelled: &dyn Fn() -> bool,
+    read: &mut dyn FnMut(usize) -> Result<Vec<f32>, AudioError>,
+) -> Result<(), AudioError> {
+    if from_rate == 0 || input_len == 0 {
         return Err(AudioError::message(DECODE_RECORDING));
     }
     let ratio = f64::from(SAMPLE_RATE) / f64::from(from_rate);
@@ -640,12 +746,44 @@ fn resample_mono(input: &[f32], from_rate: u32) -> Result<Vec<f32>, AudioError> 
         FixedAsync::Input,
     )
     .map_err(|_| AudioError::message(DECODE_RECORDING))?;
-    let adapter = InterleavedSlice::new(input, 1, input.len())
-        .map_err(|_| AudioError::message(DECODE_RECORDING))?;
-    let output = resampler
-        .process_all(&adapter, input.len(), None)
-        .map_err(|_| AudioError::message(DECODE_RECORDING))?;
-    Ok(output.take_data())
+    let expected = (ratio * input_len as f64).ceil() as usize;
+    if expected == 0 || expected > MAX_FRAMES as usize {
+        return Err(AudioError::message(DURATION_LIMIT));
+    }
+    let mut writer = RecordingWriter::create(destination)?;
+    let mut offset = 0;
+    let mut trim = resampler.output_delay();
+    let mut written = 0;
+    while offset < input_len || written < expected {
+        check_cancelled(cancelled)?;
+        let count = resampler.input_frames_next().min(input_len - offset);
+        let input = read(count)?;
+        if input.len() != count {
+            return Err(AudioError::message(TRUNCATED));
+        }
+        let adapter = InterleavedSlice::new(&input, 1, input.len())
+            .map_err(|_| AudioError::message(DECODE_RECORDING))?;
+        let indexing = rubato::Indexing {
+            input_offset: 0,
+            output_offset: 0,
+            partial_len: Some(count),
+            active_channels_mask: None,
+        };
+        let output = resampler
+            .process(&adapter, Some(&indexing))
+            .map_err(|_| AudioError::message(DECODE_RECORDING))?
+            .take_data();
+        offset += count;
+        let skipped = trim.min(output.len());
+        trim -= skipped;
+        let stop = (skipped + expected - written).min(output.len());
+        if stop > skipped {
+            writer.write_samples(&output[skipped..stop])?;
+            written += stop - skipped;
+        }
+    }
+    check_cancelled(cancelled)?;
+    Ok(())
 }
 
 fn map_open(err: hound::Error) -> AudioError {
@@ -679,6 +817,74 @@ mod tests {
             AudioError::Message(text) => text,
             AudioError::Io(err) => panic!("unexpected io error: {err}"),
         }
+    }
+
+    #[test]
+    fn cancelled_normalization_preserves_source_destination_and_removes_staging() {
+        use std::cell::Cell;
+        for canonical in [true, false] {
+            let dir = std::env::temp_dir()
+                .join(format!("speakerdesk-cancel-audio-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&dir).unwrap();
+            let source = dir.join(if canonical {
+                "source.wav"
+            } else {
+                "source.flac"
+            });
+            if canonical {
+                let mut writer = RecordingWriter::create(&source).unwrap();
+                writer.write_samples(&vec![0.1; 100_000]).unwrap();
+            } else {
+                fs::write(&source, include_bytes!("../tests/testdata/stereo-48k.flac")).unwrap();
+            }
+            let original = fs::read(&source).unwrap();
+            let destination = dir.join("existing.wav");
+            fs::write(&destination, b"previous output").unwrap();
+            let checks = Cell::new(0);
+            let error = normalize_cancellable(&source, &destination, &|| {
+                let next = checks.get() + 1;
+                checks.set(next);
+                next >= if canonical { 17 } else { 3 }
+            })
+            .unwrap_err();
+            assert_eq!(message(error), CANCELLED);
+            assert_eq!(fs::read(&source).unwrap(), original);
+            assert_eq!(fs::read(&destination).unwrap(), b"previous output");
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn resampling_checks_cancellation_between_bounded_chunks() {
+        use std::cell::Cell;
+        let path = std::env::temp_dir().join(format!(
+            "speakerdesk-cancel-resample-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let checks = Cell::new(0);
+        let input = vec![0.1; 48_000];
+        let mut offset = 0;
+        let error = resample_to_wav(
+            input.len(),
+            48_000,
+            &path,
+            &|| {
+                let next = checks.get() + 1;
+                checks.set(next);
+                next >= 4
+            },
+            &mut |count| {
+                let chunk = input[offset..offset + count].to_vec();
+                offset += count;
+                Ok(chunk)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(message(error), CANCELLED);
+        let reader = RecordingReader::open(&path).unwrap();
+        assert!(reader.import_samples().unwrap() < 16_000);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -853,7 +1059,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn apple_conversion_limits_kill_and_reap_the_child_and_remove_partial_output() {
         use std::process::{Command, Stdio};
-        for (oversized, completed) in [(false, false), (true, false), (true, true)] {
+        for (oversized, completed, cancelled) in [
+            (false, false, false),
+            (true, false, false),
+            (true, true, false),
+            (false, false, true),
+        ] {
             let directory = std::env::temp_dir()
                 .join(format!("speakerdesk-audio-bound-{}", uuid::Uuid::new_v4()));
             fs::create_dir_all(&directory).unwrap();
@@ -885,8 +1096,10 @@ mod tests {
                     + std::time::Duration::from_secs(if oversized { 180 } else { 0 }),
             };
             assert_eq!(
-                message(conversion.wait().unwrap_err()),
-                if oversized {
+                message(conversion.wait_cancellable(&|| cancelled).unwrap_err()),
+                if cancelled {
+                    CANCELLED
+                } else if oversized {
                     DURATION_LIMIT
                 } else {
                     "Audio conversion exceeded three minutes."

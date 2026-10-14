@@ -355,25 +355,36 @@ async fn native_startup_failed_migration_does_not_create_a_store_and_can_retry()
 
 #[tokio::test]
 async fn native_startup_keeps_existing_native_state_and_requires_its_owner_lock() {
-    let temp = tempfile::tempdir().unwrap();
-    let storage = temp.path().join("native");
-    let state = AppState::open(&storage).unwrap();
-    let legacy = storage.join("recordings/jobs.sqlite");
-    let before = seed_legacy(&legacy);
-    let result = tokio::time::timeout(
-        Duration::from_secs(5),
-        spawn(&storage, temp.path()).wait_with_output(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("Cannot own native storage"));
-    drop(state);
-    let host = Host::start(&storage, temp.path()).await;
-    assert_eq!(host.json("api/jobs").await, json!([]));
-    assert_eq!(host.json("api/people").await["people"], json!([]));
-    assert_eq!(host.json("api/config").await["default_language"], "en");
-    host.stop().await;
-    assert_eq!(std::fs::read(&legacy).unwrap(), before);
+    for preference in [None, Some("en")] {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("native");
+        let state = AppState::open(&storage).unwrap();
+        if let Some(language) = preference {
+            SqliteJobStore::open(storage.join("speakerdesk.sqlite"))
+                .unwrap()
+                .set_preference("default_language", language)
+                .unwrap();
+        }
+        let legacy = storage.join("recordings/jobs.sqlite");
+        let before = seed_legacy(&legacy);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            spawn(&storage, temp.path()).wait_with_output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("Cannot own native storage"));
+        drop(state);
+        let host = Host::start(&storage, temp.path()).await;
+        assert_eq!(host.json("api/jobs").await, json!([]));
+        assert_eq!(host.json("api/people").await["people"], json!([]));
+        assert_eq!(
+            host.json("api/config").await["default_language"],
+            preference.unwrap_or("auto")
+        );
+        host.stop().await;
+        assert_eq!(std::fs::read(&legacy).unwrap(), before);
+    }
 }

@@ -26,6 +26,9 @@ use crate::speech::{self, Admission, BlockedSpeech, SampleSpan, SpeechLedger};
 use crate::timing;
 use crate::transcript::{self, TranscriptError};
 
+mod pipeline;
+pub use pipeline::{ImportPlan, ImportProgress, ImportResume, import_reader};
+
 /// Brief same-speaker pause that still belongs to one decode envelope.
 pub const TURN_GAP_SECONDS: f64 = 0.65;
 /// Default envelope split. Matches `pipeline.decode_regions`.
@@ -59,12 +62,16 @@ pub struct ImportError {
 }
 
 impl ImportError {
-    fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             child: None,
             language_failure: None,
         }
+    }
+
+    pub fn child_error(&self) -> Option<&ChildError> {
+        self.child.as_ref()
     }
 }
 
@@ -75,7 +82,7 @@ impl From<TranscriptError> for ImportError {
 }
 
 /// One slice of the activity ledger inside a bridged envelope.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ActivitySlice {
     pub start: f64,
     pub end: f64,
@@ -83,7 +90,7 @@ pub struct ActivitySlice {
 }
 
 /// One continuous decode region, before or after [`crop_context`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DecodeRegion {
     pub start: f64,
     pub end: f64,
@@ -222,117 +229,15 @@ pub fn import_recording<M: Models + ?Sized>(
     language: &str,
     alignment: Option<&crate::alignment::Vocabulary>,
 ) -> Result<Document, ImportError> {
-    let choice = LanguageChoice::parse(language).map_err(language_err)?;
-    let duration = require_pcm(pcm)?;
-    let limit = limits::SPEAKER_TRACK_LIMIT;
-    let turns = normalize_turns(
-        models.diarize_window(pcm).map_err(child_err)?,
-        duration,
-        limit,
-    )?;
-    let mut chunks = decode_regions(&turns, Some(IMPORT_MAX_SECONDS), Some((0.0, duration)));
-    let padding = if matches!(choice, LanguageChoice::Auto) {
-        0.0
-    } else {
-        CROP_PADDING_SECONDS
-    };
-    crop_context(&mut chunks, duration, padding);
-    if chunks.len() > MAX_CHUNKS {
-        return Err(ImportError::new(messages::TOO_MANY_TRANSITIONS));
-    }
-    let ledger = admit(models, pcm)?;
-    let book = canonical_utterances(&ledger, pcm.len() as i64)?;
-    chunks = utterance_prefix_chunks(chunks, &book, pcm.len() as i64);
-    chunks = utterance_tail_chunks(chunks, &book, pcm.len() as i64);
-    let spans: Vec<_> = book.speech_regions().map(|(span, _)| span).collect();
-    let work = plan_work(&ledger, pcm, &chunks, &spans)?;
-    let mut transcriber = if work.iter().any(|item| item.blocked.is_none()) {
-        Some(open_transcriber(models, language, ledger, None, None)?)
-    } else {
-        None
-    };
-    let mut speakers = speaker_map(&turns);
-    let mut segments = Vec::new();
-    for item in work {
-        let chunk = &chunks[item.chunk];
-        let decoded = decode_window(
-            transcriber.as_mut(),
-            pcm,
-            language,
-            &chunk.speakers,
-            &item,
-            None,
-        )?;
-        for row in decoded {
-            let Some((start, end)) = clip_span(row.start, row.end, chunk.start, chunk.end) else {
-                continue;
-            };
-            let Some((start, end)) = clip_span(start, end, 0.0, duration) else {
-                continue;
-            };
-            let speaker = if chunk.utterance_context_boundary.is_some()
-                && chunk.activity_regions.as_ref().is_some_and(|activity| {
-                    activity.iter().any(|part| {
-                        part.speakers.is_empty() && part.start < end && part.end > start
-                    })
-                }) {
-                "unassigned".to_string()
-            } else {
-                chunk_speaker(chunk)
-            };
-            ensure_speaker(&mut speakers, &speaker);
-            let mut segment = segment_from_row(
-                format!("seg-{}", segments.len()),
-                start,
-                end,
-                speaker,
-                chunk,
-                &row,
-                (pcm.len() / 160 * 160) as i64,
-            );
-            if let Some(alignment) = alignment
-                && row.audio_state.is_none()
-                && !segment.text.trim().is_empty()
-                && let Some(language) = &segment.language
-                && languages::is_supported(language)
-            {
-                let a = seconds_to_sample(segment.start, pcm.len() as i64) as usize;
-                let b = seconds_to_sample(segment.end, pcm.len() as i64) as usize;
-                let result = alignment
-                    .align(models, &pcm[a..b], &segment.text, a as i64, language)
-                    .map_err(child_err)?;
-                crate::alignment::attach(&mut segment, result);
-            }
-            segments.push(segment);
-        }
-    }
-    let supplied_timing = segments
-        .iter()
-        .any(|s| s.rest.contains_key("reading_alignment"));
-    let mut document = Document {
-        schema_version: 1,
-        speakers,
-        segments,
-        provenance: Some(provenance(language, limit)),
-        warnings: warnings(language, limit),
-        diarization: turns
-            .iter()
-            .map(|turn| json!({"start": turn.start, "end": turn.end, "speaker": turn.speaker}))
-            .collect(),
-        edited_at: None,
-        rest: Map::new(),
-    };
-    if supplied_timing {
-        document.provenance.as_mut().expect("import provenance")["timing"] =
-            json!("Supplied-text CTC timing where supported; speech crop boundaries otherwise");
-        document.warnings[0] = "Word timing is model-estimated. Uncertain or edited passages use speech crop boundaries; review subtitle timing.".into();
-    }
-    review::retain_unassigned_audio(&mut document, duration);
-    let value = serde_json::to_value(&document)
-        .map_err(|_| ImportError::new(messages::PROCESSING_FAILED))?;
-    let document = transcript::validate(&value, duration)?;
-    export::export(&document, "txt").map_err(|_| ImportError::new(messages::EXPORT_TOO_LARGE))?;
-    Ok(document)
+    require_pcm(pcm)?;
+    pipeline::run(
+        models,
+        &pipeline::SliceAudio(pcm),
+        language,
+        alignment,
+        None,
+        &mut |progress| Ok(progress.rows.to_vec()),
+    )
 }
 
 /// Transcribe one explicit-language passage. The result is not written onto a document.
@@ -986,7 +891,6 @@ struct Window {
 }
 
 struct Examined {
-    chunk: usize,
     start: i64,
     end: i64,
     blocked: Option<BlockedSpeech>,
@@ -1006,33 +910,6 @@ struct Decoded {
     acoustic: Option<Value>,
     pcm: Option<Value>,
     padding: Option<Value>,
-}
-
-fn plan_work(
-    ledger: &SpeechLedger,
-    pcm: &[f32],
-    chunks: &[DecodeRegion],
-    spans: &[SampleSpan],
-) -> Result<Vec<Examined>, ImportError> {
-    let mut work = Vec::new();
-    let len = pcm.len() as i64;
-    for (index, chunk) in chunks.iter().enumerate() {
-        let start = seconds_to_sample(chunk.audio_start, len);
-        let end = seconds_to_sample(chunk.audio_end, len);
-        if end <= start {
-            continue;
-        }
-        let windows = examine_range(ledger, pcm, spans, start, end)?;
-        let silent = windows.iter().all(|item| item.blocked.is_some());
-        if chunk.speakers.is_empty() && silent {
-            continue;
-        }
-        work.extend(windows.into_iter().map(|mut item| {
-            item.chunk = index;
-            item
-        }));
-    }
-    Ok(work)
 }
 
 fn examine_range(
@@ -1087,7 +964,6 @@ fn examine(ledger: &SpeechLedger, pcm: &[f32], window: Window) -> Result<Examine
     let samples = &pcm[window.start as usize..window.end as usize];
     let blocked = speech::blocked_route(admission.decision, samples, window.start, window.end);
     Ok(Examined {
-        chunk: 0,
         start: window.start,
         end: window.end,
         blocked,
@@ -1377,6 +1253,139 @@ fn segment_from_row(
     }
 }
 
+fn capture_language(segment: &mut Segment, mode: &str) {
+    segment.rest.insert("language_mode".into(), json!(mode));
+    segment.rest.insert("language_epoch".into(), json!(0));
+    segment.rest.insert("language_generation".into(), json!(0));
+    segment.rest.insert("stream_generation".into(), json!(0));
+    segment.rest.insert(
+        "canonical_text_end_sample".into(),
+        json!((segment.end * 16000.).round_ties_even() as i64),
+    );
+    segment
+        .rest
+        .insert("canonical_machine_revision".into(), json!(0));
+}
+
+/// Older imports used one immutable job-wide setting. Repair ownership only
+/// from that setting and recorded provenance, never from detected words.
+pub fn restore_import_ownership(
+    document: &mut Document,
+    job_language: &str,
+) -> Result<bool, ImportError> {
+    let recorded = document
+        .provenance
+        .as_ref()
+        .and_then(|p| p["language"].as_str());
+    let valid = |mode: &str| mode == languages::AUTOMATIC || languages::is_supported(mode);
+    let mode = match (recorded, valid(job_language)) {
+        (Some(mode), true) if valid(mode) && mode == job_language => mode,
+        (Some(mode), false) if valid(mode) => mode,
+        (None, true) => job_language,
+        _ => return Err(ImportError::new("The import's captured language is unavailable or conflicting; choose its language before accuracy work.")),
+    }.to_owned();
+    let mut changed = false;
+    for row in &mut document.segments {
+        if row.separation.is_some()
+            || row.rest.get("timing").and_then(Value::as_str) == Some("audio_coverage")
+        {
+            continue;
+        }
+        if !row.start.is_finite() || !row.end.is_finite() || row.start < 0. || row.end <= row.start
+        {
+            return Err(ImportError::new(messages::RECORDING_LENGTH));
+        }
+        if let Some(existing) = row.rest.get("language_mode").and_then(Value::as_str) {
+            if !valid(existing) || existing != mode {
+                return Err(ImportError::new(
+                    "The import's captured language conflicts with its passage ownership; existing words are retained.",
+                ));
+            }
+        } else {
+            capture_language(row, &mode);
+            changed = true;
+        }
+        for (key, value) in [
+            ("language_epoch", json!(0)),
+            ("language_generation", json!(0)),
+            ("stream_generation", json!(0)),
+            (
+                "start_sample",
+                json!((row.start * 16000.).round_ties_even() as i64),
+            ),
+            (
+                "end_sample",
+                json!((row.end * 16000.).round_ties_even() as i64),
+            ),
+            ("canonical_state", json!("sealed")),
+            (
+                "canonical_text_end_sample",
+                json!((row.end * 16000.).round_ties_even() as i64),
+            ),
+            (
+                "canonical_machine_revision",
+                json!(row.machine_revision.unwrap_or(0)),
+            ),
+        ] {
+            if !row.rest.contains_key(key) {
+                row.rest.insert(key.into(), value);
+                changed = true;
+            }
+        }
+        if row.canonical_utterance_id.is_none() {
+            row.canonical_utterance_id = Some(row.id.clone());
+            changed = true;
+        }
+        if row.audio_revision.is_none() {
+            row.audio_revision = Some(0);
+            changed = true;
+        }
+        if !row.rest.contains_key("source_speaker_candidates") {
+            let tracks = if speaker_index(&row.speaker).is_some() {
+                vec![row.speaker.clone()]
+            } else {
+                Vec::new()
+            };
+            row.rest
+                .insert("source_speaker_candidates".into(), json!(tracks));
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+pub fn repair_import_metadata(job: &mut crate::document::Job) -> Result<bool, ImportError> {
+    if job.kind != crate::document::JobKind::Import {
+        return Ok(false);
+    }
+    let Some(document) = &mut job.document else {
+        return Ok(false);
+    };
+    // Failed validation must not leave a partially repaired in-memory document.
+    let mut repaired = document.clone();
+    let changed = restore_import_ownership(&mut repaired, &job.language)?;
+    if changed {
+        *document = repaired;
+    }
+    Ok(changed)
+}
+
+/// Only speech-bearing canonical authority participates in an accuracy pass.
+pub fn refinable_segment(segment: &Segment) -> bool {
+    segment.separation.is_none()
+        && segment.canonical_utterance_id.is_some()
+        && segment.rest.get("canonical_state").and_then(Value::as_str) == Some("sealed")
+        && segment
+            .protected_fields
+            .as_ref()
+            .is_none_or(|fields| fields.is_empty())
+        && segment.rest.get("timing").and_then(Value::as_str) != Some("audio_coverage")
+        && !matches!(
+            segment.rest.get("audio_state").and_then(Value::as_str),
+            Some("digital_silence" | "constant_signal" | "model_non_speech")
+        )
+}
+
 fn manual_language(language: &str) -> Option<String> {
     match LanguageChoice::parse(language) {
         Ok(LanguageChoice::Manual(code)) => Some(code),
@@ -1504,6 +1513,7 @@ fn seconds_to_sample(seconds: f64, len: i64) -> i64 {
     frames as i64
 }
 
+#[cfg(test)]
 fn admit<M: Models + ?Sized>(models: &M, pcm: &[f32]) -> Result<SpeechLedger, ImportError> {
     admit_source(models, pcm, None)
 }
@@ -1580,10 +1590,8 @@ impl<'a, M: Models + ?Sized> BorrowedModels<'a, M> {
     }
 
     fn retain_lifecycle(&self, error: &ChildError) {
-        if matches!(
-            error,
-            ChildError::ProcessLost { .. } | ChildError::Timeout | ChildError::Cancelled
-        ) && let Some(failure) = &self.failure
+        if error.is_lifecycle_failure()
+            && let Some(failure) = &self.failure
         {
             failure
                 .lock()
@@ -1706,7 +1714,7 @@ pub(crate) mod tests {
     use crate::messages;
     use crate::models::{Models, UnimplementedModels};
     use crate::timing;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use std::borrow::Cow;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -1732,6 +1740,7 @@ pub(crate) mod tests {
         token_count: u32,
         probe_scores: Mutex<std::collections::VecDeque<Vec<f32>>>,
         cursor: Mutex<usize>,
+        diar_cursor: Mutex<usize>,
         events: Mutex<Vec<Event>>,
         pub(crate) alignment: Option<(String, ipc::CtcScoresOut)>,
         failure: Option<(&'static str, crate::error::ChildError)>,
@@ -1746,6 +1755,7 @@ pub(crate) mod tests {
                 token_count: 1,
                 probe_scores: Mutex::new(Default::default()),
                 cursor: Mutex::new(0),
+                diar_cursor: Mutex::new(0),
                 events: Mutex::new(Vec::new()),
                 alignment: None,
                 failure: None,
@@ -1778,6 +1788,313 @@ pub(crate) mod tests {
                 })
                 .collect()
         }
+    }
+
+    #[test]
+    fn imported_speech_can_run_saved_accuracy_with_its_captured_language() {
+        for mode in ["en", "auto"] {
+            let samples = 32_000;
+            let pcm = tone(samples);
+            let models = Scripted::new(
+                vec![Turn {
+                    start: 0.,
+                    end: 2.,
+                    speaker: "speaker_0".into(),
+                }],
+                vec![(0, samples)],
+            );
+            let document = import_recording(&models, &pcm, mode, None).unwrap();
+            let row = document
+                .segments
+                .iter()
+                .find(|s| !s.text.is_empty())
+                .unwrap();
+            let candidate = crate::live::refine_saved_passage(&models, row, &pcm, None)
+                .expect("imported canonical speech must reach saved accuracy");
+            assert_eq!(candidate.rest["language_mode"], mode);
+            assert!(!candidate.text.is_empty());
+        }
+    }
+
+    #[test]
+    fn imported_auto_prefers_qualified_speaker_language_over_the_last_speaker_and_pause() {
+        for gap in [0., 70.] {
+            let end = 18. + gap;
+            let samples = (end * 16000.) as usize;
+            let models = Scripted::new(
+                vec![
+                    Turn {
+                        start: 0.,
+                        end: 6.,
+                        speaker: "speaker_0".into(),
+                    },
+                    Turn {
+                        start: 6.,
+                        end: 12.,
+                        speaker: "speaker_1".into(),
+                    },
+                    Turn {
+                        start: 12. + gap,
+                        end,
+                        speaker: "speaker_0".into(),
+                    },
+                ],
+                vec![(0, 192_000), (((12. + gap) * 16000.) as usize, samples)],
+            );
+            models.probe_scores.lock().unwrap().extend([
+                vec![0.99, 0.01],
+                vec![0.99, 0.01],
+                vec![0.01, 0.99],
+                vec![0.01, 0.99],
+                vec![0.4, 0.6],
+                vec![0.4, 0.6],
+            ]);
+            let document = import_recording(&models, &tone(samples), "auto", None).unwrap();
+            let final_row = document
+                .segments
+                .iter()
+                .rev()
+                .find(|s| !s.text.is_empty())
+                .unwrap();
+            assert_eq!(final_row.language.as_deref(), Some("en"), "gap {gap}");
+            let detection = final_row.language_detection.as_ref().unwrap();
+            assert_eq!(
+                detection["context_evidence"]["scope"],
+                "speaker_main_language"
+            );
+            assert_eq!(
+                detection["context_evidence"]["speaker_track_id"],
+                "speaker_0"
+            );
+        }
+    }
+
+    #[test]
+    fn imported_ordinary_timing_failure_keeps_words_and_lifecycle_failure_stops() {
+        use crate::error::ChildError;
+        let (vocabulary, text, scores) = crate::alignment::tests::live_fixture();
+        for (error, stop) in [
+            (ChildError::failed("CTC crop failed", false), false),
+            (ChildError::Timeout, true),
+            (ChildError::Cancelled, true),
+            (ChildError::Unimplemented, false),
+        ] {
+            let samples = scores.audio_num_samples as usize;
+            let mut models = Scripted::new(
+                vec![Turn {
+                    start: 0.,
+                    end: seconds(samples as i64),
+                    speaker: "speaker_0".into(),
+                }],
+                vec![(0, samples)],
+            );
+            models.alignment = Some((text.clone(), scores.clone()));
+            models.failure = Some(("ctc", error.clone()));
+            let result = import_recording(&models, &tone(samples), "en", Some(&vocabulary));
+            if stop {
+                assert_eq!(result.unwrap_err().child_error(), Some(&error));
+            } else {
+                let document = result.unwrap();
+                let row = document
+                    .segments
+                    .iter()
+                    .find(|s| !s.text.is_empty())
+                    .unwrap();
+                assert_eq!(row.text, text.trim());
+                assert_eq!(row.rest["reading_alignment"]["status"], "unavailable");
+                assert_eq!(row.rest["reading_alignment"]["reason"], "model_error");
+            }
+        }
+    }
+
+    #[test]
+    fn imported_failure_and_silence_have_different_accuracy_eligibility() {
+        let samples = 32_000;
+        for failure in [false, true] {
+            let mut models = Scripted::new(
+                vec![Turn {
+                    start: 0.,
+                    end: 2.,
+                    speaker: "speaker_0".into(),
+                }],
+                if failure {
+                    vec![(0, samples)]
+                } else {
+                    Vec::new()
+                },
+            );
+            if failure {
+                models.failure = Some((
+                    "asr",
+                    crate::error::ChildError::failed("crop failure", false),
+                ));
+            }
+            let document = import_recording(&models, &tone(samples), "en", None).unwrap();
+            assert!(document.segments.iter().all(|s| s.text.is_empty()));
+            assert_eq!(
+                document.segments.iter().any(super::refinable_segment),
+                failure
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_import_metadata_uses_captured_mode_and_preserves_conflicting_documents() {
+        let models = Scripted::new(
+            vec![Turn {
+                start: 0.,
+                end: 2.,
+                speaker: "speaker_0".into(),
+            }],
+            vec![(0, 32_000)],
+        );
+        let mut document = import_recording(&models, &tone(32_000), "auto", None).unwrap();
+        for row in &mut document.segments {
+            row.rest.remove("language_mode");
+            row.rest.remove("language_epoch");
+        }
+        let mut job:crate::document::Job=serde_json::from_value(json!({
+            "id":uuid::Uuid::new_v4().simple().to_string(),"name":"old import","status":"ready","language":"auto","created":0.,"updated":0.,"document":document
+        })).unwrap();
+        assert!(super::repair_import_metadata(&mut job).unwrap());
+        let row = &job.document.as_ref().unwrap().segments[0];
+        assert_eq!(row.rest["language_mode"], "auto");
+        assert_eq!(row.language.as_deref(), Some("en"));
+        assert!(!super::repair_import_metadata(&mut job).unwrap());
+        job.language = "fr".into();
+        let original = job.clone();
+        assert!(super::repair_import_metadata(&mut job).is_err());
+        assert_eq!(job, original);
+    }
+
+    #[test]
+    fn reader_import_resumes_accepted_batches_without_replacing_protected_words() {
+        let samples = 36 * 16000;
+        let pcm = tone(samples);
+        let models = Scripted::new(
+            vec![Turn {
+                start: 0.,
+                end: 36.,
+                speaker: "speaker_0".into(),
+            }],
+            vec![(0, samples)],
+        );
+        let path = std::env::temp_dir().join(format!(
+            "speakerdesk-import-resume-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let mut writer = crate::audio::RecordingWriter::create(&path).unwrap();
+        writer.write_samples(&pcm).unwrap();
+        drop(writer);
+        let reader = crate::audio::RecordingReader::open(&path).unwrap();
+        let mut checkpoint = None;
+        let result = super::import_reader(&models, &reader, "en", None, None, &mut |progress| {
+            if !progress.rows.is_empty() {
+                let mut rows = progress.rows.to_vec();
+                rows[0].text = "My correction".into();
+                rows[0].protected_fields = Some(vec!["text".into()]);
+                checkpoint = Some(super::ImportResume {
+                    next_work: progress.next_work,
+                    plan_sha256: progress.plan_sha256.into(),
+                    plan: progress.plan.clone(),
+                    document: crate::document::Document {
+                        schema_version: 1,
+                        speakers: progress.speakers.clone(),
+                        segments: rows,
+                        provenance: Some(progress.provenance.clone()),
+                        warnings: progress.warnings.to_vec(),
+                        diarization: progress.diarization.to_vec(),
+                        edited_at: None,
+                        rest: Default::default(),
+                    },
+                });
+                return Err(super::ImportError::new("interrupted after committed batch"));
+            }
+            Ok(Vec::new())
+        });
+        assert!(result.is_err());
+        let checkpoint = checkpoint.unwrap();
+        let first_calls = models.calls().len();
+        let document = super::import_reader(
+            &models,
+            &reader,
+            "en",
+            None,
+            Some(&checkpoint),
+            &mut |progress| Ok(progress.rows.to_vec()),
+        )
+        .unwrap();
+        assert_eq!(
+            document
+                .segments
+                .iter()
+                .filter(|s| s.id == checkpoint.document.segments[0].id)
+                .count(),
+            1
+        );
+        assert_eq!(
+            document
+                .segments
+                .iter()
+                .find(|s| s.id == checkpoint.document.segments[0].id)
+                .unwrap()
+                .text,
+            "My correction"
+        );
+        assert_eq!(
+            models.calls().len(),
+            first_calls + 1,
+            "only the remaining 18-second anchor is decoded"
+        );
+        let mut wrong = checkpoint.clone();
+        wrong.plan_sha256 = "different".into();
+        let calls = models.calls().len();
+        assert!(
+            super::import_reader(&models, &reader, "en", None, Some(&wrong), &mut |_| panic!(
+                "stale plan must not publish"
+            ))
+            .is_err()
+        );
+        assert_eq!(models.calls().len(), calls);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn import_processing_reads_bounded_windows_instead_of_the_whole_source() {
+        struct GeneratedAudio {
+            samples: usize,
+            largest: std::cell::Cell<usize>,
+        }
+        impl super::pipeline::ImportAudio for GeneratedAudio {
+            fn samples(&self) -> usize {
+                self.samples
+            }
+            fn read(&self, start: usize, end: usize) -> Result<Vec<f32>, super::ImportError> {
+                self.largest.set(self.largest.get().max(end - start));
+                Ok((start..end)
+                    .map(|index| ((index % 17) as f32 - 8.) / 1000.)
+                    .collect())
+            }
+            fn diarize<M: Models + ?Sized>(&self, _: &M) -> Result<Vec<Turn>, super::ImportError> {
+                Ok(vec![Turn {
+                    start: 0.,
+                    end: self.samples as f64 / 16000.,
+                    speaker: "speaker_0".into(),
+                }])
+            }
+        }
+        let source = GeneratedAudio {
+            samples: 120 * 16000,
+            largest: std::cell::Cell::new(0),
+        };
+        let models = Scripted::new(Vec::new(), vec![(0, source.samples)]);
+        let document = super::pipeline::run(&models, &source, "en", None, None, &mut |progress| {
+            Ok(progress.rows.to_vec())
+        })
+        .unwrap();
+        assert!(document.segments.iter().any(|s| !s.text.is_empty()));
+        assert!(source.largest.get() <= 25 * 16000);
+        assert!(source.largest.get() < source.samples / 4);
     }
 
     impl Models for Scripted<'_> {
@@ -1830,7 +2147,12 @@ pub(crate) mod tests {
             Ok(())
         }
         fn diar_open(&self, _preset: ipc::DiarPreset) -> Result<Handle, crate::error::ChildError> {
-            UnimplementedModels.diar_open(_preset)
+            *self.diar_cursor.lock().unwrap() = 0;
+            self.events.lock().unwrap().push(Event::Diarize);
+            Ok(Handle {
+                generation: 1,
+                session: 2,
+            })
         }
         fn diar_feed(
             &self,
@@ -1838,10 +2160,38 @@ pub(crate) mod tests {
             pcm: &[f32],
             last: bool,
         ) -> Result<DiarFeedOut, crate::error::ChildError> {
-            UnimplementedModels.diar_feed(handle, pcm, last)
+            let _ = handle;
+            let mut received = self.diar_cursor.lock().unwrap();
+            *received += pcm.len();
+            Ok(DiarFeedOut {
+                received: *received as u64,
+                observed: if last {
+                    (*received / 160 * 160) as u64
+                } else {
+                    0
+                },
+                turns: if last {
+                    self.turns
+                        .iter()
+                        .filter_map(|t| {
+                            let start = (t.start * 16000.).round() as u64;
+                            let end = ((t.end * 16000.).round() as u64)
+                                .min((*received / 160 * 160) as u64);
+                            (start < end).then(|| ipc::DiarTurn {
+                                start,
+                                end,
+                                speaker: t.speaker.clone(),
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            })
         }
         fn diar_close(&self, handle: Handle) -> Result<(), crate::error::ChildError> {
-            UnimplementedModels.diar_close(handle)
+            let _ = handle;
+            Ok(())
         }
         fn diarize_window(&self, _pcm: &[f32]) -> Result<Vec<Turn>, crate::error::ChildError> {
             self.events.lock().unwrap().push(Event::Diarize);
@@ -1896,6 +2246,9 @@ pub(crate) mod tests {
             pcm: &[f32],
             token_ids: &[i32],
         ) -> Result<ipc::CtcScoresOut, crate::error::ChildError> {
+            if let Some(("ctc", error)) = &self.failure {
+                return Err(error.clone());
+            }
             if let Some((_, scores)) = &self.alignment {
                 assert_eq!(pcm.len(), scores.audio_num_samples as usize);
                 let columns: Vec<_> = token_ids
@@ -2354,7 +2707,7 @@ pub(crate) mod tests {
                     duration: 176_505. / 16000.,
                     revision: 1,
                     document: Some(&document),
-                    segment_id: "seg-0",
+                    segment_id: &document.segments[0].id,
                     body: &json!({"segment_revision":0,"changes":changes}),
                     now: 2.,
                 })

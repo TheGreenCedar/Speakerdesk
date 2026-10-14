@@ -165,8 +165,16 @@ impl CaptureSupervisor {
             let mut failure = None;
             let mut stdin_joined = false;
             let mut resuming = false;
+            // One overflow packet remains owned while the bounded writer queue drains.
+            let mut pending_packet: Option<WriterInput> = None;
             loop {
                 tokio::select! {
+                    permit=packets_tx.reserve(), if pending_packet.is_some() => {
+                        match permit {
+                            Ok(permit)=>permit.send(pending_packet.take().expect("pending packet")),
+                            Err(_)=>{failure=Some("Capture writer closed with a retained overflow packet.".into());break;}
+                        }
+                    }
                     _=actor_stop.cancelled(), if !stopping => {
                         stopping=true; deadline=Some(Instant::now()+stop_bound);
                         if stdin_tx.try_send(Command::Stop).is_err() { failure=Some("Capture command queue is full.".into());break; }
@@ -196,7 +204,7 @@ impl CaptureSupervisor {
                         stdin_joined=true;
                         failure=Some(match result {Ok(Err(e))=>format!("Capture command failed: {e}"),Err(e)=>e.to_string(),Ok(Ok(()))=>"Capture command pipe closed unexpectedly.".into()});break;
                     }
-                    line=lines.next() => {
+                    line=lines.next(), if pending_packet.is_none() => {
                         let line=match line {
                             Ok(Some(line))=>line,
                             Ok(None)=>{if !stopped {failure=Some("Capture helper closed without a stopped acknowledgement.".into());}break;},
@@ -208,8 +216,36 @@ impl CaptureSupervisor {
                             deadline.get_or_insert_with(|| Instant::now()+stop_bound);
                         }
                         if event.kind()==EventKind::Recording {resuming=false;}
-                        if packets_tx.try_send(WriterInput::Event(event)).is_err() {failure=Some("Capture writer fell behind; recording stopped and accepted audio is being saved.".into());break;}
+                        match packets_tx.try_send(WriterInput::Event(event)) {
+                            Ok(())=>{},
+                            Err(mpsc::error::TrySendError::Full(input))=>{
+                                pending_packet=Some(input);
+                                failure.get_or_insert_with(|| "Capture writer fell behind; recording stopped while accepted audio drains.".into());
+                                stopping=true;deadline.get_or_insert_with(|| Instant::now()+stop_bound);
+                                let _=stdin_tx.try_send(Command::Stop);
+                            }
+                            Err(mpsc::error::TrySendError::Closed(input))=>{
+                                pending_packet=Some(input);
+                                failure=Some("Capture writer closed before its packet was retained.".into());break;
+                            }
+                        }
                     }
+                }
+            }
+            if let Some(WriterInput::Event(event)) = pending_packet {
+                // A dead/stalled writer cannot consume it. Keep the complete received input
+                // privately rather than dropping the TrySendError payload.
+                let folder = config.folder.clone();
+                let value = event.body().clone();
+                match tokio::task::spawn_blocking(move|| {
+                    use std::io::Write;
+                    let mut file=private_create(&folder.join("capture-overflow-input.json"))?;
+                    serde_json::to_writer(&mut file,&value).map_err(|e|invalid(e.to_string()))?;
+                    file.write_all(b"\n")?;file.sync_all()?;
+                    Ok::<_,CaptureError>(())
+                }).await {
+                    Ok(Ok(()))=>failure=Some("Capture writer could not drain before stopping. A received packet is retained in capture-overflow-input.json; recording coverage is incomplete.".into()),
+                    other=>failure=Some(format!("Capture writer could not drain or retain its received packet: {other:?}")),
                 }
             }
             drop(stdin_tx);

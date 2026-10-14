@@ -27,10 +27,68 @@ struct Recording {
     failure: Option<String>,
     phase: CapturePhase,
     pause_pending: bool,
+    pause_sequence: u64,
     stopping: bool,
     recovery_attempted: bool,
     cleanup_error: Option<String>,
+    repaired_from: Option<u32>,
     rolling: crate::routes::refinement::Rolling,
+}
+
+fn invalidate_repaired_audio(job: &mut speakerdesk_core::document::Job, from: u32) {
+    for key in [
+        "live_stream_generation",
+        "language_context_generation",
+        "audio_revision",
+    ] {
+        let next = job
+            .extra
+            .get(key)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .saturating_add(1);
+        job.extra.insert(key.into(), json!(next));
+    }
+    job.extra
+        .insert("capture_repaired_from_sample".into(), json!(from));
+    if let Some(document) = &mut job.document {
+        for row in &mut document.segments {
+            if row.end * 16000. <= f64::from(from) {
+                continue;
+            }
+            // Keep human words and geometry. Acoustic claims referred to the old
+            // samples and cannot remain authoritative after source repair.
+            row.audio_revision = Some(row.audio_revision.unwrap_or(0).saturating_add(1));
+            row.machine_revision = Some(row.machine_revision.unwrap_or(0).saturating_add(1));
+            row.language_detection = None;
+            row.acoustic_evidence = None;
+            row.speaker_activity = None;
+            row.alignment = None;
+            row.reading_turns = None;
+            row.reading_turn_provenance = None;
+            row.retry_candidate = None;
+            row.separation_candidate = None;
+            row.review = Some(true);
+            row.review_resolution = None;
+            for key in [
+                "text_audio_anchor",
+                "reading_alignment",
+                "voice_eligible",
+                "audio_state",
+            ] {
+                row.rest.remove(key);
+            }
+            row.rest.insert("canonical_state".into(), json!("sealed"));
+            row.rest.insert(
+                "canonical_unresolved".into(),
+                json!("capture_audio_repaired"),
+            );
+            row.rest.insert("finalized".into(), json!(true));
+            if row.protected_fields.as_ref().is_none_or(Vec::is_empty) {
+                row.refinement_state = Some("unresolved".into());
+            }
+        }
+    }
 }
 impl Recording {
     async fn mutate(
@@ -74,7 +132,7 @@ impl Recording {
             self.progress
                 .send_modify(|p| p.error = Some(message.clone()));
             self.progress.send_modify(|p| p.recovering = false);
-            let _=self.mutate(move|job|{job.message=format!("Live transcription stopped: {message}. Audio is still being recorded. Stop to retain the recording.");job.extra.insert("live_inference_error".into(),json!(message));if let Some(recovery)=job.extra.get_mut("live_recovery"){recovery["status"]=json!("failed");}Ok(())}).await;
+            let _=self.mutate(move|job|{job.message=format!("Live transcription stopped: {message}. Audio is still being recorded. Stop to retain the recording.");job.extra.insert("live_inference_error".into(),json!(message));if let Some(recovery)=job.extra.get_mut("live_recovery"){recovery["status"]=json!("failed");}if let Some(pause)=job.extra.get_mut("pause_flush"){if pause["status"]=="pending"{pause["status"]=json!("unavailable");}}Ok(())}).await;
         }
     }
     async fn recover(
@@ -157,6 +215,30 @@ impl Recording {
     async fn snapshot(&mut self, snapshot: &CaptureSnapshot, dual: bool) -> Result<(), ApiError> {
         self.progress
             .send_modify(|p| p.levels = snapshot.levels.clone());
+        if let Some(from) = snapshot.repaired_from_sample {
+            if self.repaired_from.is_none_or(|prior| from < prior) {
+                self.repaired_from = Some(from);
+                // Invalidate durable publication before signalling any model owner.
+                self.mutate(move |job| {
+                    invalidate_repaired_audio(job, from);
+                    Ok(())
+                })
+                .await?;
+                let app = self.app.clone();
+                let op = self.operation.clone();
+                let rolling = self.rolling.clone();
+                tokio::task::spawn_blocking(move || rolling.interrupt(&app, &op))
+                    .await
+                    .map_err(|e| ApiError::new(500, e.to_string()))??;
+                if let Some(worker) = self.worker.take() {
+                    worker.cancel();
+                    if let Err(error) = worker.join().await {
+                        self.cleanup_error = Some(error.to_string());
+                    }
+                }
+                self.fail("Delayed capture audio was retained. Affected passages need review against the repaired recording".into()).await;
+            }
+        }
         let app = self.app.clone();
         let id = self.id.clone();
         let duration = f64::from(snapshot.committed_sample) / 16000.;
@@ -246,9 +328,15 @@ impl Recording {
                     })
                     .await?;
                 } else if let Some(worker) = &self.worker {
+                    let through = self.received;
+                    self.mutate(move |job| {
+                        job.extra["pause_flush"]["through_sample"] = json!(through);
+                        Ok(())
+                    })
+                    .await?;
                     worker
                         .push(LiveCommand::Flush {
-                            request_id: Some("pause".into()),
+                            request_id: Some(format!("pause-{}", self.pause_sequence)),
                             through_sample: Some(self.received),
                         })
                         .map_err(|e| conflict(e.to_string()))?;
@@ -315,10 +403,12 @@ impl Recording {
                     .command(Command::Pause)
                     .map_err(|e| conflict(e.to_string()))?;
                 self.pause_pending = true;
-                self.mutate(|job| {
+                self.pause_sequence += 1;
+                let request_id = format!("pause-{}", self.pause_sequence);
+                self.mutate(move |job| {
                     job.extra.insert(
                         "pause_flush".into(),
-                        json!({"request_id":"pause","status":"pending"}),
+                        json!({"request_id":request_id,"status":"pending"}),
                     );
                     Ok(())
                 })
@@ -428,9 +518,11 @@ pub(super) async fn record(
         failure: None,
         phase: CapturePhase::Starting,
         pause_pending: false,
+        pause_sequence: 0,
         stopping: false,
         recovery_attempted: false,
         cleanup_error: None,
+        repaired_from: None,
         rolling: crate::routes::refinement::Rolling::new(),
     };
     let config = CaptureConfig {
@@ -496,6 +588,9 @@ pub(super) async fn record(
                     let id = id.clone();
                     let raw = final_snapshot.raw_sample;
                     let clean = final_snapshot.committed_sample;
+                    let late = final_snapshot.late_samples;
+                    let rebuilt = final_snapshot.derived_rebuilt;
+                    let repaired_from = final_snapshot.repaired_from_sample;
                     let healthy = running.is_ok()
                         && final_snapshot.phase == CapturePhase::Stopped
                         && final_snapshot.error.is_none()
@@ -503,7 +598,7 @@ pub(super) async fn record(
                         && clean > 0;
                     let operation = operation.clone();
                     let coverage=tokio::task::spawn_blocking(move||app.store().update_job(&id,|job| {
-                        job.extra.insert("capture_audio_coverage".into(),json!({"raw_samples":raw,"clean_samples":clean,"sample_rate":16000}));
+                        job.extra.insert("capture_audio_coverage".into(),json!({"raw_samples":raw,"clean_samples":clean,"sample_rate":16000,"late_samples":late,"derived_rebuilt":rebuilt,"repaired_from_sample":repaired_from}));
                         if healthy && operation.current(job) {
                             job.message = "Audio saved. Finishing transcript…".into();
                         }
@@ -648,4 +743,48 @@ pub(super) async fn record(
         app.queue_separation(id, generation);
     }
     cleanup
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn repaired_audio_invalidates_evidence_without_erasing_words_or_user_geometry() {
+        let mut job = super::super::meeting_job(
+            JobId::parse("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").unwrap(),
+            "repair",
+            "auto",
+            &["microphone".into()],
+        );
+        job.document.as_mut().unwrap().segments = serde_json::from_value(json!([
+            {"id":"safe","start":0.,"end":1.,"speaker":"speaker_0","text":"Earlier words","audio_revision":1,"language_detection":{"language":"en"}},
+            {"id":"edited","start":1.25,"end":3.,"speaker":"speaker_2","text":"Human correction","protected_fields":["text","start","speaker"],"audio_revision":2,"machine_revision":4,"language_detection":{"language":"en"},"acoustic_evidence":{"complete":true},"canonical_state":"open"}
+        ])).unwrap();
+        let before = job.document.as_ref().unwrap().segments.clone();
+        invalidate_repaired_audio(&mut job, 16000);
+        let rows = &job.document.as_ref().unwrap().segments;
+        assert_eq!(
+            serde_json::to_value(&rows[0]).unwrap(),
+            serde_json::to_value(&before[0]).unwrap()
+        );
+        assert_eq!(
+            (
+                &rows[1].text,
+                rows[1].start,
+                &rows[1].speaker,
+                &rows[1].protected_fields
+            ),
+            (
+                &before[1].text,
+                before[1].start,
+                &before[1].speaker,
+                &before[1].protected_fields
+            )
+        );
+        assert!(rows[1].language_detection.is_none() && rows[1].acoustic_evidence.is_none());
+        assert_eq!(rows[1].audio_revision, Some(3));
+        assert_eq!(rows[1].machine_revision, Some(5));
+        assert_eq!(rows[1].rest["canonical_state"], "sealed");
+        assert_eq!(job.extra["live_stream_generation"], 1);
+    }
 }

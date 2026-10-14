@@ -61,7 +61,7 @@ final class EpochPeer {
         // The serial audio queue owns both converters; state snapshots use a lock.
         let timing = stateLock.withLock { (active, paused, captureGeneration, captureHostFloor, resumeBoundary) }
         guard timing.0 && timing.2 == generation && AppleMicrophoneResumeBoundary.accepts(timestamp,after:timing.3) &&
-            (!timing.1 || (source == "microphone" && timing.4 != nil)) && !stateLock.withLock({failed}) else { return }
+            (!timing.1 || (source == "microphone" && timing.4 != nil)) else { return }
 
         // Synthetic publication peer follows the unchanged first-receipt gate.
         // The production entry guard above decides whether this job may see PCM.

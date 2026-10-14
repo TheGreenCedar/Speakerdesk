@@ -40,6 +40,15 @@ pub enum ChildError {
 }
 
 impl ChildError {
+    /// Crop failures can retain a passage. Transport, cancellation and unavailable
+    /// runtime capabilities must leave the current model sequence.
+    pub fn is_lifecycle_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Cancelled | Self::Timeout | Self::ProcessLost { .. } | Self::MetalUnavailable
+        )
+    }
+
     pub fn failed(message: impl Into<String>, retryable: bool) -> Self {
         Self::Failed {
             message: message.into(),

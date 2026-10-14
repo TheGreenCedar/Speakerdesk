@@ -46,7 +46,9 @@ fn audio(start: u32, end: u32, sources: &[&str]) {
                 json!({"type":"audio","source":source,"time":f64::from(position)/16000.,"rate":16000,"channels":1,"pcm":STANDARD.encode(bytes)}),
             );
         }
-        emit(json!({"type":"clock","time":f64::from(stop)/16000.}));
+        emit(
+            json!({"type":"clock","time":f64::from(stop)/16000.,"producer_fence":"audio_queue_fence_v1","sequence":u64::from(stop)+1}),
+        );
     }
 }
 pub fn run() {
@@ -87,7 +89,16 @@ pub fn run() {
     let mut endpoint = 0;
     let mut stage = 0;
     let mut paused = false;
+    let mut late_sent = false;
     loop {
+        if !late_sent && root.join("inject-late-pcm").exists() {
+            let bytes: Vec<_> = (0..513).flat_map(|_| 0.6_f32.to_le_bytes()).collect();
+            emit(
+                json!({"type":"audio","source":sources[0],"time":1.25,"rate":16000,"channels":1,"pcm":STANDARD.encode(bytes)}),
+            );
+            late_sent = true;
+            fs::write(root.join("late-pcm-sent"), b"513 retained late samples").unwrap();
+        }
         if !paused && root.join(format!("stage-{}", stage + 1)).exists() {
             stage += 1;
             let samples = fs::read_to_string(root.join(format!("stage-{stage}-samples")))

@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File},
+    io::{BufRead, BufReader, Seek, SeekFrom, Write},
     path::PathBuf,
 };
 
@@ -47,6 +48,10 @@ pub struct CaptureSnapshot {
     /// Original aligned tracks may extend beyond failed or buffered DSP output.
     pub raw_sample: u32,
     pub late_samples: u64,
+    /// Formerly committed audio changed. Transcript authority after this point is invalid.
+    pub repaired_from_sample: Option<u32>,
+    /// Corrected originals were used to rebuild all playable derived media at EOF.
+    pub derived_rebuilt: bool,
     pub levels: BTreeMap<String, f32>,
     pub processing: Option<ProcessingReceipt>,
     pub source_catalog: Option<Value>,
@@ -59,6 +64,8 @@ impl Default for CaptureSnapshot {
             committed_sample: 0,
             raw_sample: 0,
             late_samples: 0,
+            repaired_from_sample: None,
+            derived_rebuilt: false,
             levels: BTreeMap::new(),
             processing: None,
             source_catalog: None,
@@ -80,6 +87,9 @@ pub(super) struct SourceWriter {
     echo: Option<EchoMixer>,
     clean_failed: bool,
     reset_points: Vec<u32>,
+    reset_history: Vec<u32>,
+    late_pcm: Option<File>,
+    fence_sequence: u64,
     pub snapshot: CaptureSnapshot,
 }
 
@@ -91,6 +101,10 @@ struct Tile {
 }
 
 impl SourceWriter {
+    #[cfg(test)]
+    pub(super) fn next_fence_sequence(&self) -> u64 {
+        self.fence_sequence + 1
+    }
     pub fn create(config: CaptureConfig, helper: Helper) -> Result<Self, CaptureError> {
         if config.job_id.len() != 32
             || !config
@@ -179,6 +193,9 @@ impl SourceWriter {
             echo,
             clean_failed: false,
             reset_points: Vec::new(),
+            reset_history: Vec::new(),
+            late_pcm: None,
+            fence_sequence: 0,
             snapshot,
         })
     }
@@ -264,6 +281,19 @@ impl SourceWriter {
                     return Ok(());
                 }
                 let seconds = seconds(value)?;
+                if self.helper.qualified() {
+                    if value.get("producer_fence").and_then(Value::as_str)
+                        != Some(super::processing::PROGRESS)
+                    {
+                        return Err(invalid("Capture clock is not a drained producer fence."));
+                    }
+                    let sequence = value
+                        .get("sequence")
+                        .and_then(Value::as_u64)
+                        .filter(|sequence| *sequence > self.fence_sequence)
+                        .ok_or_else(|| invalid("Capture producer fence is stale or unordered."))?;
+                    self.fence_sequence = sequence;
+                }
                 self.flush(seconds, false)?;
                 if let Some(message) =
                     disk_guard_message(fs4::available_space(&self.config.folder)?)
@@ -290,6 +320,7 @@ impl SourceWriter {
                             ));
                         }
                         self.reset_points.push(point);
+                        self.reset_history.push(point);
                         self.reset_points.sort_unstable();
                     }
                 }
@@ -465,6 +496,38 @@ impl SourceWriter {
             .saturating_sub(position)
             .min(frames as u32) as usize;
         self.snapshot.late_samples += offset as u64;
+        if offset > 0 {
+            // Journal the validated original before doing anything to a committed prefix.
+            // Replaying this journal at EOF repairs source WAVs, then rebuilds derived audio.
+            if self.late_pcm.is_none() {
+                self.late_pcm = Some(private_create(
+                    &self.config.folder.join("capture-late-pcm.jsonl"),
+                )?);
+            }
+            let original = if source == 0 {
+                mono.clone()
+            } else {
+                reference.iter().flatten().copied().collect()
+            };
+            let original_bytes =
+                pcm16_bytes(&original).map_err(|error| invalid(error.to_string()))?;
+            let mono_bytes = pcm16_bytes(&mono).map_err(|error| invalid(error.to_string()))?;
+            let entry = serde_json::json!({"source":source,"start_sample":position,"channels":if source==0 {1}else{2},
+                "pcm16":STANDARD.encode(original_bytes),"mono_pcm16":STANDARD.encode(mono_bytes)});
+            let journal = self.late_pcm.as_mut().expect("late PCM journal");
+            serde_json::to_writer(&mut *journal, &entry).map_err(|e| invalid(e.to_string()))?;
+            journal.write_all(b"\n")?;
+            journal.sync_data()?;
+            let affected = position / TILE * TILE;
+            let cutoff = self
+                .snapshot
+                .repaired_from_sample
+                .map_or(affected, |old| old.min(affected));
+            self.snapshot.repaired_from_sample = Some(cutoff);
+            self.snapshot.committed_sample = self.snapshot.committed_sample.min(cutoff);
+            self.clean_failed = true;
+            self.snapshot.error.get_or_insert_with(|| "Delayed capture PCM changed saved audio. Recording stopped; originals are retained and playable audio is being rebuilt. Transcript after the affected boundary requires review.".into());
+        }
         position += offset as u32;
         while offset < frames {
             let within = (position % TILE) as usize;
@@ -625,12 +688,186 @@ impl SourceWriter {
         {
             self.snapshot.error.get_or_insert(error.to_string());
         }
-        for (_, wav) in self.files {
+        for (_, wav) in std::mem::take(&mut self.files) {
             if let Err(error) = wav.finalize() {
                 self.snapshot.error.get_or_insert(error.to_string());
             }
         }
+        if self.snapshot.repaired_from_sample.is_some() {
+            let repaired = if self.write_failed {
+                Err(invalid("Original capture WAV writes failed."))
+            } else {
+                self.repair_originals()
+                    .and_then(|()| self.rebuild_derived())
+            };
+            match repaired {
+                Ok(()) => self.snapshot.derived_rebuilt = true,
+                Err(error) => {
+                    self.snapshot.error = Some(format!(
+                        "Capture audio repair did not finish: {error}. Original packets are retained in capture-late-pcm.jsonl."
+                    ));
+                    // Never leave stale processed audio looking complete.
+                    let cutoff = self.snapshot.repaired_from_sample.unwrap();
+                    for name in ["audio", "microphone_clean"] {
+                        if self.config.folder.join(format!("{name}.wav")).exists() {
+                            if let Err(error) = truncate_wav(
+                                &self.config.folder.join(format!("{name}.wav")),
+                                cutoff,
+                            ) {
+                                self.snapshot.error = Some(format!(
+                                    "Capture audio repair and invalidation failed: {error}. Original packets are retained."
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         self.snapshot
+    }
+
+    fn repair_originals(&mut self) -> Result<(), CaptureError> {
+        if let Some(journal) = self.late_pcm.take() {
+            journal.sync_all()?;
+        }
+        let journal = BufReader::new(File::open(
+            self.config.folder.join("capture-late-pcm.jsonl"),
+        )?);
+        for line in journal.lines() {
+            let entry: Value = serde_json::from_str(&line?).map_err(|e| invalid(e.to_string()))?;
+            let source = entry["source"]
+                .as_u64()
+                .ok_or_else(|| invalid("Invalid late PCM source."))?;
+            let start = entry["start_sample"]
+                .as_u64()
+                .ok_or_else(|| invalid("Invalid late PCM clock."))? as u32;
+            let bytes = STANDARD
+                .decode(
+                    entry["pcm16"]
+                        .as_str()
+                        .ok_or_else(|| invalid("Invalid late PCM journal."))?,
+                )
+                .map_err(|e| invalid(e.to_string()))?;
+            if source == 0 {
+                patch_wav(&self.config.folder.join("microphone.wav"), start, &bytes)?;
+            } else {
+                patch_wav(
+                    &self.config.folder.join("system_reference.wav"),
+                    start,
+                    &bytes,
+                )?;
+                // Preserve exactly the original float-domain downmix, not an i16-domain remix.
+                let mono = STANDARD
+                    .decode(
+                        entry["mono_pcm16"]
+                            .as_str()
+                            .ok_or_else(|| invalid("Missing late system downmix."))?,
+                    )
+                    .map_err(|e| invalid(e.to_string()))?;
+                patch_wav(&self.config.folder.join("system.wav"), start, &mono)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild_derived(&mut self) -> Result<(), CaptureError> {
+        let mut mic = self
+            .config
+            .microphone
+            .then(|| hound::WavReader::open(self.config.folder.join("microphone.wav")))
+            .transpose()?;
+        let mut system = self
+            .config
+            .system
+            .then(|| hound::WavReader::open(self.config.folder.join("system.wav")))
+            .transpose()?;
+        let mut reference = self
+            .config
+            .system
+            .then(|| hound::WavReader::open(self.config.folder.join("system_reference.wav")))
+            .transpose()?;
+        let mut echo = if self.echo.is_some() {
+            Some(
+                EchoMixer::start(
+                    self.config
+                        .echo_library
+                        .as_deref()
+                        .ok_or_else(|| invalid("Missing echo library during repair."))?,
+                )
+                .map_err(|e| invalid(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let audio_path = self.config.folder.join("audio.repair.wav");
+        let clean_path = self.config.folder.join("microphone_clean.repair.wav");
+        let mut audio = hound::WavWriter::new(private_create(&audio_path)?, spec)?;
+        let mut clean = (self.config.microphone && self.config.system)
+            .then(|| {
+                private_create(&clean_path)
+                    .and_then(|file| hound::WavWriter::new(file, spec).map_err(CaptureError::from))
+            })
+            .transpose()?;
+        let mut committed = 0;
+        let mut cursor = 0;
+        let mut resets = self.reset_history.iter().copied().peekable();
+        while cursor < self.snapshot.raw_sample {
+            if resets.peek().is_some_and(|point| *point == cursor) {
+                if let Some(echo) = &mut echo {
+                    let out = echo
+                        .add(&[], &[], &[], true)
+                        .map_err(|e| invalid(e.to_string()))?;
+                    write_rebuilt(&mut audio, clean.as_mut(), &out.clean, &out.system)?;
+                    committed += out.clean.len() as u32;
+                }
+                resets.next();
+            }
+            let end = (cursor + TILE)
+                .min(self.snapshot.raw_sample)
+                .min(resets.peek().copied().unwrap_or(u32::MAX));
+            let count = (end - cursor) as usize;
+            let m = read_pcm16(mic.as_mut(), count)?;
+            let s = read_pcm16(system.as_mut(), count)?;
+            let r = read_pcm16(reference.as_mut(), count * 2)?;
+            let stereo: Vec<[f32; 2]> = r.chunks_exact(2).map(|v| [v[0], v[1]]).collect();
+            if let Some(echo) = &mut echo {
+                let out = echo
+                    .add(&m, &s, &stereo, false)
+                    .map_err(|e| invalid(e.to_string()))?;
+                write_rebuilt(&mut audio, clean.as_mut(), &out.clean, &out.system)?;
+                committed += out.clean.len() as u32;
+            } else {
+                write_rebuilt(&mut audio, clean.as_mut(), &m, &s)?;
+                committed += count as u32;
+            }
+            cursor = end;
+        }
+        if let Some(echo) = &mut echo {
+            let out = echo
+                .add(&[], &[], &[], true)
+                .map_err(|e| invalid(e.to_string()))?;
+            write_rebuilt(&mut audio, clean.as_mut(), &out.clean, &out.system)?;
+            committed += out.clean.len() as u32;
+        }
+        if committed != self.snapshot.raw_sample {
+            return Err(invalid("Rebuilt capture audio has incomplete coverage."));
+        }
+        audio.finalize()?;
+        if let Some(clean) = clean {
+            clean.finalize()?;
+        }
+        fs::rename(audio_path, self.config.folder.join("audio.wav"))?;
+        if self.config.microphone && self.config.system {
+            fs::rename(clean_path, self.config.folder.join("microphone_clean.wav"))?;
+        }
+        self.snapshot.committed_sample = committed;
+        Ok(())
     }
 
     fn max_frames(&self) -> u32 {
@@ -640,11 +877,100 @@ impl SourceWriter {
 
     #[cfg(test)]
     pub(super) fn make_audio_read_only(&mut self) {
-        self.files.remove("audio").unwrap().finalize().unwrap();
-        let read_only = File::open(self.config.folder.join("audio.wav")).unwrap();
-        self.files
-            .insert("audio", hound::WavWriter::new_append(read_only).unwrap());
+        self.make_file_read_only("audio");
     }
+    #[cfg(test)]
+    pub(super) fn make_file_read_only(&mut self, name: &'static str) {
+        self.files.remove(name).unwrap().finalize().unwrap();
+        let read_only = File::open(self.config.folder.join(format!("{name}.wav"))).unwrap();
+        self.files
+            .insert(name, hound::WavWriter::new_append(read_only).unwrap());
+    }
+}
+
+fn read_pcm16(
+    reader: Option<&mut hound::WavReader<BufReader<File>>>,
+    count: usize,
+) -> Result<Vec<f32>, CaptureError> {
+    let Some(reader) = reader else {
+        return Ok(vec![0.; count]);
+    };
+    let values: Vec<f32> = reader
+        .samples::<i16>()
+        .take(count)
+        .map(|sample| sample.map(|v| f32::from(v) / 32768.))
+        .collect::<Result<_, _>>()?;
+    if values.len() != count {
+        return Err(invalid("Original capture source is incomplete."));
+    }
+    Ok(values)
+}
+
+fn write_rebuilt(
+    audio: &mut hound::WavWriter<File>,
+    clean: Option<&mut hound::WavWriter<File>>,
+    m: &[f32],
+    s: &[f32],
+) -> Result<(), CaptureError> {
+    if m.len() != s.len() {
+        return Err(invalid("Rebuilt source clocks differ."));
+    }
+    if let Some(clean) = clean {
+        write_samples(clean, m)?;
+    }
+    let mixed: Vec<f32> = m
+        .iter()
+        .zip(s)
+        .map(|(m, s)| (m + s).clamp(-1., 1.))
+        .collect();
+    write_samples(audio, &mixed)
+}
+
+fn wav_data(path: &std::path::Path) -> Result<(File, u64, u16, u32), CaptureError> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let reader = hound::WavReader::new(file)?;
+    let spec = reader.spec();
+    if spec.bits_per_sample != 16 || spec.sample_format != hound::SampleFormat::Int {
+        return Err(invalid("Unexpected capture WAV format."));
+    }
+    let frames = reader.duration();
+    let mut file = reader.into_inner();
+    let offset = file.stream_position()?;
+    Ok((file, offset, spec.channels, frames))
+}
+
+fn patch_wav(path: &std::path::Path, start: u32, bytes: &[u8]) -> Result<(), CaptureError> {
+    let (mut file, offset, channels, frames) = wav_data(path)?;
+    let frame_bytes = u64::from(channels) * 2;
+    if !bytes.len().is_multiple_of(frame_bytes as usize)
+        || u64::from(start) + bytes.len() as u64 / frame_bytes > u64::from(frames)
+    {
+        return Err(invalid("Late PCM exceeds retained original audio."));
+    }
+    file.seek(SeekFrom::Start(offset + u64::from(start) * frame_bytes))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn truncate_wav(path: &std::path::Path, through: u32) -> Result<(), CaptureError> {
+    let (mut file, offset, channels, frames) = wav_data(path)?;
+    let size = through.min(frames) * u32::from(channels) * 2;
+    let total = offset + u64::from(size);
+    file.set_len(total)?;
+    file.seek(SeekFrom::Start(offset - 4))?;
+    file.write_all(&size.to_le_bytes())?;
+    file.seek(SeekFrom::Start(4))?;
+    file.write_all(
+        &u32::try_from(total - 8)
+            .map_err(|_| invalid("Invalid RIFF repair size."))?
+            .to_le_bytes(),
+    )?;
+    file.sync_all()?;
+    Ok(())
 }
 
 fn write_samples(wav: &mut hound::WavWriter<File>, samples: &[f32]) -> Result<(), CaptureError> {

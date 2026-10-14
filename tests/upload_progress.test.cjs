@@ -65,7 +65,7 @@ test('passage retry progress follows pending work and terminal candidates withou
     const f=frontend(root);f.seed(1);
     f.document.getElementById('job-progress').hidden=true;
     f.run("selected.kind='upload';selected.message='Ready';flushSave=async()=>{};window.request=null;api=()=>new Promise(resolve=>{request={resolve}});setStatus();renderSegments()");
-    const retry=f.document.getElementById('segments').querySelectorAll('button').find(b=>b.textContent==='Retry passage locally');
+    const retry=f.document.getElementById('segments').querySelector('.passage-retry button');
     retry.click();await Promise.resolve();await Promise.resolve();
     assert.equal(f.document.getElementById('job-progress').hidden,false,result);
     assert.match(f.document.getElementById('job-message').textContent,/Retrying passage/);

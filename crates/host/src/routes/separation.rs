@@ -205,9 +205,6 @@ struct LivePending {
     separator: Option<SeparatorSession>,
     samples: usize,
     speech_ranges: [Vec<(usize, usize)>; 2],
-    identity_started: bool,
-    identity: Option<super::separation_identity::Identity>,
-    identity_done: bool,
 }
 
 /// Capture owns one bounded original passage and at most its two output channels.
@@ -239,9 +236,6 @@ impl LiveSeparation {
                     == Some(&p.episode)
                 {
                     interrupt(job);
-                }
-                if let Some(identity) = &p.identity {
-                    identity.interrupt(job);
                 }
                 Ok::<_, ApiError>(())
             });
@@ -318,9 +312,6 @@ impl LiveSeparation {
                 separator: None,
                 samples: 0,
                 speech_ranges: std::array::from_fn(|_| Vec::new()),
-                identity_started: false,
-                identity: None,
-                identity_done: false,
             });
         }
         let p = self.pending.as_mut().expect("selected passage");
@@ -405,38 +396,6 @@ impl LiveSeparation {
                     p.speech_ranges[channel] = ranges;
                 })
             })()
-        } else if !p.identity_started {
-            p.identity = super::separation_identity::Identity::begin(
-                models.as_ref(),
-                &mut app.store(),
-                current.as_ref().expect("fresh current"),
-                &p.segment,
-                &p.episode,
-                p.audio.as_ref().expect("separated audio"),
-                &p.speech_ranges,
-            )
-            .map_err(|e| speakerdesk_core::live::LiveError::Detail(e.to_string()))?;
-            p.identity_started = true;
-            p.identity_done = p.identity.is_none();
-            Ok(())
-        } else if !p.identity_done {
-            let snapshot =
-                super::separation_identity::Snapshot::load(&app.store(), models.as_ref())
-                    .map_err(|e| speakerdesk_core::live::LiveError::Detail(e.to_string()))?;
-            p.identity
-                .as_mut()
-                .expect("started identity")
-                .step(
-                    models.as_ref(),
-                    app.data_dir(),
-                    &operation.cancellation,
-                    current.as_ref().expect("fresh current"),
-                    &snapshot,
-                    p.audio.as_ref().expect("separated audio"),
-                )
-                .map(|progressed| {
-                    p.identity_done = !progressed;
-                })
         } else {
             let p = self.pending.take().expect("completed passage");
             let result = write_audio(
@@ -452,6 +411,7 @@ impl LiveSeparation {
                 original: Box::new(p.segment.clone()),
                 voices: p.voices.try_into().expect("two voices"),
                 model: p.audio.expect("separated audio").model,
+                speech_ranges: bounded_speech_ranges(p.speech_ranges, p.samples),
             });
             finish(
                 operation,
@@ -461,7 +421,6 @@ impl LiveSeparation {
                 true,
                 true,
                 result,
-                p.identity.as_ref(),
                 models.as_ref(),
             );
             return Ok(true);
@@ -498,7 +457,6 @@ impl LiveSeparation {
                 true,
                 true,
                 Err(error.to_string()),
-                p.identity.as_ref(),
                 models.as_ref(),
             );
             if matches!(
@@ -554,6 +512,17 @@ fn owned_directory(root: &Path, directory: &Path) -> bool {
 /// Reconcile only this feature's files after recovering the durable job state.
 pub(super) fn cleanup(root: &Path, store: &SqliteJobStore) -> Result<(), StoreError> {
     for summary in store.summaries()? {
+        if ![
+            root.join(summary.id.as_str()).join("separated"),
+            root.join("derived")
+                .join(summary.id.as_str())
+                .join("separated"),
+        ]
+        .iter()
+        .any(|directory| owned_directory(root, directory))
+        {
+            continue;
+        }
         let Some(job) = store.get(&summary.id, false)? else {
             continue;
         };
@@ -607,7 +576,6 @@ fn execute(
     automatic: bool,
 ) {
     let source_key = domain::source_key(original, segment);
-    let mut identity = None;
     let result: Result<Candidate, String> = (|| {
         if operation.cancellation.is_cancelled() {
             return Err("Separation cancelled.".into());
@@ -625,49 +593,6 @@ fn execute(
         let (audio, voices, speech_ranges) =
             models.separate_passage_with_evidence(&pcm, language, &operation.cancellation)?;
         audio.validate(pcm.len()).map_err(|e| e.to_string())?;
-        if automatic {
-            identity = super::separation_identity::Identity::begin(
-                models,
-                &mut operation.shared.store.lock().expect("jobs"),
-                original,
-                segment,
-                episode,
-                &audio,
-                &speech_ranges,
-            )
-            .map_err(|e| e.to_string())?;
-            if let Some(state) = &mut identity {
-                loop {
-                    let (current, snapshot) = {
-                        let store = operation.shared.store.lock().expect("jobs");
-                        (
-                            store
-                                .get(&original.id, false)
-                                .map_err(|e| e.to_string())?
-                                .ok_or("Recording is unavailable")?,
-                            super::separation_identity::Snapshot::load(&store, models)
-                                .map_err(|e| e.to_string())?,
-                        )
-                    };
-                    if !operation.current(&current) || operation.cancellation.is_cancelled() {
-                        return Err("Separation cancelled.".into());
-                    }
-                    if !state
-                        .step(
-                            models,
-                            &operation.shared.data_dir,
-                            &operation.cancellation,
-                            &current,
-                            &snapshot,
-                            &audio,
-                        )
-                        .map_err(|e| e.to_string())?
-                    {
-                        break;
-                    }
-                }
-            }
-        }
         write_audio(
             &operation.shared.data_dir,
             original,
@@ -681,19 +606,29 @@ fn execute(
             original: Box::new(segment.clone()),
             voices,
             model: audio.model,
+            speech_ranges: bounded_speech_ranges(speech_ranges, pcm.len()),
         })
     })();
     finish(
-        operation,
-        original,
-        segment,
-        episode,
-        automatic,
-        false,
-        result,
-        identity.as_ref(),
-        models,
+        operation, original, segment, episode, automatic, false, result, models,
     );
+}
+
+fn bounded_speech_ranges(
+    ranges: [Vec<(usize, usize)>; 2],
+    length: usize,
+) -> [Vec<(usize, usize)>; 2] {
+    ranges.map(|ranges| {
+        if ranges.len() <= 256
+            && ranges
+                .iter()
+                .all(|(start, end)| start < end && *end <= length)
+        {
+            ranges
+        } else {
+            Vec::new()
+        }
+    })
 }
 
 fn write_audio(
@@ -749,13 +684,10 @@ fn finish(
     automatic: bool,
     live: bool,
     result: Result<Candidate, String>,
-    identity: Option<&super::separation_identity::Identity>,
-    models: &dyn ApplicationModels,
+    _models: &dyn ApplicationModels,
 ) {
     let source_key = domain::source_key(original, segment);
     let mut store = operation.shared.store.lock().expect("jobs");
-    let identity_snapshot =
-        identity.and_then(|_| super::separation_identity::Snapshot::load(&store, models).ok());
     let published=store.update_job(&original.id,|job| {
         if !operation.current(job) || job.extra.get("passage_separation").and_then(|v|v["id"].as_str())!=Some(episode) {
             return Err(ApiError::new(409,"Separation was cancelled or superseded."));
@@ -770,22 +702,15 @@ fn finish(
         }
         match &result {
             Ok(candidate) => {
-                job.document.as_mut().expect("current document").segments.iter_mut().find(|s|s.id==segment.id).expect("current passage").separation_candidate=Some(Box::new(candidate.clone()));
-                if automatic {
-                    if let Err(error) = if live { domain::accept_live(job, &segment.id, episode) } else { domain::accept(job, &segment.id, episode) } {
-                        job.document.as_mut().expect("current document").segments.iter_mut().find(|s|s.id==segment.id).expect("current passage").separation_candidate=None;
-                        job.extra.insert("separation_error".into(),json!(error.message));
-                        job.message=RETAINED.into();
-                        return Ok(false);
-                    }
-                    if let Some(identity) = identity {
-                        if let Some(snapshot) = &identity_snapshot { identity.apply(job,snapshot); }
-                        identity.interrupt(job);
-                    }
-                    if !live { job.message="Separated voices saved. Check separated voices.".into(); }
-                    return Ok(true);
+                if automatic && candidate.voices.iter().any(|voice| voice.text.trim().is_empty() || !speakerdesk_core::languages::is_supported(&voice.language)) {
+                    job.extra.insert("separation_error".into(), json!("Both voice estimates need usable words. The original passage is retained."));
+                    job.message = RETAINED.into();
+                    return Ok(false);
                 }
-                job.message="Voice estimates ready. Listen to both before replacing the original passage.".into();
+                job.document.as_mut().expect("current document").segments.iter_mut().find(|s|s.id==segment.id).expect("current passage").separation_candidate=Some(Box::new(candidate.clone()));
+                // Nonempty ASR is not evidence that two generated channels contain
+                // distinct voices. Keep the original and its attributed reading turns.
+                if !live { job.message="Voice estimates ready. Compare them with the original recording.".into(); }
                 Ok(true)
             }
             Err(error) => {
@@ -796,14 +721,6 @@ fn finish(
             }
         }
     });
-    if !matches!(published, Ok(Some((_, true)))) {
-        if let Some(identity) = identity {
-            let _ = store.update_job(&original.id, |job| {
-                identity.interrupt(job);
-                Ok::<_, ApiError>(())
-            });
-        }
-    }
     drop(store);
     if !matches!(published, Ok(Some((_, true)))) {
         remove_assets(&operation.shared.data_dir, original, episode);
@@ -923,7 +840,14 @@ pub(super) async fn accept(
                     })
                 })
                 .ok_or_else(|| ApiError::new(404, "Voice estimates are no longer available."))?;
+            let candidate = passage
+                .separation_candidate
+                .as_ref()
+                .expect("selected candidate")
+                .as_ref()
+                .clone();
             let (start, end) = domain::sample_bounds(passage)?;
+            let mut channels = Vec::with_capacity(2);
             for channel in 0..2 {
                 let path = asset_path(app.data_dir(), &job, &episode, channel).map_err(|_| {
                     ApiError::new(
@@ -943,21 +867,144 @@ pub(super) async fn accept(
                         "Separated audio length changed. The original passage is retained.",
                     ));
                 }
+                channels.push(pcm);
             }
             let passage_id = passage.id.clone();
-            app.store()
-                .update_job(&id, |current| {
-                    domain::accept(current, &passage_id, &episode)?;
-                    current.message = "Separated voices saved.".into();
-                    Ok::<_, ApiError>(())
-                })?
-                .map(|(job, _)| job)
-                .ok_or_else(|| ApiError::new(404, NOT_FOUND))
+            let models = app.models();
+            let recognize =
+                bounded_speech_ranges(candidate.speech_ranges.clone(), channels[0].len())
+                    .iter()
+                    .any(|ranges| !ranges.is_empty())
+                    && models.separated_voice_policy().is_some()
+                    && app.store().preference("voice_recognition")?.as_deref() != Some("false");
+            if !recognize {
+                return app
+                    .store()
+                    .update_job(&id, |current| {
+                        domain::accept(current, &passage_id, &episode)?;
+                        current.message = "Separated voices saved.".into();
+                        Ok::<_, ApiError>(())
+                    })?
+                    .map(|(job, _)| job)
+                    .ok_or_else(|| ApiError::new(404, NOT_FOUND));
+            }
+            let lease = app
+                .admission
+                .lease(Activity::Refinement)
+                .map_err(|e| ApiError::new(409, e.message()))?;
+            let mut store = app.store();
+            let mut current = load_job(&store, &id, false)?;
+            domain::accept(&mut current, &passage_id, &episode)?;
+            current.message = "Separated voices saved.".into();
+            current.revision += 1;
+            current.updated = unix_now();
+            let operation = app.begin_refinement_operation(&mut store, &mut current)?;
+            drop(store);
+            let reply = current.clone();
+            app.worker.enqueue(move || {
+                let _lease = lease;
+                recognize_accepted(
+                    &operation,
+                    models.as_ref(),
+                    &current,
+                    &candidate,
+                    speakerdesk_core::ipc::SeparatedAudio {
+                        model: candidate.model.clone(),
+                        channels: channels.try_into().expect("two channels"),
+                    },
+                );
+            });
+            Ok(reply)
         })();
         respond(result)
     })
     .await
 }
+fn recognize_accepted(
+    operation: &OperationGuard,
+    models: &dyn ApplicationModels,
+    original: &Job,
+    candidate: &Candidate,
+    audio: speakerdesk_core::ipc::SeparatedAudio,
+) {
+    let ranges = bounded_speech_ranges(candidate.speech_ranges.clone(), audio.channels[0].len());
+    if ranges.iter().all(Vec::is_empty) {
+        return;
+    }
+    let mut state = {
+        let mut store = operation.shared.store.lock().expect("store");
+        let Ok(Some(current)) = store.get(&original.id, false) else {
+            return;
+        };
+        if !operation.current(&current) {
+            return;
+        }
+        match super::separation_identity::Identity::begin(
+            models,
+            &mut store,
+            &current,
+            &candidate.original,
+            &candidate.id,
+            &audio,
+            &ranges,
+        ) {
+            Ok(Some(state)) => state,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error,"could not start accepted voice recognition");
+                return;
+            }
+        }
+    };
+    let mut completed = false;
+    loop {
+        let snapshot = {
+            let store = operation.shared.store.lock().expect("store");
+            match (
+                store.get(&original.id, false),
+                super::separation_identity::Snapshot::load(&store, models),
+            ) {
+                (Ok(Some(current)), Ok(snapshot)) if operation.current(&current) => {
+                    (current, snapshot)
+                }
+                _ => break,
+            }
+        };
+        match state.step(
+            models,
+            &operation.shared.data_dir,
+            &operation.cancellation,
+            &snapshot.0,
+            &snapshot.1,
+            &audio,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                completed = true;
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(%error,"accepted voice recognition interrupted");
+                break;
+            }
+        }
+    }
+    let mut store = operation.shared.store.lock().expect("store");
+    let snapshot = super::separation_identity::Snapshot::load(&store, models).ok();
+    let _ = store.update_job(&original.id, |current| {
+        if completed && operation.current(current) {
+            if let Some(snapshot) = &snapshot {
+                state.apply(current, snapshot);
+            } else {
+                state.interrupt(current);
+            }
+        } else {
+            state.interrupt(current);
+        }
+        Ok::<_, ApiError>(())
+    });
+}
+
 pub(super) async fn discard(
     State(app): State<AppState>,
     AxumPath((jid, episode)): AxumPath<(String, String)>,
