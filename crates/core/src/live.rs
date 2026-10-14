@@ -2322,6 +2322,7 @@ pub fn publish_saved_passage(
         ));
     }
     let mut written = candidate.clone();
+    written.separation_candidate = None;
     written.refinement_state = Some("refined".into());
     written.rest.insert("finalized".into(), Value::Bool(true));
     written.rest.insert(
@@ -2440,6 +2441,13 @@ pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Do
         }
         if kept_text || !protected.is_empty() {
             crate::edit::clear_alignment_bundle(&mut row);
+        } else if row.reading_turns.is_none() {
+            crate::alignment::retain_growing_prefix(&prior, &mut row);
+        }
+        if segment_version(&row) == segment_version(&prior)
+            && row.speaker_activity == prior.speaker_activity
+        {
+            row.separation_candidate = prior.separation_candidate.clone();
         }
         if let Some(slot) = document
             .segments

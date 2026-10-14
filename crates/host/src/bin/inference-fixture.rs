@@ -161,6 +161,7 @@ fn main() {
                                 "coarse-alignment" if root.join("fixture-ctc").exists() => speakerdesk_core::alignment::CHECKPOINT.into(),
                                 "whisper-language" => speakerdesk_core::languages::LID_CHECKPOINT.into(),
                                 "redimnet2-b6" if root.join("fixture-voice").exists() => "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU".into(),
+                                "mossformer2-16k" if root.join("fixture-overlap").exists() => speakerdesk_core::separation::MODEL.into(),
                                 _ => format!("replay:{model}"),
                             },
                             ok: true,

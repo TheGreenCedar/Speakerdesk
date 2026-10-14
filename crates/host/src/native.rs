@@ -40,6 +40,7 @@ pub(crate) struct NativeModels {
     root: PathBuf,
     alignment: RwLock<Option<Arc<speakerdesk_core::alignment::Vocabulary>>>,
     voice: RwLock<Option<speakerdesk_core::voice::Calibration>>,
+    separation_error: RwLock<Option<String>>,
     model_root: PathBuf,
     notices: PathBuf,
     setup: crate::setup::SetupService,
@@ -93,10 +94,15 @@ impl ApplicationModels for NativeModels {
         .map_err(|e| e.to_string())
     }
     fn separation_available(&self) -> bool {
-        self.model_root
-            .join(crate::setup::separation_artifact().id)
-            .join("model.safetensors")
-            .is_file()
+        self.separation_error
+            .read()
+            .expect("separation capability")
+            .is_none()
+            && self
+                .model_root
+                .join(crate::setup::separation_artifact().id)
+                .join("model.safetensors")
+                .is_file()
     }
     fn separate_passage_with_evidence(
         &self,
@@ -209,6 +215,9 @@ impl NativeModels {
         }
         let handle = tokio::spawn(async move {
             let _lease = lease;
+            if download {
+                native.record_setup_attempt(&app);
+            }
             let result = if download {
                 native.install(&app, &token, separation).await
             } else {
@@ -227,9 +236,37 @@ impl NativeModels {
                 && !app.admission.closed()
                 && native.setup.progress().status == "missing";
             native.setup.finish(result, missing);
+            if download {
+                native.record_setup_attempt(&app);
+            }
         });
         *task = Some((cancel, handle));
         Ok(())
+    }
+    fn record_setup_attempt(&self, app: &AppState) {
+        let progress = self.setup.progress();
+        let Ok(attempt) = serde_json::to_value(&progress) else {
+            return;
+        };
+        let result = (|| {
+            let mut store = app.store();
+            let mut history: Vec<Value> = store
+                .preference("model_setup_history")?
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+            history.retain(|item| item["started_at"] != progress.started_at);
+            history.push(attempt);
+            if history.len() > 8 {
+                history.drain(..history.len() - 8);
+            }
+            store.set_preference(
+                "model_setup_history",
+                &serde_json::to_string(&history).expect("setup history serializes"),
+            )
+        })();
+        if let Err(error) = result {
+            tracing::warn!(%error, "Could not retain model setup diagnostics");
+        }
     }
     fn cancel(&self) {
         if let Some((cancel, task)) = self.task.lock().expect("setup task").as_ref()
@@ -266,7 +303,18 @@ impl NativeModels {
         all: bool,
     ) -> Result<(), String> {
         let artifacts = crate::setup::artifacts();
-        self.setup.check_downloads(&self.model_root, &artifacts);
+        *self
+            .separation_error
+            .write()
+            .expect("separation capability") = Some("Separation has not finished loading.".into());
+        self.setup.check_downloads(
+            &self.model_root,
+            &if self.setup.progress().target.as_deref() == Some("separation") {
+                vec![crate::setup::separation_artifact()]
+            } else {
+                artifacts.clone()
+            },
+        );
         let models = self.supervisor.models(cancel.clone());
         let mut reports = Vec::new();
         let mut failures = Vec::new();
@@ -330,6 +378,35 @@ impl NativeModels {
         }
         *self.alignment.write().expect("alignment capability") = alignment;
         *self.voice.write().expect("voice capability") = voice;
+        let separation = if self
+            .model_root
+            .join("mossformer2-16k/model.safetensors")
+            .is_file()
+        {
+            self.setup.phase("Loading overlapping voice separation…");
+            models
+                .setup_check(&["mossformer2-16k".into()])
+                .map_err(|e| e.to_string())
+                .and_then(|reports| {
+                    if reports.len() == 1
+                        && reports[0].ok
+                        && reports[0].model == speakerdesk_core::separation::MODEL
+                    {
+                        Ok(())
+                    } else {
+                        Err(
+                            "Separation model initialization returned an unexpected identity"
+                                .into(),
+                        )
+                    }
+                })
+        } else {
+            Err("Download the model to separate overlapping voices.".into())
+        };
+        *self
+            .separation_error
+            .write()
+            .expect("separation capability") = separation.err();
         let missing = !all
             && ordinary_errors
             && crate::setup::initial_models_missing(&self.model_root, &artifacts, &reports);
@@ -401,6 +478,8 @@ impl NativeModels {
             self.setup.bytes(completed);
         }
         self.setup.loading();
+        self.setup.activated();
+        self.record_setup_attempt(app);
         self.setup.phase("Restarting the model worker");
         let supervisor = self.supervisor.clone();
         let cancellation = cancel.clone();
@@ -408,29 +487,25 @@ impl NativeModels {
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        self.initialize_async(app.clone(), cancel.clone(), true)
-            .await?;
+        let ordinary = self
+            .initialize_async(app.clone(), cancel.clone(), !separation)
+            .await;
         if separation {
-            let supervisor = self.supervisor.clone();
-            let cancellation = cancel.clone();
-            tokio::task::spawn_blocking(move || {
-                let reports = supervisor
-                    .models(cancellation)
-                    .setup_check(&["mossformer2-16k".into()])
-                    .map_err(|e| e.to_string())?;
-                if reports.len() != 1
-                    || !reports[0].ok
-                    || reports[0].model != speakerdesk_core::separation::MODEL
-                {
-                    return Err(
-                        "Separation model initialization returned an unexpected identity"
-                            .to_string(),
-                    );
-                }
-                Ok(())
-            })
-            .await
-            .map_err(|e| e.to_string())??;
+            // Refresh other capabilities after restart, but judge this request by
+            // the model it installed. Missing timing must not turn success into failure.
+            if cancel.is_cancelled() || app.admission.closed() {
+                return Err("Model setup cancelled".into());
+            }
+            if let Some(error) = self
+                .separation_error
+                .read()
+                .expect("separation capability")
+                .clone()
+            {
+                return Err(error);
+            }
+        } else {
+            ordinary?;
         }
         Ok(())
     }
@@ -650,6 +725,7 @@ async fn serve(
         notices,
         alignment: RwLock::new(None),
         voice: RwLock::new(None),
+        separation_error: RwLock::new(Some("Separation has not been checked.".into())),
         setup: crate::setup::SetupService::default(),
         task: Mutex::new(None),
     });
@@ -901,6 +977,19 @@ async fn setup(State(app): State<AppState>) -> Response {
         let timing = core_ready && app.alignment_ready();
         let ready = core_ready && automatic && timing && voice;
         let progress = app.native.get().map(|native| native.setup.progress()).unwrap_or_default();
+        let history: Vec<Value> = app.store().preference("model_setup_history").ok().flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+        let operation = if progress.target.is_some() {
+            serde_json::to_value(&progress).ok()
+        } else {
+            history.last().cloned().map(|mut last| {
+                if matches!(last["status"].as_str(), Some("downloading" | "loading")) {
+                    last["status"] = json!("interrupted");
+                    last["error"] = json!("Setup stopped before it finished. Retry to continue.");
+                }
+                last
+            })
+        };
         let busy = matches!(progress.status,"downloading" | "loading");
         let supported = cfg!(all(target_os="macos",target_arch="aarch64"));
         let can_download = supported && app.native.get().is_some() && !app.admission.busy() && !app.admission.closed() && !app.admission.reserved();
@@ -913,11 +1002,11 @@ async fn setup(State(app): State<AppState>) -> Response {
         models.push(json!({"id":separation.id,"name":separation.name,"installed":separation_installed,"optional":true,"bytes":separation.download_bytes(),"checkpoint":speakerdesk_core::separation::MODEL}));
         let status = if busy || progress.status == "missing" {progress.status} else if progress.error.is_some() {"failed"} else if ready {"ready"} else {"idle"};
         Json(json!({
-            "supported":supported,"ready":ready,"core_ready":core_ready,"automatic_language":automatic,
+            "supported":supported,"ready":ready,"core_ready":core_ready,"automatic_language":automatic,"operation":operation,"setup_history":history,
             "status":status,"phase":progress.phase,"error":progress.error,
             "download_required":progress.download_required,
             "models":models,"total_bytes":if separation_setup {separation.download_bytes()} else {catalog.iter().map(|m| m.download_bytes()).sum::<u64>()},
-            "separation":{"installed":separation_installed,"bytes":separation.download_bytes(),"can_download":can_download,"active":separation_setup && busy},
+            "separation":{"installed":separation_installed,"ready":app.models().separation_available(),"bytes":separation.download_bytes(),"can_download":can_download,"active":separation_setup && busy},
             "downloaded_bytes":progress.downloaded_bytes,"required_free_bytes":if separation_setup {separation.stored_bytes()} else {catalog.iter().map(|m| m.stored_bytes()).sum::<u64>()},
             "can_download":can_download,"can_cancel":busy && app.native.get().is_some(),
             "alignment":{"id":alignment.id,"status":if busy {progress.status}else if timing {"ready"}else {"idle"},"ready":timing,"can_download":false,
@@ -1128,6 +1217,7 @@ mod setup_tests {
             notices: temp.path().join("THIRD_PARTY_NOTICES.txt"),
             alignment: RwLock::new(None),
             voice: RwLock::new(None),
+            separation_error: RwLock::new(Some("Separation has not been checked.".into())),
             setup: crate::setup::SetupService::default(),
             task: Mutex::new(None),
         });
@@ -1312,6 +1402,39 @@ mod setup_tests {
             .unwrap();
         assert_eq!(failed["status"], "failed");
         assert_eq!(failed["can_cancel"], false);
+        assert_eq!(failed["operation"]["target"], "models");
+        assert_eq!(failed["operation"]["status"], "failed");
+        let first_failure = failed["operation"]["error"].clone();
+        assert_eq!(
+            post("/api/setup/separation").send().await.unwrap().status(),
+            200
+        );
+        let task = native.task.lock().unwrap().take().unwrap().1;
+        task.await.unwrap();
+        let separation_failed = setup_status()
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(separation_failed["operation"]["target"], "separation");
+        assert_eq!(separation_failed["operation"]["status"], "failed");
+        assert!(
+            separation_failed["setup_history"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|attempt| attempt["target"] == "models" && attempt["error"] == first_failure)
+        );
+        let persisted: Vec<Value> = serde_json::from_str(
+            &app.store()
+                .preference("model_setup_history")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.last().unwrap()["target"], "separation");
         stop.cancel();
         server.await.unwrap();
         tokio::task::spawn_blocking(move || supervisor.shutdown())

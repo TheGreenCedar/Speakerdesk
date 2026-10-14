@@ -112,3 +112,78 @@ discarded crops receive fresh bounded VAD checks; this does not reproduce histor
 recurrent-model probabilities. Abrupt app/OS loss recovers the last durable periodic
 draft copy; normal close requires a final acknowledged copy. Recovery never applies
 drafts to canonical text automatically.
+
+## Overlap and first-attempt setup follow-up
+
+The twelve-batch checkpoint is `c78f865`. The follow-up fixes the reported overlap
+collapse and setup failure, and simplifies their user-facing controls.
+
+- Saved evidence showed automatic separation replacing attributed original
+  paragraphs with two generated whole-window rows, including an almost unchanged
+  mixed channel and a much quieter sibling. Automatic processing now saves a
+  candidate; only explicit acceptance replaces the original. Recognition of the
+  generated voices runs after acceptance on the existing serial worker. This
+  prevents silent publication of poor estimates; it does not improve the neural
+  separator's accuracy. Original words, audio and restoration remain available.
+- Growing live audio retains validated timing for unchanged words on their
+  original prefix, then recalculates speaker attribution against current evidence.
+  Changed words, protected edits and incompatible source ownership invalidate reuse.
+- Passage controls say **Retry transcription** and **Edit full passage**. Comparison
+  provides original/Voice A/Voice B playback; JSON diagnostics stay collapsed.
+  Settings puts the separation model, its failure and its scoped retry before
+  explanations. Start and transcript views expose separation readiness.
+- The installed baseline reproduced separation setup activating its requested
+  model, then failing because unrelated transcript timing was missing. Generic
+  Retry started ordinary setup instead. The fix judges each request by its own
+  target while reporting other capabilities separately, validates native separation
+  initialization, and retains eight durable setup-attempt receipts. The update
+  deleting weights was not established by this investigation.
+
+### First-attempt native proof
+
+Each qualified case used a fresh disposable root, one authenticated setup POST,
+and no Retry. Installed application data and models were not modified.
+
+| Case | Observed result |
+| --- | --- |
+| Installed baseline, other models present except timing, staged separation source | Failed after separation activation with `Transcript timing: No such file or directory` |
+| Candidate, equivalent partially installed state | Separation activated and initialized; missing timing remained separately not ready |
+| Candidate, empty model root | Downloaded the pinned 670,353,271-byte separation checkpoint over HTTP, prepared, activated and initialized it successfully |
+| Candidate, ordinary setup with raw source files staged and no active model directories or prepared timing weights | All six models passed native initialization in 44.3 s; no ordinary network transfer was exercised |
+
+The first ordinary debug probe reached timing preparation without a product error
+but exceeded the harness's 300-second bound. A fresh probe passed after compiling
+only the SHA-2 dependency with `profile.dev.package.sha2.opt-level=3`; application
+logic and model pins were unchanged. This is a debug-build proof condition, not a
+release performance claim. The failed baseline and bounded-out run remain in the
+evidence record. All probe-owned hosts exited and their model trees were removed.
+
+Evidence manifests are `/tmp/speakerdesk-firstattempt-proof-summary-20261013.json`
+and `/tmp/speakerdesk-firstattempt-optimized-proof-summary-20261013.json`. They
+record request/state receipts, durable SQLite history, logs, elapsed time and exact
+binary/runtime hashes. The initial candidate binary SHA-256 is
+`f84197a261c7e30c24832447d380f335d071086a687eca2c846962247578184a`;
+the checksum-optimized candidate is
+`280919a978f36ec0c3b8d37cfbb19a440e764955a9a81fd437ad5bd55cc922d5`.
+
+### Follow-up qualification
+
+- Integrated macOS Rust gate: **446 passed, 27 ignored, zero failures**, using the
+  package/features/resource override above, four test threads and the same SHA-2
+  optimization. Log: `/tmp/speakerdesk-overlap-setup-rust-final.log`. An earlier
+  parallel fixture run timed out once in the existing rolling-accuracy matrix;
+  its focused rerun and the final integrated gate passed without weakening it.
+- Frontend: **184 passed, one existing skip**. Python: **62 passed, one existing
+  skip**. Source boundary/version check passed; independent references unchanged.
+- The overlap publication regression failed on the previous behavior. Disabling
+  prefix-timing retention makes its independent CTC replay fail at missing speaker
+  turns. The deferred-identity matrix covers cancellation, stale generations,
+  edits, child loss, recognition changes and forgotten profiles.
+- Rendered shipped frontend passed setup, paragraph preservation and playback
+  checks at 1280 and 760 pixels with the full model catalog, no measured overflow
+  and no page exceptions. Screenshots were inspected. Report:
+  `/tmp/speakerdesk-overlap-setup-rendered/overlap-browser-report.json`.
+- Sol 6.1's final adversarial review found no remaining blockers. The prior native
+  DSP/capture evidence remains valid for unchanged code. No physical overlapping
+  conversation, installed-app UI workflow, release package or publication was
+  qualified by this follow-up; rendered checks used a disposable synthetic server.

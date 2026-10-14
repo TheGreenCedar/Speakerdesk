@@ -545,7 +545,11 @@ function refreshReadingTurnView(card,segment) {
   const blocked=passageDrafts.has(segment.id) || recoverablePassageDrafts.has(segment.id) || isPassageSaving(segment.id);
   const reading=!!turns && !binding.editing && !blocked && text.value===segment.text && document.activeElement!==text;
   host.hidden=!reading;text.hidden=reading;button.hidden=!turns;
-  button.disabled=blocked;button.textContent=reading?'Edit passage':'View speaker turns';
+  button.disabled=blocked;button.textContent=reading?'Edit full passage':'View speaker turns';
+  let explanation=card.querySelector('.whole-passage-note');
+  if(!explanation){explanation=node('p','Editing the full passage. Speaker turns are a reading view; editing words may make their attribution unavailable.','whole-passage-note');text.parentElement.insertBefore(explanation,text);}
+  explanation.textContent=turns?'Editing the full passage. Speaker turns are a reading view; editing words may make their attribution unavailable.':'Speaker-turn attribution is unavailable for these words. This is the full original passage.';
+  explanation.hidden=reading;
   setPassageClass(card,'has-reading-turns',!!turns);setPassageClass(card,'editing-reading-turns',!reading);
 }
 function savedPassageSignature(segment) {
@@ -587,8 +591,8 @@ function savedCard(segment) {
   }
   const actions=node('div',undefined,'segment-actions');
   const repairToggle=node('button',undefined,'segment-action repair-toggle');repairToggle.type='button';
-  repairToggle.append(icon('wrench'),node('span','Repair'));repairToggle.title='Retry this passage in another language';
-  repairToggle.setAttribute('aria-label',`Repair passage at ${passageTime(segment.start)}`);repairToggle.setAttribute('aria-expanded','false');
+  repairToggle.append(icon('wrench'),node('span','Retry transcription'));repairToggle.title='Retry this passage in another language';
+  repairToggle.setAttribute('aria-label',`Retry transcription at ${passageTime(segment.start)}`);repairToggle.setAttribute('aria-expanded','false');
   const remove = node('button', undefined, 'segment-action remove-segment'); remove.type='button'; remove.append(icon('trash-2')); remove.setAttribute('aria-label', `Remove passage at ${passageTime(segment.start)}`); remove.title='Remove passage (you can undo)';
   remove.addEventListener('click', () => removePassage(segment));
   const details=node('button',undefined,'segment-action passage-details-toggle');details.type='button';details.append(icon('sliders-horizontal'),node('span','Details'));
@@ -679,13 +683,13 @@ function refreshPassageLanguageIssue(body,segment) {
     message.textContent=explanation+(segment.text.trim()?' Your current words are kept.':'');
   }else message?.remove();
   const summary=repair?.querySelector('summary');
-  if(summary)summary.textContent=blocked?'Choose passage language':'Repair passage';
+  if(summary)summary.textContent=blocked?'Choose passage language':'Retry transcription';
   return blocked;
 }
 function appendPassageRepair(body,segment,reason,visibleSource=()=>true) {
   if(!isLive()) {
     const blocked=refreshPassageLanguageIssue(body,segment);
-    const repair=node('details',undefined,'passage-repair');repair.open=blocked;repair.append(node('summary',blocked?'Choose passage language':'Repair passage'));
+    const repair=node('details',undefined,'passage-repair');repair.open=blocked;repair.append(node('summary',blocked?'Choose passage language':'Retry transcription'));
     const tools=node('div',undefined,'passage-retry'), language=node('select');
     language.setAttribute('aria-label',`Choose language to retry passage at ${time(segment.start)}`);
     const choose=node('option','Choose passage language');choose.value='';language.append(choose);
@@ -694,7 +698,7 @@ function appendPassageRepair(body,segment,reason,visibleSource=()=>true) {
       const option=node('option',name);option.value=code;language.append(option);
     }
     language.value=segment.language || '';
-    const retry=node('button','Retry passage locally');
+    const retry=node('button','Retry transcription');
     const busy=['preparing','processing','queued'].includes(selected.status),retryPending=!!selected.passage_retry || !!selected.passage_separation;
     const drafts=hasPassageDrafts() || hasPendingPassageSaves();
     const tooLong=segment.end-segment.start>24.5;
@@ -834,6 +838,21 @@ function separationAudio(path,start,end,label) {
   audio.addEventListener('error',()=>notice(`${label} unavailable. The original passage is retained.`,true));
   return audio;
 }
+function separationPlayback(path,start,end,label) {
+  const group=node('div',undefined,'separation-playback'),audio=separationAudio(path,start,end,label);
+  audio.controls=false;audio.hidden=true;
+  group.append(separationPlayButton(audio,start,end,label),audio);return group;
+}
+function separationPlayButton(audio,start,end,label) {
+  const play=node('button',`Play ${label}`,'quiet');
+  play.addEventListener('click',()=>{
+    if(!audio.paused){audio.pause();return;}
+    if(audio.currentTime<start || audio.currentTime>=end || audio.ended)audio.currentTime=start;
+    audio.play().catch(error=>notice(error.message,true));
+  });
+  for(const event of ['play','pause','ended'])audio.addEventListener(event,()=>{play.textContent=`${audio.paused?'Play':'Pause'} ${label}`;});
+  return play;
+}
 function appendPassageSeparation(body,segment) {
   const panel=node('div',undefined,'passage-separation');body.append(panel);
   renderPassageSeparation(panel,segment);
@@ -846,7 +865,7 @@ function renderPassageSeparation(panel,segment) {
   const signature=JSON.stringify([segment,selected.status,selected.passage_separation,selected.passage_retry,selected.separation_error,setupState?.separation]);
   if(panel.dataset.signature===signature)return;
   panel.dataset.signature=signature;panel.replaceChildren();
-  if(isLive()) {
+  if(isLive() && !segment.separation_candidate) {
     if(segment.separation)panel.append(node('p',`${voiceEstimateLabel(segment.separation.channel)} · Check separated voices`,'separation-hint'));
     return;
   }
@@ -854,8 +873,9 @@ function renderPassageSeparation(panel,segment) {
     const voice=segment.separation,origin=voice.origin_sample/16000;
     const audio=separationAudio(`/api/jobs/${selected.id}/separation/${voice.episode_id}/${voice.channel}/audio`,Math.max(0,segment.start-origin),segment.end-origin,`${voiceEstimateLabel(voice.channel)} separated audio`);
     audio.className='separated-player';audio.controls=false;audio.hidden=true;panel.append(audio);
+    panel.append(separationPlayButton(audio,Math.max(0,segment.start-origin),segment.end-origin,voiceEstimateLabel(voice.channel)));
     if(segment.review_resolution!=='words_reviewed')panel.append(node('p','Check separated voices','separation-hint'));
-    const historyPanel=node('details',undefined,'separation-history');historyPanel.append(node('summary','Original recording'));
+    const historyPanel=node('details',undefined,'separation-history');historyPanel.append(node('summary','Compare with original'));
     const original=node('button','Play original recording','text-button');
     original.addEventListener('click',()=>playOriginalPassage({start:origin,end:origin+voice.length_samples/16000},voice.episode_id));historyPanel.append(original);panel.append(historyPanel);
     if(voice.channel===0) {
@@ -873,7 +893,7 @@ function renderPassageSeparation(panel,segment) {
             return current && ['text','speaker','start','end','machine_revision','protected_fields','language','language_detection'].every(key=>JSON.stringify(current[key]??(key==='protected_fields'?[]:null))===JSON.stringify(prior[key]??(key==='protected_fields'?[]:null)));
           });
           if(unchanged) {
-            const restore=node('button','Restore original');restore.addEventListener('click',async()=>{try{await separationRequest(`/separation/${voice.episode_id}/restore`);}catch(error){notice(error.message,true);}});saved.append(restore);
+            const restore=node('button','Use original transcript and audio');restore.addEventListener('click',async()=>{try{await separationRequest(`/separation/${voice.episode_id}/restore`);}catch(error){notice(error.message,true);}});saved.append(restore);
           }else saved.append(node('p','A separated passage was edited. Copy the original words above to keep those edits.','passage-review'));
           historyPanel.append(saved);prior.remove();fitPassageText(text);
         }catch(error){prior.disabled=false;notice(error.message,true);}
@@ -883,23 +903,24 @@ function renderPassageSeparation(panel,segment) {
   }
   const candidate=segment.separation_candidate;
   if(candidate) {
-    const result=node('details',undefined,'separation-comparison');result.append(node('summary','Review saved separation result'));panel.append(result);
+    const result=node('details',undefined,'separation-comparison');result.append(node('summary','Compare voice estimates'));panel.append(result);
     result.append(node('strong','Separated voice estimates · check both'));
     result.append(node('p','A saved separation result is available. The original passage is retained until you choose this result.','passage-review'));
     const original=node('div',undefined,'separation-original'),text=node('textarea');text.readOnly=true;text.value=candidate.original.text;text.setAttribute('aria-label','Original passage words');
-    original.append(node('strong','Original passage'),text,separationAudio(`/api/jobs/${selected.id}/passages/${encodeURIComponent(segment.id)}/audio`,candidate.original.start,candidate.original.end,'Original recording'));result.append(original);
+    original.append(node('strong','Original passage'),text,separationPlayback(`/api/jobs/${selected.id}/passages/${encodeURIComponent(segment.id)}/audio`,candidate.original.start,candidate.original.end,'Original recording'));result.append(original);
     candidate.voices.forEach((voice,channel)=>{
       const row=node('div',undefined,'separation-estimate');row.append(node('strong',voiceEstimateLabel(channel)));
       row.append(node('p',voice.text || 'No supported words returned. Keep the original and review this audio.','segment-text'));
       row.append(node('small',config.languages[voice.language] || 'Language needs review'));
       if(voice.review || voice.transcription_review)row.append(node('p',voice.transcription_review?.reason==='overlapping_speech'?'Speech may still overlap in this estimate.':reviewReasons[voice.transcription_review?.reason] || 'Words need review.','passage-review'));
-      row.append(separationAudio(`/api/jobs/${selected.id}/separation/${candidate.id}/${channel}/audio`,0,candidate.original.end-candidate.original.start,`${voiceEstimateLabel(channel)} separated audio`));result.append(row);
+      row.append(separationPlayback(`/api/jobs/${selected.id}/separation/${candidate.id}/${channel}/audio`,0,candidate.original.end-candidate.original.start,voiceEstimateLabel(channel)));result.append(row);
     });
     const actions=node('div',undefined,'separation-actions'),keep=node('button','Keep original'),use=node('button','Use both voices','primary');
     const current=['text','speaker','start','end','language'].every(key=>JSON.stringify(segment[key]??null)===JSON.stringify(candidate.original[key]??null));
-    use.disabled=!current || candidate.voices.some(voice=>!voice.text?.trim() || !Object.hasOwn(config.languages,voice.language) || voice.language==='auto');
+    use.disabled=isLive() || selected.status!=='ready' || !current || candidate.voices.some(voice=>!voice.text?.trim() || !Object.hasOwn(config.languages,voice.language) || voice.language==='auto');
     if(!current)result.append(node('p','This passage changed. Keep the original and separate its current words and audio again.','passage-review'));
     for(const [button,action] of [[keep,'discard'],[use,'accept']])button.addEventListener('click',async()=>{try{await separationRequest(`/separation/${candidate.id}/${action}`);}catch(error){notice(error.message,true);}});
+    if(isLive()){keep.disabled=true;result.append(node('p','Review these estimates after recording stops. The original speaker turns stay in your transcript.','passage-review'));}
     actions.append(keep,use);result.append(actions);return;
   }
   if(selected.passage_separation?.segment_id===segment.id) {
@@ -950,14 +971,15 @@ function appendPassageEvidence(host,segment) {
   const reason=passageReviewReason(segment);
   if(reason)host.append(node('p',reason,'passage-review'));
   appendUncoveredAudio(host,segment);
-  const evidence=node('details',undefined,'passage-evidence');evidence.append(node('summary','Inference evidence'));
+  const evidence=node('details',undefined,'passage-evidence');evidence.append(node('summary','Technical diagnostics'));
   const metadata={};
   for(const key of ['review','review_resolution','refinement_state','language','language_detection','confidence','speaker_candidates','speaker_track_mapping','voice_eligible','audio_state','transcription_review','audio_anchor','timing','provenance','refinement_window','machine_revision']) {
     if(segment[key]!==undefined)metadata[key]=segment[key];
   }
   if(doc.provenance)metadata.recording_provenance=doc.provenance;
   const text=node('pre',JSON.stringify(metadata,null,2));text.style.whiteSpace='pre-wrap';text.style.overflowWrap='anywhere';
-  evidence.append(text);host.append(evidence);
+  const copy=node('button','Copy diagnostics','text-button');copy.addEventListener('click',()=>navigator.clipboard.writeText(text.textContent).catch(error=>notice(error.message,true)));
+  evidence.append(copy,text);host.append(evidence);
 }
 function showTranscriptPassage(segment) {
   return !!segment.text.trim() || languageBlockedPassage(segment) || !!segment.separation_candidate || selected?.passage_separation?.segment_id===segment.id || passageDrafts.has(segment.id) || !!recoverablePassageDrafts.get(segment.id)?.text.trim() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
@@ -1516,9 +1538,19 @@ function renderStartState() {
     $('setup-card-install').disabled=busy || !state.supported || state.can_download===false || state.voice?.status==='downloading';
     $('setup-card-install').querySelector('span').textContent=downloading?'Downloading…':state.status==='failed'?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
   }
+  renderSeparationReadiness();
   $('start-meeting').disabled=serviceUnavailable || busy || !modelsReady || !capture || changingLiveLanguage || changingDefaultLanguage;
   $('start-hint').textContent=!capture?'Live recording isn’t available in this build. Use Import recording in the sidebar to transcribe a file.'
     :loading?'Loading models…':downloading?'Finish model setup before starting a meeting.':!modelsReady?'Start meeting is available once the models are ready.':'';
+}
+function renderSeparationReadiness() {
+  const separation=setupState?.separation;if(!separation)return;
+  const failed=separation.ready!==true && setupState.operation?.target==='separation' && ['failed','interrupted'].includes(setupState.operation.status);
+  const message=failed?'Automatic separation needs attention':separation.active?'Automatic separation is setting up':(separation.ready??separation.installed)?'Automatic separation is ready':separation.installed?'Automatic separation needs setup':'Automatic separation needs a model';
+  for(const id of ['start-separation-readiness','meeting-separation-readiness']) {
+    const host=$(id);host.replaceChildren();host.append(node('span',message));
+    if(!(separation.ready??separation.installed) || failed){const action=node('button',failed?'Retry download':separation.installed?'Finish setup':'Download','text-button');action.addEventListener('click',()=>openSettings('models'));host.append(action);}
+  }
 }
 let alignmentChanging=false,alignmentGeneration=0;
 async function alignmentAction(method,body) {
@@ -1555,7 +1587,8 @@ async function refreshSetup() {
     setupState=state;
     const downloading=state.status==='downloading', loading=state.status==='loading', busy=downloading || loading;
     const list=$('model-list'),existing=new Map(Array.from(list.children).map(row=>[row.dataset.modelId,row])),retained=new Set();
-    state.models.forEach(model => {
+    const models=[...state.models].sort((a,b)=>Number(b.id==='mossformer2-16k')-Number(a.id==='mossformer2-16k'));
+    models.forEach(model => {
       const size=formatBytes(model.bytes);
       let item=existing.get(model.id);
       if(!item){item=node('div',undefined,'model-item');item.dataset.modelId=model.id;item.append(node('strong',model.name),node('span'));list.append(item);}
@@ -1568,10 +1601,14 @@ async function refreshSetup() {
         let install=item.querySelector('button');
         if(!install){
           item.append(node('p','Separates saved passages where two voices overlap.','separation-model-note'));
-          install=node('button',undefined,'quiet');item.append(install);
+          install=node('button',undefined,'quiet');item.insertBefore(install,item.querySelector('.separation-model-note'));
           install.addEventListener('click',async()=>{install.dataset.requesting='true';install.disabled=true;try{await api('/api/setup/separation',{method:'POST'});await refreshSetup();}catch(error){notice(error.message,true);}finally{install.dataset.requesting='false';await refreshSetup();}});
         }
-        install.textContent=state.separation.active?'Setting up separation…':state.separation.installed?'Check / repair separation model':`Download separation · ${formatBytes(state.separation.bytes)}`;
+        const failed=state.separation.ready!==true && state.operation?.target==='separation' && ['failed','interrupted'].includes(state.operation.status);
+        if(failed)item.querySelector('span').textContent='Needs attention';
+        let failure=item.querySelector('.model-failure');if(!failure){failure=node('p',undefined,'model-failure');item.insertBefore(failure,install);}
+        failure.hidden=!failed;failure.textContent=failed?(state.operation.error || 'Separation setup did not finish. Retry the download.') : '';
+        install.textContent=failed?'Retry separation download':state.separation.active?'Setting up separation…':state.separation.installed?'Check separation model':`Download separation · ${formatBytes(state.separation.bytes)}`;
         install.disabled=install.dataset.requesting==='true' || state.separation.active || state.separation.can_download===false || busy;
       }
     });
@@ -1581,14 +1618,16 @@ async function refreshSetup() {
     $('setup-disk-note').hidden=loading || state.ready || (state.status==='failed' && !state.download_required);
     $('model-progress').hidden=!downloading;
     $('model-progress').value=state.total_bytes?100*state.downloaded_bytes/state.total_bytes:0;
-    $('model-status').textContent=loading?(state.phase || 'Loading models…'):downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?'Ready to transcribe on this Mac.':modelSetupMessage(state);
-    $('model-error').textContent=[...new Set([state.error,state.message].filter(Boolean))].join('\n');
+    const operation=state.operation,failedModels=!state.ready && operation?.target==='models' && ['failed','interrupted'].includes(operation.status);
+    const failedSeparation=state.separation?.ready!==true && operation?.target==='separation' && ['failed','interrupted'].includes(operation.status);
+    $('model-status').textContent=failedModels?'Transcription setup did not finish. Retry setup.':loading?(state.phase || 'Loading models…'):downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?'Ready to transcribe on this Mac.':modelSetupMessage(state);
+    $('model-error').textContent=[...new Set([state.error,state.message,operation?.error && operation.error!==state.error?`Previous setup attempt: ${operation.error}`:null].filter(Boolean))].join('\n');
     $('model-error-details').hidden=!$('model-error').textContent;
-    $('install-models').hidden=loading || state.ready;
+    $('install-models').hidden=loading || (state.ready && !failedModels) || failedSeparation;
     $('cancel-model-setup').hidden=!state.can_cancel;
     const voice=state.voice,voiceBusy=voice.status==='downloading';
     $('install-models').disabled=busy || voiceBusy || !state.supported || state.can_download===false;
-    $('install-models').textContent=downloading?'Downloading…':state.status==='failed'?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
+    $('install-models').textContent=downloading?'Downloading…':(failedModels || state.status==='failed')?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
     if(voiceAvailable!==voice.available) await loadPeople();
     $('settings-voice-note').textContent=voice.enabled?voice.message:'Recognition is off. Saved names and voices stay on this Mac.';
     if(document.activeElement!==$('recognize-voices')) $('recognize-voices').checked=voice.enabled;

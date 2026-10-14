@@ -17,6 +17,57 @@ pub const MAX_SAMPLES: usize = 392000;
 
 /// Attach timing to an unpublished candidate aligned from this exact crop.
 pub fn attach(segment: &mut crate::document::Segment, alignment: Value) {
+    let end = (segment.end * 16000.).round() as i64;
+    attach_through(segment, alignment, end);
+}
+
+/// Reuse timing only for unchanged words on an append-only audio prefix. Speaker
+/// attribution is recalculated from the new observations, never copied wholesale.
+pub(crate) fn retain_growing_prefix(
+    prior: &crate::document::Segment,
+    next: &mut crate::document::Segment,
+) {
+    if prior.text != next.text
+        || prior.start != next.start
+        || prior.end >= next.end
+        || prior.canonical_utterance_id.is_none()
+        || prior.canonical_utterance_id != next.canonical_utterance_id
+        || prior.capture_source != next.capture_source
+        || prior.language != next.language
+        || prior.rest.get("language_epoch") != next.rest.get("language_epoch")
+        || next
+            .protected_fields
+            .as_ref()
+            .is_some_and(|f| !f.is_empty())
+        || prior
+            .audio_revision
+            .zip(next.audio_revision)
+            .is_none_or(|(before, after)| after < before)
+    {
+        return;
+    }
+    let Ok(mut reading) = serde_json::from_value::<timing::ReadingSegment>(
+        serde_json::to_value(prior).expect("segment serializes"),
+    ) else {
+        return;
+    };
+    reading.installed_provider_identity = Some(NATIVE_PROVIDER.into());
+    if timing::validated_turns(&reading).is_empty() {
+        return;
+    }
+    let Some(alignment) = prior.rest.get("reading_alignment") else {
+        return;
+    };
+    let Some(end) = alignment["audio_anchor"]["end_sample"].as_i64() else {
+        return;
+    };
+    if end > (prior.end * 16000.).round() as i64 {
+        return;
+    }
+    attach_through(next, alignment.clone(), end);
+}
+
+fn attach_through(segment: &mut crate::document::Segment, alignment: Value, anchor_end: i64) {
     use timing::{AudioAnchor, ReadingRow, ReadingWordEvidence, SpeakerActivity, TimedWord};
     let start = (segment.start * 16000.).round() as i64;
     let end = (segment.end * 16000.).round() as i64;
@@ -36,7 +87,7 @@ pub fn attach(segment: &mut crate::document::Segment, alignment: Value) {
         .canonical_utterance_id
         .clone()
         .unwrap_or_else(|| segment.id.clone());
-    let anchor = json!({"start_sample":start,"end_sample":end});
+    let anchor = json!({"start_sample":start,"end_sample":anchor_end});
     if alignment["raw_text"] != segment.text
         || alignment["text_sha256"] != sha256_hex(segment.text.as_bytes())
         || alignment["audio_anchor"] != anchor
@@ -93,7 +144,7 @@ pub fn attach(segment: &mut crate::document::Segment, alignment: Value) {
         protected_fields: segment.protected_fields.clone().unwrap_or_default(),
         text_audio_anchor: Some(AudioAnchor {
             start_sample: start,
-            end_sample: end,
+            end_sample: anchor_end,
         }),
         reading_word_evidence: Some(ReadingWordEvidence {
             text_sha256: sha256_hex(segment.text.as_bytes()),
@@ -102,7 +153,7 @@ pub fn attach(segment: &mut crate::document::Segment, alignment: Value) {
             retained_audio_revision: None,
             audio_anchor: AudioAnchor {
                 start_sample: start,
-                end_sample: end,
+                end_sample: anchor_end,
             },
             model_sha256: timing::MODEL.into(),
             calibration_id: alignment["score_calibration_id"]
@@ -996,6 +1047,46 @@ pub(crate) mod tests {
             segment.rest["reading_alignment"]["audio_anchor"],
             json!({"start_sample":0,"end_sample":samples})
         );
+        // Append-only audio does not erase the still-current word timing. A new
+        // speaker in the tail is not attributed to words decoded before that tail.
+        let mut growing = segment.clone();
+        growing.end += 1.;
+        growing.audio_revision = Some(segment.audio_revision.unwrap() + 1);
+        growing.machine_revision = Some(segment.machine_revision.unwrap() + 1);
+        growing.speaker_activity.as_mut().unwrap()["audio_revision"] =
+            json!(growing.audio_revision);
+        let observed = segment.speaker_activity.as_ref().unwrap()["observed_end_sample"]
+            .as_u64()
+            .unwrap();
+        growing.speaker_activity.as_mut().unwrap()["observed_end_sample"] = json!(observed + 16000);
+        growing.speaker_activity.as_mut().unwrap()["regions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "start_sample":observed,"end_sample":observed+16000,"speakers":["speaker_1"]
+            }));
+        crate::edit::clear_alignment_bundle(&mut growing);
+        growing = crate::live::apply_canonical_candidate(&document, &growing)
+            .segments
+            .remove(0);
+        assert_eq!(growing.reading_turns, segment.reading_turns);
+        assert_eq!(growing.rest["text_audio_anchor"]["end_sample"], samples);
+        let mut reading: timing::ReadingSegment =
+            serde_json::from_value(serde_json::to_value(&growing).unwrap()).unwrap();
+        reading.installed_provider_identity = Some(NATIVE_PROVIDER.into());
+        assert!(!timing::validated_turns(&reading).is_empty());
+        for change in ["text", "shrink", "source", "protected"] {
+            let mut changed = growing.clone();
+            crate::edit::clear_alignment_bundle(&mut changed);
+            match change {
+                "text" => changed.text.push_str(" changed"),
+                "shrink" => changed.end = segment.end - 0.1,
+                "source" => changed.capture_source = Some(json!({"source_id":"different"})),
+                _ => changed.protected_fields = Some(vec!["text".into()]),
+            }
+            retain_growing_prefix(segment, &mut changed);
+            assert!(changed.reading_turns.is_none(), "{change}");
+        }
         assert!(
             !document.provenance.as_ref().unwrap()["timing"]
                 .as_str()

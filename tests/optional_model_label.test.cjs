@@ -62,7 +62,7 @@ test('cached unqualified voice weights are unavailable rather than usable',async
   assert.equal(f.document.getElementById('model-list').children[0].querySelector('span').textContent,'Unavailable');
 });
 
-test('optional separation download and installed repair use the dedicated setup route without changing speech readiness',async()=>{
+test('optional separation download and installed check use the dedicated setup route without changing speech readiness',async()=>{
   const f=frontend(root);f.seed();
   f.run(`window.requests=[];window.setupFixture={status:'ready',ready:true,core_ready:true,supported:true,total_bytes:100,downloaded_bytes:100,
     voice:{status:'ready',available:false,enabled:false},separation:{installed:false,bytes:670353271,can_download:true,active:false},
@@ -75,6 +75,50 @@ test('optional separation download and installed repair use the dedicated setup 
   action.click();await Promise.all(action.lastEventResults);assert.equal(f.run('requests[0].path'),'/api/setup/separation');assert.equal(f.run('requests[0].options.method'),'POST');
   assert.equal(f.run('languageReady("en")'),true);assert.equal(f.document.getElementById('model-list').querySelector('button').disabled,true);
   f.run('setupFixture.separation.installed=true;setupFixture.separation.active=false;setupFixture.models[0].installed=true');await f.run('refreshSetup()');
-  action=f.document.getElementById('model-list').querySelector('button');assert.equal(action.textContent,'Check / repair separation model');assert.equal(action.disabled,false);
+  action=f.document.getElementById('model-list').querySelector('button');assert.equal(action.textContent,'Check separation model');assert.equal(action.disabled,false);
   action.click();await Promise.all(action.lastEventResults);assert.equal(f.run('requests[1].path'),'/api/setup/separation');assert.equal(f.run('languageReady("en")'),true);
+});
+
+test('failed separation keeps a dedicated retry and failure visible when transcription is ready',async()=>{
+  const f=frontend(root);f.seed();
+  f.run(`window.requests=[];window.setupFixture={status:'failed',ready:true,supported:true,total_bytes:100,downloaded_bytes:0,
+    operation:{target:'separation',status:'failed',error:'Connection interrupted'},
+    voice:{available:false,enabled:false},separation:{installed:true,bytes:100,can_download:true,active:false},
+    models:[{id:'mossformer2-16k',name:'Voice separation',installed:true,optional:true,bytes:100}]};
+    api=async(path,options)=>{if(options)requests.push(path);return structuredClone(setupFixture)};`);
+  await f.run('refreshSetup()');
+  const action=f.document.getElementById('model-list').querySelector('button');
+  assert.equal(action.textContent,'Retry separation download');
+  assert.equal(f.document.getElementById('model-list').querySelector('span').textContent,'Needs attention');
+  assert.equal(f.document.getElementById('install-models').hidden,true);
+  assert.match(f.document.getElementById('start-separation-readiness').textContent,/needs attention/);
+  assert.match(f.document.getElementById('model-list').textContent,/Connection interrupted/);
+  action.click();await Promise.all(action.lastEventResults);
+  assert.equal(f.run('requests[0]'),'/api/setup/separation');
+  assert.equal(f.run('languageReady("en")'),true);
+});
+
+ test('installed but uninitialized separation never claims automatic readiness',async()=>{
+  const f=frontend(root);f.seed();f.run("setupState={separation:{installed:true,ready:false,active:false}};renderSeparationReadiness()");
+  assert.match(f.document.getElementById('start-separation-readiness').textContent,/needs setup/);
+  assert.doesNotMatch(f.document.getElementById('meeting-separation-readiness').textContent,/is ready/);
+  assert.equal(f.run('languageReady("en")'),true);
+});
+
+test('current readiness wins over retained failed setup history after restart',async()=>{
+  for(const target of ['separation','models'])for(const ready of [true,false]) {
+    const f=frontend(root);f.seed();
+    f.context.fixtureTarget=target;f.context.fixtureReady=ready;
+    f.run(`window.setupFixture={status:fixtureReady?'ready':'idle',ready:fixtureReady,supported:true,total_bytes:100,downloaded_bytes:100,
+      operation:{target:fixtureTarget,status:'failed',error:'Previous initialization failed'},
+      voice:{available:false,enabled:false},separation:{installed:true,ready:true,bytes:100,can_download:true,active:false},
+      models:[{id:'mossformer2-16k',name:'Voice separation',installed:true,optional:true,bytes:100}]};
+      api=async()=>structuredClone(setupFixture)`);
+    await f.run('refreshSetup()');
+    assert.equal(f.document.getElementById('model-list').querySelector('span').textContent,'Installed');
+    assert.match(f.document.getElementById('start-separation-readiness').textContent,/is ready/);
+    assert.equal(f.document.getElementById('install-models').hidden,ready);
+    if(ready)assert.equal(f.document.getElementById('model-status').textContent,'Ready to transcribe on this Mac.');
+    assert.match(f.document.getElementById('model-error').textContent,/Previous setup attempt: Previous initialization failed/);
+  }
 });

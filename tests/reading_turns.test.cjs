@@ -232,3 +232,23 @@ test('mixed live routing is described as multiple languages with retained eviden
   f.run("doc.segments[0].text=''");
   assert.equal(f.run('passageReviewReason(doc.segments[0])'),'Multiple languages detected; review the passage');
 });
+
+test('whole passage editing explains the change from speaker paragraphs',()=>{
+  const f=fixture(parts),c=card(f);c.querySelector('.edit-whole-passage').click();
+  assert.equal(c.querySelector('.whole-passage-note').hidden,false);
+  assert.match(c.querySelector('.whole-passage-note').textContent,/Editing the full passage/);
+  assert.equal(c.querySelector('.reading-turn-view').hidden,true);
+});
+
+test('live voice estimates preserve original speaker turns and wait for stopped acceptance',()=>{
+  const f=fixture(parts,'recording');
+  f.run(`doc.segments[0].separation_candidate={id:'candidate',original:structuredClone(doc.segments[0]),voices:[{text:'Voice A estimate',language:'en'},{text:'Voice B estimate',language:'en'}]};renderSegments();`);
+  const c=card(f),comparison=c.querySelector('.separation-comparison');
+  assert.equal(c.querySelectorAll('.reading-turn').length,3);
+  assert.equal(!!comparison.open,false);
+  const buttons=comparison.querySelectorAll('button');
+  assert(buttons.some(b=>b.textContent==='Play Voice A'));
+  assert(buttons.some(b=>b.textContent==='Play Voice B'));
+  assert.equal(buttons.find(b=>b.textContent==='Use both voices').disabled,true);
+  assert.equal(buttons.find(b=>b.textContent==='Keep original').disabled,true);
+});

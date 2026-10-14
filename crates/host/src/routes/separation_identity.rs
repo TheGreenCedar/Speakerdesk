@@ -186,6 +186,7 @@ mod tests {
             original: Box::new(source.clone()),
             voices,
             model: separation::MODEL.into(),
+            speech_ranges: Default::default(),
         }));
         separation::accept(job, &source.id, EPISODE).unwrap();
     }
@@ -203,10 +204,13 @@ mod tests {
     fn association_is_acoustic_and_keeps_existing_manual_people_and_restore() {
         let (_root, app, job, source, audio, model) = fixture();
         let profiles_before = app.store().voice_profiles().unwrap();
+        let mut accepted_job = job.clone();
+        accepted(&mut accepted_job, &source);
+        app.insert_job(accepted_job.clone());
         let mut state = Identity::begin(
             &model,
             &mut app.store(),
-            &job,
+            &accepted_job,
             &source,
             EPISODE,
             &audio,
@@ -222,7 +226,6 @@ mod tests {
         current.revision += 7;
         current.document.as_mut().unwrap().segments[0].text = "retained human words".into();
         let manual = current.extra["speaker_assignments"]["speaker_0"].clone();
-        accepted(&mut current, &source);
         assert!(state.apply(&mut current, &snapshot));
         assert_eq!(
             rows(&current)
@@ -256,10 +259,13 @@ mod tests {
     fn pending_identity_cannot_override_source_edits_preference_reset_or_accepted_corrections() {
         for mode in ["speaker", "bounds", "source", "off_on", "row_edit"] {
             let (_root, app, job, source, audio, model) = fixture();
+            let mut accepted_job = job.clone();
+            accepted(&mut accepted_job, &source);
+            app.insert_job(accepted_job.clone());
             let mut state = Identity::begin(
                 &model,
                 &mut app.store(),
-                &job,
+                &accepted_job,
                 &source,
                 EPISODE,
                 &audio,
@@ -291,7 +297,6 @@ mod tests {
                 }
                 _ => {}
             }
-            accepted(&mut current, &source);
             if mode == "row_edit" {
                 let row = current
                     .document
@@ -325,6 +330,9 @@ mod tests {
     #[test]
     fn absent_separated_calibration_consumes_no_model_work_or_identity_check() {
         let (_root, app, job, source, audio, mut model) = fixture();
+        let mut job = job;
+        accepted(&mut job, &source);
+        app.insert_job(job.clone());
         model.qualified = false;
         assert!(
             Identity::begin(
@@ -384,10 +392,13 @@ mod tests {
             );
             // Channel B has no compatible known voice; A must still be useful.
             audio.channels.swap(0, 1);
+            let mut accepted_job = job.clone();
+            accepted(&mut accepted_job, &source);
+            app.insert_job(accepted_job.clone());
             let mut state = Identity::begin(
                 &model,
                 &mut app.store(),
-                &job,
+                &accepted_job,
                 &source,
                 EPISODE,
                 &audio,
@@ -418,7 +429,6 @@ mod tests {
             let profiles_before = app.store().voice_profiles().unwrap();
             let snapshot = Snapshot::load(&app.store(), &model).unwrap();
             let mut current = app.store().get(&job.id, false).unwrap().unwrap();
-            accepted(&mut current, &source);
             if mode == "interrupt" {
                 state.interrupt(&mut current);
                 current.extra["voice_checks"][state.check_key(1)] =
@@ -539,6 +549,27 @@ impl Identity {
         audio: &SeparatedAudio,
         speech_ranges: &[Vec<(usize, usize)>; 2],
     ) -> Result<Option<Self>, StoreError> {
+        let accepted = original
+            .extra
+            .get("separation_history")
+            .and_then(|h| h.get(episode))
+            .and_then(|h| serde_json::from_value::<separation::History>(h.clone()).ok());
+        if accepted.as_ref().is_none_or(|history| {
+            separation::source_key(original, &history.original)
+                != separation::source_key(original, source)
+                || history.accepted.iter().any(|prior| {
+                    original
+                        .document
+                        .as_ref()
+                        .and_then(|d| d.segments.iter().find(|row| row.id == prior.id))
+                        .is_none_or(|row| {
+                            speakerdesk_core::live::segment_version(row)
+                                != speakerdesk_core::live::segment_version(prior)
+                        })
+                })
+        }) {
+            return Ok(None);
+        }
         let snapshot = Snapshot::load(store, models)?;
         let Some(policy) = snapshot.policy else {
             return Ok(None);
@@ -628,10 +659,12 @@ impl Identity {
         }
         store.update_job(&original.id, |current| {
             if current
-                .document
-                .as_ref()
-                .and_then(|d| d.segments.iter().find(|s| s.id == source.id))
-                .is_some_and(|row| {
+                .extra
+                .get("separation_history")
+                .and_then(|h| h.get(episode))
+                .and_then(|h| serde_json::from_value::<separation::History>(h.clone()).ok())
+                .is_some_and(|history| {
+                    let row = &history.original;
                     separation::source_key(current, row) == separation::source_key(original, source)
                 })
             {
@@ -667,7 +700,7 @@ impl Identity {
         }
     }
 
-    fn unchanged(&self, current: &Job, snapshot: &Snapshot, accepted: bool) -> bool {
+    fn unchanged(&self, current: &Job, snapshot: &Snapshot) -> bool {
         if !snapshot.enabled
             || snapshot.policy.as_ref() != Some(&self.policy)
             || snapshot.profiles != self.profiles
@@ -683,20 +716,12 @@ impl Identity {
         {
             return false;
         }
-        let source = if accepted {
-            current
-                .extra
-                .get("separation_history")
-                .and_then(|h| h.get(&self.episode))
-                .and_then(|h| serde_json::from_value::<separation::History>(h.clone()).ok())
-                .map(|h| *h.original)
-        } else {
-            current
-                .document
-                .as_ref()
-                .and_then(|d| d.segments.iter().find(|s| s.id == self.source.id))
-                .cloned()
-        };
+        let source = current
+            .extra
+            .get("separation_history")
+            .and_then(|h| h.get(&self.episode))
+            .and_then(|h| serde_json::from_value::<separation::History>(h.clone()).ok())
+            .map(|h| *h.original);
         if source.as_ref().is_none_or(|row| {
             separation::source_key(current, row)
                 != separation::source_key(&self.original, &self.source)
@@ -734,7 +759,7 @@ impl Identity {
         if cancellation.is_cancelled() {
             return Err(ChildError::Cancelled);
         }
-        if !self.unchanged(current, snapshot, false) {
+        if !self.unchanged(current, snapshot) {
             self.finished = true;
             return Ok(false);
         }
@@ -817,8 +842,7 @@ impl Identity {
     /// Called in the separation publication transaction after the accepted pair
     /// exists. It never creates a People record or changes any voice profile.
     pub(crate) fn apply(&self, current: &mut Job, snapshot: &Snapshot) -> bool {
-        let fresh =
-            self.finished && !self.failed_reference && self.unchanged(current, snapshot, true);
+        let fresh = self.finished && !self.failed_reference && self.unchanged(current, snapshot);
         let result = if fresh {
             let mut references: Vec<_> = self
                 .solo

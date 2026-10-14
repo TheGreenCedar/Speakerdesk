@@ -85,6 +85,13 @@ Language context is derived from direct acoustic observations belonging to the s
 - Long rows plan only the unaccepted suffix. Accepted cores keep their text, language decisions and final sample boundary.
 - GET, export and reopen never run models to rebuild metadata.
 
+Append-only live audio can reuse validated native timing for unchanged text on the
+same canonical passage, source and language epoch. The original alignment anchor
+stays at the transcribed prefix; attribution is projected again from current
+speaker activity and receives current revision receipts. Changed text, protected
+edits or incompatible ownership fail closed. Identical live snapshots retain a
+pending separation candidate; a new saved accuracy result invalidates it.
+
 Ordinary language, decoder and optional timing failures remain local to their
 passage and preserve existing words. Typed cancellation, timeout, child loss and
 Metal failure reach lifecycle recovery. A worker's child cancellation scope cancels
@@ -109,7 +116,7 @@ inference remains serial.
 
 The recording worker also owns live voice recognition and separation under the same operation and cancellation token. It retains one auxiliary continuation and services pending live audio and controls between separation blocks and separated-transcription decoder steps, and between admission, language, timing and embedding requests. Models remain serial: encoder work, individual blocks and primary live ASR requests finish before yielding. Child session handles retain the full source window without chunk stitching; cancellation, close and generation invalidation release them. No additional inference worker runs concurrently.
 
-Recognition checks observed solo crops without waiting for an ongoing passage to close; enrollment still requires finalized clips. Separated attribution uses its own measured model policy, one speech-admitted query crop per channel, unchanged natural source clips and compatible consented profiles. Generated embedding views receive quantization headroom; original recordings, saved estimates and ASR input stay unchanged. Store locks do not span inference. Publication rechecks source ownership, reference audio, names, assignments, profiles, recognition preference and the accepted rows. New saved-voice assignments remain unconfirmed and never enroll a voice. Protected edits and stale generations win; accepted separated rows prevent a later live snapshot from restoring the original mixed row.
+Recognition checks observed solo crops without waiting for an ongoing passage to close; enrollment still requires finalized clips. Separation generation saves a candidate and its bounded speech-admission ranges without replacing the original passage. Explicit acceptance starts separated attribution on the existing serial worker. It uses its own measured model policy, one speech-admitted query crop per channel, unchanged natural source clips and compatible consented profiles. Generated embedding views receive quantization headroom; original recordings, saved estimates and ASR input stay unchanged. Store locks do not span inference. Publication rechecks source ownership, reference audio, names, assignments, profiles, recognition preference and the accepted rows. New saved-voice assignments remain unconfirmed and never enroll a voice. Protected edits and stale generations win; accepted separated rows prevent a later live snapshot from restoring the original mixed row.
 
 ## Capture
 
@@ -128,6 +135,15 @@ the interruption even when playback repair succeeds.
 ## Model installation
 
 The parent owns installation (`host/src/setup.rs`, pins in `host/src/model-artifacts.json`). It holds an fs4 installer lock and an exclusive setup admission lease. Downloads are pinned and hash-checked. The timing model's MLX weights are prepared locally from the pinned source model. The child only prepares alignment in its fixed private staging path. Publication is atomic and is followed by a parent-controlled child restart. Readiness comes from initializing the activated model identities. The installer never enrolls voices and never holds a SQLite transaction during I/O.
+
+Setup progress identifies its requested target (`models` or `separation`). After a
+worker restart all available capabilities are refreshed, but missing unrelated
+models do not fail a separation request. Separation readiness requires successful
+model identity initialization in addition to prepared files. The store's
+`model_setup_history` preference retains eight explicit attempts, updated before
+installation, after activation and at completion. The setup API reports the
+current operation separately from capability readiness and recognizes an
+unfinished persisted attempt as interrupted after restart.
 
 ## Messages and security
 

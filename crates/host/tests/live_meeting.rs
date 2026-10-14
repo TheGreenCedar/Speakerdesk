@@ -4422,19 +4422,25 @@ async fn live_words_advance_while_separation_and_generated_decode_are_pending() 
                     && job["inference_owned"] == false
                     && job["document"]["segments"].as_array().is_some_and(|rows| {
                         rows.iter()
-                            .filter(|row| row["separation"].is_object())
-                            .count()
-                            >= 2
+                            .any(|row| row["separation_candidate"].is_object())
                     })
             })
             .await;
         assert_eq!(finished["canonical_observed_sample"], 224513);
+        assert!(
+            finished["document"]["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["separation"].is_null())
+        );
         host.close(root).await;
     }
 }
 
 #[tokio::test]
-async fn completed_overlap_is_separated_during_capture_and_survives_child_recovery() {
+async fn completed_overlap_keeps_original_and_reviewable_estimates_through_stop_and_child_recovery()
+{
     for mode in ["normal", "child_loss", "edit"] {
         let child_loss = mode == "child_loss";
         let temp = tempfile::tempdir().unwrap();
@@ -4508,9 +4514,7 @@ async fn completed_overlap_is_separated_during_capture_and_survives_child_recove
             .wait(&path, |v| {
                 v["document"]["segments"].as_array().is_some_and(|rows| {
                     rows.iter()
-                        .filter(|row| row["separation"].is_object())
-                        .count()
-                        == 2
+                        .any(|row| row["separation_candidate"].is_object())
                 })
             })
             .await;
@@ -4518,28 +4522,38 @@ async fn completed_overlap_is_separated_during_capture_and_survives_child_recove
             live["status"], "recording",
             "separation must not wait for Stop"
         );
-        let separated: Vec<_> = live["document"]["segments"]
+        let original = live["document"]["segments"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|row| row["separation"].is_object())
-            .cloned()
-            .collect();
-        assert_eq!(separated.len(), 2);
+            .find(|row| row["separation_candidate"].is_object())
+            .unwrap()
+            .clone();
+        assert!(original["separation"].is_null());
+        assert_ne!(original["text"], "Separated replay words");
+        let candidate = &original["separation_candidate"];
+        assert_eq!(candidate["original"]["text"], original["text"]);
         assert!(
-            separated.iter().all(
-                |row| row["text"] == "Separated replay words" && row["speaker"] == "unassigned"
-            )
+            candidate["voices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|voice| voice["text"] == "Separated replay words")
         );
-        let episode = separated[0]["separation"]["episode_id"].as_str().unwrap();
-        let history = host
-            .get(&format!("{path}/separation/{episode}/history"))
-            .await;
-        assert!(
-            history["original"]["text"]
-                .as_str()
-                .is_some_and(|text| !text.is_empty())
-        );
+        let episode = candidate["id"].as_str().unwrap();
+        for channel in 0..2 {
+            let response = host
+                .client
+                .get(format!(
+                    "{}{path}/separation/{episode}/{channel}/audio",
+                    host.url
+                ))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            assert!(response.bytes().await.unwrap().len() > 44);
+        }
         if child_loss {
             assert_eq!(live["live_stream_generation"], 1);
             assert!(!root.join("exit-separated-asr-once").exists());
@@ -4556,16 +4570,15 @@ async fn completed_overlap_is_separated_during_capture_and_survives_child_recove
             .await;
         let done = host.stop(&id).await;
         assert_eq!(done["status"], "ready");
-        for row in separated {
-            assert!(
-                done["document"]["segments"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|saved| saved["id"] == row["id"] && saved["text"] == row["text"]),
-                "later canonical publication must not replace separated words"
-            );
-        }
+        let saved = done["document"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == original["id"])
+            .expect("original passage survives Stop");
+        assert!(saved["separation"].is_null());
+        assert_eq!(saved["separation_candidate"]["id"], candidate["id"]);
+        assert_ne!(saved["text"], "Separated replay words");
         host.close(root).await;
     }
 }

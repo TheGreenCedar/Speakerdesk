@@ -447,30 +447,19 @@ async fn automatic_import_separation_preserves_protection_cancellation_and_unrel
             usize::from(!skip),
             "{mode}"
         );
-        assert!(
-            finished["document"]["segments"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|row| row.get("separation_candidate").is_none()),
-            "automatic work must never leave an acceptance task: {mode}"
-        );
+        let candidate = &finished["document"]["segments"][0]["separation_candidate"];
+        assert_eq!(candidate.is_object(), mode == "unrelated", "{mode}");
         if mode == "unrelated" {
             let rows = finished["document"]["segments"].as_array().unwrap();
-            assert_eq!(rows.len(), 3);
-            assert_eq!(rows[0]["text"], "estimated voice 0");
-            assert_eq!(rows[1]["text"], "estimated voice 1");
-            assert_eq!(rows[2]["id"], "adjacent");
-            assert_eq!(rows[2]["text"], "my neighbouring correction");
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0]["id"], "mixed");
+            assert_eq!(rows[0]["text"], "original mixed words");
+            assert_eq!(candidate["voices"][0]["text"], "estimated voice 0");
+            assert_eq!(candidate["voices"][1]["text"], "estimated voice 1");
+            assert_eq!(rows[1]["id"], "adjacent");
+            assert_eq!(rows[1]["text"], "my neighbouring correction");
             assert_eq!(finished["document"]["speakers"]["speaker_0"], "Renamed Ada");
-            for row in &rows[..2] {
-                assert_eq!(
-                    row["speaker"], "unassigned",
-                    "channel order cannot identify the local tracks"
-                );
-                assert_eq!(row["review"], true);
-                assert_eq!(row["review_resolution"], "separated_estimate");
-            }
+            assert!(rows.iter().all(|row| row["separation"].is_null()));
         } else {
             let rows = finished["document"]["segments"].as_array().unwrap();
             assert_eq!(rows.len(), 2, "{mode}");
@@ -524,6 +513,35 @@ async fn automatic_import_separation_preserves_protection_cancellation_and_unrel
 }
 
 #[tokio::test]
+async fn automatic_estimates_cannot_replace_a_subsequent_original_text_edit() {
+    let temp = tempfile::tempdir().unwrap();
+    let (state, _) = automatic_fixture(temp.path(), false, "ordinary");
+    let host = Host::start(state).await;
+    host.post("/run", 202).await;
+    host.state.drain();
+    let pending = host.job().await;
+    let row = &pending["document"]["segments"][0];
+    let episode = row["separation_candidate"]["id"].as_str().unwrap();
+    let edited = host.request(reqwest::Method::PATCH, "/segments/mixed",
+        Some(json!({"segment_revision":row["machine_revision"],"changes":{"text":"My reviewed original words."}})))
+        .await;
+    assert_eq!(edited.status(), 200);
+    host.post(&format!("/separation/{episode}/accept"), 409)
+        .await;
+    let retained = host.job().await;
+    assert_eq!(
+        retained["document"]["segments"][0]["text"],
+        "My reviewed original words."
+    );
+    assert_eq!(
+        retained["document"]["segments"].as_array().unwrap().len(),
+        2
+    );
+    assert!(retained["document"]["segments"][0]["separation"].is_null());
+    host.stop().await;
+}
+
+#[tokio::test]
 async fn automatic_rows_export_restart_restore_and_do_not_repeat_the_same_source() {
     let temp = tempfile::tempdir().unwrap();
     let (state, replay) = automatic_fixture(temp.path(), false, "ordinary");
@@ -531,7 +549,34 @@ async fn automatic_rows_export_restart_restore_and_do_not_repeat_the_same_source
     let host = Host::start(state).await;
     host.post("/run", 202).await;
     host.state.drain();
-    let split = host.job().await;
+    let pending = host.job().await;
+    let original = &pending["document"]["segments"][0];
+    assert_eq!(original["id"], "mixed");
+    assert_eq!(original["text"], "original mixed words");
+    assert!(original["separation"].is_null());
+    let episode = original["separation_candidate"]["id"]
+        .as_str()
+        .expect("automatic estimates must remain reviewable until explicit acceptance")
+        .to_owned();
+    for kind in ["txt", "srt", "vtt"] {
+        let body = host
+            .request(reqwest::Method::GET, &format!("/export/{kind}"), None)
+            .await
+            .text()
+            .await
+            .unwrap();
+        assert!(body.contains("original mixed words"));
+        assert!(!body.contains("estimated voice 0"));
+    }
+    host.stop().await;
+    let state = AppState::open(temp.path()).unwrap();
+    state.set_models(replay.clone());
+    let host = Host::start(state).await;
+    assert_eq!(host.job().await["document"], pending["document"]);
+    assert_eq!(replay.calls.load(Ordering::SeqCst), 1);
+    let split = host
+        .post(&format!("/separation/{episode}/accept"), 200)
+        .await;
     let rows = split["document"]["segments"].as_array().unwrap();
     assert_eq!(rows.len(), 3);
     let episode = rows[0]["separation"]["episode_id"]
@@ -646,8 +691,16 @@ async fn automatic_rows_export_restart_restore_and_do_not_repeat_the_same_source
 }
 
 #[tokio::test]
-async fn automatic_identity_publication_retires_checks_and_persists_one_known_channel() {
-    for mode in ["match", "cancel", "stale_generation", "child_loss"] {
+async fn accepted_identity_checks_keep_unknown_siblings_and_reject_superseded_receipts() {
+    for mode in [
+        "match",
+        "cancel",
+        "stale_generation",
+        "child_loss",
+        "edit",
+        "preference",
+        "profile",
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let (state, mut replay) = automatic_fixture(temp.path(), false, "ordinary");
         state.set_models(Arc::new(speakerdesk_host::routes::UnavailableModels));
@@ -691,6 +744,23 @@ async fn automatic_identity_publication_retires_checks_and_persists_one_known_ch
         let profiles_before = store.voice_profiles().unwrap();
         let host = Host::start(state).await;
         host.post("/run", 202).await;
+        host.state.drain();
+        let pending = host.job().await;
+        assert_eq!(pending["document"]["segments"][0]["id"], "mixed");
+        assert_eq!(
+            pending["document"]["segments"][0]["text"],
+            "original mixed words"
+        );
+        assert!(
+            !identity.entered.load(Ordering::SeqCst),
+            "unaccepted estimates cannot run identity work"
+        );
+        let episode = pending["document"]["segments"][0]["separation_candidate"]["id"]
+            .as_str()
+            .unwrap();
+        let accepted = host
+            .post(&format!("/separation/{episode}/accept"), 200)
+            .await;
         tokio::time::timeout(Duration::from_secs(3), async {
             while !identity.entered.load(Ordering::SeqCst) {
                 tokio::task::yield_now().await;
@@ -717,6 +787,19 @@ async fn automatic_identity_publication_retires_checks_and_persists_one_known_ch
                 job.message = "A newer operation owns this message.".into();
                 host.state.insert_job(job);
             }
+            "edit" => {
+                let row = &accepted["document"]["segments"][0];
+                let response = host.request(reqwest::Method::PATCH,
+                    &format!("/segments/{}", row["id"].as_str().unwrap()),
+                    Some(json!({"segment_revision":row["machine_revision"],"changes":{"text":"Reviewed accepted words."}}))).await;
+                assert_eq!(response.status(), 200);
+            }
+            "preference" => {
+                store.set_recognition(false).unwrap();
+            }
+            "profile" => {
+                store.forget_voice("lin").unwrap();
+            }
             _ => {}
         }
         replay.release();
@@ -731,7 +814,11 @@ async fn automatic_identity_publication_retires_checks_and_persists_one_known_ch
                 .all(|check| check["status"] != "checking"),
             "{mode}"
         );
-        assert_eq!(store.voice_profiles().unwrap(), profiles_before);
+        if mode == "profile" {
+            assert!(store.voice_profiles().unwrap().is_empty());
+        } else {
+            assert_eq!(store.voice_profiles().unwrap(), profiles_before);
+        }
         assert_eq!(store.people().unwrap().get("lin").unwrap().name, "Lin");
         if mode == "match" {
             let rows = finished["document"]["segments"].as_array().unwrap();
@@ -739,10 +826,7 @@ async fn automatic_identity_publication_retires_checks_and_persists_one_known_ch
                 finished["document"]["speakers"][rows[0]["speaker"].as_str().unwrap()],
                 "Lin"
             );
-            assert_eq!(
-                rows[1]["speaker"], "unassigned",
-                "unknown sibling cannot be assigned by exclusion"
-            );
+            assert_eq!(rows[1]["speaker"], "unassigned");
             assert_eq!(
                 finished["speaker_assignments"][rows[0]["speaker"].as_str().unwrap()]["person_id"],
                 "lin"
@@ -759,16 +843,30 @@ async fn automatic_identity_publication_retires_checks_and_persists_one_known_ch
             assert_eq!(stored(temp.path()).document, durable.document);
             assert_eq!(store.voice_profiles().unwrap(), profiles_before);
         } else {
-            assert_eq!(finished["document"]["segments"][0]["id"], "mixed", "{mode}");
+            assert!(
+                finished["document"]["segments"][0]["separation"].is_object(),
+                "{mode}"
+            );
             assert_eq!(
-                finished["document"]["segments"][0]["text"], "original mixed words",
+                finished["document"]["segments"][0]["text"],
+                if mode == "edit" {
+                    "Reviewed accepted words."
+                } else {
+                    "estimated voice 0"
+                },
+                "{mode}"
+            );
+            assert!(
+                finished["document"]["segments"].as_array().unwrap()[..2]
+                    .iter()
+                    .all(|row| row["speaker"] == "unassigned"),
                 "{mode}"
             );
             if mode == "stale_generation" {
                 assert_eq!(finished["message"], "A newer operation owns this message.");
             }
             let assets = temp.path().join(JOB).join("separated");
-            assert!(!assets.exists() || std::fs::read_dir(assets).unwrap().count() == 0);
+            assert_eq!(std::fs::read_dir(assets).unwrap().count(), 2);
             host.stop().await;
             assert_eq!(stored(temp.path()).document, durable.document);
         }

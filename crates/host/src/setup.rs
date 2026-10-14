@@ -50,6 +50,9 @@ pub(crate) fn separation_artifact() -> ModelArtifact {
 
 #[derive(Clone, Default, Serialize)]
 pub(crate) struct Progress {
+    pub target: Option<String>,
+    pub started_at: u64,
+    pub activated: bool,
     pub models: Vec<String>,
     pub status: &'static str,
     pub phase: String,
@@ -68,6 +71,18 @@ impl SetupService {
     }
     pub fn begin(&self, models: &[ModelArtifact], download: bool) {
         *self.progress.lock().expect("setup progress") = Progress {
+            target: download.then(|| {
+                if models.len() == 1 && models[0].id == "mossformer2-16k" {
+                    "separation"
+                } else {
+                    "models"
+                }
+                .into()
+            }),
+            started_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             models: models.iter().map(|m| m.id.clone()).collect(),
             status: if download { "downloading" } else { "loading" },
             phase: if download {
@@ -102,6 +117,9 @@ impl SetupService {
     }
     pub fn phase(&self, phase: impl Into<String>) {
         self.progress.lock().expect("setup progress").phase = phase.into();
+    }
+    pub fn activated(&self) {
+        self.progress.lock().expect("setup progress").activated = true;
     }
     pub fn bytes(&self, bytes: u64) {
         self.progress

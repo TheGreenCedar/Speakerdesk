@@ -57,6 +57,8 @@ pub struct Candidate {
     pub original: Box<Segment>,
     pub voices: [CandidateVoice; 2],
     pub model: String,
+    #[serde(default)]
+    pub speech_ranges: [Vec<(usize, usize)>; 2],
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -522,6 +524,7 @@ mod tests {
         let mut job = job();
         let original = job.document.as_ref().unwrap().segments[0].clone();
         let candidate = Candidate {
+            speech_ranges: Default::default(),
             id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             source_key: source_key(&job, &original),
             original: Box::new(original.clone()),

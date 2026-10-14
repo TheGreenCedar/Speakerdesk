@@ -4,7 +4,7 @@ const {frontend}=require('./support/frontend_dom.cjs');
 test('pending retry prevents duplicate retries while the saved transcript stays editable',()=>{
   const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
   f.run("selected.passage_retry={id:'pending',segment_id:'r0'};setStatus();renderSegments()");
-  const retry=()=>f.document.getElementById('segments').querySelectorAll('button').find(b=>b.textContent==='Retry passage locally');
+  const retry=()=>f.document.getElementById('segments').querySelector('.passage-retry button');
   assert.equal(retry().disabled,true);assert.equal(f.document.getElementById('editor').inert,false);
   assert.equal(f.document.getElementById('segments').querySelectorAll('button').filter(b=>b.textContent==='Cancel passage retry').length,1);
   f.run('delete selected.passage_retry;renderSegments()');
@@ -198,7 +198,7 @@ test('separation begin saves first, retains editable words during work, and canc
   assert.equal(f.run('requests[0]'),'save');assert.equal(f.run('requests[1].path'),'/api/jobs/'+'d'.repeat(32)+'/separation');
   assert.equal(f.run('JSON.parse(requests[1].options.body).segment_id'),'r0');
   assert.equal(f.run('doc.segments[0].text'),'Words 0');assert.equal(f.document.getElementById('editor').inert,false);
-  assert.equal(button(f,'Retry passage locally').disabled,true);
+  assert.equal(f.document.getElementById('segments').querySelector('.passage-retry button').disabled,true);
   const cancel=button(f,'Cancel separation');cancel.click();await Promise.all(cancel.lastEventResults);
   assert.equal(f.run('requests[2].path'),'/api/jobs/'+'d'.repeat(32)+'/cancel');assert.equal(f.run('doc.segments[0].text'),'Words 0');
 });
@@ -260,7 +260,7 @@ test('overlap audio without original words can expose separation and its complet
   f.run("doc.segments[0].separation_candidate={id:'e'.repeat(32),original:structuredClone(doc.segments[0]),voices:[{text:'First voice',language:'en'},{text:'Second voice',language:'en'}]};renderSegments()");
   assert.equal(f.document.getElementById('segments').children[0].dataset.segmentId,'r0');assert.equal(button(f,'Use both voices').disabled,false);
 });
-test('automatically published voices are ordinary editable rows with hidden generated players and collapsed original history',async()=>{
+test('explicitly accepted voices are ordinary editable rows with hidden generated players and collapsed original history',async()=>{
   for(const edited of [false,true]) {
     const f=frontend(path.resolve(__dirname,'..'));candidateFixture(f);f.context.edited=edited;
     f.run(`const candidate=doc.segments[0].separation_candidate;window.historyFixture={original:candidate.original,accepted:candidate.voices.map((voice,channel)=>({...candidate.original,id:'e'+channel,text:voice.text,speaker:'unassigned',separation:{episode_id:candidate.id,channel,origin_sample:320000,length_samples:32000}}))};
@@ -279,8 +279,8 @@ test('automatically published voices are ordinary editable rows with hidden gene
     assert.match(f.document.getElementById('player').getAttribute('src'),/\/original\/audio$/);assert.equal(f.document.getElementById('player').currentTime,20);
     const original=button(f,'Show original passage');original.click();await Promise.all(original.lastEventResults);
     assert.equal(row.querySelector('.separation-original textarea').value,'Words 0');
-    if(edited){assert.equal(button(f,'Restore original'),undefined);assert.match(row.textContent,/Copy the original words/);assert.equal(f.run('doc.segments[1].text'),'Keep this correction');}
-    else assert.notEqual(button(f,'Restore original'),undefined);
+    if(edited){assert.equal(button(f,'Use original transcript and audio'),undefined);assert.match(row.textContent,/Copy the original words/);assert.equal(f.run('doc.segments[1].text'),'Keep this correction');}
+    else assert.notEqual(button(f,'Use original transcript and audio'),undefined);
   }
 });
 test('published voices in the draft renderer keep normal naming and play their own audio without dropping an older draft',()=>{
@@ -323,15 +323,15 @@ test('Stop reveals passage tools but never retries over unsaved or pending corre
   f.run("selected.status='ready';selected.refinement_status='unresolved';renderSegments()");
   assert.ok(row.querySelector('.passage-repair'),'The stopped row must expose an explicit-language retry');
   assert.ok(button(f,'Retry voice separation'),'The stopped row must expose overlap repair');
-  const retry=button(f,'Retry passage locally');assert.equal(retry.disabled,true);
+  const retry=f.document.getElementById('segments').querySelector('.passage-retry button');assert.equal(retry.disabled,true);
   f.run("window.requests=0;flushSave=async()=>{};api=async()=>{requests++;throw Error('Unexpected request')}");
   retry.click();await Promise.all(retry.lastEventResults);
   assert.equal(f.run('requests'),0);assert.equal(text.value,'Protected correction');assert.equal(f.document.activeElement,text);
   assert.equal(text.selectionStart,2);assert.equal(text.selectionEnd,5);
   f.run("passageDrafts.clear();passageSaveOperations.set(selected.id+':r0',{jid:selected.id,segment:doc.segments[0]});renderSegments()");
-  assert.equal(button(f,'Retry passage locally').disabled,true);
+  assert.equal(f.document.getElementById('segments').querySelector('.passage-retry button').disabled,true);
   f.run("passageSaveOperations.clear();renderSegments()");
-  assert.equal(button(f,'Retry passage locally').disabled,false);
+  assert.equal(f.document.getElementById('segments').querySelector('.passage-retry button').disabled,false);
 });
 test('review cannot approve replacement words hidden behind a focused older passage',()=>{
   const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
