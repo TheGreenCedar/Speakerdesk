@@ -1,6 +1,11 @@
 // Shipped renderer contract; router/model behavior is exercised separately.
 const test=require('node:test'),assert=require('node:assert/strict'),path=require('node:path');
 const {frontend}=require('./support/frontend_dom.cjs');
+function openPassageDetails(f) {
+  const card=f.document.getElementById('segments').firstChild;
+  card.querySelector('.passage-details-toggle').click();
+  return f.run('isLive()')?card.querySelector('.rolling-review'):f.document.getElementById('segment-details');
+}
 
 test('prior words can be compared and explicitly restored through protected passage editing in saved and live views',async()=>{
   for(const status of ['ready','recording']) {
@@ -12,10 +17,16 @@ test('prior words can be compared and explicitly restored through protected pass
         const segment=structuredClone(doc.segments[0]);segment.text=JSON.parse(options.body).changes.text;
         segment.machine_revision++;segment.protected_fields=['text'];segment.refinement_state='edited';return {segment,revision:2};
       };renderSegments();`);
-    const compare=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+    const card=f.document.getElementById('segments').firstChild;
+    assert.equal(card.querySelector('.passage-history'),null,'history adds no separate row to the reading view');
+    if(status==='ready')assert.equal(card.querySelectorAll('button').some(button=>button.textContent==='Compare prior words'),false);
+    else assert.equal(card.querySelector('.rolling-review').hidden,true);
+    const details=openPassageDetails(f);
+    const compare=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+    assert.ok(compare,'history remains available through passage Details');
     compare.click();await Promise.all(compare.lastEventResults);
     assert.equal(f.run('doc.segments[0].text'),'Words 0','comparison alone does not select text');
-    const restore=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
+    const restore=details.querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
     restore.click();await Promise.all(restore.lastEventResults);
     assert.equal(f.run('doc.segments[0].text'),'Earlier complete words');
     assert.equal(f.run('doc.segments[0].protected_fields[0]'),'text');
@@ -32,10 +43,10 @@ test('prior words stay copyable after a trim and a compared stale or deleted pas
         return {segments:[{id:'r0',start:0,end:10,text:'Old full-range text'}]};};`);
     if(change==='trim')f.run('doc.segments[0].end=5');
     f.run('renderSegments()');
-    const compare=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+    const details=openPassageDetails(f),compare=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
     compare.click();await Promise.all(compare.lastEventResults);
-    assert.match(f.document.getElementById('segments').textContent,/Old full-range text/);
-    const restore=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
+    assert.match(details.textContent,/Old full-range text/);
+    const restore=details.querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
     if(change==='trim')assert.equal(restore,undefined);
     else {f.run(change==='revision'?'doc.segments[0].machine_revision++':'doc.segments[0].deleted=true');restore.click();await Promise.all(restore.lastEventResults);}
     assert.equal(f.run('writes'),0);assert.equal(f.run('doc.segments[0].text'),'Words 0');
@@ -51,10 +62,10 @@ test('a pre-restore poll cannot overwrite explicitly restored words after PATCH 
       if(path==='/api/jobs')return [];
       return new Promise(resolve=>window.releaseOldPoll=()=>resolve(before));
     };renderSegments();`);
-  const compare=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+  const details=openPassageDetails(f),compare=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
   compare.click();await Promise.all(compare.lastEventResults);
   f.run('window.pendingPoll=poll()');await new Promise(resolve=>setImmediate(resolve));
-  const restore=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
+  const restore=details.querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
   restore.click();await Promise.all(restore.lastEventResults);
   f.run('releaseOldPoll()');await f.run('pendingPoll');
   assert.equal(f.run('doc.segments[0].text'),'Restored earlier words');

@@ -637,7 +637,6 @@ function savedCard(segment) {
   body.append(top,text);
   const reason=passageReviewReason(segment);
   appendPassageRepair(body,segment,reason);
-  const history=node('details',undefined,'passage-history');history.append(node('summary','Passage history'));appendPassageHistory(history,segment);history.hidden=!segment.refinement_window;body.append(history);
   appendPassageSeparation(body,segment);
   const repair=body.querySelector(':scope > .passage-repair');
   if(repair){repair.classList.add('inline-repair');
@@ -1192,6 +1191,7 @@ function showInspector(segment,card,force=false,visibleSource=()=>true,commit=nu
     const reset=node('button','Reset','text-button');reset.type='button';reset.addEventListener('click',()=>{timingDrafts.delete(draftKey);input.value=segment[key].toFixed(2);input.removeAttribute('aria-invalid');hint.textContent=passageTime(segment[key]);renderSaveState();});
     field.append(input,hint,reset);details.append(field);
   }
+  appendPassageHistory(details,segment);
   appendPassageEvidence(details,segment);
   if(segment.review && markReviewable(segment)) {
     const reviewed=node('button','Mark words reviewed','text-button review-action');

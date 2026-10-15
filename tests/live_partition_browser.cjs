@@ -38,6 +38,7 @@ async function main(){
       if(url.pathname==='/fixture/release'){if(held){const pending=held;held=null;pending.res.setHeader('Content-Type','application/json');pending.res.end(JSON.stringify(pending.snapshot));}send({ok:true});return;}
       if(url.pathname==='/api/config'){send({languages:{auto:'Automatic',en:'English',fr:'French'},default_language:'en',readiness:{configured:true,automatic_language:true}});return;}
       if(url.pathname==='/api/jobs'){send([{id:jid,name:job.name,created:1,status:job.status}]);return;}
+      if(url.pathname===`/api/jobs/${jid}/refinement/revisions/r0`){send({segments:[{id:'r0',start:0,end:10,text:'Prior first passage words.'}]});return;}
       if(url.pathname===`/api/jobs/${jid}`){
         const snapshot=structuredClone(job);
         if(holdNext){holdNext=false;held={res,snapshot};return;}
@@ -92,17 +93,27 @@ async function main(){
       let offset=0;const turns=pieces.map(([text,speaker,attribution],i)=>{const start_offset=offset;offset+=text.length;return {text,speaker,attribution,start_offset,end_offset:offset,start:attribution==='unknown'?null:i,end:attribution==='unknown'?null:i+1};});
       job.status='ready';job.refinement_status='complete_with_exceptions';job.rolling_refinement={version:1};job.message='Previous retry finished';job.inference_owned=false;
       job.document.speakers={speaker_0:'Alex',speaker_1:'Sam',multiple_speakers:'Multiple speakers',unassigned:'Unassigned'};
-      job.document.segments=Array.from({length:90},(_,i)=>({id:'r'+i,start:i*10,end:i*10+10,speaker:'speaker_0',text:'A later readable passage '+i+'.',language:'en',machine_revision:1,refinement_state:'refined'}));
+      job.document.segments=Array.from({length:90},(_,i)=>({id:'r'+i,start:i*10,end:i*10+10,speaker:'speaker_0',text:'A later readable passage '+i+'.',language:'en',machine_revision:1,refinement_state:'refined',refinement_window:'r'+i}));
       Object.assign(job.document.segments[0],{text:turns.map(turn=>turn.text).join(''),speaker:'multiple_speakers',speaker_candidates:['speaker_0','speaker_1'],reading_turns:turns});
       Object.assign(job.document.segments[1],{text:'A coherent phrase.',speaker_candidates:['speaker_0'],reading_turns:[{text:'A coherent ',start_offset:0,end_offset:11,start:10,end:12,speaker:'speaker_0',attribution:'single'},{text:'phrase.',start_offset:11,end_offset:18,start:null,end:null,speaker:'unassigned',attribution:'unknown'}]});
       job.document.segments[2].refinement_issue={kind:'accuracy',message:'This passage returned no complete words.'};job.revision++;
       await evaluate('poll()');await wait("$('segments').children.length===90 && !polling");
+      assert.equal(await evaluate("$('segments').querySelectorAll('.passage-history').length"),0,'Refined history adds no repeated reading rows');
+      assert.equal(await evaluate("Array.from($('segments').querySelectorAll('button')).some(button=>button.textContent==='Compare prior words')"),false);
       for(const width of [1280,760]) {
         await send('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false});
         const view=await evaluate(`(()=>{const first=$('segments').firstElementChild,tail=$('segments').children[1],pane=$('transcript-pane').getBoundingClientRect();return {rows:$('segments').children.length,processingHidden:$('processing-row').hidden,menuClosed:!$('processing-details').open,routineInMenu:$('processing-details').contains($('refinement-controls')) && $('processing-details').contains($('meeting-separation-readiness')) && $('processing-details').contains($('editor-hints')),paragraphs:first.querySelectorAll('.reading-turn').length,tailParagraphs:tail.querySelectorAll('.reading-turn').length,tailUnassigned:tail.querySelector('.reading-turn-unassigned').textContent,deleteVisible:first.querySelector('.remove-segment').getBoundingClientRect().width>0,paneHeight:pane.height,overflow:document.body.scrollWidth>innerWidth};})()`);
         assert.equal(view.processingHidden,true);assert.equal(view.menuClosed,true);assert.equal(view.routineInMenu,true);assert.equal(view.paragraphs,4);assert.equal(view.tailParagraphs,1);assert.equal(view.tailUnassigned,'phrase.');assert.equal(view.deleteVisible,true);assert(view.paneHeight>450);assert.equal(view.overflow,false);measurements.push({width,...view});await screenshot(`release-reading-${width}.png`);
       }
       checks.push('Saved wide/narrow long transcript prioritizes reading; status and help are collapsed, passage exception remains local, unassigned tail stays explicit inline.');
+      await evaluate("$('segments').firstElementChild.querySelector('.passage-details-toggle').focus()");
+      await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',text:' '});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});
+      assert.equal(await evaluate("$('inspector').hidden"),false);
+      await evaluate("Array.from($('segment-details').querySelectorAll('button')).find(button=>button.textContent==='Compare prior words').click()");
+      await wait("$('segment-details').querySelector('.prior-words')?.textContent==='Prior first passage words.'");
+      assert.equal(await evaluate("Array.from($('segment-details').querySelectorAll('button')).some(button=>button.textContent==='Restore prior words')"),true);
+      await screenshot('release-passage-history-details.png');await evaluate("$('inspector-close').click()");
+      checks.push('All 90 refined passages keep history out of reading; keyboard Details exposes comparison and restoration in the existing inspector.');
       await evaluate("$('processing-summary').focus()");
       await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',text:' '});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});
       assert.equal(await evaluate("$('processing-details').open"),true);await screenshot('release-processing-menu.png');await evaluate("$('processing-details').open=false");
