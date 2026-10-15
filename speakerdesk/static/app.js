@@ -232,6 +232,7 @@ function setStatus() {
   $('recording-dot').classList.toggle('paused',selected.status==='paused');
   $('run').hidden = (!!doc?.segments?.length && !isProgressiveImport()) || live; $('run').disabled = serviceUnavailable || busy || !!selected.inference_owned || !languageReady(selected.language);
   $('run').textContent=isProgressiveImport()?'Resume transcription':'Transcribe';
+  $('processing-row').hidden=!busy && !serviceUnavailable && !['failed','delete_failed','deleting'].includes(selected.status) && $('run').hidden;
   $('run').title = languageReady(selected.language) ? '' : setupState?.status==='loading' ? 'Loading models…' : 'Finish model setup in Settings → Models first.';
   $('manual').hidden = !!doc || busy || !selected.duration;
   $('delete').disabled = busy || !!selected.inference_owned;
@@ -256,7 +257,7 @@ function setStatus() {
   renderExportState();
   renderRefinementStatus();
   renderShortcutHints();
-  if(serviceUnavailable){$('job-message').textContent='Local service unavailable · open words retained';$('recording-dot').classList.add('paused');}
+  if(serviceUnavailable){$('processing-row').hidden=false;$('job-message').textContent='Local service unavailable · open words retained';$('recording-dot').classList.add('paused');}
 }
 async function select(jid) {
   if(hasPendingPassageSaves()){notice('Wait for the passage save to finish before switching meetings.');return;}
@@ -356,19 +357,35 @@ function speakerNameControl(id,className='name-speaker',allPersonTracks=false) {
   }
   return control;
 }
-function removePassage(segment) {
-  const index = doc.segments.indexOf(segment), jid = selected.id;
-  if (index < 0) return;
-  clearTimeout(undoRemoval?.timer);
-  const removal = {jid, timer: setTimeout(() => { if (undoRemoval === removal) { undoRemoval = null; scheduleAutosave(); } }, 8000)};
-  undoRemoval = removal;
-  doc.segments.splice(index, 1); changed(); renderEditor();
-  notice('Passage removed.', false, {label: 'Undo', run: () => {
-    if (undoRemoval !== removal || selected?.id !== jid || !doc) { notice('That removal is already saved and can’t be undone.'); return; }
-    clearTimeout(removal.timer); undoRemoval = null;
-    doc.segments.splice(Math.min(index, doc.segments.length), 0, segment); changed(); renderEditor();
-    document.querySelector(`[data-segment-id="${CSS.escape(segment.id)}"] textarea`)?.focus();
-  }});
+async function removePassage(segment) {
+  if(updateFrozen || hasPassageDrafts() || hasPendingPassageSaves()){notice('Save or discard passage corrections before deleting a passage.',true);return;}
+  const jid=selected.id;
+  const update=async deleted=>{
+    await flushSave();
+    if(selected?.id!==jid)return false;
+    const current=doc.segments.find(row=>row.id===segment.id);if(!current)return false;
+    const key=`${jid}:${segment.id}`,operation={jid,segment:structuredClone(current)};
+    passageSaveOperations.set(key,operation);renderSaveState();
+    let result;
+    try {result=await api(`/api/jobs/${jid}/segments/${encodeURIComponent(segment.id)}`,{method:'PATCH',body:JSON.stringify({segment_revision:current.machine_revision ?? 0,changes:{deleted}})});}
+    finally {passageSaveOperations.delete(key);renderSaveState();}
+    if(selected?.id!==jid)return false;
+    selectionGeneration++;
+    doc.segments[doc.segments.findIndex(row=>row.id===segment.id)]=result.segment;
+    const saved=selected.document?.segments.findIndex(row=>row.id===segment.id);
+    if(saved>=0)selected.document.segments[saved]=structuredClone(result.segment);
+    renderSegments();renderSaveState();return true;
+  };
+  try {
+    if(!await update(true))return;
+    clearTimeout(undoRemoval?.timer);
+    const removal={jid,timer:setTimeout(()=>{if(undoRemoval===removal)undoRemoval=null;},8000)};undoRemoval=removal;
+    notice('Passage deleted. Original audio kept.',false,{label:'Undo',run:async()=>{
+      if(undoRemoval!==removal || selected?.id!==jid)return;
+      try {if(await update(false)){clearTimeout(removal.timer);undoRemoval=null;notice('Passage restored.');}}
+      catch(error){notice(error.message,true);}
+    }});
+  }catch(error){notice(error.message,true);}
 }
 function markReviewable(segment) {
   return !!segment.text.trim() && !hasOverlappingSpeakers(segment) && segment.speaker !== 'unassigned';
@@ -487,6 +504,8 @@ function refreshReadingTurnView(card,segment) {
     text.addEventListener('input',()=>refreshReadingTurnView(card,current()));
   }
   const {host,text,button}=binding;
+  const scope=`Full passage ${passageTime(segment.start)}–${passageTime(segment.end)}`;
+  text.setAttribute('aria-label',scope);
   const signature=JSON.stringify([turns,doc.speakers,selected.speaker_assignments]);
   if(signature!==binding.signature) {
     binding.signature=signature;host.replaceChildren();
@@ -520,6 +539,14 @@ function refreshReadingTurnView(card,segment) {
       }
       paragraphs.push(turn);
     }
+    // A short uncertain tail stays inline under its own explicit attribution.
+    // It does not acquire the preceding speaker or an invented timestamp.
+    const tail=paragraphs.at(-1),previous=paragraphs.at(-2);
+    if(paragraphs.length===2 && previous?.attribution==='single' && previous.start!==null &&
+       segment.speaker===previous.speaker && segment.speaker_candidates?.length===1 && shortUnknown(tail)) {
+      previous.text+=tail.text;previous.slices.push(...tail.slices);previous.includesUnassigned=true;
+      previous.start=previous.end=null;paragraphs.pop();
+    }
     for(const turn of paragraphs) {
       const row=node('section',undefined,'reading-turn');
       row.dataset.attribution=turn.includesUnassigned?'single_with_unassigned':turn.attribution;
@@ -548,10 +575,11 @@ function refreshReadingTurnView(card,segment) {
   const blocked=passageDrafts.has(segment.id) || recoverablePassageDrafts.has(segment.id) || isPassageSaving(segment.id);
   const reading=!!turns && !binding.editing && !blocked && text.value===segment.text && document.activeElement!==text;
   host.hidden=!reading;text.hidden=reading;button.hidden=!turns;
-  button.disabled=blocked;button.textContent=reading?'Edit full passage':'View speaker turns';
+  button.disabled=blocked;button.textContent=reading?`Edit full passage${host.children.length>1?` (${host.children.length} speaker paragraphs)`:''}`:'View speaker turns';
+  button.title=scope;
   let explanation=card.querySelector('.whole-passage-note');
   if(!explanation){explanation=node('p','Editing the full passage. Speaker turns are a reading view; editing words may make their attribution unavailable.','whole-passage-note');text.parentElement.insertBefore(explanation,text);}
-  explanation.textContent=turns?'Editing the full passage. Speaker turns are a reading view; editing words may make their attribution unavailable.':'Speaker-turn attribution is unavailable for these words. This is the full original passage.';
+  explanation.textContent=`${scope}. `+(turns?'Editing the full passage: all speaker paragraphs together. Speaker attribution becomes unavailable when the words change; timing and original audio are kept.':'Speaker-turn attribution is unavailable for these words. This is the full original passage.');
   explanation.hidden=reading;
   setPassageClass(card,'has-reading-turns',!!turns);setPassageClass(card,'editing-reading-turns',!reading);
 }
@@ -596,7 +624,7 @@ function savedCard(segment) {
   const repairToggle=node('button',undefined,'segment-action repair-toggle');repairToggle.type='button';
   repairToggle.append(icon('wrench'),node('span','Retry transcription'));repairToggle.title='Retry this passage in another language';
   repairToggle.setAttribute('aria-label',`Retry transcription at ${passageTime(segment.start)}`);repairToggle.setAttribute('aria-expanded','false');
-  const remove = node('button', undefined, 'segment-action remove-segment'); remove.type='button'; remove.append(icon('trash-2')); remove.setAttribute('aria-label', `Remove passage at ${passageTime(segment.start)}`); remove.title='Remove passage (you can undo)';
+  const remove = node('button', 'Delete passage', 'segment-action remove-segment'); remove.type='button'; remove.setAttribute('aria-label', `Delete passage at ${passageTime(segment.start)}`); remove.title='Delete this full passage; original audio is kept';
   remove.addEventListener('click', () => removePassage(segment));
   const details=node('button',undefined,'segment-action passage-details-toggle');details.type='button';details.append(icon('sliders-horizontal'),node('span','Details'));
   details.setAttribute('aria-label',`Timing and details for passage at ${passageTime(segment.start)}`);details.title='Timing & details';
@@ -609,6 +637,7 @@ function savedCard(segment) {
   body.append(top,text);
   const reason=passageReviewReason(segment);
   appendPassageRepair(body,segment,reason);
+  const history=node('details',undefined,'passage-history');history.append(node('summary','Passage history'));appendPassageHistory(history,segment);history.hidden=!segment.refinement_window;body.append(history);
   appendPassageSeparation(body,segment);
   const repair=body.querySelector(':scope > .passage-repair');
   if(repair){repair.classList.add('inline-repair');
@@ -684,6 +713,9 @@ function refreshPassageLanguageIssue(body,segment) {
       if(repair)repair.open=true;
     }
     message.textContent=explanation+(segment.text.trim()?' Your current words are kept.':'');
+  }else if(segment.refinement_issue?.kind==='accuracy') {
+    if(!message){message=node('p',undefined,'passage-review passage-issue');body.insertBefore(message,repair);}
+    message.textContent=`Accuracy exception: ${segment.refinement_issue.message} Current words and original audio are kept.`;
   }else message?.remove();
   const summary=repair?.querySelector('summary');
   if(summary)summary.textContent=blocked?'Choose passage language':'Retry transcription';
@@ -736,6 +768,7 @@ function appendPassageRepair(body,segment,reason,visibleSource=()=>true) {
       });repair.append(timing);
     }
     if(selected.passage_retry?.segment_id===segment.id) {
+      const progress=node('p','Retrying this passage locally…','passage-review');progress.setAttribute('role','status');tools.append(progress);
       const cancel=node('button','Cancel passage retry');
       cancel.addEventListener('click',async()=>{
         try {
@@ -779,6 +812,33 @@ function appendPassageRepair(body,segment,reason,visibleSource=()=>true) {
       body.append(result);
     }
   }
+}
+
+function appendPassageHistory(host,segment) {
+  if(!segment.refinement_window)return;
+  const jid=selected.id,prior=node('button','Compare prior words','text-button');prior.type='button';
+  prior.addEventListener('click',async()=>{
+    try {
+      const history=await api(`/api/jobs/${jid}/refinement/revisions/${encodeURIComponent(segment.refinement_window)}`);
+      if(selected?.id!==jid || !host.isConnected)return;
+      const previous=history.segments.filter(row=>row.start<segment.end && row.end>segment.start).map(row=>row.text).filter(Boolean).join('\n');
+      const compared=structuredClone(doc.segments.find(row=>row.id===segment.id));
+      const original=history.segments.find(row=>row.id===segment.id);
+      const sameRange=compared && !compared.deleted && original?.start===compared.start && original?.end===compared.end;
+      host.append(node('p',previous || 'No previous legible words.','prior-words'));
+      if(previous && sameRange) {
+        const restore=node('button','Restore prior words','text-button');restore.type='button';
+        restore.addEventListener('click',async()=>{
+          const current=doc.segments.find(row=>row.id===segment.id);if(!current || selected?.id!==jid)return;
+          if(current.deleted || JSON.stringify(current)!==JSON.stringify(compared)){notice('This passage changed since comparison. Compare its current words again before restoring.',true);return;}
+          restore.disabled=true;
+          try {await savePassageDetails(current,{text:original.text});notice('Prior words restored and protected from accuracy changes.');}
+          catch(error){notice(error.message,true);restore.disabled=false;}
+        });host.append(restore);
+      }else if(previous)host.append(node('p','The passage timing changed. Copy prior words to correct the current range.','passage-review'));
+      prior.remove();
+    }catch(error){notice(error.message,true);}
+  });host.append(prior);
 }
 
 const reviewReasons={insufficient_acoustic_context:'Too little acoustic context to decode; audio retained',short_acoustic_context:'Unconfirmed words from a short audio fragment; review the recording',possible_non_speech:'Audio may contain no speech; model words need review',uncertain:'Language uncertain; audio retained',change_pending:'Language change uncertain; audio retained',unsupported:'Detected language unsupported; audio retained',insufficient_speech:'Too little usable speech; audio retained',overlapping_speech:'Overlapping speakers; voices are not separated',refinement_incomplete:'Larger-context result was incomplete; previous words and audio retained',empty_result:'No transcript text returned; audio retained',transcription_failed:'Transcription failed for this passage; audio retained',token_limit:'Transcript may be incomplete; audio retained',unassigned_audio:'Audio outside detected speech; may be silence or missed speech'};
@@ -985,6 +1045,8 @@ function appendPassageEvidence(host,segment) {
   evidence.append(copy,text);host.append(evidence);
 }
 function showTranscriptPassage(segment) {
+  if(segment.deleted)return false;
+  if(segment.refinement_issue?.kind==='accuracy')return true;
   return !!segment.text.trim() || languageBlockedPassage(segment) || !!segment.separation_candidate || selected?.passage_separation?.segment_id===segment.id || passageDrafts.has(segment.id) || !!recoverablePassageDrafts.get(segment.id)?.text.trim() || segment.protected_fields?.includes('text') || segment.refinement_state==='edited';
 }
 function languageBlockedPassage(segment) {
@@ -994,7 +1056,7 @@ function languageBlockedPassage(segment) {
     ['uncertain','change_pending','needs_language','unsupported','mixed'].includes(segment.language_detection?.reason);
 }
 function unresolvedLanguagePassages() {
-  return selected?.status==='ready' && selected.refinement_status==='unresolved' ? (doc?.segments || []).filter(languageBlockedPassage) : [];
+  return selected?.status==='ready' && ['unresolved','complete_with_exceptions'].includes(selected.refinement_status) ? (doc?.segments || []).filter(languageBlockedPassage) : [];
 }
 function isEmptyNonSpeechPlaceholder(segment) {
   // Presentation only: legacy no-word hints do not establish verified silence
@@ -1010,7 +1072,7 @@ function isEmptyNonSpeechPlaceholder(segment) {
 function renderRetainedAudioReview() {
   const host=$('retained-audio-review'),open=host.open;
   if(host.contains(document.activeElement))return;
-  const rows=doc.segments.filter(segment=>!showTranscriptPassage(segment) && !isEmptyNonSpeechPlaceholder(segment) &&
+  const rows=doc.segments.filter(segment=>!segment.deleted && !showTranscriptPassage(segment) && !isEmptyNonSpeechPlaceholder(segment) &&
     (segment.transcription_review?.reason || ['unsupported','uncertain','change_pending','needs_language','insufficient_speech','mixed'].includes(segment.language_detection?.reason) ||
      (segment.refinement_state==='unresolved' && segment.language_detection?.reason!=='silence')));
   host.hidden=!rows.length;host.replaceChildren();if(!rows.length)return;

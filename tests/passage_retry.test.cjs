@@ -1,6 +1,64 @@
 // Shipped renderer contract; router/model behavior is exercised separately.
 const test=require('node:test'),assert=require('node:assert/strict'),path=require('node:path');
 const {frontend}=require('./support/frontend_dom.cjs');
+
+test('prior words can be compared and explicitly restored through protected passage editing in saved and live views',async()=>{
+  for(const status of ['ready','recording']) {
+    const f=frontend(path.resolve(__dirname,'..'));f.seed(1,status);
+    f.run(`doc.segments[0].refinement_window='r0';window.calls=[];flushSave=async()=>{};poll=async()=>{};
+      api=async(path,options={})=>{
+        calls.push({path,options});
+        if(!options.method)return {segments:[{id:'r0',start:0,end:10,text:'Earlier complete words'}]};
+        const segment=structuredClone(doc.segments[0]);segment.text=JSON.parse(options.body).changes.text;
+        segment.machine_revision++;segment.protected_fields=['text'];segment.refinement_state='edited';return {segment,revision:2};
+      };renderSegments();`);
+    const compare=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+    compare.click();await Promise.all(compare.lastEventResults);
+    assert.equal(f.run('doc.segments[0].text'),'Words 0','comparison alone does not select text');
+    const restore=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
+    restore.click();await Promise.all(restore.lastEventResults);
+    assert.equal(f.run('doc.segments[0].text'),'Earlier complete words');
+    assert.equal(f.run('doc.segments[0].protected_fields[0]'),'text');
+    assert.equal(f.run('JSON.parse(calls[1].options.body).segment_revision'),1);
+    assert.equal(f.run('doc.segments[0].start'),0);assert.equal(f.run('doc.segments[0].end'),10);
+  }
+});
+
+test('prior words stay copyable after a trim and a compared stale or deleted passage cannot be restored',async()=>{
+  for(const change of ['trim','revision','deleted']) {
+    const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
+    f.run(`doc.segments[0].refinement_window='r0';window.writes=0;flushSave=async()=>{};poll=async()=>{};
+      api=async(path,options={})=>{if(options.method){writes++;throw Error('Unexpected stale restore');}
+        return {segments:[{id:'r0',start:0,end:10,text:'Old full-range text'}]};};`);
+    if(change==='trim')f.run('doc.segments[0].end=5');
+    f.run('renderSegments()');
+    const compare=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+    compare.click();await Promise.all(compare.lastEventResults);
+    assert.match(f.document.getElementById('segments').textContent,/Old full-range text/);
+    const restore=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
+    if(change==='trim')assert.equal(restore,undefined);
+    else {f.run(change==='revision'?'doc.segments[0].machine_revision++':'doc.segments[0].deleted=true');restore.click();await Promise.all(restore.lastEventResults);}
+    assert.equal(f.run('writes'),0);assert.equal(f.run('doc.segments[0].text'),'Words 0');
+  }
+});
+
+test('a pre-restore poll cannot overwrite explicitly restored words after PATCH acknowledgement',async()=>{
+  const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
+  f.run(`doc.segments[0].refinement_window='r0';window.before=structuredClone(selected);before.revision=2;flushSave=async()=>{};
+    api=async(path,options={})=>{
+      if(path.includes('/refinement/revisions/'))return {segments:[{id:'r0',start:0,end:10,text:'Restored earlier words'}]};
+      if(options.method==='PATCH'){const segment=structuredClone(doc.segments[0]);segment.text=JSON.parse(options.body).changes.text;segment.machine_revision++;return {segment,revision:3};}
+      if(path==='/api/jobs')return [];
+      return new Promise(resolve=>window.releaseOldPoll=()=>resolve(before));
+    };renderSegments();`);
+  const compare=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+  compare.click();await Promise.all(compare.lastEventResults);
+  f.run('window.pendingPoll=poll()');await new Promise(resolve=>setImmediate(resolve));
+  const restore=f.document.getElementById('segments').querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
+  restore.click();await Promise.all(restore.lastEventResults);
+  f.run('releaseOldPoll()');await f.run('pendingPoll');
+  assert.equal(f.run('doc.segments[0].text'),'Restored earlier words');
+});
 test('pending retry prevents duplicate retries while the saved transcript stays editable',()=>{
   const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
   f.run("selected.passage_retry={id:'pending',segment_id:'r0'};setStatus();renderSegments()");

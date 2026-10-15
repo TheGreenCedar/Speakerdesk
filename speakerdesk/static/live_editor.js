@@ -29,7 +29,7 @@ function renderPassageSaveState(card) {
   renderSaveState();
 }
 async function savePassageDetails(segment,changes) {
-  if(isLive() || hasPassageDrafts() || hasPendingPassageSaves())throw new Error('Save or discard passage corrections before changing timing or speaker.');
+  if((isLive() && Object.keys(changes).some(key=>key!=='text')) || hasPassageDrafts() || hasPendingPassageSaves())throw new Error('Save or discard passage corrections before changing this passage.');
   const jid=selected.id,key=`${jid}:${segment.id}`,revision=segment.machine_revision ?? 0;
   await flushSave();
   if(selected?.id!==jid || doc.segments.find(row=>row.id===segment.id)?.machine_revision!==segment.machine_revision)throw new Error('This passage changed. Open its current details again.');
@@ -37,6 +37,7 @@ async function savePassageDetails(segment,changes) {
   try {
     const result=await api(`/api/jobs/${jid}/segments/${encodeURIComponent(segment.id)}`,{method:'PATCH',body:JSON.stringify({segment_revision:revision,changes})});
     if(selected?.id!==jid)return;
+    selectionGeneration++;
     const index=doc.segments.findIndex(row=>row.id===segment.id);if(index>=0)doc.segments[index]=result.segment;
     $('inspector').hidden=true;await poll();
   } finally {passageSaveOperations.delete(key);if(selected?.id===jid){renderSegments();renderSaveState();}}
@@ -47,17 +48,21 @@ function renderRefinementStatus() {
   const noAudio=emptyFailedCapture(selected);
   const unverified=selected?.status==='failed' && selected.capture_audio?.state==='unverified';
   $('refinement-controls').hidden=selected?.status==='failed' || (!selected?.rolling_refinement && !saved);
-  $('refinement-status').textContent=noAudio?'No audio was recorded.':unverified?'Recorded audio could not be verified.':({waiting:'Accuracy pass queued · recent words may still change',refining:'Rechecking sealed passages…',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',unresolved:'Accuracy pass incomplete · your transcript is saved'})[status] || '';
+  $('refinement-status').textContent=noAudio?'No audio was recorded.':unverified?'Recorded audio could not be verified.':({waiting:'Accuracy pass queued · recent words may still change',refining:'Rechecking sealed passages…',paused:'Accuracy pass paused · audio kept for later',complete:'Accuracy pass complete',complete_with_exceptions:'Accuracy pass finished with passage exceptions · your transcript is saved',unresolved:'Accuracy pass incomplete · your transcript is saved'})[status] || '';
+  if(status==='unresolved' && selected?.refinement_error)$('refinement-status').textContent+=` · ${selected.refinement_error}`;
   if(saved && !noAudio && !unverified && status==='refining')$('refinement-status').textContent='Rechecking saved passages…';
   const timingAccuracy=hostPlatform==='windows'?'Word times are uncalibrated estimates.':'Non-English word times are uncalibrated estimates.';
   $('refinement-status').title=saved?`Re-decode complete saved passages using their captured Auto or explicit language setting. Saved corrections and speaker identities are retained; incomplete results keep their previous words. Passages blocked by language appear in the transcript with repair controls. Long passages require one supported language and unambiguous context timing. ${timingAccuracy}`:'Speakerdesk rechecks sealed passages while recording continues. Incomplete results retain previous words. Passages blocked by language appear in the transcript with repair controls after recording stops. Pause accuracy independently of recording. Your saved corrections are never overwritten.';
   $('refinement-toggle').hidden=noAudio || unverified || status==='complete';
-  $('refinement-toggle').textContent=saved && !selected?.rolling_refinement?'Start saved accuracy pass':status==='paused'?'Resume accuracy pass':status==='unresolved'?'Retry accuracy pass':'Pause accuracy pass';
+  $('refinement-toggle').textContent=saved && !selected?.rolling_refinement?'Start saved accuracy pass':status==='paused'?'Resume accuracy pass':status==='unresolved'?'Retry accuracy pass':status==='complete_with_exceptions'?'Retry passage exceptions':'Pause accuracy pass';
   const blocked=unresolvedLanguagePassages();
   if(blocked.length) {
     $('refinement-status').textContent=`${blocked.length} ${blocked.length===1?'passage needs':'passages need'} a language · your transcript is saved`;
     $('refinement-toggle').textContent='Choose passage language';
   }
+  const exceptions=(doc?.segments || []).filter(row=>!row.deleted && row.refinement_issue).length;
+  $('processing-summary').textContent=status==='unresolved' && selected?.refinement_error?'Processing interrupted':exceptions?`Processing · ${exceptions} passage ${exceptions===1?'exception':'exceptions'}`:['waiting','refining'].includes(status)?'Accuracy running…':'Processing & help';
+  if(status==='unresolved' && selected?.refinement_error)$('processing-details').open=true;
 }
 async function toggleRefinement() {
   const blocked=unresolvedLanguagePassages()[0];
@@ -74,7 +79,7 @@ async function toggleRefinement() {
     return;
   }
   const jid=selected.id,button=$('refinement-toggle');button.disabled=true;
-  try { await api(`/api/jobs/${jid}/refinement/${(!selected.rolling_refinement && selected.saved_refinement_available) || ['paused','unresolved'].includes(selected.refinement_status)?'resume':'pause'}`,{method:'POST'});await poll(); }
+  try { await api(`/api/jobs/${jid}/refinement/${(!selected.rolling_refinement && selected.saved_refinement_available) || ['paused','unresolved','complete_with_exceptions'].includes(selected.refinement_status)?'resume':'pause'}`,{method:'POST'});await poll(); }
   catch(error){notice(error.message,true);}finally{button.disabled=false;}
 }
 function liveCard(segment) {
@@ -174,13 +179,16 @@ function liveCard(segment) {
     if(!['unassigned','multiple_speakers'].includes(track))nameSpeaker(track);
   });details.append(detailName);
   const repair=node('div',undefined,'rolling-repair');
-  if(languageBlockedPassage(segment))body.append(repair);else details.append(repair);
+  if(languageBlockedPassage(segment) || (!isLive() && segment.refinement_issue))body.append(repair);else details.append(repair);
   const inspect=node('button',undefined,'segment-action passage-details-toggle');inspect.type='button';
   inspect.append(icon('sliders-horizontal'),node('span','Details'));inspect.title='Passage details';
   inspect.setAttribute('aria-label',`Details for passage at ${passageTime(segment.start)}`);inspect.setAttribute('aria-expanded','false');
   inspect.addEventListener('click',()=>{details.hidden=!details.hidden;details.open=!details.hidden;inspect.setAttribute('aria-expanded',String(details.open));});
   details.addEventListener('toggle',()=>{if(!details.open)details.hidden=true;inspect.setAttribute('aria-expanded',String(details.open));});
   const detailActions=node('div',undefined,'segment-actions');detailActions.append(inspect);top.append(detailActions);
+  const remove=node('button','Delete passage','segment-action remove-segment');remove.type='button';
+  remove.setAttribute('aria-label',`Delete passage at ${passageTime(segment.start)}`);remove.title='Delete this full passage; original audio is kept';
+  remove.addEventListener('click',()=>removePassage(doc.segments.find(row=>row.id===segment.id) || segment));detailActions.append(remove);
   const editDetails=node('button','Timing & speaker','segment-action');editDetails.type='button';editDetails.classList.add('saved-passage-details');editDetails.hidden=!!isLive();
   editDetails.addEventListener('click',()=>{
     if(hasPassageDrafts() || hasPendingPassageSaves()){notice('Save or discard passage corrections before changing timing or speaker.',true);return;}
@@ -189,15 +197,7 @@ function liveCard(segment) {
     const label=node('label','Speaker','segment-detail-field'),speaker=node('select');speakerOptions(speaker,current.speaker);speaker.setAttribute('aria-label','Passage speaker');
     speaker.addEventListener('change',()=>{speaker.disabled=true;savePassageDetails(current,{speaker:speaker.value}).catch(error=>notice(error.message,true)).finally(()=>{speaker.disabled=false;});});label.append(speaker);$('segment-details').append(label);
   });detailActions.append(editDetails);
-  if(segment.refinement_window) {
-    const prior=node('button','Show prior words','text-button');
-    prior.addEventListener('click',async()=>{
-      try {const history=await api(`/api/jobs/${selected.id}/refinement/revisions/${encodeURIComponent(segment.refinement_window)}`);
-        const previous=history.segments.filter(s=>s.start<segment.end && s.end>segment.start).map(s=>s.text).filter(Boolean).join('\n');
-        details.append(node('p',previous || 'No previous legible words.','prior-words'));prior.remove();}
-      catch(error){notice(error.message,true);}
-    });details.append(prior);
-  }
+  appendPassageHistory(details,segment);
   body.append(details);
   appendPassageSeparation(body,segment);
   card.append(avatar,body);refreshReadingTurnView(card,segment);renderPassageSaveState(card);return card;
@@ -223,8 +223,9 @@ function livePassageRows() {
 function refreshStoppedPassageRepair(card,segment,signature) {
   const host=card.querySelector('.rolling-repair');
   const blocked=languageBlockedPassage(segment);
-  const parent=card.querySelector(blocked?'.segment-body':'.rolling-review');
-  if(host.parentElement!==parent && (blocked || !host.contains(document.activeElement)))parent.append(host);
+  const visible=blocked || (!isLive() && !!segment.refinement_issue);
+  const parent=card.querySelector(visible?'.segment-body':'.rolling-review');
+  if(host.parentElement!==parent && (visible || !host.contains(document.activeElement)))parent.append(host);
   const visibleSource=()=>doc.segments.find(row=>row.id===segment.id)===segment && card.querySelector('textarea').value===segment.text;
   const key=JSON.stringify([signature,isLive(),selected.status,!!selected.passage_retry,!!selected.passage_separation,hasPassageDrafts(),hasPendingPassageSaves(),visibleSource()]);
   if(host.dataset.signature===key || host.contains(document.activeElement))return;

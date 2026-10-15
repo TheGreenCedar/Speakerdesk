@@ -1558,6 +1558,9 @@ pub fn apply_canonical_candidate(document: &Document, candidate: &Segment) -> Do
         .find(|segment| segment.id == candidate.id)
         .cloned()
     {
+        if prior.rest.get("deleted") == Some(&Value::Bool(true)) {
+            return document;
+        }
         // A completed saved-anchor revision outranks later draft snapshots of that same
         // audio. Refinement never changes the live book's acoustic/identity ownership.
         if prior.refinement_state.as_deref() == Some("refined")

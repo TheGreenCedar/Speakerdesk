@@ -51,6 +51,7 @@ const SERVER_REST_KEYS: &[&str] = &[
     "audio_state",
     "canonical_unresolved",
     "refinement_issue",
+    "deleted",
 ];
 
 const TYPED_SERVER_KEYS: &[&str] = &[
@@ -120,11 +121,23 @@ pub fn edit_passage(input: PassageEditInput<'_>) -> Result<PassageEditOutcome, A
         return Err(ApiError::new(400, SUPPLY_PASSAGE_EDITS));
     };
     if changes.is_empty()
-        || changes
-            .keys()
-            .any(|key| !matches!(key.as_str(), "text" | "speaker" | "start" | "end"))
+        || changes.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "text" | "speaker" | "start" | "end" | "deleted"
+            )
+        })
     {
         return Err(ApiError::new(400, ONLY_WORDS_SPEAKER_BOUNDS));
+    }
+    if changes
+        .get("deleted")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(ApiError::new(
+            400,
+            "Passage deletion must be true or false.",
+        ));
     }
     let Some(document) = input.document else {
         return Err(ApiError::new(409, WAIT_FOR_PASSAGES));
@@ -283,8 +296,13 @@ fn apply_json_changes(document: &mut Value, segment_id: &str, changes: &Map<Stri
 fn finish_passage_edit(row: &mut Segment, prior: &Segment, changes: &Map<String, Value>) {
     let mut protected = prior.protected_fields.clone().unwrap_or_default();
     for key in changes.keys() {
+        let key = if key == "deleted" {
+            "text"
+        } else {
+            key.as_str()
+        };
         if !protected.iter().any(|field| field == key) {
-            protected.push(key.clone());
+            protected.push(key.to_string());
         }
     }
     protected.sort();
@@ -295,7 +313,7 @@ fn finish_passage_edit(row: &mut Segment, prior: &Segment, changes: &Map<String,
     row.rest.remove("refinement_state");
     row.refinement_state = Some("edited".to_string());
     clear_alignment_bundle(row);
-    if changes.contains_key("text")
+    if (changes.contains_key("text") || changes.get("deleted") == Some(&Value::Bool(true)))
         && prior.rest.get("canonical_state").and_then(Value::as_str) == Some("open")
     {
         // A manual fill before first ASR covers the saved displayed audio scope. A
@@ -594,7 +612,7 @@ fn speaker_audio_eligible(segment: &Segment, track_id: &str) -> bool {
 
 fn assemble_document(
     saved: Option<&Document>,
-    incoming: Document,
+    mut incoming: Document,
     imported: bool,
     now: f64,
 ) -> Document {
@@ -614,6 +632,17 @@ fn assemble_document(
         };
     }
     if let Some(saved) = saved {
+        for row in &saved.segments {
+            if row.rest.get("deleted") == Some(&Value::Bool(true))
+                && !incoming
+                    .segments
+                    .iter()
+                    .any(|candidate| candidate.id == row.id)
+            {
+                incoming.segments.push(row.clone());
+            }
+        }
+        crate::transcript::sort_segments(&mut incoming.segments);
         let mut document = saved.clone();
         document.speakers = incoming.speakers;
         document.segments = incoming.segments;
@@ -817,6 +846,84 @@ mod tests {
             Some("canonical-one")
         );
         assert_eq!(outcome.document.edited_at, Some(12.0));
+    }
+
+    #[test]
+    fn passage_deletion_is_protected_and_survives_stale_document_content() {
+        let mut document = saved_document(prior_segment());
+        document.segments[0]
+            .rest
+            .insert("canonical_state".into(), json!("open"));
+        document.segments[0]
+            .rest
+            .insert("end_sample".into(), json!(16000));
+        let deleted = edit_passage(PassageEditInput {
+            status: "recording",
+            duration: 10.,
+            revision: 7,
+            document: Some(&document),
+            segment_id: "one",
+            body: &json!({"segment_revision":2,"changes":{"deleted":true}}),
+            now: 12.,
+        })
+        .unwrap();
+        assert_eq!(deleted.segment.rest.get("deleted"), Some(&json!(true)));
+        assert_eq!(deleted.segment.text, "Hello");
+        assert_eq!(
+            deleted.segment.rest.get("canonical_text_boundary_sample"),
+            Some(&json!(16000))
+        );
+        let mut growing = document.segments[0].clone();
+        growing.rest.insert("end_sample".into(), json!(32000));
+        assert_eq!(
+            crate::live::edited_boundary(&deleted.document, &growing)
+                .unwrap()
+                .end_sample,
+            16000
+        );
+        assert_eq!(deleted.segment.protected_fields, Some(vec!["text".into()]));
+        assert_eq!(
+            deleted.segment.rest.get("text_audio_anchor"),
+            document.segments[0].rest.get("text_audio_anchor")
+        );
+        let (assignments, checks) = empty_maps();
+        let saved = save_transcript(SaveInput {
+            status: "ready",
+            duration: Some(10.),
+            revision: 8,
+            saved: Some(&deleted.document),
+            body: &json!({"revision":8,"document":document}),
+            now: 13.,
+            speaker_assignments: &assignments,
+            voice_checks: &checks,
+        })
+        .unwrap();
+        assert_eq!(
+            saved.document.segments[0].rest.get("deleted"),
+            Some(&json!(true))
+        );
+        for kind in ["txt", "srt", "vtt", "json"] {
+            let exported = crate::export::export(&saved.document, kind).unwrap();
+            assert!(!exported.body.contains("Hello"), "{kind}");
+        }
+        let restored = edit_passage(PassageEditInput {
+            status: "ready",
+            duration: 10.,
+            revision: 9,
+            document: Some(&saved.document),
+            segment_id: "one",
+            body: &json!({"segment_revision":3,"changes":{"deleted":false}}),
+            now: 14.,
+        })
+        .unwrap();
+        assert_eq!(restored.segment.text, "Hello");
+        assert_ne!(restored.segment.rest.get("deleted"), Some(&json!(true)));
+        assert!(
+            crate::export::export(&restored.document, "txt")
+                .unwrap()
+                .body
+                .contains("Hello")
+        );
     }
 
     #[test]

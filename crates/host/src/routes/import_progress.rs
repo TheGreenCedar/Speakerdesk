@@ -200,6 +200,27 @@ mod tests {
             })
             .unwrap();
         assert_eq!(publish_rows(&rows, 1).unwrap()[0].text, "Human correction");
+        app.store()
+            .update_job(&job.id, |current| {
+                let outcome = speakerdesk_core::edit::edit_passage(
+                    speakerdesk_core::edit::PassageEditInput {
+                        status: "ready",
+                        duration: 10.,
+                        revision: current.revision,
+                        document: current.document.as_ref(),
+                        segment_id: "import-0-0",
+                        body: &json!({"segment_revision":1,"changes":{"deleted":true}}),
+                        now: 1.,
+                    },
+                )?;
+                current.document = Some(outcome.document);
+                Ok::<_, ApiError>(())
+            })
+            .unwrap();
+        assert_eq!(
+            publish_rows(&rows, 1).unwrap()[0].rest.get("deleted"),
+            Some(&json!(true))
+        );
         rows[0].id = "import-1-0".into();
         rows[0].start = 1.;
         rows[0].end = 2.;

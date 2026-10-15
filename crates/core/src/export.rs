@@ -19,6 +19,9 @@ pub struct Export {
 pub fn export(document: &Document, kind: &str) -> Result<Export, ExportTooLarge> {
     if kind == "json" {
         let mut active = document.clone();
+        active
+            .segments
+            .retain(|segment| segment.rest.get("deleted") != Some(&Value::Bool(true)));
         for segment in &mut active.segments {
             segment.separation_candidate = None;
         }
@@ -50,7 +53,8 @@ fn render_lines(document: &Document, kind: &str) -> Vec<String> {
     let mut emitted = kind == "vtt";
     let mut cue = 0usize;
     for segment in &document.segments {
-        if segment.text.trim().is_empty() {
+        if segment.rest.get("deleted") == Some(&Value::Bool(true)) || segment.text.trim().is_empty()
+        {
             continue;
         }
         let turns = local_turns(segment);
