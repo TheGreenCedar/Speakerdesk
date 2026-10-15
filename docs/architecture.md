@@ -124,6 +124,7 @@ Language context is derived from direct acoustic observations belonging to the s
 - A pause acknowledgement owns both its request ID and exact saved-audio endpoint;
   recovery cannot acknowledge a later or unrelated boundary.
 - Complete supported-language output may retain routing warnings. Short mixed-language output keeps per-language timing receipts; long context composition still requires consistent language ownership and unambiguous timing.
+- During capture, accuracy may run one bounded passage/context after a primary drain when no ordered control is pending and the remaining audio fits one configured primary batch. Larger audio queues drain first; enrichment keeps its idle admission and priority. The same serial owner polls live work before another accuracy step; model calls are not preemptible.
 - Stop drains live EOF before running the remaining accuracy work and retries failed live anchors once. Shared recording control retains this limit across worker recovery.
 - Child loss keeps its typed cause, rebuilds live sessions once from saved audio, and lets unfinished accuracy work retry under the new generation.
 - Long rows plan only the unaccepted suffix. Accepted cores keep their text, language decisions and final sample boundary.
