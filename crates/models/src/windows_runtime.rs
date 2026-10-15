@@ -109,14 +109,15 @@ impl Backend {
         if policy.model_sha256 != model_sha256 {
             return Err(error("placement policy belongs to a different model hash"));
         }
-        // The exact-affine UINT4 graphs rely on their qualified node order for
-        // bounded reconstruction. Keep the measured optimization, DML scratch,
-        // fusion and CPU-arena settings together for this artifact family.
+        // The encoder needs its ordered, unfused reconstruction to bound memory.
+        // The smaller shape-folded decoders use DML pooling and fusion; keep ORT
+        // optimization disabled so it cannot expand the packed UINT4 constants.
+        let decoder = graph != "encoder";
         self.load_with_options(
             &admission.directory.join(graph_name),
             ort::session::builder::GraphOptimizationLevel::Disable,
-            false,
-            false,
+            decoder,
+            decoder,
             true,
             Some((&policy, &model_sha256)),
         )

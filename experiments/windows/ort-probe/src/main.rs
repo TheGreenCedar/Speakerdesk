@@ -423,6 +423,7 @@ fn main() -> Result<()> {
                 "runtime_sha256": sha256(&runtime)?, "loaded_runtime_libraries": libraries,
                 "runner_sha256": sha256(&std::env::current_exe()?)?, "case_sha256": sha256(&case_path)?,
                 "model_files": model_files, "assignments": assignments, "load_ms": load_ms,
+                "private_commit": private_commit()?,
                 "inspection_only": case.inspect_placement_only,
                 "policy_admitted": case.placement_policy.is_some() && admission.is_ok(),
                 "admission_error": admission.as_ref().err().map(|error| error.to_string()),

@@ -442,16 +442,33 @@ mod tests {
             let operation = Operation::native().unwrap();
             let started = std::time::Instant::now();
             let mut session = network.begin(&pcm, "en", (0, 0), &operation).unwrap();
+            let mut decoder_step_ms = Vec::new();
             let result = loop {
-                if let Some(result) = network.step(&mut session, &operation).unwrap() {
+                let step_started = std::time::Instant::now();
+                let result = network.step(&mut session, &operation).unwrap();
+                decoder_step_ms.push(step_started.elapsed().as_secs_f64() * 1000.0);
+                if let Some(result) = result {
                     break result;
                 }
             };
-            eprintln!("Cohere Windows resident run {run}: {:?}", started.elapsed());
+            let elapsed = started.elapsed();
+            eprintln!("Cohere Windows resident run {run}: {elapsed:?}");
             assert_eq!(session.tokens, expected);
             assert_eq!(result.text, reference["text"].as_str().unwrap());
             assert_eq!(result.raw_text, result.text);
             assert_eq!(result.token_count as usize, expected.len());
+            eprintln!(
+                "COHERE_REQUEST {}",
+                serde_json::json!({
+                    "pid": std::process::id(),
+                    "run": run,
+                    "samples": pcm.len(),
+                    "sample_rate": 16000,
+                    "seconds": elapsed.as_secs_f64(),
+                    "decoder_calls": decoder_step_ms.len(),
+                    "decoder_step_ms": decoder_step_ms,
+                })
+            );
             assert!(network.step(&mut session, &operation).is_err());
         }
         let operation = Operation::native().unwrap();

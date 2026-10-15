@@ -1,16 +1,20 @@
 # Cohere Windows graph qualification
 
-The draft Windows artifact inventory now pins the ordered exact-affine UINT4
-candidate: ten payload/policy files totaling **2,094,730,822 bytes**. Its dedicated
-Cohere loader disables ORT optimization, the DML memory arena and DML graph
-fusion, matching the retained-output qualification settings. Before returning
-each session, it checks actual API27 assignments against the exact pinned
-graph's reviewed placement policy. See
-[compact-weights.md](compact-weights.md) for provenance and the preserved failures.
-The Rust resident-request gate preserves the reference tokens/text, continuation
-and pre-cancel rejection within the memory bounds, but the 9.09-second clip takes
-12.95/11.12 seconds. Live throughput remains unqualified. The later diagnostic
-results below do not change the draft loader settings or establish a release.
+The draft Windows inventory pins the original-affine UINT4 encoder and the
+shape-folded decoder graphs. The loader disables ORT optimization for all three;
+the encoder disables DML pooling/fusion to bound reconstruction memory, while
+the smaller decoders enable both. Before returning a session, actual API27
+assignments must match that exact graph's reviewed placement policy.
+
+The actual Rust resident path preserves all 31 reference tokens and exact text
+in two complete requests. The 9.09-second clip takes **3.78 / 2.87 seconds**
+(first after load / second request), including preprocessing, encoder, all 32
+decoder calls and text construction. Native lifetime private peak is **4.29 GiB**;
+maximum sampled GPU commitment is **3.89 GiB**. Load is separately measured at
+10.96 seconds. These are retained-clip observations, not sustained live-app proof.
+[compact-weights.md](compact-weights.md) records the original weights, failed
+proxy gates and separate complete-request decision. Combined model residency,
+assembled application qualification and distribution remain open.
 
 ## FP32 diagnostic exporter
 

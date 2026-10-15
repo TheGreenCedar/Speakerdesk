@@ -41,20 +41,20 @@
     "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/cohere-speech--",
     "files": {
       "decoder-init-placement-policy.json": {
-        "sha256": "cfc642b03a5eb3c750d2d8642baa8ac05ca00a77dd1c3b99654cb239b72bfe0d",
-        "size": 232937
+        "sha256": "b16cb795b087366d127e77b735123372fed8a511baed6b9cc804fbda7e762dad",
+        "size": 213617
       },
       "decoder-init.onnx": {
-        "sha256": "832b2d541fde5bd1a8b5a884be2c9fb5844bf81dbdc865df4e6d5eb699d4fa23",
-        "size": 414063
+        "sha256": "747695a40d7a7be1938077c30cbd1459277bbffcea779614d8689e5d9b8cc2c5",
+        "size": 402269
       },
       "decoder-step-placement-policy.json": {
-        "sha256": "bfee3c221e80b8679d65b6cb8d8cf67aa34829fcffcd7f1bf418257ef0aaeb01",
-        "size": 189635
+        "sha256": "ecbbf2967d422ee483cce9cb4a9a2f20d7ddefc809043af1879146a5267f67a7",
+        "size": 175891
       },
       "decoder-step.onnx": {
-        "sha256": "2e60e256454f46b62a4158e15c2983bc1aace260f3704e8b1efbcaa9fd3e894f",
-        "size": 337823
+        "sha256": "d34369dd4e48b64be03e7a4fc4c3dcdc09973d86df472a10d29650354355a572",
+        "size": 329514
       },
       "decoder.weights-000": {
         "sha256": "83fcdea9364e3ddb1a5df4ede38800fcddae730026bded34f68841e72c1c9c9b",

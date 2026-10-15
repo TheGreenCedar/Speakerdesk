@@ -190,10 +190,11 @@ missing/extra/duplicate identities or a graph-hash mismatch fail closed. This
 enforces placement on the product-selected HighPerformance adapter instead of
 assuming it is the probe's adapter0. The shared admission source is also used by
 the native probe; its hostile placement tests move with that implementation.
-The dedicated Cohere loader uses disabled ORT
+At this historical ordered baseline, the Cohere loader used disabled ORT
 optimization, serial execution, no memory patterns, four intra-op threads,
-disabled DML memory arena, disabled DML graph fusion and the probe's enabled CPU
-arena. Other model loaders retain their existing settings.
+disabled DML memory arena/fusion and the probe's enabled CPU arena. The later
+decoder-only pooling integration below supersedes those decoder settings; other
+model loaders retain their existing settings.
 
 The ignored Rust resident test passes both exact 31-token/text requests,
 decoder-cache continuation, tiny-crop and pre-cancel checks under the original
@@ -211,15 +212,16 @@ decoders it also folds only embedded INT64 scalar `Unsqueeze` operations with
 literal axis 0 or -1 into equivalent one-element initializers. It preserves each
 surviving NodeProto, every original initializer, unrelated protobuf fields and
 all weight/reference bytes; controls include signed INT64 extremes, dynamic and
-floating inputs, invalid axes, duplicate identities and idempotence. These graphs
-are experimental: changing their hashes requires fresh reviewed placement
-policies and native qualification before changing the draft artifact registry.
+floating inputs, invalid axes, duplicate identities and idempotence. The shape graphs received fresh exact placement policies and load-only native
+admission; the complete-request integration below now pins those four decoder
+graph/policy files. All other artifact pins remain unchanged.
 
 The same retained inputs and `.002` absolute/relative comparisons were used in
 these consecutive diagnostics. Each speed gate requires **every** completed Run
 to be at most 150 ms, with two repeats, 6 GiB lifetime private commit, 8 GiB sampled
 GPU commitment and a 180-second family budget. Each failed at init, so none ran
-its subsequent decoder-step case or changed production settings.
+its subsequent decoder-step case. None of these failed gates alone justified
+a production setting change.
 
 | Decoder-init configuration | Cold / repeated Run | Result |
 | --- | ---: | --- |
@@ -227,6 +229,7 @@ its subsequent decoder-step case or changed production settings.
 | Exact INT64 shape fold | 434.43 / 310.14 ms | Speed failed |
 | Shape fold with GPU-bound KV outputs | 438.16 / 301.21 ms | Speed failed |
 | Shape fold with decoder-only memory pooling, ordinary outputs | 163.47 / 23.76 ms | First-call speed failed |
+| Pooling plus last-two-axis MatMul transpose fusion | 293.27 / 21.33 ms | First-call speed failed; rewrite discarded |
 
 Offline comparisons for each failed gate preserve all 66 output tensors,
 repeated bytes and greedy-logit identity; maximum reference error is 5.72205e-6.
@@ -248,3 +251,45 @@ Enabling decoder pooling materially reduces repeated-shape cost. The remaining
 cold overhead spans many DML nodes; host profile spans cannot distinguish resource
 creation, first-use compilation, GPU execution and waits. Do not omit first-use
 work from timing or reinterpret the failed cold-call gate as a family pass.
+
+
+## Complete resident requests with decoder pooling
+
+The 150 ms gates above remain failed. That bound was a conservative throughput
+proxy: retained cold encoder time plus 32 calls at 150 ms would fit inside the
+9.09-second clip. Pooling reduced repeated decoder time from 310 to 24 ms, so a
+separate prospective observation measured the actual complete request rather
+than adding another graph rewrite. The transpose experiment was discarded:
+three rewritten MatMuls added concentrated first-use cost without a useful
+steady-state improvement. Its exact prototype and failed receipts are retained
+with the task evidence; it is not a converter option or runtime dependency.
+
+The integrated candidate changes only the two decoder sessions to DML pooling
+and fusion, and pins the four existing shape graph/policy files from manifest
+`e292b3d454db8e83f36a0473f7986dccfea60cc99b50e7084af87795fadb98e0`.
+The encoder, packed stores, tokenizer, independent references and numerical
+placement boundary are unchanged. There is no shape override, prewarm or GPU
+binding path. The existing ignored Rust test emits `COHERE_REQUEST` receipts
+around `begin` through final text, with each decoder call counted and timed.
+
+Both complete requests had to finish within the actual 145,445-sample / 16 kHz
+clip, while retaining the existing 6 GiB lifetime private / 8 GiB sampled GPU /
+180-second family limits and all correctness assertions. The retained shape
+inspection time was charged to the family. The one process passed:
+
+| Observation | Result |
+| --- | ---: |
+| Network load, reported separately | 10.9578 s |
+| First complete request, including first inference | 3.7813 s (RTF 0.416) |
+| Second fresh request | 2.8684 s (RTF 0.316) |
+| Calls including EOS, each request | 32 |
+| Native lifetime private peak | 4,609,437,696 bytes |
+| Maximum sampled GPU commitment | 4,180,258,816 bytes |
+| Family time including retained inspection | 25.5338 s |
+
+Both requests preserve all 31 reference tokens and exact text. Completed-session,
+short-crop and pre-cancel checks pass; the owned process exits and is reaped.
+The result receipt is `c247a75134f03bf3239aa7e59d2e3b446b7f4610538bce704ed3de56e74a09f7`.
+This qualifies this retained English clip and these two requests. It does not
+establish all-model residency, sustained live backlog, new-speech accuracy,
+in-flight cancellation, installed behavior or public readiness.

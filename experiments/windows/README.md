@@ -13,8 +13,10 @@ rejected its 10.27 GB download and memory cost. Cohere now has an
 the original packed bytes. Exact native placement now admits numerical work on
 DirectML and proven integer shape work on CPU. The initial memory failure is
 retained; stable ordering subsequently passed the numerical family and full
-reference transcription within the original memory bounds. Compact live
-throughput, combined residency and application qualification remain open.
+reference transcription within the original memory bounds. Decoder pooling
+subsequently brings the actual complete 9.09-second reference request to
+3.78 / 2.87 seconds, including the first use. Combined residency, sustained live
+throughput and assembled application qualification remain open.
 [Later decoder diagnostics](cohere/compact-weights.md#decoder-throughput-diagnostics)
 record their failures separately; do not transfer the FP32 results below to the
 compact candidate.
