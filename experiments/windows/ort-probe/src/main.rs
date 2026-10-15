@@ -28,6 +28,8 @@ struct Case {
     #[serde(default)]
     disable_memory_arena: bool,
     #[serde(default)]
+    disable_graph_fusion: bool,
+    #[serde(default)]
     idle_ms: u64,
     #[serde(default)]
     inspect_placement_only: bool,
@@ -220,6 +222,49 @@ fn idle_phase(output: &Path, name: &str, milliseconds: u64) -> Result<()> {
     Ok(())
 }
 
+fn private_commit() -> Result<serde_json::Value> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::{
+            ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX},
+            Threading::GetCurrentProcess,
+        };
+        let mut counters: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+        let bytes = std::mem::size_of_val(&counters) as u32;
+        counters.cb = bytes;
+        if unsafe {
+            GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast(),
+                bytes,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // PeakPagefileUsage is lifetime peak private commit, not resident RAM or GPU peak.
+        Ok(json!({"current_bytes": counters.PrivateUsage,
+            "lifetime_peak_bytes": counters.PeakPagefileUsage,
+            "source": "GetProcessMemoryInfo/PROCESS_MEMORY_COUNTERS_EX"}))
+    }
+    #[cfg(not(windows))]
+    Ok(serde_json::Value::Null)
+}
+
+fn run_phase(output: &Path, run: usize, completed: bool) -> Result<()> {
+    let name = if completed { "complete" } else { "start" };
+    let phase = json!({"phase": format!("run-{name}"), "run": run,
+        "pid": std::process::id(), "unix_ms": SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+        "model_run_returned": completed, "private_commit": private_commit()?});
+    fs::write(
+        output.join(format!("phase-run-{run}-{name}.json")),
+        serde_json::to_vec_pretty(&phase)?,
+    )?;
+    println!("{phase}");
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
@@ -358,6 +403,9 @@ fn main() -> Result<()> {
     if case.disable_memory_arena {
         builder = builder.with_config_entry("ep.dml.disable_memory_arena", "1")?;
     }
+    if case.disable_graph_fusion {
+        builder = builder.with_config_entry("ep.dml.disable_graph_fusion", "1")?;
+    }
     if capture_placement {
         builder = builder.with_config_entry("session.record_ep_graph_assignment_info", "1")?;
     }
@@ -463,6 +511,7 @@ fn main() -> Result<()> {
     let mut run_ms = Vec::new();
     let mut output_records = Vec::new();
     for run in 0..case.repeat {
+        run_phase(&output, run, false)?;
         let started = Instant::now();
         let outputs = session.run(
             inputs
@@ -471,6 +520,7 @@ fn main() -> Result<()> {
                 .collect::<Vec<_>>(),
         )?;
         run_ms.push(started.elapsed().as_secs_f64() * 1000.);
+        run_phase(&output, run, true)?;
         for (index, (name, value)) in outputs.iter().enumerate() {
             let (shape, dtype, bytes) = if let Ok((shape, data)) = value.try_extract_tensor::<f32>()
             {
@@ -531,6 +581,8 @@ fn main() -> Result<()> {
         "case_sha256": sha256(&case_path)?, "inputs": input_records, "outputs": output_records,
         "graph_optimizations_disabled": case.disable_optimizations,
         "require_dml_only": case.require_dml_only, "memory_arena_disabled": case.disable_memory_arena,
+        "dml_graph_fusion_disabled": case.disable_graph_fusion,
+        "private_commit": private_commit()?,
         "idle_ms": case.idle_ms,
         "placement_policy_admitted": case.placement_policy.is_some(), "pre_run_assignments": assignments,
         "load_ms": load_ms, "run_ms": run_ms, "executed_provider_events": placement, "profile": profile

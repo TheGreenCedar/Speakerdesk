@@ -132,3 +132,124 @@ Local controls (Python 3.11+; no NumPy/ONNX needed for these controls):
 python -m unittest discover -s experiments/windows/cohere -p test_quantized_probe.py -v
 cargo test --locked --manifest-path experiments/windows/ort-probe/Cargo.toml
 ```
+
+## Bounded scheduling contrast
+
+The full compact encoder passed load-only placement inspection but exceeded its
+resource guard on the first request. The original synthetic branches were
+independent. This additional **single pair** tests the dependent weight lifetimes
+that the original family did not cover; it is not another full-model attempt.
+
+Both graphs contain the same eight distinct `[3072,3072]` UINT4 affine matrices
+and a dependent MatMul chain, with input `[frames,3072]` and representative
+`frames=114`. Each intermediate product is multiplied by the exact power-of-two
+constant `1/256` before becoming the next input, keeping the scalar/NumPy controls
+finite. All eight products are compared under the unchanged 0.002 bounds; both
+repetitions must match exactly. The reference is computed once in bounded row
+blocks and shared by both cases. No checkpoint, retained-model oracle or original
+FP32 model is read. The earlier tiny correctness graph and its reference remain
+the fail-fast nibble/affine control.
+
+`interleaved` preserves generation order. `hoisted` stable-partitions the complete
+input-independent node closure, including the existing weight Transposes. Every
+node, initializer, input/output and operation remains identical; only node order
+changes. Preparation checks this identity and replays the pinned ORT default
+reverse-DFS traversal. Its modeled live transposed-weight inventory must be
+**288 MiB interleaved versus 36 MiB hoisted**. Hoisting only reconstruction nodes
+does not produce the intended contrast.
+
+Both cases set `disable_graph_fusion=true`, which sets the maintained
+`ep.dml.disable_graph_fusion=1` option. This prevents later DML fusion from
+appending new high-index weight islands and undoing the controlled ordering.
+The option defaults to false for all existing cases. Both cases also disable ORT
+optimization and the DML arena and retain strict DML-only admission. These
+controls do not guarantee a particular physical allocation or GPU lifetime.
+
+```powershell
+$family = "$base\issue20-models\cohere-scheduling-v1"
+& $python experiments/windows/cohere/quantized_probe.py prepare-scheduling $family
+```
+
+The new destination contains `family.json`, `interleaved.onnx`, `hoisted.onnx`,
+one shared `weights.bin`, one input, one reference array set, and per-case
+`interleaved/case.json` and `hoisted/case.json`. The graph-local ONNX external data
+location is simply `weights.bin`; it does not escape the graph directory. Packed
+weights and affine metadata occupy 45 MiB once. Preparation rejects a complete
+family larger than 128 MiB. There are no shape/count knobs or expansion variants.
+
+After adversarial review and the existing tiny correctness control, root owns
+these three invocations under one wrapper. The tiny control may use a fresh case
+copy with `disable_graph_fusion=true`, preserving its graph, inputs and reference.
+Use fresh output directories and reap each owned process before proceeding:
+
+```powershell
+$results = "$base\cohere-scheduling-v1-results"
+# Each native command runs through the owning lane's bounded wrapper.
+& $probe $runtime dml "$family\interleaved\case.json" "$results\interleaved"
+& $python experiments/windows/cohere/quantized_probe.py compare-scheduling $family $results --case interleaved
+& $probe $runtime dml "$family\hoisted\case.json" "$results\hoisted"
+& $python experiments/windows/cohere/quantized_probe.py compare-scheduling $family $results
+```
+
+The **120-second whole-family limit**, **2 GiB sampled GPU committed guard** and
+**2 GiB process private-commit guard** include the tiny control and this pair.
+Stop on the first failed gate. Never increase a guard, retry the full model or
+start native decoding automatically. Preparation/build are outside the native
+timer. Timestamped GPUProcessMemory samples remain required; missing counters
+fail the sampled GPU policy and cannot be replaced by a process-memory number.
+
+The native probe writes `phase-run-{0,1}-start.json` immediately before each Run,
+after input loading, and `phase-run-{0,1}-complete.json` after Run returns, before
+output serialization. These receipts carry run index, PID, UTC Unix milliseconds,
+`model_run_returned` and `private_commit`. Baseline/loaded/warm idle phases last
+1500 ms for this pair. A start marker identifies entry to a request; it does not
+claim that execution or device work completed.
+
+On Windows, `private_commit` contains `current_bytes`, `lifetime_peak_bytes`, and
+source `GetProcessMemoryInfo/PROCESS_MEMORY_COUNTERS_EX`. `PrivateUsage` measures
+current process private commit; `PeakPagefileUsage` measures its lifetime peak.
+This is neither resident physical RAM nor GPU peak. The result records the same
+process-lifetime measurement after both requests and profile collection. It
+includes loader, compiler, driver, inputs and output handling. No counter is reset
+between requests; use one fresh process per graph.
+
+The fixed decision requires both numerical/provider/repeat gates, no resource
+guard violation, pre-Run current **and lifetime-peak** private-commit baselines
+within **36 MiB**, and an inference-complete peak above the pre-Run lifetime peak
+for each case. Hoisted lifetime peak must be at least **108 MiB (three expanded
+matrices)** below interleaved. Loader-dominated peaks or a smaller effect leave
+the scheduling contrast unproven; the comparator exits nonzero for that outcome.
+These thresholds are frozen before measurement. A pass establishes a bounded
+process-commit scheduling contrast, not allocation-site attribution, GPU peak,
+packed persistent residency of the full model, or a shipping claim.
+
+The focused optional ONNX control runs only in the existing generation
+environment. It builds a tiny dynamic dependent chain, checks both graph orders
+and external storage, and compares the single NumPy control against scalar affine
+matrix products. It skips locally when ONNX is unavailable; it never runs ORT.
+
+The single native scheduling family passed on the AMD PC on 2026-10-15. Its
+59,815,706-byte input family is pinned by manifest
+`5aa8c988faf9145a06caab4016eb865f1cc1b6a56583fcafbd5d26d8eff8b64f`.
+All outputs match the unchanged reference bounds (maximum absolute difference
+`3.6508e-7`), repeats are exact, and both graph orders return identical bytes.
+Profiles contain only DirectML events. Lifetime peak private commit fell from
+594,743,296 to 335,712,256 bytes, a 247.03 MiB reduction; loaded current and peak
+baselines differ by less than 9 MiB. Both have distinct inference peaks. All
+three owned processes exited normally and were independently observed absent.
+
+The sampled GPU observations miss the short requests and do not establish GPU
+peak. This result supports one full-model ordering/fusion-disabled candidate
+under the unchanged full-model guards; it does not qualify that candidate or
+prove its allocation cause. Receipts remain under `cohere-scheduling-v1-results`.
+
+The resulting full-model family also passed once on the same PC. Ordered manifest
+`3b4b81dd69360dc62e245645aeef2a6cf7d0f5d18ea778cb0abd1afe7543767f`
+preserves all graph operations and weights; only node order changes. Encoder,
+decoder-init and decoder-step match the retained references within `5.7221e-6`,
+with byte-identical repeats. The family took 38.50 seconds under the original
+8 GiB sampled GPU / 6 GiB private-commit / 180-second guards. Encoder lifetime
+peak private commit was 3,064,528,896 bytes; maximum sampled GPU commitment was
+2,461,843,456 bytes. The exact placement policy still permits only proven integer
+shape/index work on CPU. These are retained tensor checks; full transcription,
+combined model residency and the shipping application remain separate gates.
