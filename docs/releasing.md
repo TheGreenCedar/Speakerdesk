@@ -61,3 +61,30 @@ Preparation checks the payload inventory and hashes, notarization, the compiled 
 3. Deploy, then check the installer and archive bytes anonymously, along with the latest metadata, the updater version and signature, and the previous version's routes.
 
 The app ZIP, signature, signer manifest and `SHA256SUMS` stay attached to the GitHub release.
+
+## Windows preparation
+
+Windows uses the [two-phase signing path](windows-signing.md), with the updater key
+remaining on the Mac. Freeze the qualified source/model candidate before packaging.
+After final NSIS signing and actual standard-user installation QA, prepare locally:
+
+```sh
+python3 scripts/promote_release.py --manifest <candidate>/artifact-manifest.json \
+  --native-qa <proof>/native-qa.json --notes <proof>/notes.md
+```
+
+This branch binds local operator reports, signed payload snapshots, final installer,
+signature and build-time configuration pins. It supplies no Apple producer/signer
+provenance and rejects `--publish`. Native installed observations and actual updater
+verification must name these exact bytes; portable contract tests cannot supply them.
+The candidate manifest stays `public_ready: false`. Model distribution/readiness and
+owner-controlled public promotion remain separate gates. Never relabel the existing
+Mac `v0.7.6` tag or artifacts with a different Windows source commit.
+
+The website's independent `speakerdesk-windows-releases.json` catalog starts empty.
+Its `/downloads/speakerdesk/updater/windows-x86_64/latest.json` endpoint returns 204
+until an approved Windows entry is selected; the Mac feed/catalog are unchanged.
+Approved Windows installers use the existing immutable versioned download route
+with `application/octet-stream`. Real A-to-B update proof requires an older installed
+Windows build with this Windows-specific endpoint and a newer approved signed target;
+direct installer replacement and detached-signature verification do not prove that flow.

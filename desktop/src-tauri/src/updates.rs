@@ -14,7 +14,11 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::mpsc;
 
+#[cfg(not(target_os = "windows"))]
 const ENDPOINT: &str = "https://rootandruntime.com/downloads/speakerdesk/updater/latest.json";
+#[cfg(target_os = "windows")]
+const ENDPOINT: &str =
+    "https://rootandruntime.com/downloads/speakerdesk/updater/windows-x86_64/latest.json";
 const MAX_UPDATE_BYTES: u64 = 256 * 1024 * 1024;
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(45);

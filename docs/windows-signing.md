@@ -154,6 +154,23 @@ beside pending metadata, verified again on retry. Remove an abandoned
 keeps installed evidence and `public_ready` false; signed installed QA and
 promotion remain separate gates.
 
+Local Windows release preparation requires `native-qa.json` with `passed`,
+`platform: windows-x86_64`, exact `version`, full `source_commit`, and
+`artifact_manifest_sha256`. Its `verification`/`verification_sha256` bind a JSON
+operator report with kind `signed-standard-user-install`, `passed`, `standard_user`,
+`installer_sha256`, and the exact observed `installed_payloads` map. The report
+confirms `authenticode_verified`, `save_reopen`, `clean_shutdown`,
+`uninstall_reinstall` and `data_preserved` for the signed installed package.
+
+The QA file also binds `updater_verification`/`updater_verification_sha256` to the
+actual Mac verifier receipt: kind `nsis-installer-updater-verification`, exact
+`payload_sha256`, `signature_sha256`, `version`, compiled `public_key`,
+`signature_key_version_verified: true` and `payload_unchanged: true`. Helper fixtures,
+dirty source, pending signatures, changed reports/configurations or missing signed
+snapshots fail preparation. These are explicit local operator assertions bound to
+files; preparation does not rerun native trust or cryptography, authenticate CI, prove
+an app-driven update, or permit publication. See [releasing](releasing.md#windows-preparation).
+
 ## Focused local checks
 
 ```sh
