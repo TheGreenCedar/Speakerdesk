@@ -1,8 +1,8 @@
 // Shipped renderer contract; router/model behavior is exercised separately.
 const test=require('node:test'),assert=require('node:assert/strict'),path=require('node:path');
 const {frontend}=require('./support/frontend_dom.cjs');
-function openPassageDetails(f) {
-  const card=f.document.getElementById('segments').firstChild;
+function openPassageDetails(f,index=0) {
+  const card=f.document.getElementById('segments').children[index];
   card.querySelector('.passage-details-toggle').click();
   return f.run('isLive()')?card.querySelector('.rolling-review'):f.document.getElementById('segment-details');
 }
@@ -33,6 +33,27 @@ test('prior words can be compared and explicitly restored through protected pass
     assert.equal(f.run('JSON.parse(calls[1].options.body).segment_revision'),1);
     assert.equal(f.run('doc.segments[0].start'),0);assert.equal(f.run('doc.segments[0].end'),10);
   }
+});
+
+test('a pending history comparison cannot append one passage\'s words or restore action to another passage\'s inspector',async()=>{
+  const f=frontend(path.resolve(__dirname,'..'));f.seed(2);
+  f.run(`doc.segments.forEach(row=>row.refinement_window=row.id);window.historyRequests={};
+    api=path=>new Promise(resolve=>historyRequests[path.split('/').pop()]=resolve);renderSegments();`);
+  const details=openPassageDetails(f),compareA=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+  compareA.click();
+  assert.equal(openPassageDetails(f,1),details,'the inspector is reused for the newly selected passage');
+  const compareB=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+  assert.notEqual(compareB,compareA);
+  f.run("historyRequests.r0({segments:[{id:'r0',start:0,end:10,text:'Earlier A words'}]})");
+  await Promise.all(compareA.lastEventResults);
+  assert.equal(details.querySelector('.prior-words'),null,'A response must stay out of B details');
+  assert.equal(details.querySelectorAll('button').some(button=>button.textContent==='Restore prior words'),false);
+  compareB.click();
+  f.run("historyRequests.r1({segments:[{id:'r1',start:10,end:20,text:'Earlier B words'}]})");
+  await Promise.all(compareB.lastEventResults);
+  assert.equal(details.querySelector('.prior-words').textContent,'Earlier B words');
+  assert.equal(details.querySelectorAll('button').some(button=>button.textContent==='Restore prior words'),true);
+  assert.equal(f.run('doc.segments[0].text'),'Words 0');assert.equal(f.run('doc.segments[1].text'),'Words 1');
 });
 
 test('prior words stay copyable after a trim and a compared stale or deleted passage cannot be restored',async()=>{
