@@ -20,6 +20,10 @@ use windows_sys::Win32::System::LibraryLoader::{
     LOAD_LIBRARY_SEARCH_USER_DIRS, RemoveDllDirectory, SetDefaultDllDirectories,
 };
 
+#[path = "windows_placement.rs"]
+mod placement;
+use placement::{PlacementPolicy, admit_placement, placement_assignments};
+
 static RUNTIME_READY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
@@ -60,6 +64,9 @@ impl Backend {
             path,
             ort::session::builder::GraphOptimizationLevel::Level3,
             true,
+            true,
+            false,
+            None,
         )
     }
 
@@ -68,6 +75,9 @@ impl Backend {
             path,
             ort::session::builder::GraphOptimizationLevel::Disable,
             true,
+            true,
+            false,
+            None,
         )
     }
 
@@ -76,6 +86,39 @@ impl Backend {
             path,
             ort::session::builder::GraphOptimizationLevel::Level3,
             false,
+            true,
+            false,
+            None,
+        )
+    }
+
+    pub(crate) fn load_cohere(
+        &self,
+        admission: &ModelAdmission,
+        graph: &str,
+    ) -> Result<Session, ChildError> {
+        if !matches!(graph, "encoder" | "decoder-init" | "decoder-step") {
+            return Err(error("Unknown Cohere graph"));
+        }
+        // Both reads use the admitted handles retained against writes/replacement.
+        let graph_name = format!("{graph}.onnx");
+        let policy: PlacementPolicy =
+            serde_json::from_slice(&admission.read(&format!("{graph}-placement-policy.json"))?)
+                .map_err(error)?;
+        let model_sha256 = format!("{:x}", Sha256::digest(admission.read(&graph_name)?));
+        if policy.model_sha256 != model_sha256 {
+            return Err(error("placement policy belongs to a different model hash"));
+        }
+        // The exact-affine UINT4 graphs rely on their qualified node order for
+        // bounded reconstruction. Keep the measured optimization, DML scratch,
+        // fusion and CPU-arena settings together for this artifact family.
+        self.load_with_options(
+            &admission.directory.join(graph_name),
+            ort::session::builder::GraphOptimizationLevel::Disable,
+            false,
+            false,
+            true,
+            Some((&policy, &model_sha256)),
         )
     }
 
@@ -84,12 +127,15 @@ impl Backend {
         path: &Path,
         optimization: ort::session::builder::GraphOptimizationLevel,
         memory_arena: bool,
+        graph_fusion: bool,
+        cpu_arena: bool,
+        placement: Option<(&PlacementPolicy, &str)>,
     ) -> Result<Session, ChildError> {
         if !fs::symlink_metadata(path).map_err(error)?.is_file() || path.is_symlink() {
             return Err(error("Model graph must be a regular file"));
         }
         // DirectML requires serial execution and disabled memory-pattern optimization.
-        let session = Session::builder(&self.environment)
+        let mut builder = Session::builder(&self.environment)
             .map_err(error)?
             .with_optimization_level(optimization)
             .map_err(error)?
@@ -105,6 +151,17 @@ impl Backend {
                 if memory_arena { "0" } else { "1" },
             )
             .map_err(error)?
+            .with_config_entry(
+                "ep.dml.disable_graph_fusion",
+                if graph_fusion { "0" } else { "1" },
+            )
+            .map_err(error)?;
+        if placement.is_some() {
+            builder = builder
+                .with_config_entry("session.record_ep_graph_assignment_info", "1")
+                .map_err(error)?;
+        }
+        let session = builder
             .with_execution_providers([
                 ort::ep::DirectML::default()
                     .with_performance_preference(
@@ -112,13 +169,18 @@ impl Backend {
                     )
                     .build()
                     .error_on_failure(),
-                // Each yielding model stage must release its temporary CPU allocations.
-                ort::ep::CPU::default().with_arena_allocator(false).build(),
+                ort::ep::CPU::default()
+                    .with_arena_allocator(cpu_arena)
+                    .build(),
             ])
             .map_err(error)?
             .commit_from_file(path)
             .map_err(error)?;
         reject_foreign_runtime(&self.directory.path)?;
+        if let Some((policy, model_sha256)) = placement {
+            let assignments = placement_assignments(&session).map_err(error)?;
+            admit_placement(policy, model_sha256, &assignments).map_err(error)?;
+        }
         Ok(session)
     }
 }
@@ -167,7 +229,7 @@ pub fn verify_model(directory: &Path, id: &str) -> Result<(), ChildError> {
 /// Hold verified file identities until their native model objects are dropped.
 pub(crate) struct ModelAdmission {
     directory: PathBuf,
-    _files: Vec<fs::File>,
+    files: BTreeMap<String, fs::File>,
     // Drop this last so the directory cannot move before its file guards close.
     _directory: fs::File,
 }
@@ -175,6 +237,20 @@ pub(crate) struct ModelAdmission {
 impl ModelAdmission {
     pub(crate) fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    fn read(&self, name: &str) -> Result<Vec<u8>, ChildError> {
+        use std::io::Seek;
+        let mut file = self
+            .files
+            .get(name)
+            .ok_or_else(|| error(format!("Artifact was not admitted: {name}")))?
+            .try_clone()
+            .map_err(error)?;
+        file.rewind().map_err(error)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(error)?;
+        Ok(bytes)
     }
 }
 
@@ -201,7 +277,7 @@ fn admit_files(
     if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(error("Artifact directory is missing or a reparse point"));
     }
-    let mut handles = Vec::with_capacity(files.len());
+    let mut handles = BTreeMap::new();
     for (name, pin) in files {
         verify_filename(name)?;
         let file = fs::OpenOptions::new()
@@ -211,11 +287,11 @@ fn admit_files(
             .open(directory.join(name))
             .map_err(error)?;
         // Metadata and hash come from the very handle retained against writes/deletion.
-        handles.push(verify_open_file(file, name, pin)?);
+        handles.insert(name.clone(), verify_open_file(file, name, pin)?);
     }
     Ok(ModelAdmission {
         directory,
-        _files: handles,
+        files: handles,
         _directory: directory_handle,
     })
 }

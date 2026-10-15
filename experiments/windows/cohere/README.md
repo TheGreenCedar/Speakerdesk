@@ -1,5 +1,17 @@
 # Cohere Windows graph qualification
 
+The draft Windows artifact inventory now pins the ordered exact-affine UINT4
+candidate: ten payload/policy files totaling **2,094,730,822 bytes**. Its dedicated
+Cohere loader disables ORT optimization, the DML memory arena and DML graph
+fusion, matching the retained-output qualification settings. Before returning
+each session, it checks actual API27 assignments against the exact pinned
+graph's reviewed placement policy. See
+[compact-weights.md](compact-weights.md) for provenance and the preserved failures.
+The Rust resident-request gate remains pending; these pins do not establish
+publication or release readiness.
+
+## FP32 diagnostic exporter
+
 Build-only conversion of the installed, pinned MLX 4-bit checkpoint into ONNX.
 The application remains Rust. No upstream ONNX checkpoint is substituted and no
 independent reference is regenerated.
@@ -142,9 +154,9 @@ the verified manifest and rerun native encoder/decode qualification. The helper
 does not change the exporter, independent references, numerical bounds or runtime
 format.
 
-The Windows repack preserves all 1,884 tensor ranges in eight shards. The updated
-encoder graph is `c777228a…`; the complete output pins are in
-`crates/models/src/windows-model-artifacts.json`. Five focused tests pass on
+The historical FP32 repack preserves all 1,884 tensor ranges in eight shards.
+Its encoder graph is `c777228a…`; it has been superseded in the draft artifact
+inventory by the compact candidate above. Five focused tests passed on
 Windows, including an attempted same-length write blocked by the retained handle.
 The native Rust resident transcription test also passes with the sharded layout:
 all 31 retained tokens, text and EOS match across both requests, with the existing
@@ -153,7 +165,7 @@ two requests took 1.258 s and 0.535 s. This qualifies the artifact layout and Ru
 frontend on the retained clip; multilingual quality and published-download setup
 remain separate gates.
 
-The ignored `windows_residency` integration test keeps Cohere, Silero, Nemotron,
+The previous FP32 `windows_residency` integration test kept Cohere, Silero, Nemotron,
 ReDimNet and MossFormer loaded together. Cohere decoder state survives VAD,
 diarization, embedding and the maximum 392,000-sample separation window; a decoder
 step also runs between separation phases. Resumed and subsequent transcription

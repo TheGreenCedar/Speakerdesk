@@ -117,16 +117,16 @@ remain retained.
 
 The candidate case policy
 disables ORT optimization and the DML memory arena and requests strict DML with
-CPU fallback disabled. The production Cohere loader currently uses Level3
-optimization; root must integrate the admitted policy and new pins only after
-the native candidate passes. A strict full-graph placement failure is evidence
+CPU fallback disabled. The production Cohere loader used Level3 optimization
+at this diagnostic stage. A strict full-graph placement failure is evidence
 to review, not permission to add numerical CPU fallback.
 
 The next native gate must retain expected outputs/tokens/EOS, repeated requests,
 decoder cache continuation and existing numerical bounds, then measure full-model
 persistent/temporary GPU allocations and latency. The synthetic packed-matrix
 result does not establish those full-model properties, particularly if DML fuses
-a larger graph. No shipping claim or production registry update is made here.
+a larger graph. The later ordered candidate and draft registry integration are
+recorded below.
 
 ## Placement admitted; execution memory gate failed
 
@@ -165,3 +165,40 @@ correctness, full decoding, residency and throughput remain unqualified. Keep
 the failed candidate and receipts; raising the guard does not resolve compact
 execution. Private evidence is retained under
 `cohere-compact-qualified-placement-v1-results` in the owning work record.
+
+## Ordered candidate and draft Rust integration
+
+The subsequent candidate stable-partitions the complete input-independent node
+closure before the remaining nodes and disables DML graph fusion. Only node
+order changes: each NodeProto, all other model fields, external weights and
+retained references remain byte-identical. The three retained-output graph gates
+passed in 38.5 seconds with the original `.002` bounds, two repeats, 8 GiB sampled
+GPU commitment, 6 GiB process private commit and 180-second family limits.
+Independent profile review matched every CPU event to the reviewed INT64
+shape/index nodes and found no numerical CPU execution. These are retained
+graph-case results; full resident transcription and throughput remain separate.
+
+The ordered manifest SHA-256 is
+`3b4b81dd69360dc62e245645aeef2a6cf7d0f5d18ea778cb0abd1afe7543767f`.
+The draft artifact inventory pins its three graphs, three external weight stores,
+tokenizer and three graph-specific placement policies: **2,094,730,822 bytes**
+total. Exact artifact admission retains all verified file handles. The loader
+parses each policy and hashes its graph through those admitted handles, enables
+API27 assignment recording before session construction, and checks every actual
+assignment before returning the session. Unknown providers, numerical CPU work,
+missing/extra/duplicate identities or a graph-hash mismatch fail closed. This
+enforces placement on the product-selected HighPerformance adapter instead of
+assuming it is the probe's adapter0. The shared admission source is also used by
+the native probe; its hostile placement tests move with that implementation.
+The dedicated Cohere loader uses disabled ORT
+optimization, serial execution, no memory patterns, four intra-op threads,
+disabled DML memory arena, disabled DML graph fusion and the probe's enabled CPU
+arena. Other model loaders retain their existing settings.
+
+The existing ignored Rust resident test must still pass both exact 31-token/text
+requests, decoder-cache continuation, tiny-crop and cancellation checks under
+the same guards. It emits a `COHERE_MEMORY` JSON receipt and asserts lifetime
+peak process private commit is at most 6 GiB; this captures brief process-commit
+peaks between external samples and does not measure GPU peak or resident RAM.
+Publication, seven-model residency and live throughput are not qualified by
+this draft integration. Earlier failed candidates and receipts remain retained.

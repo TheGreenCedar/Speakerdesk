@@ -40,53 +40,41 @@
     "revision": "064e51eab6db47066cbeaa85e2894b5691bd8d12",
     "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/cohere-speech--",
     "files": {
+      "decoder-init-placement-policy.json": {
+        "sha256": "cfc642b03a5eb3c750d2d8642baa8ac05ca00a77dd1c3b99654cb239b72bfe0d",
+        "size": 232937
+      },
       "decoder-init.onnx": {
-        "sha256": "dfa9b651acd135de51cd6653b43646325d8a3819212ffee02ed49d4711a959b3",
-        "size": 235472
+        "sha256": "832b2d541fde5bd1a8b5a884be2c9fb5844bf81dbdc865df4e6d5eb699d4fa23",
+        "size": 414063
+      },
+      "decoder-step-placement-policy.json": {
+        "sha256": "bfee3c221e80b8679d65b6cb8d8cf67aa34829fcffcd7f1bf418257ef0aaeb01",
+        "size": 189635
       },
       "decoder-step.onnx": {
-        "sha256": "04f35e5eb203917056598df0c5844922bc0ac808d10d441ea1d9e837dde323c5",
-        "size": 194001
+        "sha256": "2e60e256454f46b62a4158e15c2983bc1aace260f3704e8b1efbcaa9fd3e894f",
+        "size": 337823
       },
-      "decoder.weights": {
-        "sha256": "376f7fc1ca000955e0330e54a1407c0d7fad13b80cc3be7f61b80190452905bf",
-        "size": 614125568
+      "decoder.weights-000": {
+        "sha256": "83fcdea9364e3ddb1a5df4ede38800fcddae730026bded34f68841e72c1c9c9b",
+        "size": 96555008
+      },
+      "encoder-placement-policy.json": {
+        "sha256": "9b2b210d0c6d0d078cf2789b9f53917e370d208adf6bb1d23d91da30100a2267",
+        "size": 1609667
       },
       "encoder.onnx": {
-        "size": 2028074,
-        "sha256": "c777228abfb243a3545a8d49453800ef9206b4019250f0eedc882d412c59270d"
+        "sha256": "c0f3df497097af854967c660e7b59b0d071c34239c8b5065011dd9dec42b9995",
+        "size": 3257939
       },
       "encoder.weights-000": {
-        "size": 1071574016,
-        "sha256": "58c4dc1534c10f771454d1312d1df363597bf3ba8b7e6fc601b84ac60d83a924"
+        "sha256": "bf1f929c9b90c143f633188e7a457c76b8325e90dc4cea0bc987524ac34487da",
+        "size": 1071579136
       },
       "encoder.weights-001": {
-        "size": 1069685760,
-        "sha256": "9a6d1ebfae8f76c9f436c7594840c5f5fa9da8ff943510396ba969c18f5db2f5"
-      },
-      "encoder.weights-002": {
-        "size": 1056640000,
-        "sha256": "9141f137e1b329f6f906e06b85b300efdc3ea2cff56c2e785d33c076b6571af7"
-      },
-      "encoder.weights-003": {
-        "size": 1050040320,
-        "sha256": "54eb3235ea6c5c039e4959a7968be1148417950210943e56b99bd11982aec47c"
-      },
-      "encoder.weights-004": {
-        "size": 1069752320,
-        "sha256": "1766a2ded98e6c2e69aeaca83d3d26cc970334897035ef8954c70bacd9b38e13"
-      },
-      "encoder.weights-005": {
-        "size": 1069685760,
-        "sha256": "7883aee74fdc1082093819649f7cdd3a2e0bad00f2d2db44766922f46bee2ce3"
-      },
-      "encoder.weights-006": {
-        "size": 1063198720,
-        "sha256": "390c20e4e87fb90c6752ea49fcc87044aa24e56cc0759f68135500dfbe8a2c34"
-      },
-      "encoder.weights-007": {
-        "size": 131271680,
-        "sha256": "ad99c16868a8376c260c1c29a615a4e2b92bf73a4d6522a03f6b264d63f981b3"
+        "sha256": "1f36470cba0cd62bcd791e254132baaa735a2d18fb5073efe651403b2d83f683",
+        "size": 918737920
       },
       "tokenizer.json": {
         "sha256": "780ccca2de2ccd289971b1fb7d4f0b5ec2dc908872f6e350181c7eba9db3fa9f",

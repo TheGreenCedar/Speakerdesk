@@ -20,7 +20,7 @@ tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "load-dynamic", "directml", "api-27"] }
-windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }
 realfft = "3.5"
 rand = "0.9.5"

@@ -49,9 +49,9 @@ impl Network {
             prompt(&tokenizer, language)?;
         }
         Ok(Self {
-            encoder: backend.load(&directory.join("encoder.onnx"))?,
-            decoder_init: backend.load(&directory.join("decoder-init.onnx"))?,
-            decoder_step: backend.load(&directory.join("decoder-step.onnx"))?,
+            encoder: backend.load_cohere(&admission, "encoder")?,
+            decoder_init: backend.load_cohere(&admission, "decoder-init")?,
+            decoder_step: backend.load_cohere(&admission, "decoder-step")?,
             features: Features::new(),
             tokenizer,
             _admission: admission,
@@ -467,5 +467,41 @@ mod tests {
             network.begin(&pcm, "en", (0, 0), &operation),
             Err(ChildError::Cancelled)
         ));
+        use windows_sys::Win32::System::{
+            ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX},
+            Threading::GetCurrentProcess,
+        };
+        // This is lifetime peak process private commit, including brief peaks
+        // between external samples; it is neither resident RAM nor GPU memory.
+        let mut memory: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+        let bytes = std::mem::size_of_val(&memory) as u32;
+        memory.cb = bytes;
+        assert_ne!(
+            unsafe {
+                GetProcessMemoryInfo(
+                    GetCurrentProcess(),
+                    (&mut memory as *mut PROCESS_MEMORY_COUNTERS_EX).cast(),
+                    bytes,
+                )
+            },
+            0,
+            "GetProcessMemoryInfo: {}",
+            std::io::Error::last_os_error()
+        );
+        let limit = 6 * 1024 * 1024 * 1024_u64;
+        eprintln!(
+            "COHERE_MEMORY {}",
+            serde_json::json!({
+                "pid": std::process::id(),
+                "current_bytes": memory.PrivateUsage,
+                "lifetime_peak_bytes": memory.PeakPagefileUsage,
+                "limit_bytes": limit,
+            })
+        );
+        assert!(memory.PrivateUsage > 0 && memory.PeakPagefileUsage >= memory.PrivateUsage);
+        assert!(
+            memory.PeakPagefileUsage as u64 <= limit,
+            "Cohere lifetime peak private commit exceeded {limit} bytes"
+        );
     }
 }
