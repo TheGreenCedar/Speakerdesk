@@ -1,0 +1,12 @@
+[package]
+name = "speakerdesk-windows-updater-verifier"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+base64 = "=0.22.1"
+minisign-verify = "=0.2.5"
+serde_json = "=1.0.153"
