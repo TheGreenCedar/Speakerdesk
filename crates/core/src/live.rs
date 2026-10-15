@@ -1182,7 +1182,8 @@ fn refine_saved_passage_with_context<M: Models + ?Sized + 'static>(
         language,
         start,
         processed,
-        None,
+        // Fresh admission may gate this anchor, but must not recut its opening context.
+        Some((0, 0)),
         language_context,
     )
     .map_err(LiveError::from)?;
@@ -4658,6 +4659,7 @@ mod tests {
         pub(super) probe_scores: Mutex<VecDeque<Result<LanguageProbeOut, ChildError>>>,
         transcription_languages: Mutex<Vec<String>>,
         transcription_crops: Mutex<Vec<(f32, usize)>>,
+        transcription_pcm_sha256: Mutex<Vec<String>>,
         clock_text: AtomicBool,
         transcription_results: Mutex<VecDeque<AsrText>>,
         transcription_errors: Mutex<VecDeque<Option<ChildError>>>,
@@ -4686,6 +4688,7 @@ mod tests {
                 probe_scores: Mutex::new(VecDeque::new()),
                 transcription_languages: Mutex::new(Vec::new()),
                 transcription_crops: Mutex::new(Vec::new()),
+                transcription_pcm_sha256: Mutex::new(Vec::new()),
                 clock_text: AtomicBool::new(false),
                 transcription_results: Mutex::new(VecDeque::new()),
                 transcription_errors: Mutex::new(VecDeque::new()),
@@ -4869,6 +4872,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((pcm[0].abs(), pcm.len()));
+            self.transcription_pcm_sha256
+                .lock()
+                .unwrap()
+                .push(sha256_hex(
+                    &pcm.iter()
+                        .flat_map(|sample| sample.to_le_bytes())
+                        .collect::<Vec<_>>(),
+                ));
             self.transcription_languages
                 .lock()
                 .unwrap()
@@ -6819,6 +6830,108 @@ mod tests {
     }
 
     #[test]
+    fn saved_accuracy_keeps_the_full_owned_anchor_after_fresh_admission() {
+        let models = FakeModels::english();
+        let mut pcm = quiet(RATE as usize);
+        pcm.extend(clock_pcm(5 * RATE));
+        let mut old = sample_segment("Earlier words", 7);
+        old.start = 11.;
+        old.end = 17.;
+        old.canonical_utterance_id = Some(old.id.clone());
+        old.rest.extend(
+            serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+                "canonical_state":"sealed","language_mode":"auto","language_epoch":3,
+                "canonical_machine_revision":7
+            }))
+            .unwrap(),
+        );
+        let candidate = refine_saved_passage(&models, &old, &pcm, None).unwrap();
+        assert_eq!(candidate.text, "hello");
+        assert_eq!(
+            models.conditioning.lock().unwrap().len(),
+            1,
+            "fresh VAD still runs"
+        );
+        assert_eq!(
+            models.probe_calls.load(Ordering::SeqCst),
+            2,
+            "Auto still routes the anchor"
+        );
+        assert_eq!(
+            *models.transcription_pcm_sha256.lock().unwrap(),
+            vec![sha256_hex(
+                &pcm.iter()
+                    .flat_map(|sample| sample.to_le_bytes())
+                    .collect::<Vec<_>>()
+            )],
+            "VAD-negative opening context belongs to this anchor and must reach the decoder unchanged"
+        );
+        let detection = candidate.language_detection.as_ref().unwrap();
+        assert_eq!(detection["probes"][0]["start_sample"], 11 * RATE);
+        assert_eq!(detection["probes"][1]["end_sample"], 17 * RATE);
+    }
+
+    #[test]
+    fn saved_accuracy_preserves_admission_language_and_anchor_guards() {
+        for case in [
+            "no_speech",
+            "insufficient",
+            "unsupported",
+            "unsealed",
+            "protected",
+            "bounds",
+        ] {
+            let models = FakeModels::english();
+            let pcm = match case {
+                "no_speech" => quiet(6 * RATE as usize),
+                "insufficient" => loud(160),
+                _ => loud(6 * RATE as usize),
+            };
+            let mut old = sample_segment("Retained words", 7);
+            old.start = 11.;
+            old.end = old.start + pcm.len() as f64 / RATE as f64;
+            old.canonical_utterance_id = Some(old.id.clone());
+            old.rest.extend(
+                serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+                    "canonical_state":"sealed","language_mode":"auto","language_epoch":3,
+                    "canonical_machine_revision":7
+                }))
+                .unwrap(),
+            );
+            match case {
+                "unsupported" => models.probe_scores.lock().unwrap().extend((0..2).map(|_| {
+                    Ok(LanguageProbeOut {
+                        codes: vec!["ru".into()],
+                        probabilities: vec![0.99],
+                    })
+                })),
+                "unsealed" => {
+                    old.rest
+                        .insert("canonical_state".into(), Value::from("open"));
+                }
+                "protected" => old.protected_fields = Some(vec!["text".into()]),
+                "bounds" => old.end += 1.,
+                _ => {}
+            }
+            assert!(
+                refine_saved_passage(&models, &old, &pcm, None).is_err(),
+                "{case}"
+            );
+            assert_eq!(models.transcribe_calls.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(
+                models.probe_calls.load(Ordering::SeqCst),
+                if case == "unsupported" { 2 } else { 0 },
+                "{case}"
+            );
+            assert_eq!(
+                models.conditioning.lock().unwrap().len(),
+                usize::from(matches!(case, "no_speech" | "insufficient" | "unsupported")),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
     fn saved_auto_accuracy_processes_complete_routing_with_warnings_and_keeps_failures() {
         let mut old = sample_segment("Earlier legible English words", 7);
         old.start = 1.;
@@ -7225,7 +7338,7 @@ mod tests {
         partial.end = partial.start + pcm.len() as f64 / RATE as f64;
         let complete = FakeModels::english();
         let candidate = refine_saved_passage(&complete, &partial, &pcm, None).unwrap();
-        assert_eq!(candidate.text, "hello hello");
+        assert_eq!(candidate.text, "hello");
         assert_eq!(
             complete
                 .transcription_crops
@@ -7234,26 +7347,24 @@ mod tests {
                 .last()
                 .unwrap()
                 .1,
-            3744,
-            "the 160 speech samples have 3200 canonical context plus their preceding VAD frame tail"
+            pcm.len(),
+            "fresh speech islands do not split the existing saved anchor"
         );
+        assert_eq!(complete.transcribe_calls.load(Ordering::SeqCst), 1);
         assert!(candidate.transcription_review.is_none());
         let incomplete = FakeModels::english();
-        incomplete.transcription_results.lock().unwrap().extend([
-            AsrText {
-                text: "hello".into(),
-                raw_text: "hello".into(),
-                token_count: 1,
-            },
-            AsrText {
+        incomplete
+            .transcription_results
+            .lock()
+            .unwrap()
+            .push_back(AsrText {
                 text: "unfinished tail".into(),
                 raw_text: "unfinished tail".into(),
                 token_count: 448,
-            },
-        ]);
+            });
         assert!(
             refine_saved_passage(&incomplete, &partial, &pcm, None).is_err(),
-            "an incomplete second decode cannot replace whole-anchor words"
+            "an incomplete whole-anchor decode cannot replace retained words"
         );
         partial.end = partial.start + 160. / RATE as f64;
         assert!(
