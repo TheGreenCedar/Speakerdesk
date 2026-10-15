@@ -1,5 +1,9 @@
 //! Native graph qualification; model-specific exporters own numerical acceptance.
-use ort::{session::Session, value::Tensor};
+use ort::{
+    memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType},
+    session::Session,
+    value::{DynTensorValueType, DynValue, Tensor},
+};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -35,6 +39,8 @@ struct Case {
     inspect_placement_only: bool,
     #[serde(default)]
     placement_policy: Option<PlacementPolicy>,
+    #[serde(default)]
+    dml_device_outputs: Vec<String>,
 }
 
 #[path = "../../../../crates/models/src/windows_placement.rs"]
@@ -42,6 +48,112 @@ mod windows_placement;
 use windows_placement::{
     PlacementPolicy, admit_placement, placement_assignments, validate_assignment_table,
 };
+
+fn validate_device_outputs(
+    provider: &str,
+    adapter: i32,
+    available: &[String],
+    requested: &[String],
+) -> Result<()> {
+    if requested.is_empty() {
+        return Ok(());
+    }
+    if provider != "dml" || adapter != 0 {
+        return Err("device-output diagnostic requires DirectML physical adapter 0".into());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for name in requested {
+        if !seen.insert(name) {
+            return Err("duplicate device-output name".into());
+        }
+        if matches!(name.as_str(), "logits" | "encoder_mask") {
+            return Err("logits and encoder_mask must remain CPU outputs".into());
+        }
+        if !available.contains(name) {
+            return Err(format!("unknown device-output name: {name}").into());
+        }
+    }
+    Ok(())
+}
+
+type OwnedOutputs = Vec<(String, DynValue)>;
+
+fn run_bound(
+    session: &mut Session,
+    inputs: &[(String, DynValue)],
+    device_outputs: &[String],
+    options: &ort::session::RunOptions,
+) -> Result<(OwnedOutputs, Vec<serde_json::Value>)> {
+    let mut binding = session.create_binding()?;
+    let dml = MemoryInfo::new(
+        AllocationDevice::DIRECTML,
+        0,
+        AllocatorType::Device,
+        MemoryType::Default,
+    )?;
+    let cpu = MemoryInfo::new(
+        AllocationDevice::CPU,
+        0,
+        AllocatorType::Device,
+        MemoryType::CPUOutput,
+    )?;
+    // Bind outputs first so even a partially failed input upload can be drained.
+    let setup = (|| -> ort::Result<()> {
+        for output in session.outputs() {
+            binding.bind_output_to_device(
+                output.name(),
+                if device_outputs.iter().any(|n| n == output.name()) {
+                    &dml
+                } else {
+                    &cpu
+                },
+            )?;
+        }
+        for (name, value) in inputs {
+            binding.bind_input(name, value)?;
+        }
+        binding.synchronize_inputs()
+    })();
+    if let Err(cause) = setup {
+        let drained = binding.synchronize_outputs();
+        return Err(format!("binding setup failed: {cause}; output drain: {drained:?}").into());
+    }
+    let ran = session.run_binding_with_options(&binding, options);
+    // DML OnRunEnd only flushes. Always wait, including error/cancellation paths.
+    let drained = binding.synchronize_outputs();
+    let outputs = match ran {
+        Ok(outputs) => outputs,
+        Err(cause) => {
+            return Err(format!("bound Run failed: {cause}; output drain: {drained:?}").into());
+        }
+    };
+    drained?;
+    let mut owned = Vec::new();
+    let mut locations = Vec::new();
+    for (name, value) in outputs {
+        let tensor = value.downcast_ref::<DynTensorValueType>()?;
+        let info = tensor.memory_info();
+        let expected = if device_outputs.iter().any(|n| n == name) {
+            AllocationDevice::DIRECTML
+        } else {
+            AllocationDevice::CPU
+        };
+        if info.allocation_device() != expected || info.device_id() != 0 {
+            return Err(format!("output {name} is not on its requested device").into());
+        }
+        locations.push(
+            json!({"name": name, "allocation_device": info.allocation_device().as_str(),
+            "device_id": info.device_id(), "memory_type": format!("{:?}", info.memory_type()),
+            "device_type": format!("{:?}", info.device_type())}),
+        );
+        if name == "logits" {
+            value.try_extract_tensor::<f32>()?;
+        }
+        owned.push((name.to_owned(), value));
+    }
+    // The returned values own their originating allocator; none borrows binding.
+    Ok((owned, locations))
+}
 
 fn idle_phase(output: &Path, name: &str, milliseconds: u64) -> Result<()> {
     if milliseconds != 0 {
@@ -202,6 +314,14 @@ fn main() -> Result<()> {
     if !matches!(provider, "cpu" | "dml") {
         return Err("provider must be cpu or dml".into());
     }
+    let adapter: i32 = if provider == "dml" {
+        args.get(5)
+            .map(|value| value.to_string_lossy().parse())
+            .transpose()?
+            .unwrap_or(0)
+    } else {
+        0
+    };
     let case_path = Path::new(&args[3]).canonicalize()?;
     let root = case_path.parent().ok_or("case has no parent")?;
     let case: Case = serde_json::from_slice(&fs::read(&case_path)?)?;
@@ -211,14 +331,14 @@ fn main() -> Result<()> {
     if case.idle_ms > 5000 || (case.require_dml_only && provider != "dml") {
         return Err("idle must be <=5000ms and strict DirectML requires dml".into());
     }
+    if !case.dml_device_outputs.is_empty() && (provider != "dml" || adapter != 0) {
+        return Err("device-output diagnostic requires DirectML physical adapter 0".into());
+    }
     let capture_placement = case.inspect_placement_only || case.placement_policy.is_some();
     if capture_placement
-        && (provider != "dml"
-            || case.require_dml_only
-            || !case.disable_optimizations
-            || !case.disable_memory_arena)
+        && (provider != "dml" || case.require_dml_only || !case.disable_optimizations)
     {
-        return Err("placement inspection/admission requires dml, disabled optimization/arena, and no conflicting global strict flag".into());
+        return Err("placement inspection/admission requires dml, disabled optimization, and no conflicting global strict flag".into());
     }
     let output = Path::new(&args[4]);
     fs::create_dir(output)?;
@@ -247,11 +367,6 @@ fn main() -> Result<()> {
         builder = builder.with_config_entry("session.record_ep_graph_assignment_info", "1")?;
     }
     if provider == "dml" {
-        let adapter: i32 = args
-            .get(5)
-            .map(|value| value.to_string_lossy().parse())
-            .transpose()?
-            .unwrap_or(0);
         builder = builder.with_execution_providers([ort::ep::DirectML::default()
             .with_device_id(adapter)
             .build()
@@ -278,6 +393,16 @@ fn main() -> Result<()> {
     let started = Instant::now();
     let mut session = builder.commit_from_file(&model)?;
     let load_ms = started.elapsed().as_secs_f64() * 1000.;
+    validate_device_outputs(
+        provider,
+        adapter,
+        &session
+            .outputs()
+            .iter()
+            .map(|v| v.name().to_owned())
+            .collect::<Vec<_>>(),
+        &case.dml_device_outputs,
+    )?;
     let assignments = if capture_placement {
         let assignments = placement_assignments(&session)?;
         #[cfg(windows)]
@@ -347,17 +472,64 @@ fn main() -> Result<()> {
     }
     let mut run_ms = Vec::new();
     let mut output_records = Vec::new();
+    let mut oracle_copy_ms = Vec::new();
+    let mut serialization_ms = Vec::new();
+    let mut total_ms = Vec::new();
+    let mut output_locations = Vec::new();
+    let binding_options = if case.dml_device_outputs.is_empty() {
+        None
+    } else {
+        Some(ort::session::RunOptions::new()?)
+    };
     for run in 0..case.repeat {
         run_phase(&output, run, false)?;
+        let total_started = Instant::now();
+        // Binding can queue uploads: the clock starts before creating/binding it.
         let started = Instant::now();
-        let outputs = session.run(
-            inputs
-                .iter()
-                .map(|(name, value)| (name.as_str(), value))
-                .collect::<Vec<_>>(),
-        )?;
-        run_ms.push(started.elapsed().as_secs_f64() * 1000.);
+        let (outputs, elapsed) = if let Some(options) = &binding_options {
+            let (values, locations) =
+                run_bound(&mut session, &inputs, &case.dml_device_outputs, options)?;
+            let elapsed = started.elapsed().as_secs_f64() * 1000.;
+            output_locations.push(json!({"run": run, "outputs": locations}));
+            (values, elapsed)
+        } else {
+            let outputs = session.run(
+                inputs
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value))
+                    .collect::<Vec<_>>(),
+            )?;
+            let elapsed = started.elapsed().as_secs_f64() * 1000.;
+            (
+                outputs
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value))
+                    .collect(),
+                elapsed,
+            )
+        };
+        run_ms.push(elapsed);
         run_phase(&output, run, true)?;
+        // Oracle materialization is diagnostic only, after all GPU work completed.
+        let copy_started = Instant::now();
+        let outputs: OwnedOutputs = outputs
+            .into_iter()
+            .map(|(name, value)| -> Result<_> {
+                if case.dml_device_outputs.contains(&name) {
+                    let cpu = value
+                        .downcast_ref::<DynTensorValueType>()?
+                        .to(AllocationDevice::CPU, 0)?;
+                    if cpu.memory_info().allocation_device() != AllocationDevice::CPU {
+                        return Err("oracle copy did not return a CPU tensor".into());
+                    }
+                    Ok((name, cpu.into()))
+                } else {
+                    Ok((name, value))
+                }
+            })
+            .collect::<Result<_>>()?;
+        oracle_copy_ms.push(copy_started.elapsed().as_secs_f64() * 1000.);
+        let serialization_started = Instant::now();
         for (index, (name, value)) in outputs.iter().enumerate() {
             let (shape, dtype, bytes) = if let Ok((shape, data)) = value.try_extract_tensor::<f32>()
             {
@@ -385,6 +557,8 @@ fn main() -> Result<()> {
             fs::write(output.join(&file), bytes)?;
             output_records.push(json!({"run": run, "name": name, "shape": shape, "dtype": dtype, "file": file, "sha256": sha256(&output.join(&file))?}));
         }
+        serialization_ms.push(serialization_started.elapsed().as_secs_f64() * 1000.);
+        total_ms.push(total_started.elapsed().as_secs_f64() * 1000.);
     }
     idle_phase(&output, "warm", case.idle_ms)?;
     let profile = session.end_profiling()?;
@@ -409,7 +583,7 @@ fn main() -> Result<()> {
                     "DmlExecutionProvider" | "CPUExecutionProvider"
                 )
             }));
-    let report = json!({
+    let mut report = json!({
         "pid": std::process::id(),
         "runtime": runtime, "runtime_sha256": sha256(&runtime)?, "runtime_info": format!("{:?}", ort::info()),
         "provider_requested": provider, "model": model, "model_sha256": sha256(&model)?,
@@ -424,6 +598,16 @@ fn main() -> Result<()> {
         "placement_policy_admitted": case.placement_policy.is_some(), "pre_run_assignments": assignments,
         "load_ms": load_ms, "run_ms": run_ms, "executed_provider_events": placement, "profile": profile
     });
+    if binding_options.is_some() {
+        report["dml_device_outputs"] = json!(case.dml_device_outputs);
+        report["output_locations_before_oracle_copy"] = json!(output_locations);
+        report["oracle_copy_ms"] = json!(oracle_copy_ms);
+        report["serialization_ms"] = json!(serialization_ms);
+        report["total_ms"] = json!(total_ms);
+        report["run_timing_scope"] = json!(
+            "binding+input synchronization+Run+output synchronization+CPU logits ready; oracle copy and serialization separate"
+        );
+    }
     fs::write(
         output.join(if placed { "result.json" } else { "failed.json" }),
         serde_json::to_vec_pretty(&report)?,
@@ -439,6 +623,41 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_output_contract_rejects_wrong_provider_adapter_names_and_duplicates() {
+        let available = [
+            "present_self_k_0",
+            "matrix0_product",
+            "logits",
+            "encoder_mask",
+        ]
+        .map(str::to_owned);
+        super::validate_device_outputs("cpu", 7, &[], &[]).unwrap();
+        super::validate_device_outputs("dml", 0, &available, &["matrix0_product".into()]).unwrap();
+        for (provider, adapter, names, error) in [
+            ("cpu", 0, vec!["present_self_k_0"], "physical adapter 0"),
+            ("dml", 1, vec!["present_self_k_0"], "physical adapter 0"),
+            ("dml", -1, vec!["present_self_k_0"], "physical adapter 0"),
+            ("dml", 0, vec!["missing_cache"], "unknown"),
+            (
+                "dml",
+                0,
+                vec!["present_self_k_0", "present_self_k_0"],
+                "duplicate",
+            ),
+            ("dml", 0, vec!["logits"], "CPU outputs"),
+            ("dml", 0, vec!["encoder_mask"], "CPU outputs"),
+        ] {
+            let names = names.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert!(
+                super::validate_device_outputs(provider, adapter, &available, &names)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(error)
+            );
+        }
+    }
+
     #[test]
     fn rejects_truncated_negative_and_overflowing_tensor_shapes() {
         for (shape, bytes, width) in [

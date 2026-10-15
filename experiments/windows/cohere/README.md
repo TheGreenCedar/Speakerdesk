@@ -7,8 +7,10 @@ fusion, matching the retained-output qualification settings. Before returning
 each session, it checks actual API27 assignments against the exact pinned
 graph's reviewed placement policy. See
 [compact-weights.md](compact-weights.md) for provenance and the preserved failures.
-The Rust resident-request gate remains pending; these pins do not establish
-publication or release readiness.
+The Rust resident-request gate preserves the reference tokens/text, continuation
+and pre-cancel rejection within the memory bounds, but the 9.09-second clip takes
+12.95/11.12 seconds. Live throughput remains unqualified. The later diagnostic
+results below do not change the draft loader settings or establish a release.
 
 ## FP32 diagnostic exporter
 

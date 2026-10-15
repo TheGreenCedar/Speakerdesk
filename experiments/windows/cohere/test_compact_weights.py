@@ -38,6 +38,69 @@ def fixture():
 
 
 class CompactWeights(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("onnx"), "ONNX required for exact graph metadata control")
+    def test_shape_fold_preserves_signed_int64_dynamic_float_and_unrelated_graph_bytes(self):
+        import copy
+        from collections import Counter
+        from onnx import helper as h, TensorProto as T
+
+        literals = [h.make_tensor("lo", T.INT64, [], [-(1 << 63)]),
+                    h.make_tensor("hi", T.INT64, [], [(1 << 63) - 1]),
+                    h.make_tensor("zero", T.INT64, [1], [0]),
+                    h.make_tensor("negative", T.INT64, [1], [-1]),
+                    h.make_tensor("float", T.FLOAT, [], [0.125])]
+        nodes = [h.make_node("Unsqueeze", ["lo", "zero"], ["low"], name="low"),
+                 h.make_node("Unsqueeze", ["hi", "negative"], ["high"], name="high"),
+                 h.make_node("Unsqueeze", ["dynamic", "zero"], ["dyn"], name="dynamic"),
+                 h.make_node("Unsqueeze", ["float", "zero"], ["flt"], name="float"),
+                 h.make_node("Unsqueeze", ["lo", "axes"], ["dynamic_axes"], name="dynamic_axes")]
+        model = h.make_model(h.make_graph(nodes, "shape-metadata", [
+            h.make_tensor_value_info("dynamic", T.INT64, []),
+            h.make_tensor_value_info("axes", T.INT64, [1])], [], literals),
+            opset_imports=[h.make_opsetid("", 21)], ir_version=10)
+        model.doc_string = "Preserve every unrelated field."
+        before = model.SerializeToString(deterministic=True)
+        result, proof = compact.finalize_metadata(model, fold_shapes=True)
+        self.assertEqual(model.SerializeToString(deterministic=True), before)
+        added = {v.name: v for v in list(result.graph.initializer)[len(literals):]}
+        self.assertEqual(set(added), {"low", "high"})
+        self.assertEqual(list(added["low"].int64_data), [-(1 << 63)])
+        self.assertEqual(list(added["high"].int64_data), [(1 << 63) - 1])
+        self.assertEqual([list(v.dims) for v in added.values()], [[1], [1]])
+        self.assertEqual(Counter(v.SerializeToString() for v in result.graph.node),
+                         Counter(v.SerializeToString() for v in nodes[2:]))
+        self.assertEqual([v.SerializeToString() for v in result.graph.initializer[:len(literals)]],
+                         [v.SerializeToString() for v in literals])
+        metadata = []
+        for value in (model, result):
+            value = copy.deepcopy(value)
+            value.graph.ClearField("node")
+            value.graph.ClearField("initializer")
+            metadata.append(value.SerializeToString())
+        self.assertEqual(metadata[0], metadata[1])
+        self.assertEqual([(r["axis"], r["value"]) for r in proof["folded_int64_unsqueezes"]],
+                         [(0, -(1 << 63)), (-1, (1 << 63) - 1)])
+        # Idempotence includes the stable complete input-independent ordering.
+        again, second = compact.finalize_metadata(result, fold_shapes=True)
+        self.assertEqual(result.SerializeToString(), again.SerializeToString())
+        self.assertFalse(second["folded_int64_unsqueezes"])
+
+    @unittest.skipUnless(importlib.util.find_spec("onnx"), "ONNX required for hostile graph metadata control")
+    def test_shape_fold_rejects_invalid_constant_axes_and_duplicate_values(self):
+        from onnx import helper as h, TensorProto as T
+        for axes in ([1], [-2], [0, 0]):
+            model = h.make_model(h.make_graph([
+                h.make_node("Unsqueeze", ["scalar", "axes"], ["y"], name="shape")], "invalid", [], [], [
+                    h.make_tensor("scalar", T.INT64, [], [3]),
+                    h.make_tensor("axes", T.INT64, [len(axes)], axes)]))
+            with self.subTest(axes=axes), self.assertRaisesRegex(ValueError, "axes"):
+                compact.finalize_metadata(model, fold_shapes=True)
+        model.graph.node.add(op_type="Identity", input=["scalar"], output=["y"], name="duplicate")
+        model.graph.initializer[1].dims[:] = [1]
+        model.graph.initializer[1].int64_data[:] = [0]
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            compact.finalize_metadata(model, fold_shapes=True)
+
     def test_frozen_oracle_inventory_rejects_same_length_tampering_before_graph_work(self):
         names = ("encoder-case/case.json", "encoder-case/expected.json", "encoder-case/features.f32",
                  "encoder-case/expected-encoded.f32", "prompts.json", "provenance.json")

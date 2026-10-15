@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import struct
+from collections import Counter
 
 COPY_BYTES = 1 << 20
 SHARD_BYTES = 1 << 30
@@ -358,6 +359,96 @@ def _all_tensors(model):
     return shard_encoder.tensors(model)
 
 
+def finalize_metadata(model, fold_shapes=False):
+    """Only fold literal INT64 scalar Unsqueezes, then apply the proven ordering."""
+    from onnx import TensorProto as T, helper as h
+    from quantized_probe import independent_partition
+
+    original = model
+    model = copy.deepcopy(model)
+    literals, occupied = {}, set()
+
+    def literal(tensor):
+        if tensor.data_type != T.INT64 or tensor.external_data or tensor.data_location == T.EXTERNAL:
+            return None
+        if any(dim < 0 for dim in tensor.dims) or any(len(getattr(tensor, key)) for key in
+                ("float_data", "int32_data", "string_data", "double_data", "uint64_data")):
+            raise ValueError("malformed embedded INT64 literal")
+        count = math.prod(tensor.dims)
+        if count > 100:
+            return None
+        if tensor.HasField("raw_data"):
+            if len(tensor.raw_data) != count * 8 or tensor.int64_data:
+                raise ValueError("malformed embedded INT64 literal")
+            values = struct.unpack(f"<{count}q", tensor.raw_data)
+        else:
+            values = tuple(tensor.int64_data)
+            if len(values) != count:
+                raise ValueError("malformed embedded INT64 literal")
+        return tuple(tensor.dims), values
+
+    def register(name):
+        if not name or name in occupied:
+            raise ValueError("duplicate or empty graph value identity")
+        occupied.add(name)
+
+    for value in model.graph.input:
+        register(value.name)
+    for tensor in model.graph.initializer:
+        register(tensor.name)
+        value = literal(tensor)
+        if value is not None:
+            literals[tensor.name] = value
+    folded, kept, added = [], [], []
+    for node in model.graph.node:
+        if any(attr.HasField("g") or attr.graphs for attr in node.attribute):
+            raise ValueError("nested graphs require separate metadata proof")
+        for output in node.output:
+            register(output)
+        if not node.domain and node.op_type == "Constant" and len(node.output) == 1:
+            if len(node.attribute) == 1 and node.attribute[0].name == "value":
+                value = literal(node.attribute[0].t)
+                if value is not None:
+                    literals[node.output[0]] = value
+        if (fold_shapes and not node.domain and node.op_type == "Unsqueeze"
+                and len(node.input) == 2 and node.input[0] in literals
+                and literals[node.input[0]][0] == () and node.input[1] in literals):
+            axes_shape, axes = literals[node.input[1]]
+            if node.attribute or len(node.output) != 1 or axes_shape != (1,) or axes not in ((0,), (-1,)):
+                raise ValueError("eligible INT64 scalar Unsqueeze has invalid shape-vector axes")
+            values = literals[node.input[0]][1]
+            tensor = h.make_tensor(node.output[0], T.INT64, [1], values)
+            added.append(tensor)
+            literals[node.output[0]] = ((1,), values)
+            folded.append(dict(name=node.name, output=node.output[0], value=values[0], axis=axes[0]))
+        else:
+            kept.append(node)
+    model.graph.initializer.extend(added)
+    ordered = independent_partition(kept, [v.name for v in model.graph.initializer])
+    del model.graph.node[:]
+    model.graph.node.extend(ordered)
+
+    # Preserve every surviving NodeProto and all unrelated protobuf fields exactly.
+    removed = {row["output"] for row in folded}
+    surviving = [node for node in original.graph.node if not any(v in removed for v in node.output)]
+    node_bytes = lambda node: node.SerializeToString(deterministic=True)
+    if Counter(map(node_bytes, surviving)) != Counter(map(node_bytes, model.graph.node)):
+        raise ValueError("metadata pass changed a surviving NodeProto")
+    metadata = []
+    for value in (original, model):
+        value = copy.deepcopy(value)
+        value.graph.ClearField("node")
+        value.graph.ClearField("initializer")
+        metadata.append(value.SerializeToString(deterministic=True))
+    if metadata[0] != metadata[1] or [v.SerializeToString() for v in model.graph.initializer] != [
+            v.SerializeToString() for v in [*original.graph.initializer, *added]]:
+        raise ValueError("metadata pass changed unrelated fields or original initializers")
+    return model, dict(folded_int64_unsqueezes=folded,
+        surviving_node_bytes_sha256=hashlib.sha256(b"".join(sorted(map(node_bytes, surviving)))).hexdigest(),
+        non_node_non_initializer_sha256=hashlib.sha256(metadata[0]).hexdigest(),
+        ordering="stable complete input-independent closure; original surviving NodeProto bytes")
+
+
 def pin_open(handles, path, pin):
     import shard_encoder
     if path.is_symlink() or not path.is_file():
@@ -391,7 +482,7 @@ def convert(source, checkpoint, destination):
         if config["quantization"] != {"bits": 4, "group_size": 64, "mode": "affine"}:
             raise ValueError("checkpoint quantization differs")
         destination.mkdir()
-        coverage = {}
+        coverage, metadata_passes = {}, {}
         with ExitStack() as output_handles:
             stores = {name: Store(destination, name, output_handles) for name in ("encoder", "decoder")}
             for graph in ("encoder", "decoder-init", "decoder-step"):
@@ -400,6 +491,7 @@ def convert(source, checkpoint, destination):
                 model = onnx.load_model_from_string(stream.read())
                 model, coverage[graph] = rewrite(model, originals["model.safetensors"], entries, opened[filename],
                     GRAPH_PINS[filename][0], filename, stores["encoder" if graph == "encoder" else "decoder"], source_name)
+                model, metadata_passes[graph] = finalize_metadata(model, fold_shapes=graph != "encoder")
                 onnx.save(model, destination / (graph + ".onnx"))
         used = {row["source"] for rows in coverage.values() for row in rows}
         used.update(key for rows in coverage.values() for row in rows for key in row.get("source_metadata", []))
@@ -433,7 +525,8 @@ def convert(source, checkpoint, destination):
                 case_pins[f"{graph}-case/{name}"] = dict(size=pin[0], sha256=pin[1])
             store = stores["encoder" if graph == "encoder" else "decoder"]
             case["model_files"] = {"../" + name: shard_encoder.sha256(destination / name) for name in store.files}
-            case.update(disable_optimizations=True, disable_memory_arena=True, require_dml_only=True)
+            case.update(disable_optimizations=True, disable_memory_arena=True, disable_graph_fusion=True,
+                        require_dml_only=True)
             (outgoing / "case.json").write_text(json.dumps(case, indent=2) + "\n")
         for name, handle in [("tokenizer.json", originals["tokenizer.json"]), ("independent-reference.json", reference)]:
             handle.seek(0)
@@ -464,6 +557,8 @@ def convert(source, checkpoint, destination):
             onnx_version=onnx.__version__, mapping_source_sha256=shard_encoder.sha256(Path(__file__).with_name("export.py")),
             precision="original UINT4 affine weights, exact BF16 metadata widened to FP32; existing FP32 graph arithmetic",
             opset_conversion="onnx.version_converter 17 to 21; explicit IR 8 to 10 for UINT4; other metadata, original initializers and I/O fields verified unchanged",
+            metadata_passes=metadata_passes,
+            ordering_helper_sha256=shard_encoder.sha256(Path(__file__).with_name("quantized_probe.py")),
             coverage=coverage, source_aliases=aliases, coverage_counts=dict(checkpoint_tensors=len(entries),
                 quantized_source_tensors=sum(value["dtype"] == "U32" for value in entries.values()),
                 graph_parameters=sum(len(rows) for rows in coverage.values()),

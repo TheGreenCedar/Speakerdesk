@@ -195,10 +195,56 @@ optimization, serial execution, no memory patterns, four intra-op threads,
 disabled DML memory arena, disabled DML graph fusion and the probe's enabled CPU
 arena. Other model loaders retain their existing settings.
 
-The existing ignored Rust resident test must still pass both exact 31-token/text
-requests, decoder-cache continuation, tiny-crop and cancellation checks under
-the same guards. It emits a `COHERE_MEMORY` JSON receipt and asserts lifetime
-peak process private commit is at most 6 GiB; this captures brief process-commit
-peaks between external samples and does not measure GPU peak or resident RAM.
-Publication, seven-model residency and live throughput are not qualified by
-this draft integration. Earlier failed candidates and receipts remain retained.
+The ignored Rust resident test passes both exact 31-token/text requests,
+decoder-cache continuation, tiny-crop and pre-cancel checks under the original
+guards. Lifetime peak private commit was 3,717,390,336 bytes; maximum sampled GPU
+commitment was 3,284,135,936 bytes. Its `COHERE_MEMORY` receipt captures brief
+process-commit peaks between external samples, not a precise GPU peak or resident
+RAM. The 9.09-second clip took 12.95/11.12 seconds, so live throughput failed.
+Publication, seven-model residency and assembled compact-app qualification remain
+open. Earlier failed candidates and receipts remain retained.
+
+## Decoder throughput diagnostics
+
+The converter now makes stable input-independent ordering reproducible. For the
+decoders it also folds only embedded INT64 scalar `Unsqueeze` operations with
+literal axis 0 or -1 into equivalent one-element initializers. It preserves each
+surviving NodeProto, every original initializer, unrelated protobuf fields and
+all weight/reference bytes; controls include signed INT64 extremes, dynamic and
+floating inputs, invalid axes, duplicate identities and idempotence. These graphs
+are experimental: changing their hashes requires fresh reviewed placement
+policies and native qualification before changing the draft artifact registry.
+
+The same retained inputs and `.002` absolute/relative comparisons were used in
+these consecutive diagnostics. Each speed gate requires **every** completed Run
+to be at most 150 ms, with two repeats, 6 GiB lifetime private commit, 8 GiB sampled
+GPU commitment and a 180-second family budget. Each failed at init, so none ran
+its subsequent decoder-step case or changed production settings.
+
+| Decoder-init configuration | Cold / repeated Run | Result |
+| --- | ---: | --- |
+| DML fusion enabled, original ordered graph | 457.09 / 328.57 ms | Speed failed |
+| Exact INT64 shape fold | 434.43 / 310.14 ms | Speed failed |
+| Shape fold with GPU-bound KV outputs | 438.16 / 301.21 ms | Speed failed |
+| Shape fold with decoder-only memory pooling, ordinary outputs | 163.47 / 23.76 ms | First-call speed failed |
+
+Offline comparisons for each failed gate preserve all 66 output tensors,
+repeated bytes and greedy-logit identity; maximum reference error is 5.72205e-6.
+The pooling run's lifetime private peak was 980,033,536 bytes and maximum sampled
+GPU commitment 880,242,688 bytes. All owned processes exited and were reaped.
+
+The probe's optional `dml_device_outputs` is limited to physical adapter 0. It
+records actual output allocation, waits for input/output synchronization inside
+the Run timer, and records oracle copies separately. A tiny exact-output native
+gate verified that API before the full diagnostic. A retained `DynValue` alone
+does not prove GPU storage, and this diagnostic does not prove cross-session GPU
+input ownership for the production HighPerformance adapter.
+
+The [pinned DirectML provider](https://github.com/microsoft/onnxruntime/blob/df2ba1cf81/onnxruntime/core/providers/dml/DmlExecutionProvider/src/ExecutionProvider.cpp#L1187-L1202)
+disables post-load bucket rounding when its memory arena is disabled; the
+[nonbucket allocator path](https://github.com/microsoft/onnxruntime/blob/df2ba1cf81/onnxruntime/core/providers/dml/DmlExecutionProvider/src/BucketizedBufferAllocator.cpp#L123-L130)
+creates new committed resources.
+Enabling decoder pooling materially reduces repeated-shape cost. The remaining
+cold overhead spans many DML nodes; host profile spans cannot distinguish resource
+creation, first-use compilation, GPU execution and waits. Do not omit first-use
+work from timing or reinterpret the failed cold-call gate as a family pass.

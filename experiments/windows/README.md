@@ -11,10 +11,13 @@ rejected its 10.27 GB download and memory cost. Cohere now has an
 [original-weight compact candidate](cohere/compact-weights.md), following a
 [bounded UINT4 feasibility gate](cohere/quantized-probe.md). Conversion preserves
 the original packed bytes. Exact native placement now admits numerical work on
-DirectML and proven integer shape work on CPU, but the first encoder execution
-attempt exceeded its 6 GiB private-memory guard before returning outputs.
-Quality and residency remain unqualified. Do not transfer the FP32 results below
-to that candidate.
+DirectML and proven integer shape work on CPU. The initial memory failure is
+retained; stable ordering subsequently passed the numerical family and full
+reference transcription within the original memory bounds. Compact live
+throughput, combined residency and application qualification remain open.
+[Later decoder diagnostics](cohere/compact-weights.md#decoder-throughput-diagnostics)
+record their failures separately; do not transfer the FP32 results below to the
+compact candidate.
 
 Start at the model's adjacent Windows implementation and the linked experiment
 record when investigating a numerical or lifecycle failure. Python is used for
