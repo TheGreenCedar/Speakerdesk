@@ -231,7 +231,7 @@ def observed_payloads(receipts, stage, target, temporary, version):
         if entry['kind'] != 'hook_or_pinned':
             require(entry['authenticode_status'] == 'Valid' and entry['verified'] is True,
                     'Unverified Microsoft packaged input')
-            require(re.match(r'^CN=Microsoft (Corporation|Windows|Windows Publisher)(?:,|$)', entry['publisher_subject']),
+            require(re.match(r'^CN=Microsoft (Corporation|Windows|Windows Publisher|Windows Software Compatibility Publisher)(?:,|$)', entry['publisher_subject']),
                     'Unexpected packaged publisher')
         if entry['kind'] == 'microsoft_bootstrapper':
             require(type(entry.get('signature_index')) is int and entry['signature_index'] == 0

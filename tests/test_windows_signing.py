@@ -214,10 +214,14 @@ $lines+='"authenticode binding passed"'
         self.fixture_inventory()
         path = self.receipts / 'package.json'
         original = json.loads(path.read_text())
-        native_patterns = re.findall(r"-cnotmatch '(\^CN=Microsoft [^']+)'",
-            (ROOT / 'scripts/windows_signing.ps1').read_text())
+        packaged, preserved = (ROOT / 'scripts/windows_signing.ps1').read_text().split('$classification=Invoke-Helper', 1)
+        native_patterns = re.findall(r"-cnotmatch '(\^CN=Microsoft [^']+)'", packaged)
+        preserved_patterns = re.findall(r"-cnotmatch '(\^CN=Microsoft [^']+)'", preserved)
         self.assertTrue(native_patterns, 'native Microsoft publisher checks are required')
+        self.assertTrue(preserved_patterns, 'pinned runtime publisher checks are required')
         cases = [
+            ('CN=Microsoft Windows Software Compatibility Publisher, O=Microsoft Corporation, L=Redmond, S=Washington, C=US', True),
+            ('CN=Microsoft Windows Software Compatibility Publisher', True),
             ('CN=Microsoft Windows Publisher, O=Microsoft Corporation, L=Redmond, S=Washington, C=US', True),
             ('CN=Microsoft Windows Publisher', True),
             ('CN=Microsoft Corporation, O=Microsoft Corporation, C=US', True),
@@ -225,6 +229,10 @@ $lines+='"authenticode binding passed"'
             ('CN=Microsoft Windows Publisher Evil, O=Microsoft Corporation', False),
             ('CN=Microsoft Windows Publishers', False),
             ('CN=Microsoft Windows Publisher.example', False),
+            ('CN=Microsoft Windows Software Compatibility Publisher Evil', False),
+            ('CN=Microsoft Windows Software Compatibility Publishers', False),
+            ('CN=Microsoft Windows Software Compatibility Publisher.example', False),
+            ('CN=microsoft Windows Software Compatibility Publisher', False),
             ('CN=Microsoft Corporation Evil', False),
             ('CN=Microsoft Windows Evil', False),
             ('CN=Not Microsoft Windows Publisher', False),
@@ -246,6 +254,9 @@ $lines+='"authenticode binding passed"'
                 # The native regex subset uses the same case-sensitive CN boundaries.
                 for pattern in native_patterns:
                     self.assertEqual(bool(re.match(pattern, subject)), accepted)
+                for pattern in preserved_patterns:
+                    self.assertEqual(bool(re.match(pattern, subject)), accepted and
+                        subject.split(',', 1)[0] != 'CN=Microsoft Windows Software Compatibility Publisher')
         for change in ({'authenticode_status': 'NotSigned'}, {'authenticode_status': 'HashMismatch'},
                        {'verified': False}):
             with self.subTest(change=change):
@@ -278,6 +289,7 @@ $lines+='"authenticode binding passed"'
             ('microsoft_bootstrapper', 'timestamped', None),
             ('microsoft_bootstrapper', 'timestamped', False),
             ('microsoft_bootstrapper', 'publisher_subject', 'CN=Microsoft Windows Publisher'),
+            ('microsoft_bootstrapper', 'publisher_subject', 'CN=Microsoft Windows Software Compatibility Publisher'),
             ('microsoft_bootstrapper', 'publisher_subject', 'CN=Microsoft Corporation Evil'),
             ('microsoft_bootstrapper', 'authenticode_status', 'NotSigned'),
             ('microsoft_bootstrapper', 'verified', False),

@@ -58,7 +58,7 @@ if($Action -eq 'VerifyPackage') {
     foreach($inputFile in $inputs) {
         if($inputFile.kind -eq 'hook_or_pinned'){continue}
         $authenticode=Get-AuthenticodeSignature -LiteralPath $inputFile.path
-        if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows|Windows Publisher)(?:,|$)'){throw 'Packaged Microsoft input has an unexpected signature.'}
+        if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows|Windows Publisher|Windows Software Compatibility Publisher)(?:,|$)'){throw 'Packaged Microsoft input has an unexpected signature.'}
         if($inputFile.kind -eq 'microsoft_bootstrapper') {
             # package_inputs pins all bytes; preserve its known supplemental EdgeBuild signature.
             if($authenticode.SignerCertificate.Subject.Split(',')[0] -cne 'CN=Microsoft Corporation' -or $null -eq $authenticode.TimeStamperCertificate){throw 'Pinned WebView2 bootstrapper lacks the Microsoft primary publisher/timestamp.'}
