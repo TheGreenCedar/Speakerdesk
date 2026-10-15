@@ -3,9 +3,11 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -52,6 +54,37 @@ class WindowsSigningTests(unittest.TestCase):
 
     def classify(self, path):
         return SIGN.classify(path, self.stage, self.target, self.tmp, self.version)
+
+    @unittest.skipUnless(sys.platform == 'win32', 'requires native PowerShell Authenticode binding')
+    def test_authenticode_objects_preserve_status_and_updater_signature_argument(self):
+        # Execute the real parameter declarations and assignments without signing or Azure access.
+        command = r'''
+$ErrorActionPreference='Stop'
+$tokens=$null; $errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:SIGNING_TEST_SCRIPT,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'Signing adapter did not parse.'}
+$assignments=@($ast.FindAll({param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Right.Extent.Text -match '^Get-AuthenticodeSignature\b'
+},$true))
+if(-not $assignments.Count){throw 'No actual Authenticode assignments found.'}
+$lines=@($ast.ParamBlock.Extent.Text,'Set-StrictMode -Version Latest',
+    '$ErrorActionPreference="Stop"','$target=$Path','$inputFile=[pscustomobject]@{path=$Path}')
+foreach($assignment in $assignments){
+    $lines+=$assignment.Extent.Text
+    $variable='$'+$assignment.Left.VariablePath.UserPath
+    $lines+=('if ({0} -is [string] -or $null -eq {0}.PSObject.Properties["Status"]) {{ throw "Authenticode result lost its Status property." }}' -f $variable)
+    $lines+=('$null={0}.Status' -f $variable)
+}
+$lines+='if($Signature -cne "returned-installer.exe.sig"){throw "Updater signature argument was overwritten."}'
+$lines+='"authenticode binding passed"'
+& ([scriptblock]::Create(($lines -join "`n"))) -Action Sign -Path $env:SIGNING_TEST_FILE -Signature 'returned-installer.exe.sig'
+'''
+        result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command],
+            env=dict(os.environ, SIGNING_TEST_SCRIPT=str(ROOT / 'scripts/windows_signing.ps1'),
+                     SIGNING_TEST_FILE=sys.executable), text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('authenticode binding passed', result.stdout)
 
     def test_metadata_cannot_select_other_credentials_or_endpoints(self):
         value = SIGN.metadata('https://eus.codesigning.azure.net/', 'shared-account', 'public-release', 'speakerdesk-abc')

@@ -57,13 +57,13 @@ if($Action -eq 'VerifyPackage') {
     $inputs=@(Invoke-Helper @('package','--path',$target,'--stage',$env:SPEAKERDESK_SIGNING_STAGE,'--target',$env:SPEAKERDESK_SIGNING_TARGET))
     foreach($inputFile in $inputs) {
         if($inputFile.kind -eq 'hook_or_pinned'){continue}
-        $signature=Get-AuthenticodeSignature -LiteralPath $inputFile.path
-        if($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows)(?:,|$)'){throw 'Packaged Microsoft input has an unexpected signature.'}
+        $authenticode=Get-AuthenticodeSignature -LiteralPath $inputFile.path
+        if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows)(?:,|$)'){throw 'Packaged Microsoft input has an unexpected signature.'}
         & $context.signtool verify /pa /all /v $inputFile.path
         if($LASTEXITCODE -ne 0){throw 'Packaged Microsoft input failed native trust verification.'}
         if((Get-FileHash -LiteralPath $inputFile.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $inputFile.sha256){throw 'Packaged input changed during verification.'}
-        $inputFile | Add-Member -NotePropertyName authenticode_status -NotePropertyValue ([string]$signature.Status)
-        $inputFile | Add-Member -NotePropertyName publisher_subject -NotePropertyValue $signature.SignerCertificate.Subject
+        $inputFile | Add-Member -NotePropertyName authenticode_status -NotePropertyValue ([string]$authenticode.Status)
+        $inputFile | Add-Member -NotePropertyName publisher_subject -NotePropertyValue $authenticode.SignerCertificate.Subject
         $inputFile | Add-Member -NotePropertyName verified -NotePropertyValue $true
     }
     $appReceipt=Get-Content -LiteralPath (Join-Path $env:SPEAKERDESK_SIGNING_RECEIPTS 'app.json') -Raw | ConvertFrom-Json
@@ -75,19 +75,19 @@ if($Action -eq 'VerifyPackage') {
 $classification=Invoke-Helper @('classify','--path',$target,'--stage',$env:SPEAKERDESK_SIGNING_STAGE,
     '--target',$env:SPEAKERDESK_SIGNING_TARGET,'--temporary',$env:SPEAKERDESK_SIGNING_TEMP,'--version',$env:SPEAKERDESK_SIGNING_VERSION)
 $before=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-$signature=Get-AuthenticodeSignature -LiteralPath $target
+$authenticode=Get-AuthenticodeSignature -LiteralPath $target
 if($classification.disposition -eq 'owned_signed') {
-    if($signature.Status -eq 'NotSigned') {
+    if($authenticode.Status -eq 'NotSigned') {
         & $context.signtool sign /v /fd SHA256 /tr $contract.timestamp_url /td SHA256 `
             /dlib $context.dlib /dmdf $Metadata /d 'Speakerdesk' $target
         if($LASTEXITCODE -ne 0){throw "Artifact Signing failed: $($classification.role)"}
-    } elseif($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -cnotmatch '^CN=Albert Najjar(?:,|$)') {
+    } elseif($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Albert Najjar(?:,|$)') {
         throw 'Refusing to replace an unexpected existing signature.'
     }
-    $signature=Get-AuthenticodeSignature -LiteralPath $target
-    if($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -cnotmatch '^CN=Albert Najjar(?:,|$)' -or $null -eq $signature.TimeStamperCertificate){throw 'Expected verified publisher and timestamp were not produced.'}
+    $authenticode=Get-AuthenticodeSignature -LiteralPath $target
+    if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Albert Najjar(?:,|$)' -or $null -eq $authenticode.TimeStamperCertificate){throw 'Expected verified publisher and timestamp were not produced.'}
 } elseif($classification.disposition -eq 'microsoft_preserved') {
-    if($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows)(?:,|$)'){throw 'Pinned Microsoft signature is not valid.'}
+    if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows)(?:,|$)'){throw 'Pinned Microsoft signature is not valid.'}
 }
 if($classification.disposition -ne 'nsis_preserved') {
     & $context.signtool verify /pa /all /v $target
@@ -97,8 +97,8 @@ $after=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvaria
 if($classification.disposition -ne 'owned_signed' -and $before -cne $after){throw 'Preserved upstream bytes changed.'}
 $role=$classification.role
 $receipt=[ordered]@{role=$role;disposition=$classification.disposition;path=$target;input_sha256=$before;sha256=$after;
-    authenticode_status=[string]$signature.Status;publisher_subject=$(if($signature.SignerCertificate){$signature.SignerCertificate.Subject}else{$null});
-    timestamped=($null -ne $signature.TimeStamperCertificate);metadata_sha256=(Get-FileHash -LiteralPath $Metadata -Algorithm SHA256).Hash.ToLowerInvariant()}
+    authenticode_status=[string]$authenticode.Status;publisher_subject=$(if($authenticode.SignerCertificate){$authenticode.SignerCertificate.Subject}else{$null});
+    timestamped=($null -ne $authenticode.TimeStamperCertificate);metadata_sha256=(Get-FileHash -LiteralPath $Metadata -Algorithm SHA256).Hash.ToLowerInvariant()}
 $receiptPath=Join-Path $env:SPEAKERDESK_SIGNING_RECEIPTS ($role+'.json')
 if(Test-Path -LiteralPath $receiptPath) {
     $prior=Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
