@@ -1,6 +1,9 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const token = document.querySelector('meta[name="speakerdesk-token"]').content;
+const hostPlatform = document.body.dataset.platform || 'macos';
+const localDevice = hostPlatform === 'windows' ? 'PC' : 'Mac';
+const systemAudioLabel = hostPlatform === 'windows' ? 'System audio' : 'Mac audio';
 let config, jobs = [], selected = null, doc = null, dirty = false, polling = false, saving = false, editGeneration = 0, selectionGeneration = 0;
 let meeting = null, followingLive = true, passageEnd = null, passageStart = null, retrying = false, separationRequestMessage = '', startingJob = null;
 let changingLiveLanguage = false, changingDefaultLanguage = false, defaultLanguageGeneration = 0;
@@ -146,7 +149,7 @@ function renderSaveState() {
   button.disabled = updateFrozen || saving || !dirty;
   (button.querySelector('.shortcut-label') || button).textContent = saving || pending ? 'Saving…' : dirty ? 'Save now' : drafts ? 'Unsaved corrections' : timingDrafts.size ? 'Check timing' : 'Saved';
   button.classList.toggle('is-dirty', dirty && !saving);
-  button.dataset.shortcutTitle = drafts ? 'Save each passage correction, or recover the retained correction.' : timingDrafts.size ? 'Fix the invalid timing fields before leaving.' : dirty ? 'Edits save automatically. Save now' : 'All changes saved on this Mac';
+  button.dataset.shortcutTitle = drafts ? 'Save each passage correction, or recover the retained correction.' : timingDrafts.size ? 'Fix the invalid timing fields before leaving.' : dirty ? 'Edits save automatically. Save now' : `All changes saved on this ${localDevice}`;
   button.title = button.dataset.shortcutTitle;
   renderShortcutControl(button);
 }
@@ -1184,7 +1187,7 @@ async function save({quiet = false} = {}) {
     }
     if($('editor').contains(document.activeElement))renderSegments();
     setStatus();
-    if (!quiet) notice('Saved on this Mac.');
+    if (!quiet) notice(`Saved on this ${localDevice}.`);
   } finally { saving = false; renderSaveState(); if (dirty) scheduleAutosave(); }
 }
 async function upload(files) {
@@ -1248,7 +1251,7 @@ async function dispatchAction(action) {
       if(!usableActionControl(id))return false;
       $(id).focus();$(id).select();return true;
     }
-    if(action==='save' && usableActionControl('save') && !isLive()) { await flushSave();notice('Saved on this Mac.');return true; }
+    if(action==='save' && usableActionControl('save') && !isLive()) { await flushSave();notice(`Saved on this ${localDevice}.`);return true; }
   } catch(error) { notice(error.message,true); }
   return false;
 }
@@ -1520,9 +1523,9 @@ async function installModels() {
   await api('/api/setup',{method:'POST'}); await refreshSetup();
 }
 function modelSetupMessage(state) {
-  if(!state.supported)return 'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.';
+  if(!state.supported)return hostPlatform==='windows'?'Local transcription is not available in this Windows build. Model setup is disabled.':'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.';
   if(state.status==='failed')return 'Model setup did not finish. Try again, or open Details for more information.';
-  return 'Download the local models once. Meetings are transcribed offline on this Mac.';
+  return `Download the local models once. Meetings are transcribed offline on this ${localDevice}.`;
 }
 function renderStartState() {
   if(!config)return;
@@ -1532,7 +1535,7 @@ function renderStartState() {
   $('setup-card-install').hidden=loading;
   if(state && !modelsReady && !loading) {
     const percent=state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0;
-    $('setup-card-text').textContent=downloading?'Downloading local models. Meetings are transcribed offline on this Mac.':modelSetupMessage(state);
+    $('setup-card-text').textContent=downloading?`Downloading local models. Meetings are transcribed offline on this ${localDevice}.`:modelSetupMessage(state);
     $('setup-card-progress').hidden=!downloading;$('setup-card-progress').value=percent;
     $('setup-card-status').textContent=downloading?`${state.phase} · ${percent}%`:'';
     $('setup-card-install').disabled=busy || !state.supported || state.can_download===false || state.voice?.status==='downloading';
@@ -1570,7 +1573,7 @@ function renderAlignment(state) {
     $('alignment-coverage').textContent+=' Accuracy in other supported languages has not been independently measured.';
   $('alignment-cost').textContent=`${formatBytes(alignment.total_bytes)} download · ${formatBytes(alignment.stored_bytes)} stored · up to ${formatBytes(alignment.required_free_bytes)} free space needed.`;
   $('alignment-cost').hidden=loading || (state.status==='failed' && !state.download_required);
-  $('alignment-message').textContent=loading?'Preparing transcript timing on this Mac.':state.status==='failed' && !state.download_required?'Retry model setup to check transcript timing.':alignment.message;
+  $('alignment-message').textContent=loading?`Preparing transcript timing on this ${localDevice}.`:state.status==='failed' && !state.download_required?'Retry model setup to check transcript timing.':alignment.message;
   $('alignment-status').textContent=alignment.error || (loading?(alignment.phase || 'Loading models…'):busy?`${alignment.phase} · ${alignment.total_bytes?Math.round(100*alignment.downloaded_bytes/alignment.total_bytes):0}%`:alignment.ready?'Ready':'Not ready');
   $('alignment-progress').hidden=!busy;
   $('alignment-progress').value=alignment.total_bytes?100*alignment.downloaded_bytes/alignment.total_bytes:0;
@@ -1620,7 +1623,7 @@ async function refreshSetup() {
     $('model-progress').value=state.total_bytes?100*state.downloaded_bytes/state.total_bytes:0;
     const operation=state.operation,failedModels=!state.ready && operation?.target==='models' && ['failed','interrupted'].includes(operation.status);
     const failedSeparation=state.separation?.ready!==true && operation?.target==='separation' && ['failed','interrupted'].includes(operation.status);
-    $('model-status').textContent=failedModels?'Transcription setup did not finish. Retry setup.':loading?(state.phase || 'Loading models…'):downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?'Ready to transcribe on this Mac.':modelSetupMessage(state);
+    $('model-status').textContent=hostPlatform==='windows' && !state.supported?modelSetupMessage(state):failedModels?'Transcription setup did not finish. Retry setup.':loading?(state.phase || 'Loading models…'):downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?`Ready to transcribe on this ${localDevice}.`:modelSetupMessage(state);
     $('model-error').textContent=[...new Set([state.error,state.message,operation?.error && operation.error!==state.error?`Previous setup attempt: ${operation.error}`:null].filter(Boolean))].join('\n');
     $('model-error-details').hidden=!$('model-error').textContent;
     $('install-models').hidden=loading || (state.ready && !failedModels) || failedSeparation;
@@ -1629,7 +1632,7 @@ async function refreshSetup() {
     $('install-models').disabled=busy || voiceBusy || !state.supported || state.can_download===false;
     $('install-models').textContent=downloading?'Downloading…':(failedModels || state.status==='failed')?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
     if(voiceAvailable!==voice.available) await loadPeople();
-    $('settings-voice-note').textContent=voice.enabled?voice.message:'Recognition is off. Saved names and voices stay on this Mac.';
+    $('settings-voice-note').textContent=voice.enabled?voice.message:`Recognition is off. Saved names and voices stay on this ${localDevice}.`;
     if(document.activeElement!==$('recognize-voices')) $('recognize-voices').checked=voice.enabled;
     if(typeof state.core_ready==='boolean' && (state.core_ready !== config.readiness.configured || (state.automatic_language??true)!==config.readiness.automatic_language || (state.alignment?.ready??config.readiness.word_alignment)!==config.readiness.word_alignment)) {
       await refreshConfig();renderLanguageDefault();if(selected)setStatus();
@@ -1730,7 +1733,7 @@ async function refreshMeeting() {
     renderStartState();
     $('elapsed').textContent=time(meeting.duration);
     const sources=meeting.sources || (selected?.id===meeting.id ? selected.sources : []) || [];
-    for(const [source,id,label] of [['microphone','microphone-level','Microphone'],['system','system-level','Mac audio']]){
+    for(const [source,id,label] of [['microphone','microphone-level','Microphone'],['system','system-level',systemAudioLabel]]){
       const enabled=sources.includes(source),meter=$(id).closest('.audio-meter');
       meter.classList.toggle('off',!enabled);meter.title=enabled?'':`${label} isn’t recorded in this meeting`;
       meter.querySelector('label').textContent=enabled?label:`${label} · off`;
@@ -1878,5 +1881,25 @@ async function refreshUpdates() {
     if (updateFrozen) $('update-status').textContent = 'Waiting for the local update service. Keep Speakerdesk open.';
   } finally { updatePolling = false; }
 }
+function renderPlatformCopy() {
+  if(hostPlatform!=='windows')return;
+  const copy={
+    'recovery-location-note':'Copies are kept on this PC for review. They never replace saved transcript words automatically.',
+    'start-description':'Record the conversation. Audio and arriving words save on this PC. Save passage corrections when you edit during processing.',
+    'setup-card-text':'Checking local model availability on this PC.',
+    'capture-system-label':'System audio',
+    'capture-note':'System audio includes sound from your default playback device, including other apps. Check Windows microphone privacy settings before recording.',
+    'privacy-copy':'Audio and transcripts stay on this PC',
+    'system-meter-label':'System audio',
+    'setup-description':'Models run locally. Audio stays on this PC.',
+    'about-platform':'Windows x64.',
+    'about-models':'Model and dependency licenses are included in the exported third-party notices.',
+  };
+  for(const [id,text] of Object.entries(copy))$(id).textContent=text;
+  $('recording-access-macos').hidden=true;
+  $('recording-access-windows').hidden=false;
+  $('save').dataset.shortcutTitle='All changes saved on this PC';
+}
+renderPlatformCopy();
 $('connection-retry').addEventListener('click',()=>initialized?retryConnection():init());
 init();

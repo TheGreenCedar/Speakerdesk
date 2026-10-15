@@ -29,7 +29,7 @@ function renderPeople() {
     const saveName = node('button', 'Save name', 'quiet'); saveName.type = 'submit';
     form.append(input, saveName);
     form.append(node('span', person.voice_saved ? voiceAvailable && !person.voice_compatible
-      ? 'Save this voice again to use recognition' : 'Voice saved on this Mac'
+      ? 'Save this voice again to use recognition' : `Voice saved on this ${localDevice}`
       : 'Name saved. Open a meeting and choose Name / remember voice beside this person’s speech.', 'settings-note'));
     form.addEventListener('submit', async event => {
       event.preventDefault(); saveName.disabled = true;
@@ -105,7 +105,7 @@ function voiceEnrollmentState() {
       : $('name-person').value ? 'Apply this saved person to the speaker before remembering their voice.'
       : 'Save this name in People, then apply it to this speaker. You can also keep the name in this meeting only.'
     : !enough ? `Select ${minimum}–12 separate, nonoverlapping passages, each 2–10 seconds.`
-    : `Choosing Remember voice ${person?.voice_saved ? 'replaces' : 'saves'} ${person?.name || assignment.name}'s voice on this Mac for future meetings. You can remove it in People.`;
+    : `Choosing Remember voice ${person?.voice_saved ? 'replaces' : 'saves'} ${person?.name || assignment.name}'s voice on this ${localDevice} for future meetings. You can remove it in People.`;
   return {ready: usable && !!confirmed && enough, reason, assignment, current, busy, usable, enough};
 }
 function updateNameControls() {
@@ -330,7 +330,7 @@ function wirePeople() {
         if (!pid || $('name-person').value !== pid) throw new Error('Apply the saved person before remembering their voice.');
         // This deliberate Remember voice activation is the explicit consent.
         await api(`/api/people/${pid}/voice`, {method: 'POST', body: JSON.stringify({...body, meeting_id: context.jid, track_id: context.track, consent: true})});
-        $('name-dialog').close(); notice('Voice saved on this Mac for future meetings.');
+        $('name-dialog').close(); notice(`Voice saved on this ${localDevice} for future meetings.`);
       } else {
         const result = await api(`/api/jobs/${context.jid}/speakers/${encodeURIComponent(context.track)}/voice-suggestion`, {method: 'POST', body: JSON.stringify(body)});
         $('name-dialog').close(); acceptIdentityJob(result.job);

@@ -58,6 +58,7 @@ async fn native_service_reaps_on_eof_bad_control_stalled_upload_and_update_shutd
                 .unwrap(),
         );
         let html = client.get(url).send().await.unwrap().text().await.unwrap();
+        assert!(html.contains(&format!("data-platform=\"{}\"", std::env::consts::OS)));
         let token = html
             .split("name=\"speakerdesk-token\" content=\"")
             .nth(1)

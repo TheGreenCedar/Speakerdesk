@@ -162,7 +162,7 @@ impl Coordinator {
                 Event::Checked(id, epoch, result) if epoch == self.epoch && self.control.current(id) && self.control.phase == Phase::Checking => {
                     self.task = None;
                     match *result {
-                        Ok(Some(update)) if allowed_archive(&update) => {
+                        Ok(Some(update)) if allowed_archive(&update.version, &update.download_url) => {
                             self.selected = Some(update); self.control.phase = Phase::Available;
                         }
                         Ok(Some(_)) => self.fail("The release did not identify an approved Speakerdesk update archive."),
@@ -588,10 +588,15 @@ fn verification_configured(app: &AppHandle) -> bool {
         .all(|key| config[*key].as_bool() != Some(true))
 }
 
-fn allowed_archive(update: &Update) -> bool {
-    let url = &update.download_url;
-    let filename = format!("Speakerdesk_{}_AppleSilicon.app.tar.gz", update.version);
-    update.version.len() <= 48
+fn allowed_archive(version: &str, url: &tauri::Url) -> bool {
+    let filename = if cfg!(all(windows, target_arch = "x86_64")) {
+        format!("Speakerdesk_{version}_x64-setup.exe")
+    } else if cfg!(windows) {
+        return false;
+    } else {
+        format!("Speakerdesk_{version}_AppleSilicon.app.tar.gz")
+    };
+    version.len() <= 48
         && url.scheme() == "https"
         && url.host_str() == Some("rootandruntime.com")
         && url.port().is_none()
@@ -599,9 +604,79 @@ fn allowed_archive(update: &Update) -> bool {
         && url.password().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
-        && url.path()
-            == format!(
-                "/downloads/speakerdesk/releases/{}/{}",
-                update.version, filename
-            )
+        && url.path() == format!("/downloads/speakerdesk/releases/{version}/{filename}")
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::allowed_archive;
+    use tauri::Url;
+
+    fn filename(version: &str) -> String {
+        if cfg!(windows) {
+            format!("Speakerdesk_{version}_x64-setup.exe")
+        } else {
+            format!("Speakerdesk_{version}_AppleSilicon.app.tar.gz")
+        }
+    }
+
+    #[test]
+    fn immutable_archive_matches_the_native_platform_and_announced_version() {
+        for version in ["0.7.5", "0.7.6-rc.1"] {
+            let name = filename(version);
+            let url = Url::parse(&format!(
+                "https://rootandruntime.com/downloads/speakerdesk/releases/{version}/{name}"
+            ))
+            .unwrap();
+            assert_eq!(
+                allowed_archive(version, &url),
+                !cfg!(all(windows, not(target_arch = "x86_64")))
+            );
+        }
+    }
+
+    #[test]
+    fn alternate_platform_names_origins_and_mutable_or_decorated_urls_are_refused() {
+        let version = "0.7.5";
+        let name = filename(version);
+        let prefix = "https://rootandruntime.com/downloads/speakerdesk/releases";
+        let other_platform = if cfg!(windows) {
+            "Speakerdesk_0.7.5_AppleSilicon.app.tar.gz"
+        } else {
+            "Speakerdesk_0.7.5_x64-setup.exe"
+        };
+        let valid = format!("{prefix}/{version}/{name}");
+        let long_version = "1".repeat(49);
+        let hostile = [
+            valid.replacen("https:", "http:", 1),
+            valid.replacen("rootandruntime.com", "rootandruntime.com.evil.example", 1),
+            valid.replacen("rootandruntime.com", "updates.rootandruntime.com", 1),
+            valid.replacen("rootandruntime.com", "rootandruntime.com:8443", 1),
+            valid.replacen("rootandruntime.com", "user@rootandruntime.com", 1),
+            valid.replacen("rootandruntime.com", "user:password@rootandruntime.com", 1),
+            format!("{valid}?download=1"),
+            format!("{valid}#payload"),
+            format!("{prefix}/{version}/{other_platform}"),
+            format!("{prefix}/{version}/Speakerdesk_0.7.5_arm64-setup.exe"),
+            format!("{prefix}/{version}/Speakerdesk_0.7.5_x64.msi"),
+            format!("{prefix}/{version}/{name}.zip"),
+            format!("{prefix}/0.7.4/{name}"),
+            format!("{prefix}/latest/{name}"),
+            format!("{prefix}/{version}/{}", filename("0.7.4")),
+            format!("{prefix}/{version}/%53{}", &name[1..]),
+            format!("{valid}/"),
+        ];
+        for text in hostile {
+            assert!(
+                !allowed_archive(version, &Url::parse(&text).unwrap()),
+                "accepted {text}"
+            );
+        }
+        let long_url = Url::parse(&format!(
+            "{prefix}/{long_version}/{}",
+            filename(&long_version)
+        ))
+        .unwrap();
+        assert!(!allowed_archive(&long_version, &long_url));
+    }
 }

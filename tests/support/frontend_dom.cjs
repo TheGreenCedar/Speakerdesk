@@ -2,7 +2,7 @@
 const vm=require('node:vm');
 const fs=require('node:fs');
 const path=require('node:path');
-function frontend(root) {
+function frontend(root,{platform='macos'}={}) {
   const trace=[],ids=new Map(),stats={elements:0,listeners:0};let document;
   const dash=key=>key.replace(/[A-Z]/g,c=>'-'+c.toLowerCase());
   class Element {
@@ -70,6 +70,7 @@ function frontend(root) {
     getElementById:id=>{if(!ids.has(id)){const el=new Element();el.setAttribute('id',id);document.body.append(el);}return ids.get(id);},
     querySelector:s=>s.startsWith('meta')?{content:'cpu-fixture-token'}:document.body.querySelector(s),querySelectorAll:s=>document.body.querySelectorAll(s),addEventListener(){}};
   document.activeElement=document.body;
+  document.body.dataset.platform=platform;
   document.body.append(new Element('main'));
   const editor=document.getElementById('editor'),pane=document.getElementById('transcript-pane'),host=document.getElementById('segments');editor.append(pane);pane.append(host);document.getElementById('workspace').append(editor);
   for(const c of ['sidebar','player-panel','export-menu','transcript-search']){const el=new Element();el.className=c;document.body.append(el);}

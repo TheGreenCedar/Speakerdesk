@@ -128,6 +128,14 @@ try {
     $version = (Get-Content 'desktop/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
     $installer = Join-Path $TargetDirectory "$target/release/bundle/nsis/Speakerdesk_${version}_x64-setup.exe"
     Assert-RegularFile $installer
+    $authenticodeStatus = [string](Get-AuthenticodeSignature -LiteralPath $installer).Status
+    if ($authenticodeStatus -ne 'NotSigned') {
+        throw 'Expected NSIS payload derivation is limited to unsigned candidates. Signed payloads require their own observed inventory.'
+    }
+    $executable = Join-Path $TargetDirectory "$target/release/speakerdesk.exe"
+    Assert-RegularFile $executable
+    $executableReceipt = (@(Invoke-Native $Python @('scripts/windows_payload.py',
+        '--executable', $executable)) -join "`n") | ConvertFrom-Json
     if (-not $OutputDirectory) {
         $candidate = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
         $OutputDirectory = Join-Path $taskRoot "release/windows/$version/$candidate"
@@ -142,7 +150,15 @@ try {
         'speakerdesk_echo.dll', 'THIRD_PARTY_NOTICES.txt') + @($runtimeNames | ForEach-Object { "runtime/$_" })) {
         $inputs[$name] = File-Digest (Join-Path $stage $name)
     }
-    $inputs['speakerdesk.exe'] = File-Digest (Join-Path $TargetDirectory "$target/release/speakerdesk.exe")
+    $inputs['speakerdesk.exe'] = File-Digest $executable
+    if ($inputs['speakerdesk.exe'] -ne $executableReceipt.input_sha256) {
+        throw 'The executable changed after deriving its expected NSIS payload hash.'
+    }
+    # Tauri restores the loose UNK executable after bundling its NSS-patched copy.
+    # These are expected payload digests; installation must verify them separately.
+    $installedPayloads = [ordered]@{}
+    foreach ($name in $inputs.Keys) { $installedPayloads[$name] = $inputs[$name] }
+    $installedPayloads['speakerdesk.exe'] = $executableReceipt.expected_payload_sha256
     $sourceCommit = @(Invoke-Native git @('rev-parse', 'HEAD')) -join ''
     $sourceChanges = @(Invoke-Native git @('status', '--porcelain', '--untracked-files=normal'))
     Write-Json (Join-Path $OutputDirectory 'artifact-manifest.json') ([ordered]@{
@@ -151,9 +167,12 @@ try {
         source_commit = $sourceCommit
         source_dirty = ($sourceChanges.Count -ne 0)
         public_ready = $false
-        authenticode_status = [string](Get-AuthenticodeSignature -LiteralPath $packagedInstaller).Status
+        authenticode_status = $authenticodeStatus
         installer = [ordered]@{ name = Split-Path -Leaf $packagedInstaller; sha256 = File-Digest $packagedInstaller; bytes = (Get-Item -LiteralPath $packagedInstaller).Length }
         inputs = $inputs
+        installed_payloads = $installedPayloads
+        installed_payloads_observed = $false
+        executable_payload_derivation = $executableReceipt
         updater_signature = $null
     })
     Write-Output "Unsigned Windows candidate: $OutputDirectory"

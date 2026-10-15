@@ -42,8 +42,38 @@ required. The original failed receipts are retained beside the corrected runs.
 Runtime pins and immutable admission live in
 `crates/models/src/windows_runtime.rs`; download/catalog activation remains a
 separate host boundary. `scripts/build_windows.ps1` builds an unsigned candidate.
-Signing, standard-user install/update, model distribution and the assembled
+Signing, standard-user update, model distribution and the assembled
 import/live/edit/save/reopen interactions remain required before release.
+
+## Windows installer qualification
+
+Run `scripts/build_windows.ps1` from the x64 MSVC environment. It writes a new
+candidate directory under `release/windows/<version>/` and records its source
+commit, dirty state, installer digest and native resource hashes. Python is
+build tooling only; the installer contains no model weights or Python runtime.
+
+The manifest distinguishes `inputs` (loose build outputs) from
+`installed_payloads` (expected installed bytes). Tauri CLI 2.12.1 temporarily
+patches its executable's bundle marker for NSIS, then restores the loose file.
+`scripts/windows_payload.py` verifies that exact unsigned x64 transformation;
+it does not extract or observe the installer. Compare every installed file with
+`installed_payloads` after installation, and retain that separate observation.
+Signed artifacts require their own observed inventory.
+
+The current-user installer places the app under `%LOCALAPPDATA%\Speakerdesk`
+and registers it under HKCU. App data lives separately under
+`%APPDATA%\com.speakerdesk.desktop`. Qualification must use an actual standard
+user: install, verify payloads, launch the installed app, change a setting through
+the UI, quit/reopen, uninstall and reinstall. Check exactly one native host after
+launch and none after closing. Normal uninstall retains the separate database;
+explicitly requesting app-data deletion is a different operation.
+
+A clean Windows Sandbox run of the unsigned `cef62f2` candidate established
+non-admin install, WebView2 launch, a UI theme change surviving whole-app reopen,
+owned-host cleanup, and normal uninstall preserving the database byte for byte.
+It also reproduced the loose-versus-installed executable hash defect described
+above. WebView2 was already present; that run does not qualify bootstrapper
+installation, SmartScreen, a signed update, model execution or recording.
 
 ## Original Silero feasibility probe
 

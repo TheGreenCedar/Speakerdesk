@@ -910,7 +910,8 @@ async fn index(State(app): State<AppState>) -> Html<String> {
     Html(
         include_str!("../../../speakerdesk/templates/index.html")
             .replace("{{token}}", app.token())
-            .replace("{{theme}}", &theme),
+            .replace("{{theme}}", &theme)
+            .replace("{{platform}}", std::env::consts::OS),
     )
 }
 
