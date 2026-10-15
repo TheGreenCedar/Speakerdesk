@@ -19,6 +19,7 @@ serde_json = "1.0.153"
 sha2 = "0.10.9"
 speakerdesk-core = { path = "../core" }
 speakerdesk-echo = { path = "../echo" }
+tempfile = { version = "3", optional = true }
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["full"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
@@ -32,7 +33,7 @@ libc = "0.2.190"
 
 [features]
 default = []
-fixtures = []
+fixtures = ["dep:tempfile"]
 
 [[bin]]
 name = "speakerdesk-dev"

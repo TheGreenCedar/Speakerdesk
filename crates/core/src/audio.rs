@@ -1,4 +1,4 @@
-//! Decode, resample, mix, and recording writes. Owned by the core-audio agent.
+//! Decode, resample, mix, and recording writes.
 //!
 //! Canonical input is 16 kHz mono PCM16. Anything else is decoded with symphonia,
 //! mixed to mono, and resampled with rubato. macOS uses its system decoder only

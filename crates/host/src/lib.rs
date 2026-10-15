@@ -1,4 +1,5 @@
-//! Host process. Route and supervisor bodies are filled by later agents.
+//! Local HTTP host, persistence, capture coordination and inference supervision.
+//! [`routes::router`] composes the API; [`native::run`] owns the process lifecycle.
 pub mod admission;
 pub mod capture;
 pub mod http;
@@ -7,8 +8,8 @@ pub mod meeting;
 pub mod native;
 mod native_updates;
 pub mod people_routes;
-pub mod routes;
 pub mod recovery;
+pub mod routes;
 pub mod setup;
 pub mod worker;
 

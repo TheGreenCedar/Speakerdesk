@@ -1,4 +1,4 @@
-//! CTC segmentation, text units, and reading turns. Owned by the core-timing agent.
+//! CTC segmentation, text units, and reading turns.
 //! Policy ids live in [`crate::timing_policy`].
 //!
 //! The segmentation dynamic program is the ctc-segmentation 1.7.4 trellis

@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use serde_json::{Map, Value, json};
+use speakerdesk_core::document::{Document, Job};
 use speakerdesk_core::error::StoreError;
 use speakerdesk_core::ids::JobId;
 use speakerdesk_core::store::{JobStore, SqliteJobStore};
@@ -171,7 +172,7 @@ async fn identity_suggestions(
     let policy = app.models().voice_policy();
     database(app, StatusCode::OK, move |store| {
         let job = load_job(store, &jid)?;
-        Ok(json!({"revision": job_revision(&job)?, "suggestions": listed_suggestions(&Catalog::load(store, policy)?, &job)}))
+        Ok(json!({"revision": job.revision, "suggestions": listed_suggestions(&Catalog::load(store, policy)?, &job)}))
     }).await
 }
 
@@ -209,16 +210,13 @@ fn update_identity(
     store: &mut SqliteJobStore,
     jid: &str,
     policy: Option<voice::Calibration>,
-    update: impl FnOnce(&Catalog, Value) -> Result<Value, HttpError>,
+    update: impl FnOnce(&Catalog, &mut Job) -> Result<(), HttpError>,
 ) -> Result<Value, HttpError> {
     let id = JobId::parse(jid).map_err(|_| not_found())?;
     let catalog = Catalog::load(store, policy)?;
+    // The store advances the revision once, only after the entire edit succeeds.
     let (job, ()) = store
-        .update_job(&id, |job| {
-            let value = update(&catalog, serde_json::to_value(&*job).map_err(invalid_job)?)?;
-            *job = serde_json::from_value(value).map_err(invalid_job)?;
-            Ok::<_, HttpError>(())
-        })?
+        .update_job(&id, |job| update(&catalog, job))?
         .ok_or_else(not_found)?;
     Ok(crate::routes::stored_job_json(&job))
 }
@@ -331,12 +329,12 @@ fn name_text(body: &Map<String, Value>) -> Result<&str, HttpError> {
 
 fn dismiss_in(
     catalog: &Catalog,
-    mut job: Value,
+    job: &mut Job,
     sid: &str,
     body: &Map<String, Value>,
-) -> Result<Value, HttpError> {
-    editing_job(&job, body, None)?;
-    let current = listed_suggestions(catalog, &job);
+) -> Result<(), HttpError> {
+    editing_job(job, body, None)?;
+    let current = listed_suggestions(catalog, job);
     let known = current
         .iter()
         .any(|item| item.get("id").and_then(|value| value.as_str()) == Some(sid));
@@ -346,26 +344,25 @@ fn dismiss_in(
             messages::SUGGESTION_STALE,
         ));
     }
-    let mut dismissed = array_field(&job, "dismissed_identity_suggestions")?;
+    let mut dismissed = array_field(job, "dismissed_identity_suggestions")?;
     dismissed.push(json!(sid));
     if dismissed.len() > 256 {
         let extra = dismissed.len() - 256;
         dismissed.drain(0..extra);
     }
-    job["dismissed_identity_suggestions"] = json!(dismissed);
-    let revision = job_revision(&job)?;
-    job["revision"] = json!(revision + 1);
-    Ok(job)
+    job.extra
+        .insert("dismissed_identity_suggestions".into(), json!(dismissed));
+    Ok(())
 }
 
 fn confirm_in(
     catalog: &Catalog,
-    mut job: Value,
+    job: &mut Job,
     jid: &str,
     track: &str,
     body: &Map<String, Value>,
-) -> Result<Value, HttpError> {
-    editing_job(&job, body, Some(track))?;
+) -> Result<(), HttpError> {
+    let speakers = &editing_job(job, body, Some(track))?.speakers;
     let all_person_tracks = match body.get("all_person_tracks") {
         None => false,
         Some(Value::Bool(value)) => *value,
@@ -377,8 +374,10 @@ fn confirm_in(
         }
     };
     let tracks = if all_person_tracks {
-        let assignments = job["speaker_assignments"]
-            .as_object()
+        let assignments = job
+            .extra
+            .get("speaker_assignments")
+            .and_then(Value::as_object)
             .ok_or_else(|| HttpError::new(StatusCode::BAD_REQUEST, messages::INVALID_REQUEST))?;
         let person = assignments
             .get(track)
@@ -389,7 +388,8 @@ fn confirm_in(
             .iter()
             .filter(|(id, assignment)| {
                 assignment["person_id"].as_str() == Some(person)
-                    && job["document"]["speakers"].get(id.as_str()) == assignment.get("name")
+                    && speakers.get(id.as_str()).map(String::as_str)
+                        == assignment.get("name").and_then(Value::as_str)
                     && assignment["name"].is_string()
             })
             .map(|(id, _)| id.clone())
@@ -400,7 +400,7 @@ fn confirm_in(
     if !tracks.iter().any(|id| id == track) {
         return Err(HttpError::new(StatusCode::CONFLICT, messages::NAME_STALE));
     }
-    let suggestion = selected_suggestion(catalog, &job, body, track)?;
+    let suggestion = selected_suggestion(catalog, job, body, track)?;
     let (person_id, name) = resolve_name(&catalog.people, body, suggestion.as_ref())?;
     if let Some(suggestion) = suggestion.as_ref() {
         reject_mismatch(suggestion, person_id.as_deref(), &name)?;
@@ -423,32 +423,34 @@ fn confirm_in(
             confirmed: Some(true),
             source: source.to_string(),
         };
-        set_speaker(&mut job, &track, &name)?;
+        job.document
+            .as_mut()
+            .expect("editable document")
+            .speakers
+            .insert(track.clone(), name.clone());
         {
-            let assignments = ensure_object(&mut job, "speaker_assignments")?;
+            let assignments = ensure_object(job, "speaker_assignments")?;
             assignments.insert(
                 track.to_string(),
                 assignment_json(&assignment, unix_now(), evidence.clone()),
             );
         }
-        let kept = without_track(&job, &track)?;
-        job["voice_suggestions"] = json!(kept);
+        let kept = without_track(job, &track)?;
+        job.extra.insert("voice_suggestions".into(), json!(kept));
         {
-            let checks = ensure_object(&mut job, "voice_checks")?;
+            let checks = ensure_object(job, "voice_checks")?;
             checks.insert(
                 track.to_string(),
                 json!({ "id": new_id(), "status": "manual" }),
             );
         }
     }
-    let revision = job_revision(&job)?;
-    job["revision"] = json!(revision + 1);
-    Ok(job)
+    Ok(())
 }
 
 fn selected_suggestion(
     catalog: &Catalog,
-    job: &Value,
+    job: &Job,
     body: &Map<String, Value>,
     track: &str,
 ) -> Result<Option<Value>, HttpError> {
@@ -544,17 +546,7 @@ fn assignment_json(
     })
 }
 
-fn set_speaker(job: &mut Value, track: &str, name: &str) -> Result<(), HttpError> {
-    let speakers = job
-        .get_mut("document")
-        .and_then(|document| document.get_mut("speakers"))
-        .and_then(|speakers| speakers.as_object_mut())
-        .ok_or_else(|| HttpError::new(StatusCode::BAD_REQUEST, messages::INVALID_REQUEST))?;
-    speakers.insert(track.to_string(), json!(name));
-    Ok(())
-}
-
-fn listed_suggestions(catalog: &Catalog, job: &Value) -> Vec<Value> {
+fn listed_suggestions(catalog: &Catalog, job: &Job) -> Vec<Value> {
     let available = catalog.policy.is_some();
     let intros = people::introduction_suggestions(&suggestion_job(job));
     let intro_tracks: BTreeSet<String> = intros.iter().map(|item| item.track_id.clone()).collect();
@@ -578,8 +570,14 @@ fn suggestion_json(suggestion: &people::IntroductionSuggestion) -> Value {
     })
 }
 
-fn suggestion_job(job: &Value) -> people::SuggestionJob {
-    serde_json::from_value(job.clone()).unwrap_or(people::SuggestionJob {
+fn suggestion_job(job: &Job) -> people::SuggestionJob {
+    // Legacy optional fields can be malformed. Keep the suggestion projection's
+    // existing all-or-nothing decode without round-tripping the job being edited.
+    let mut projection = json!({"document": job.document});
+    if let Some(dismissed) = job.extra.get("dismissed_identity_suggestions") {
+        projection["dismissed_identity_suggestions"] = dismissed.clone();
+    }
+    serde_json::from_value(projection).unwrap_or(people::SuggestionJob {
         document: None,
         dismissed_identity_suggestions: Vec::new(),
     })
@@ -587,17 +585,18 @@ fn suggestion_job(job: &Value) -> people::SuggestionJob {
 
 fn voice_suggestions(
     catalog: &Catalog,
-    job: &Value,
+    job: &Job,
     intro_tracks: &BTreeSet<String>,
     available: bool,
 ) -> Vec<Value> {
     if !available {
         return Vec::new();
     }
-    let Some(items) = job.get("voice_suggestions").and_then(Value::as_array) else {
+    let Some(items) = job.extra.get("voice_suggestions").and_then(Value::as_array) else {
         return Vec::new();
     };
     let dismissed = job
+        .extra
         .get("dismissed_identity_suggestions")
         .and_then(Value::as_array);
     let mut kept = Vec::new();
@@ -646,64 +645,50 @@ fn voice_suggestions(
     kept
 }
 
-fn track_assigned(job: &Value, track: &str) -> bool {
-    job.get("speaker_assignments")
+fn track_assigned(job: &Job, track: &str) -> bool {
+    job.extra
+        .get("speaker_assignments")
         .and_then(Value::as_object)
         .and_then(|map| map.get(track))
         .is_some_and(|value| !value.is_null())
 }
 
-fn editing_job(
-    job: &Value,
+fn editing_job<'a>(
+    job: &'a Job,
     body: &Map<String, Value>,
     track: Option<&str>,
-) -> Result<(), HttpError> {
-    let status = job
-        .get("status")
-        .and_then(Value::as_str)
-        .ok_or_else(|| HttpError::new(StatusCode::BAD_REQUEST, messages::INVALID_REQUEST))?;
-    let document = job.get("document").filter(|value| value.is_object());
-    if NAMING_BUSY.contains(&status) || document.is_none() {
-        return Err(HttpError::new(
-            StatusCode::CONFLICT,
-            messages::NAME_BEFORE_FINAL,
-        ));
-    }
-    let revision = job_revision(job)?;
-    if body.get("revision").and_then(Value::as_i64) != Some(revision) {
+) -> Result<&'a Document, HttpError> {
+    let document = job
+        .document
+        .as_ref()
+        .filter(|_| !NAMING_BUSY.contains(&job.status.as_str()))
+        .ok_or_else(|| HttpError::new(StatusCode::CONFLICT, messages::NAME_BEFORE_FINAL))?;
+    if body.get("revision").and_then(Value::as_i64) != Some(job.revision) {
         return Err(HttpError::new(StatusCode::CONFLICT, messages::NAME_STALE));
     }
-    if let Some(track) = track {
-        let speakers = document
-            .and_then(|value| value.get("speakers"))
-            .and_then(Value::as_object);
-        if speakers.is_none_or(|map| !map.contains_key(track)) {
-            return Err(not_found());
-        }
+    if let Some(track) = track
+        && !document.speakers.contains_key(track)
+    {
+        return Err(not_found());
     }
-    Ok(())
+    Ok(document)
 }
 
-fn load_job(store: &SqliteJobStore, jid: &str) -> Result<Value, HttpError> {
+fn load_job(store: &SqliteJobStore, jid: &str) -> Result<Job, HttpError> {
     let id = JobId::parse(jid).map_err(|_| not_found())?;
-    let job = store.get(&id, false)?.ok_or_else(not_found)?;
-    serde_json::to_value(job).map_err(invalid_job)
+    store.get(&id, false)?.ok_or_else(not_found)
 }
 
-fn ensure_object<'a>(
-    job: &'a mut Value,
-    key: &str,
-) -> Result<&'a mut Map<String, Value>, HttpError> {
-    if job.get(key).is_none() {
-        job[key] = json!({});
-    }
-    job.get_mut(key)
-        .and_then(Value::as_object_mut)
+fn ensure_object<'a>(job: &'a mut Job, key: &str) -> Result<&'a mut Map<String, Value>, HttpError> {
+    job.extra
+        .entry(key)
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
         .ok_or_else(|| HttpError::new(StatusCode::BAD_REQUEST, messages::INVALID_REQUEST))
 }
 
-fn without_track(job: &Value, track: &str) -> Result<Vec<Value>, HttpError> {
-    let Some(list) = job.get("voice_suggestions") else {
+fn without_track(job: &Job, track: &str) -> Result<Vec<Value>, HttpError> {
+    let Some(list) = job.extra.get("voice_suggestions") else {
         return Ok(Vec::new());
     };
     let Some(list) = list.as_array() else {
@@ -725,8 +710,8 @@ fn without_track(job: &Value, track: &str) -> Result<Vec<Value>, HttpError> {
     Ok(kept)
 }
 
-fn array_field(job: &Value, key: &str) -> Result<Vec<Value>, HttpError> {
-    match job.get(key) {
+fn array_field(job: &Job, key: &str) -> Result<Vec<Value>, HttpError> {
+    match job.extra.get(key) {
         None => Ok(Vec::new()),
         Some(Value::Array(items)) => Ok(items.clone()),
         Some(_) => Err(HttpError::new(
@@ -734,12 +719,6 @@ fn array_field(job: &Value, key: &str) -> Result<Vec<Value>, HttpError> {
             messages::INVALID_REQUEST,
         )),
     }
-}
-
-fn job_revision(job: &Value) -> Result<i64, HttpError> {
-    job.get("revision")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| HttpError::new(StatusCode::BAD_REQUEST, messages::INVALID_REQUEST))
 }
 
 fn optional_text(value: Option<&Value>) -> Option<&str> {
@@ -2187,6 +2166,9 @@ mod tests {
         let mut seeded = intro_job(&id);
         seeded["fast_history"] = json!({"private": "retained"});
         seeded["operation_generation"] = json!(4);
+        seeded["future_identity_metadata"] = json!({"version": 2, "value": null});
+        seeded["document"]["future_document_metadata"] = json!(["retained"]);
+        seeded["document"]["segments"][0]["future_passage_metadata"] = json!({"keep": true});
         state.insert_job(serde_json::from_value(seeded).unwrap());
         let running = serve(crate::routes::router(state.clone())).await;
         let response = running
@@ -2201,6 +2183,18 @@ mod tests {
         let named: Value = response.json().await.unwrap();
         assert!(named.get("fast_history").is_none());
         assert!(named.get("operation_generation").is_none());
+        assert_eq!(
+            named["future_identity_metadata"],
+            json!({"version": 2, "value": null})
+        );
+        assert_eq!(
+            named["document"]["future_document_metadata"],
+            json!(["retained"])
+        );
+        assert_eq!(
+            named["document"]["segments"][0]["future_passage_metadata"],
+            json!({"keep": true})
+        );
         let saved: Value = running
             .client
             .get(running.url(&format!("/api/jobs/{id}")))
@@ -2250,6 +2244,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(internal.extra["fast_history"]["private"], "retained");
+        assert_eq!(
+            internal.extra["future_identity_metadata"],
+            json!({"version": 2, "value": null})
+        );
+        let internal_document = internal.document.as_ref().unwrap();
+        assert_eq!(
+            internal_document.rest["future_document_metadata"],
+            json!(["retained"])
+        );
+        assert_eq!(
+            internal_document.segments[0].rest["future_passage_metadata"],
+            json!({"keep": true})
+        );
         let running = serve(crate::routes::router(reopened.clone())).await;
         let saved: Value = running
             .client
@@ -2763,6 +2770,123 @@ mod tests {
             .unwrap();
         assert_eq!(unknown.status(), 404);
         assert_ne!(unknown.status(), 405);
+
+        // Legacy extension metadata keeps its existing validation and transaction rollback.
+        for (key, value, status, revision, track, expected_status, expected_error) in [
+            (
+                "speaker_assignments",
+                Value::Null,
+                "ready",
+                0,
+                "speaker_0",
+                400,
+                messages::INVALID_REQUEST,
+            ),
+            (
+                "voice_suggestions",
+                Value::Null,
+                "ready",
+                0,
+                "speaker_0",
+                400,
+                messages::INVALID_REQUEST,
+            ),
+            (
+                "voice_suggestions",
+                json!([{"track_id": 3}]),
+                "ready",
+                0,
+                "speaker_0",
+                400,
+                messages::INVALID_REQUEST,
+            ),
+            (
+                "voice_checks",
+                Value::Null,
+                "ready",
+                0,
+                "speaker_0",
+                400,
+                messages::INVALID_REQUEST,
+            ),
+            (
+                "speaker_assignments",
+                Value::Null,
+                "preparing",
+                1,
+                "missing",
+                409,
+                messages::NAME_BEFORE_FINAL,
+            ),
+            (
+                "speaker_assignments",
+                Value::Null,
+                "ready",
+                1,
+                "missing",
+                409,
+                messages::NAME_STALE,
+            ),
+            (
+                "speaker_assignments",
+                Value::Null,
+                "ready",
+                0,
+                "missing",
+                404,
+                super::NOT_FOUND,
+            ),
+        ] {
+            let jid = "5".repeat(32);
+            let mut seeded = intro_job(&jid);
+            seeded[key] = value;
+            seeded["status"] = json!(status);
+            write_job(&state, &jid, seeded);
+            let id = speakerdesk_core::ids::JobId::parse(&jid).unwrap();
+            let before = state.store().get(&id, false).unwrap().unwrap();
+            let response = running
+                .client
+                .post(running.url(&format!("/api/jobs/{jid}/speakers/{track}/identity")))
+                .json(&json!({"revision": revision, "name": "Changed"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                expected_status,
+                "{key} / {status} / {track}"
+            );
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["error"],
+                expected_error
+            );
+            assert_eq!(state.store().get(&id, false).unwrap().unwrap(), before);
+        }
+
+        let jid = "6".repeat(32);
+        for (key, value) in [
+            ("dismissed_identity_suggestions", Value::Null),
+            ("dismissed_identity_suggestions", json!([3])),
+            ("finalized", json!("invalid")),
+        ] {
+            let mut seeded = intro_job(&jid);
+            if key == "finalized" {
+                seeded["document"]["segments"][0][key] = value;
+            } else {
+                seeded[key] = value;
+            }
+            write_job(&state, &jid, seeded);
+            let suggestions: Value = running
+                .client
+                .get(running.url(&format!("/api/jobs/{jid}/identity-suggestions")))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(suggestions["suggestions"], json!([]), "{key}");
+        }
         running.shutdown().await;
         let _ = std::fs::remove_dir_all(state.data_dir());
     }

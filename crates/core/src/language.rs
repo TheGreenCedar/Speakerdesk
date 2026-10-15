@@ -1,4 +1,4 @@
-//! Language policy and speech transcriber. Owned by the core-speech agent.
+//! Language policy and speech transcriber.
 //! Thresholds live in [`crate::limits`] and codes in [`crate::languages`].
 //!
 //! Probabilities are injected. This module does not load Whisper weights.

@@ -1,4 +1,4 @@
-"""Check tracked payload boundaries, syntax and release version consistency."""
+"""Check tracked working-tree payloads, syntax and release version consistency."""
 import ast
 import json
 import plistlib
@@ -8,6 +8,9 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
+deleted = set(subprocess.check_output(['git', 'ls-files', '--deleted', '-z'], cwd=root).decode().split('\0'))
+# Local checks run before staging too. Required files below must still exist.
+tracked = [name for name in tracked if name and name not in deleted]
 required = {'scripts/promote_release.py', 'scripts/build_macos.sh',
             'scripts/native_licenses.py', 'scripts/fetch_mlx_runtime.sh',
             'scripts/replay_capture.py', 'scripts/acceptance_fixtures.py',

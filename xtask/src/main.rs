@@ -14,22 +14,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Parity,
-    FakeCapture,
-    Acceptance,
-    Bench,
-    Corpora,
-    VerifyBundle {
-        path: Option<PathBuf>,
-    },
+    /// Check a native app bundle for required resources and forbidden Python artifacts.
+    VerifyBundle { path: Option<PathBuf> },
+    /// Check that the desktop shell does not start a Python sidecar.
     CheckPythonFree,
-    Notices,
-    CiChanges,
-    VoiceCalibrate,
-    E2e {
-        kind: Option<String>,
-    },
-    FetchUpstream,
     /// Compare Silero, Sortformer, and Cohere with packaged 0.6.6. macOS only.
     Probe,
 }
@@ -37,21 +25,8 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::FakeCapture => commands::fake_capture::run(),
-        Command::Parity => commands::pending::run("parity"),
-        Command::Acceptance => commands::pending::run("acceptance"),
-        Command::Bench => commands::pending::run("bench"),
-        Command::Corpora => commands::pending::run("corpora"),
         Command::VerifyBundle { path } => commands::verify_bundle::run(path),
         Command::CheckPythonFree => commands::python_free::run(),
-        Command::Notices => commands::pending::run("notices"),
-        Command::CiChanges => commands::ci_changes::run(),
-        Command::VoiceCalibrate => commands::pending::run("voice-calibrate"),
-        Command::E2e { kind } => {
-            let _ = kind;
-            commands::pending::run("e2e")
-        }
-        Command::FetchUpstream => commands::pending::run("fetch-upstream"),
         Command::Probe => commands::probe::run(),
     };
     match result {
