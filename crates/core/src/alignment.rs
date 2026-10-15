@@ -8,6 +8,9 @@ use std::collections::{HashMap, HashSet};
 use unicode_general_category::get_general_category;
 use unicode_normalization::{UnicodeNormalization, char::canonical_combining_class};
 
+#[cfg(test)]
+mod timing_replay;
+
 pub const TOKENS_SHA256: &str = "a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31";
 pub const CHECKPOINT: &str = "omnilingual-ctc-native-f32-v1-38ff6a225e75";
 /// Runtime-owned identity, deliberately distinct from the historical Python source digest.

@@ -1,4 +1,51 @@
-# Windows model feasibility probe
+# Windows qualification
+
+The Windows production inference dispatcher remains disabled. Native component
+implementations and their tests are available, but they do not yet constitute a
+working Windows application. [Issue #20](https://github.com/TheGreenCedar/Speakerdesk/issues/20)
+owns the complete application acceptance; [PR #49](https://github.com/TheGreenCedar/Speakerdesk/pull/49)
+remains a draft.
+
+Start at the model's adjacent Windows implementation and the linked experiment
+record when investigating a numerical or lifecycle failure. Python is used for
+export and qualification only; it is not part of the application runtime.
+
+| Component | Current boundary | Implementation / evidence |
+| --- | --- | --- |
+| Silero | Native recurrent/reference, reset, framing and cancellation checks pass. | `crates/models/src/silero/network_windows.rs`; original experiment below |
+| Cohere | Native text, tokens, decoder continuation and sharded artifact checks pass. | `crates/models/src/cohere/network_windows.rs`; [Cohere](cohere/README.md) |
+| Nemotron | Native offline/live sessions and cache compression reproduce the qualified long run. | `crates/models/src/sortformer/{network,session}_windows.rs`; [Nemotron](nemotron/README.md) |
+| ReDimNet | Component vectors and frozen separated-voice decisions pass. Ordinary recognition matches Mac, but the strict new pilot has one abstention; Windows policy approval is pending. | `crates/models/src/redimnet/network_windows.rs`; [ReDimNet](redimnet/README.md) |
+| MossFormer | Both independent waveform windows, bounded session lifetime and cancellation pass on the AMD machine. | `crates/models/src/mossformer2/network_windows.rs`; [MossFormer](mossformer/README.md) |
+| Whisper | Three of four original numerical checks fail. All four observed language-routing outcomes match. The execution adapter is compiled but artifact admission remains blocked. | `crates/models/src/whisper_lid/network_windows.rs`; [Whisper](whisper/README.md) |
+| CTC timing | Original numerical check fails. One supplemental replay preserves 130 character frames and 23 word envelopes; Windows provenance and calibration remain unresolved. The compiled adapter reports its actual Windows graph identity, which core rejects today. | `crates/models/src/ctc/network_windows.rs`; [CTC](ctc/README.md) |
+
+`crates/models/tests/windows_residency.rs` exercises all five implemented
+networks together, including Cohere continuation across maximum-window
+separation and denial of model-file writes while loaded. It does not include
+Whisper, CTC, capture or the host. Its memory observation is not seven-model
+headroom or sustained meeting throughput.
+
+`crates/host/tests/windows_capture.rs` exercises actual WASAPI capture through
+the host. `echo_quality.rs` retains a frozen simulated-room diagnostic. Both
+Windows and Mac initially failed its far-only 6 dB minimum (5.087/5.090 dB).
+The shared clock had replaced a validated correlation peak with a different,
+earlier lobe, inventing drift and shifting native alignment. Keeping delay and
+confidence on the validated peak, with 16 ms causal headroom at the native AEC
+boundary, passes the unchanged test: 46.145/46.111 dB far-only reduction and
+11.053/11.052 dB double-talk target-error reduction. Local-only bypass and system
+audio remain bit-exact. All four runs retain the same recipe, input hashes and
+native libraries. Double-talk proves aggregate error improvement, not exact
+near-voice amplitude or active-DSP alignment; physical-room qualification remains
+required. The original failed receipts are retained beside the corrected runs.
+
+Runtime pins and immutable admission live in
+`crates/models/src/windows_runtime.rs`; download/catalog activation remains a
+separate host boundary. `scripts/build_windows.ps1` builds an unsigned candidate.
+Signing, standard-user install/update, model distribution and the assembled
+import/live/edit/save/reopen interactions remain required before release.
+
+## Original Silero feasibility probe
 
 This is a disposable experiment for issue #20. It exports the exact pinned
 Silero-v6 weights and runs them through native ONNX Runtime CPU and DirectML.

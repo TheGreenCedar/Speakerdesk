@@ -48,7 +48,7 @@ impl Runtime {
     pub fn execute(
         &mut self,
         request: Request,
-        cancel: &AtomicBool,
+        cancel: &crate::operation::Operation,
     ) -> Result<Response, ChildError> {
         use speakerdesk_core::ipc::Handle;
         if cancel.load(Ordering::Acquire) {

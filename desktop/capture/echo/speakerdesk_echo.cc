@@ -58,9 +58,9 @@ struct Bank {
     render.CopyFrom(reference, webrtc::StreamConfig(16000, channels));
     echo->AnalyzeRender(&render);
     if (delay_ms >= 0) echo->SetAudioBufferDelay(delay_ms);
-    const float* near[] = {microphone};
+    const float* microphone_channels[] = {microphone};
     float* cleaned[] = {output};
-    capture.CopyFrom(near, webrtc::StreamConfig(16000, 1));
+    capture.CopyFrom(microphone_channels, webrtc::StreamConfig(16000, 1));
     echo->AnalyzeCapture(&capture);
     echo->ProcessCapture(&capture, &linear, false);
     linear.CopyTo(webrtc::StreamConfig(16000, 1), cleaned);

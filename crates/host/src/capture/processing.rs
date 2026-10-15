@@ -14,6 +14,8 @@ use super::{CaptureError, PROCESSED};
 pub(super) const EXPORT: &str = "apple_processed_mono16k_v1";
 pub(super) const PROGRESS: &str = "audio_queue_fence_v1";
 const CAPABILITY: &str = "apple_input_node_output_route_v1";
+const WINDOWS_EXPORT: &str = "raw_dual_mono_stereo16k_v1";
+const WINDOWS_CAPABILITY: &str = "windows_wasapi_shared_v1";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -71,9 +73,15 @@ impl Helper {
                 }
                 let value: Qualification = serde_json::from_slice(&fs::read(manifest)?)
                     .map_err(|_| invalid("Invalid capture helper capability manifest."))?;
+                let supported = matches!(
+                    (
+                        value.export_contract.as_str(),
+                        value.capability_version.as_str()
+                    ),
+                    (EXPORT, CAPABILITY) | (WINDOWS_EXPORT, WINDOWS_CAPABILITY)
+                );
                 if value.helper_sha256 != sha256
-                    || value.export_contract != EXPORT
-                    || value.capability_version != CAPABILITY
+                    || !supported
                     || value.progress_contract != PROGRESS
                 {
                     return Err(invalid("Capture capability differs from its built helper."));
@@ -88,8 +96,21 @@ impl Helper {
         })
     }
 
-    pub fn qualified(&self) -> bool {
+    pub fn progress_qualified(&self) -> bool {
         self.qualification.is_some()
+    }
+
+    pub fn processed_microphone(&self) -> bool {
+        self.qualification
+            .as_ref()
+            .is_some_and(|value| value.export_contract == EXPORT)
+    }
+
+    pub fn start_contract(&self, dual_source: bool) -> Option<&str> {
+        self.qualification
+            .as_ref()
+            .filter(|value| dual_source || value.export_contract == WINDOWS_EXPORT)
+            .map(|value| value.export_contract.as_str())
     }
 
     pub fn receipt(
@@ -101,6 +122,7 @@ impl Helper {
         let qualification = self
             .qualification
             .as_ref()
+            .filter(|value| value.export_contract == EXPORT)
             .ok_or_else(|| invalid("Capture producer is not qualified by the application."))?;
         let parsed: Packet = serde_json::from_value(packet.clone())
             .map_err(|_| invalid("Malformed capture processing receipt."))?;

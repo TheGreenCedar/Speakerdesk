@@ -9,7 +9,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::processing::{EXPORT, Helper, invalid, private_create};
+use super::processing::{Helper, invalid, private_create};
 use super::writer::{SourceWriter, WriterInput, run_writer};
 use super::{
     CaptureConfig, CaptureError, CapturePhase, CaptureSnapshot, Command, EventKind, STALL_STOP,
@@ -68,7 +68,9 @@ impl CaptureSupervisor {
         config: CaptureConfig,
         stop_bound: Duration,
     ) -> Result<CaptureSession, CaptureError> {
-        let qualified = config.microphone && config.system && helper.qualified();
+        let contract = helper
+            .start_contract(config.microphone && config.system)
+            .map(str::to_owned);
         let (packets_tx, packets_rx) = mpsc::channel(PACKETS);
         let (snapshots_tx, snapshots_rx) = watch::channel(CaptureSnapshot::default());
         let writer_output = snapshots_tx.clone();
@@ -120,8 +122,8 @@ impl CaptureSupervisor {
         let start = Command::Start {
             microphone: config.microphone,
             system: config.system,
-            job_id: qualified.then_some(config.job_id),
-            capture_export_contract: qualified.then(|| EXPORT.into()),
+            job_id: contract.as_ref().map(|_| config.job_id),
+            capture_export_contract: contract,
         };
         let task = tokio::spawn(async move {
             let (stdin_tx, mut stdin_rx) = mpsc::channel::<Command>(8);

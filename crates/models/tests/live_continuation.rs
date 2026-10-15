@@ -10,7 +10,8 @@ use speakerdesk_core::{
     memo::sha256_hex,
 };
 use speakerdesk_models::dispatch::Runtime;
-use std::{fs, io::Write, path::PathBuf, sync::atomic::AtomicBool, time::Instant};
+use speakerdesk_models::operation::Operation;
+use std::{fs, io::Write, path::PathBuf, time::Instant};
 
 #[derive(Deserialize)]
 struct Manifest {
@@ -49,7 +50,7 @@ fn wav(path: &std::path::Path, digest: Option<&str>) -> Vec<f32> {
 
 fn call(runtime: &mut Runtime, request: Request, label: &str, phases: &mut Vec<Value>) -> Response {
     let started = Instant::now();
-    let response = runtime.execute(request, &AtomicBool::new(false));
+    let response = runtime.execute(request, &Operation::native().unwrap());
     let seconds = started.elapsed().as_secs_f64();
     eprintln!("native phase {label}: {seconds:.9}s");
     phases.push(json!({"phase": label, "seconds": seconds}));
@@ -330,7 +331,11 @@ fn native_phases_preserve_public_outputs_and_allow_primary_work() {
             Request::TranscribeStep { handle: owner }
         };
         assert_eq!(
-            runtime.execute(step.clone(), &AtomicBool::new(true)),
+            runtime.execute(step.clone(), &{
+                let operation = Operation::native().unwrap();
+                operation.cancel();
+                operation
+            }),
             Err(ChildError::Cancelled)
         );
         let close = if separation {
@@ -346,7 +351,11 @@ fn native_phases_preserve_public_outputs_and_allow_primary_work() {
             call(&mut runtime, close, "cancel_close_again", &mut phases),
             Response::Ack
         );
-        assert!(runtime.execute(step, &AtomicBool::new(false)).is_err());
+        assert!(
+            runtime
+                .execute(step, &Operation::native().unwrap())
+                .is_err()
+        );
         let request = if separation {
             Request::SeparateOpen { pcm: vec![0.; 16] }
         } else {

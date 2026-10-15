@@ -10,7 +10,6 @@ import io
 import json
 import os
 import platform
-import resource
 import shutil
 import signal
 import stat
@@ -21,6 +20,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+if os.name != 'nt':
+    import resource
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT/'.cache/echo-source/src'
@@ -38,12 +40,14 @@ def git_hash(kind,data):
     return hashlib.sha1(f'{kind} {len(data)}\0'.encode()+data).digest()
 
 
-def tree_hash(folder):
+def tree_hash(folder, modes=None, relative=Path()):
     entries=[]
     for p in folder.iterdir():
         if p.is_symlink():raise RuntimeError(f'Unsafe echo source: {p}')
-        if p.is_dir():mode,oid,key='40000',tree_hash(p),p.name+'/'
-        else:mode,oid,key=('100755' if p.stat().st_mode&0o111 else '100644'),git_hash('blob',p.read_bytes()),p.name
+        if p.is_dir():mode,oid,key='40000',tree_hash(p,modes,relative/p.name),p.name+'/'
+        else:
+            executable = modes[(relative/p.name).as_posix()] if modes is not None else bool(p.stat().st_mode&0o111)
+            mode,oid,key=('100755' if executable else '100644'),git_hash('blob',p.read_bytes()),p.name
         entries.append((key.encode(),mode.encode()+b' '+p.name.encode()+b'\0'+oid))
     return git_hash('tree',b''.join(v for _,v in sorted(entries)))
 
@@ -51,7 +55,8 @@ def tree_hash(folder):
 def sources():
     lock_digest=hashlib.sha256(LOCK.read_bytes()).hexdigest()
     verified=SOURCE.parent/'VERIFIED-LOCK.json'
-    if verified.is_file():
+    windows = platform.system() == 'Windows'
+    if verified.is_file() and not windows:
         cached=json.loads(verified.read_text())
         if cached.get('lock_sha256')==lock_digest and cached.get('all_source_hashes_verified'):
             return {**cached,'received_bytes':0,'extracted_bytes':0,'fetched_files':0,'verified_source_cache_reused':True}
@@ -61,8 +66,9 @@ def sources():
     def get(url):
         nonlocal received
         def expired(signum,frame):raise TimeoutError('Echo source request exceeded 30 seconds.')
-        previous=signal.signal(signal.SIGALRM,expired)
-        signal.alarm(30)
+        if not windows:
+            previous=signal.signal(signal.SIGALRM,expired)
+            signal.alarm(30)
         try:
             for attempt in range(3):
                 try:
@@ -73,20 +79,24 @@ def sources():
                     error.close()
                     time.sleep(2**attempt)
         finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM,previous)
+            if not windows:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM,previous)
         received+=len(data)
         if received>RECEIVE_LIMIT:raise RuntimeError('Echo source receive budget exceeded.')
         return data
     SOURCE.mkdir(parents=True,exist_ok=True)
     for relative,entry in lock['archives'].items():
         folder=SOURCE/relative
+        modes_path=SOURCE.parent/'windows-modes'/f'{hashlib.sha256(relative.encode()).hexdigest()}.json'
+        modes=None
         if not folder.exists():
             data=get(entry['url'])
             # Extract to an owned temporary path; publish only after Git-tree verification.
             temp=folder.with_name(folder.name+'.incoming')
             if temp.exists():raise RuntimeError(f'Incomplete source fetch: {temp}; inspect before retry.')
             temp.mkdir(parents=True)
+            if windows:modes={}
             with tarfile.open(fileobj=io.BytesIO(data),mode='r:gz') as tar:
                 for member in tar:
                     rel=Path(member.name)
@@ -99,9 +109,15 @@ def sources():
                     p.parent.mkdir(parents=True,exist_ok=True)
                     with p.open('xb') as out:out.write(tar.extractfile(member).read())
                     p.chmod(0o755 if member.mode&0o111 else 0o644)
-            if tree_hash(temp).hex()!=entry['git_tree']:raise RuntimeError(f'Echo source tree mismatch: {relative}')
+                    if windows:modes[rel.as_posix()]=bool(member.mode&0o111)
+            if tree_hash(temp,modes).hex()!=entry['git_tree']:raise RuntimeError(f'Echo source tree mismatch: {relative}')
+            if windows:
+                # NTFS does not preserve POSIX executable bits; the pinned Git tree authenticates these modes.
+                modes_path.parent.mkdir(parents=True,exist_ok=True)
+                modes_path.write_text(json.dumps(modes,sort_keys=True)+'\n')
             temp.rename(folder)
-        if tree_hash(folder).hex()!=entry['git_tree']:raise RuntimeError(f'Modified pinned echo source: {relative}')
+        if windows:modes=json.loads(modes_path.read_text())
+        if tree_hash(folder,modes).hex()!=entry['git_tree']:raise RuntimeError(f'Modified pinned echo source: {relative}')
     for relative,entry in lock['files'].items():
         path=SOURCE/relative
         if path.is_symlink():raise RuntimeError(f'Unsafe echo source file: {relative}')
@@ -127,22 +143,28 @@ def output_bytes():
 
 
 def build():
-    if (platform.system(),platform.machine())!=('Darwin','arm64'):
-        raise RuntimeError('The capture echo component requires Apple Silicon macOS.')
+    windows = platform.system() == 'Windows' and platform.machine().lower() in ('amd64','x86_64')
+    if not windows and (platform.system(),platform.machine())!=('Darwin','arm64'):
+        raise RuntimeError('The capture echo component requires Apple Silicon macOS or x64 Windows.')
     receipt=sources();BUILD.mkdir(parents=True,exist_ok=True)
     guard=f'{sys.executable};{ROOT}/scripts/echo_compile_guard.py'
-    compiler=subprocess.check_output(['xcrun','--find','clang'],text=True).strip()
-    cxx=subprocess.check_output(['xcrun','--find','clang++'],text=True).strip()
-    configure=['cmake','-S',str(ROOT/'desktop/capture/echo'),'-B',str(BUILD),'-G','Ninja',
-        f'-DWEBRTC_SOURCE={SOURCE}',f'-DCMAKE_C_COMPILER={compiler}',f'-DCMAKE_CXX_COMPILER={cxx}',
-        f'-DCMAKE_C_COMPILER_LAUNCHER={guard}',f'-DCMAKE_CXX_COMPILER_LAUNCHER={guard}',
-        '-DCMAKE_BUILD_TYPE=Release']
+    configure=['cmake','-S',str(ROOT/'desktop/capture/echo'),'-B',str(BUILD),f'-DWEBRTC_SOURCE={SOURCE}']
+    if windows:
+        configure+=['-A','x64']
+    else:
+        compiler=subprocess.check_output(['xcrun','--find','clang'],text=True).strip()
+        cxx=subprocess.check_output(['xcrun','--find','clang++'],text=True).strip()
+        configure+=['-G','Ninja',f'-DCMAKE_C_COMPILER={compiler}',f'-DCMAKE_CXX_COMPILER={cxx}',
+            f'-DCMAKE_C_COMPILER_LAUNCHER={guard}',f'-DCMAKE_CXX_COMPILER_LAUNCHER={guard}',
+            '-DCMAKE_BUILD_TYPE=Release']
     subprocess.run(configure,check=True,timeout=60)
     start=time.monotonic();reason=None
     def limits():resource.setrlimit(resource.RLIMIT_CPU,(600,600))
     with (BUILD/'BUILD.log').open('w') as log:
-        child=subprocess.Popen(['cmake','--build',str(BUILD),'--target','speakerdesk_echo','--parallel','2'],
-            stdout=log,stderr=subprocess.STDOUT,start_new_session=True,preexec_fn=limits)
+        process_options = ({'creationflags':subprocess.CREATE_NEW_PROCESS_GROUP} if windows
+                           else {'start_new_session':True,'preexec_fn':limits})
+        child=subprocess.Popen(['cmake','--build',str(BUILD),'--config','Release','--target','speakerdesk_echo','--parallel','2'],
+            stdout=log,stderr=subprocess.STDOUT,**process_options)
         (BUILD/'ACTIVE-BUILD.json').write_text(json.dumps({'owned_pid':child.pid,'phase':'compiling'})+'\n')
         try:
             while child.poll() is None:
@@ -151,18 +173,21 @@ def build():
                 time.sleep(.25)
         finally:
             if child.poll() is None:
-                try:os.killpg(child.pid,signal.SIGKILL)
-                except ProcessLookupError:pass
+                if windows:
+                    subprocess.run(['taskkill','/PID',str(child.pid),'/T','/F'],check=False,capture_output=True)
+                else:
+                    try:os.killpg(child.pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
             child.wait()
             (BUILD/'ACTIVE-BUILD.json').write_text(json.dumps({'owned_pid':child.pid,'phase':'joined','exit_code':child.returncode})+'\n')
     receipt.update(exit_code=child.returncode,stop_reason=reason,elapsed_seconds=time.monotonic()-start,
-                   peak_child_rss_bytes=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
+                   peak_child_rss_bytes=None if windows else resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
                    parallel_compilers=2,output_bytes=output_bytes())
     if child.returncode or reason:
         print('\n'.join((BUILD/'BUILD.log').read_text().splitlines()[-30:]),file=sys.stderr)
         raise RuntimeError(f'Echo component build failed: {reason or child.returncode}')
-    built=BUILD/'libspeakerdesk_echo.dylib'
-    target=ROOT/'desktop/capture/echo/libspeakerdesk_echo.dylib'
+    built=BUILD/('Release/speakerdesk_echo.dll' if windows else 'libspeakerdesk_echo.dylib')
+    target=ROOT/'desktop/capture/echo'/built.name
     receipt['library_sha256']=hashlib.sha256(built.read_bytes()).hexdigest()
     shutil.copyfile(built,target)
     (BUILD/'BUILD-RECEIPT.json').write_text(json.dumps(receipt,indent=2)+'\n')

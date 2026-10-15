@@ -1,4 +1,8 @@
 //! Pinned downloads into private staging directories; activation exposes complete models.
+#[cfg(any(windows, test))]
+#[path = "setup_windows.rs"]
+mod windows;
+
 use reqwest::{
     Client, StatusCode,
     header::{CONTENT_RANGE, RANGE},
@@ -244,6 +248,11 @@ async fn regular(path: &Path) -> io::Result<Option<u64>> {
                     return Err(error("Model artifact has multiple hard links"));
                 }
             }
+            #[cfg(windows)]
+            {
+                let file = open_options().read(true).open(path).await?;
+                verify_open_file(&file).await?;
+            }
             Ok(Some(meta.len()))
         }
         Ok(_) => Err(error("Model artifact is not a regular file")),
@@ -260,7 +269,41 @@ fn open_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
     #[cfg(unix)]
     options.custom_flags(libc::O_NOFOLLOW);
+    #[cfg(windows)]
+    options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
     options
+}
+async fn verify_open_file(file: &fs::File) -> io::Result<()> {
+    let metadata = file.metadata().await?;
+    if !metadata.is_file() || metadata.is_symlink() {
+        return Err(error("Model artifact is linked or not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(error("Model artifact has multiple hard links"));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
+        };
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if information.nNumberOfLinks != 1
+            || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(error(
+                "Model artifact has multiple hard links or is a reparse point",
+            ));
+        }
+    }
+    Ok(())
 }
 async fn matches(path: &Path, pin: &FilePin, cancel: &CancellationToken) -> io::Result<bool> {
     checked(cancel)?;
@@ -268,6 +311,7 @@ async fn matches(path: &Path, pin: &FilePin, cancel: &CancellationToken) -> io::
         return Ok(false);
     }
     let mut file = open_options().read(true).open(path).await?;
+    verify_open_file(&file).await?;
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -357,6 +401,15 @@ impl Installer {
         let owner = options.open(lock)?;
         fs4::FileExt::try_lock(&owner)
             .map_err(|_| error("Another process is setting up these models"))?;
+        #[cfg(windows)]
+        windows::recover(
+            &root,
+            &artifacts()
+                .into_iter()
+                .chain([separation_artifact()])
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
+        )?;
         Ok(Self {
             root,
             client: Client::builder()
@@ -472,11 +525,9 @@ impl Installer {
                 fs::rename(&partial, path).await?;
                 return Ok(());
             }
-            open_options()
-                .write(true)
-                .truncate(true)
-                .open(&partial)
-                .await?;
+            let output = open_options().write(true).open(&partial).await?;
+            verify_open_file(&output).await?;
+            output.set_len(0).await?;
             offset = 0;
         }
         let mut request = self.client.get(url);
@@ -508,10 +559,15 @@ impl Installer {
         let mut output = open_options()
             .write(true)
             .create(true)
-            .truncate(offset == 0)
+            .truncate(false)
             .append(offset != 0)
             .open(&partial)
             .await?;
+        // Check the opened handle before mutation, including when a partial appeared during HTTP.
+        verify_open_file(&output).await?;
+        if offset == 0 {
+            output.set_len(0).await?;
+        }
         loop {
             let chunk = tokio::select! { biased; _ = cancel.cancelled() => return checked(cancel), chunk = response.chunk() => chunk.map_err(|e| error(e.to_string()))? };
             let Some(chunk) = chunk else {
@@ -553,6 +609,7 @@ impl Installer {
         checked(cancel)?;
         let source = staging.to_owned();
         let target = self.root.join(relative(&model.id)?);
+        #[cfg(not(windows))]
         let parent = self.root.clone();
         let model = model.clone();
         let cancellation = cancel.clone();
@@ -568,10 +625,15 @@ impl Installer {
                     return Err(error("Model destination is not a regular directory"));
                 }
                 Ok(_) => {
-                    exchange_directories(&source, &target)?;
-                    sync_directory(&parent)?;
-                    std::fs::remove_dir_all(&source)?;
-                    sync_directory(&parent)?;
+                    #[cfg(windows)]
+                    windows::replace(&source, &target)?;
+                    #[cfg(not(windows))]
+                    {
+                        exchange_directories(&source, &target)?;
+                        sync_directory(&parent)?;
+                        std::fs::remove_dir_all(&source)?;
+                        sync_directory(&parent)?;
+                    }
                 }
             }
             Ok(())
@@ -580,6 +642,7 @@ impl Installer {
         .map_err(|e| error(e.to_string()))?
     }
 }
+#[cfg(not(windows))]
 fn sync_directory(path: &Path) -> io::Result<()> {
     speakerdesk_core::filesystem::sync_directory(path)
 }
@@ -642,6 +705,7 @@ fn inventory(root: &Path, model: &ModelArtifact, partials: bool) -> io::Result<b
     }
     Ok(exact)
 }
+#[cfg(not(windows))]
 fn exchange_directories(source: &Path, target: &Path) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -983,7 +1047,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             directory(&staging).await.unwrap();
             fs::write(staging.join("weights"), b"abcdef").await.unwrap();
@@ -1119,7 +1183,7 @@ mod tests {
         );
         assert!(!outside.path().join("model").exists());
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn hard_linked_partials_do_not_truncate_or_append_to_outside_files() {
         let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();

@@ -166,3 +166,11 @@ mod tests {
         assert!(frames_to_turns(&below).is_empty());
     }
 }
+
+#[cfg(windows)]
+#[path = "network_windows.rs"]
+pub mod network;
+
+#[cfg(windows)]
+#[path = "session_windows.rs"]
+pub mod session;

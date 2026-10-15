@@ -1,9 +1,11 @@
-//! ReDimNet2 B6 through the system Core ML runtime; waveform policy stays in Rust.
-//! Weights: `aufklarer/ReDimNet2-B6-CoreML@112dd8f`.
+//! ReDimNet2 B6; waveform policy stays in Rust across native runtimes.
 mod waveform;
 
 #[cfg(target_os = "macos")]
 pub mod coreml;
+
+#[cfg(windows)]
+pub mod network_windows;
 
 use speakerdesk_core::error::ChildError;
 

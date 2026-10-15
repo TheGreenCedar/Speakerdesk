@@ -1,13 +1,13 @@
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, mpsc};
 
-use crate::dispatch;
+use crate::{dispatch, operation::Operation};
 use speakerdesk_core::error::ChildError;
 use speakerdesk_core::ipc::{Envelope, EnvelopeBody, Request, Response};
 pub use speakerdesk_core::ipc::{read_envelope, write_envelope};
 
-type Active = Arc<Mutex<Option<(u64, Arc<AtomicBool>)>>>;
+type Active = Arc<Mutex<Option<(u64, Arc<Operation>)>>>;
 
 pub fn serve(model_root: std::path::PathBuf) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
@@ -17,6 +17,7 @@ pub fn serve(model_root: std::path::PathBuf) -> std::io::Result<()> {
             std::io::stdin(),
             std::io::stdout(),
             move |request, cancel| runtime.execute(request, cancel),
+            Operation::native,
         )
     }
     #[cfg(not(target_os = "macos"))]
@@ -27,18 +28,24 @@ pub fn serve(model_root: std::path::PathBuf) -> std::io::Result<()> {
 }
 
 pub fn serve_on<R: Read + Send, W: Write + Send>(reader: R, writer: W) -> std::io::Result<()> {
-    serve_with(reader, writer, dispatch::dispatch)
+    serve_with(
+        reader,
+        writer,
+        |request, cancel| dispatch::dispatch(request, cancel),
+        || Ok(Operation::new()),
+    )
 }
 
 fn serve_with<R: Read + Send, W: Write + Send>(
     mut reader: R,
     writer: W,
-    mut execute: impl FnMut(Request, &AtomicBool) -> Result<Response, ChildError>,
+    mut execute: impl FnMut(Request, &Operation) -> Result<Response, ChildError>,
+    new_operation: impl Fn() -> Result<Operation, ChildError> + Send,
 ) -> std::io::Result<()> {
     let writer = Arc::new(Mutex::new(writer));
     let active: Active = Arc::new(Mutex::new(None));
     std::thread::scope(|scope| {
-        let (send, receive) = mpsc::sync_channel::<(u64, Request, Arc<AtomicBool>)>(1);
+        let (send, receive) = mpsc::sync_channel::<(u64, Request, Arc<Operation>)>(1);
         let output = writer.clone();
         let worker_active = active.clone();
         let control = scope.spawn(move || {
@@ -61,7 +68,7 @@ fn serve_with<R: Read + Send, W: Write + Send>(
                             if let Some((id, flag)) = &*active.lock().expect("active operation")
                                 && *id == request_id
                             {
-                                flag.store(true, Ordering::Release);
+                                flag.cancel();
                             }
                             reply(&writer, envelope.request_id, Ok(Response::Ack))?;
                         }
@@ -70,7 +77,13 @@ fn serve_with<R: Read + Send, W: Write + Send>(
                             break Ok(());
                         }
                         EnvelopeBody::Request(request) => {
-                            let flag = Arc::new(AtomicBool::new(false));
+                            let flag = match new_operation() {
+                                Ok(operation) => Arc::new(operation),
+                                Err(error) => {
+                                    reply(&writer, envelope.request_id, Err(error))?;
+                                    continue;
+                                }
+                            };
                             let mut current = active.lock().expect("active operation");
                             if current.is_some() {
                                 reply(
@@ -91,7 +104,7 @@ fn serve_with<R: Read + Send, W: Write + Send>(
                 }
             })();
             if let Some((_, flag)) = &*active.lock().expect("active operation") {
-                flag.store(true, Ordering::Release);
+                flag.cancel();
             }
             drop(send);
             result
@@ -134,7 +147,7 @@ fn serve_with<R: Read + Send, W: Write + Send>(
                         _ => session,
                     };
                     if let Some(close) = close {
-                        execute(close, &AtomicBool::new(false)).map_err(std::io::Error::other)?;
+                        execute(close, &Operation::new()).map_err(std::io::Error::other)?;
                     }
                     result = Err(ChildError::Cancelled);
                 }
@@ -287,21 +300,26 @@ mod tests {
         let worker = thread::spawn(move || {
             // Native model objects stay on their construction thread without unsafe Send.
             let owner = std::rc::Rc::new(thread::current().id());
-            super::serve_with(input, child, move |request, cancel| match request {
-                Request::VadFeed { .. } => {
-                    assert_eq!(thread::current().id(), *owner);
-                    started.send(()).unwrap();
-                    while !cancel.load(Ordering::Acquire) {
-                        thread::yield_now();
+            super::serve_with(
+                input,
+                child,
+                move |request, cancel| match request {
+                    Request::VadFeed { .. } => {
+                        assert_eq!(thread::current().id(), *owner);
+                        started.send(()).unwrap();
+                        while !cancel.load(Ordering::Acquire) {
+                            thread::yield_now();
+                        }
+                        Err(ChildError::Cancelled)
                     }
-                    Err(ChildError::Cancelled)
-                }
-                Request::VadClose { handle } => {
-                    observed.lock().unwrap().push(handle.session);
-                    Ok(Response::Ack)
-                }
-                _ => Err(ChildError::Unimplemented),
-            })
+                    Request::VadClose { handle } => {
+                        observed.lock().unwrap().push(handle.session);
+                        Ok(Response::Ack)
+                    }
+                    _ => Err(ChildError::Unimplemented),
+                },
+                || Ok(crate::operation::Operation::new()),
+            )
         });
         write_envelope(
             &mut parent,

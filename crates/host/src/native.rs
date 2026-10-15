@@ -221,9 +221,17 @@ impl NativeModels {
             let result = if download {
                 native.install(&app, &token, separation).await
             } else {
-                native
-                    .initialize_async(app.clone(), token.clone(), false)
-                    .await
+                async {
+                    // Recover an interrupted Windows directory replacement before the child loads it.
+                    #[cfg(windows)]
+                    let _setup_owner = crate::setup::Installer::open(&native.model_root)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    native
+                        .initialize_async(app.clone(), token.clone(), false)
+                        .await
+                }
+                .await
             };
             if let Err(error) = &result {
                 // Do not leave a first-run failure looking like an indefinitely pending load.
@@ -432,6 +440,8 @@ impl NativeModels {
             .await
             .map_err(|e| e.to_string())?;
         let mut completed = 0;
+        #[cfg(windows)]
+        let mut released_models = false;
         for model in if separation {
             vec![crate::setup::separation_artifact()]
         } else {
@@ -468,6 +478,17 @@ impl NativeModels {
                     .await
                     .map_err(|e| e.to_string())?
                     .map_err(|e| e.to_string())?;
+                }
+                #[cfg(windows)]
+                if !released_models {
+                    // Close mapped Windows model files before renaming their containing directory.
+                    let supervisor = self.supervisor.clone();
+                    let cancellation = cancel.clone();
+                    tokio::task::spawn_blocking(move || supervisor.restart(&cancellation))
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .map_err(|error| error.to_string())?;
+                    released_models = true;
                 }
                 installer
                     .activate(&model, &staging, cancel)
@@ -734,7 +755,11 @@ async fn serve(
     let notices = executable
         .parent()
         .ok_or("native executable has no parent directory")?
-        .join("../Resources/THIRD_PARTY_NOTICES.txt");
+        .join(if cfg!(windows) {
+            "THIRD_PARTY_NOTICES.txt"
+        } else {
+            "../Resources/THIRD_PARTY_NOTICES.txt"
+        });
     let supervisor =
         InferenceSupervisor::new(executable, env!("CARGO_PKG_VERSION"), model_root.clone())?;
     let native = Arc::new(NativeModels {

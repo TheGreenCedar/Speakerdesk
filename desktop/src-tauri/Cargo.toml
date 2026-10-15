@@ -19,3 +19,6 @@ speakerdesk-host = { path = "../../crates/host" }
 speakerdesk-models = { path = "../../crates/models" }
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Registry"] }

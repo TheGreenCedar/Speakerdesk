@@ -4,10 +4,13 @@ use sha2::{Digest, Sha256};
 use speakerdesk_core::error::ChildError;
 use speakerdesk_core::voice::IDENTITY_REUSE_COSINE;
 use speakerdesk_models::redimnet::{
-    MIN_SAMPLES,
+    MAX_SAMPLES, MIN_SAMPLES,
     coreml::{ComputePolicy, Network, verify_artifact},
 };
 use std::{path::PathBuf, sync::atomic::AtomicBool, time::Instant};
+
+#[path = "support/ordinary_voice.rs"]
+mod ordinary_voice;
 
 #[test]
 #[ignore = "requires SPEAKERDESK_TEST_VOICE and a fresh SPEAKERDESK_VOICE_RESULT output path"]
@@ -105,7 +108,7 @@ fn native_coreml_policies_return_stable_normalized_embeddings() {
 #[test]
 #[ignore = "requires SPEAKERDESK_VOICE_CASES manifest, SPEAKERDESK_TEST_VOICE, selected compute policy and a fresh SPEAKERDESK_VOICE_RESULT"]
 fn public_crop_voice_embeddings() {
-    use std::io::Write;
+    use std::{collections::BTreeSet, io::Write};
     let manifest_path =
         PathBuf::from(std::env::var_os("SPEAKERDESK_VOICE_CASES").expect("public crop manifest"));
     let bytes = std::fs::read(&manifest_path).unwrap();
@@ -125,12 +128,25 @@ fn public_crop_voice_embeddings() {
     .into_iter()
     .find(|policy| policy.name() == selected)
     .expect("CPU_AND_GPU, CPU_AND_NEURAL_ENGINE or ALL");
+    let ordinary = manifest["trials"].is_array();
+    if ordinary {
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            "85df77b04cfb1330a5859c70cd24d27a86466beddfd74b0d28fd97df8d57f635"
+        );
+        assert_eq!(policy, ComputePolicy::CpuAndGpu);
+    }
     let started = Instant::now();
     let network = Network::load(&root, policy).unwrap();
     let load_seconds = started.elapsed().as_secs_f64();
     let mut calls = Vec::with_capacity(cases.len());
+    let mut ids = BTreeSet::new();
     for case in cases {
         let id = case["id"].as_str().expect("case id");
+        assert!(
+            !id.is_empty() && ids.insert(id),
+            "empty or duplicate case ID"
+        );
         let path = PathBuf::from(case["path"].as_str().expect("case WAV path"));
         let path = if path.is_absolute() {
             path
@@ -138,6 +154,10 @@ fn public_crop_voice_embeddings() {
             manifest_path.parent().unwrap().join(path)
         };
         let audio = std::fs::read(&path).unwrap();
+        let wav_sha256 = format!("{:x}", Sha256::digest(&audio));
+        if ordinary || case["wav_sha256"].is_string() {
+            assert_eq!(wav_sha256, case["wav_sha256"], "WAV differs: {id}");
+        }
         let mut reader = hound::WavReader::new(std::io::Cursor::new(&audio)).unwrap();
         assert_eq!(reader.spec().channels, 1);
         assert_eq!(reader.spec().sample_rate, 16000);
@@ -150,12 +170,23 @@ fn public_crop_voice_embeddings() {
         let start = usize::try_from(case["start_sample"].as_u64().expect("start sample")).unwrap();
         let end = usize::try_from(case["end_sample"].as_u64().expect("end sample")).unwrap();
         assert!(start < end && end <= pcm.len(), "invalid crop: {id}");
+        assert!((MIN_SAMPLES..=MAX_SAMPLES).contains(&(end - start)));
+        let prepared_pcm_sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                pcm[start..end]
+                    .iter()
+                    .flat_map(|s| s.to_le_bytes())
+                    .collect::<Vec<_>>()
+            )
+        );
         let started = Instant::now();
         let embedding = network
             .embed(&pcm[start..end], &AtomicBool::new(false))
             .unwrap();
         let seconds = started.elapsed().as_secs_f64();
-        calls.push(serde_json::json!({"id":id,"path":path,"wav_sha256":format!("{:x}",Sha256::digest(&audio)),
+        calls.push(serde_json::json!({"id":id,"path":path,"wav_sha256":wav_sha256,
+            "prepared_pcm_sha256":prepared_pcm_sha256,"generated_query_headroom":false,
             "start_sample":start,"end_sample":end,"seconds":seconds,"clean":embedding.clean,"vector":embedding.vector}));
     }
     let result = serde_json::json!({"manifest_sha256":format!("{:x}",Sha256::digest(&bytes)),
@@ -346,4 +377,25 @@ fn frozen_recognition_policy_on_regenerated_synthetic_corpus() {
             report["policy"]
         );
     }
+}
+
+#[test]
+#[ignore = "requires frozen SPEAKERDESK_ORDINARY_VOICE_QUALIFICATION manifests and a CPU_AND_GPU Mac embedding receipt"]
+fn frozen_natural_ordinary_voice_comparison() {
+    let root = PathBuf::from(
+        std::env::var_os("SPEAKERDESK_ORDINARY_VOICE_QUALIFICATION")
+            .expect("ordinary qualification directory"),
+    );
+    let report = ordinary_voice::score(
+        &root,
+        ComputePolicy::CpuAndGpu.identity(),
+        "ordinary-mac-v1.json",
+        "ordinary-decisions-mac-v1.json",
+        "CPU_AND_GPU",
+    );
+    // Diagnostic only: retain the same expected decisions, including any existing-policy miss.
+    assert!(
+        report["all_inputs_clean"] == true && report["profiles_admitted"] == 6,
+        "Mac comparison input admission failed; observations retained"
+    );
 }

@@ -1,0 +1,21 @@
+{
+  "repository": "https://github.com/PalabraAI/redimnet2",
+  "revision": "2a8d15f65b1dfb5d73fede2f11ee42bcccca3035",
+  "archive_url": "https://codeload.github.com/PalabraAI/redimnet2/tar.gz/2a8d15f65b1dfb5d73fede2f11ee42bcccca3035",
+  "checkpoint_url": "https://github.com/PalabraAI/redimnet2/releases/download/v1.0.0/b6-vb2+vox2_v0-lm.pt",
+  "checkpoint_sha256": "e0a7d340a92f798720d1208949aa6a6bd0cddcb0ba7d4cec33596a17a484e6a2",
+  "files": {
+    "redimnet2/__init__.py": "a1035c35f9707dfc1b943252b2627e367c92eb2ace06bbdb1a0e39000494753b",
+    "redimnet2/layers/attention.py": "979627de7cb100102ab02b40d97c5d4a6c26db3f386220c873bb887937de7e21",
+    "redimnet2/layers/blocks.py": "27d7b3dd4f184b28a33232d9877e33492ba2b3ab9ab5140b5157310dfb74f872",
+    "redimnet2/layers/convnext.py": "0d82c2c448e5dcaed5311462b5a6f694126b56ed6d8f7dfa99bcf73469a7445d",
+    "redimnet2/layers/features.py": "5ef8dfb33c3330bddb3c65f693bfe0df597056a287ced99450550e4f5ba34979",
+    "redimnet2/layers/features_tf.py": "cef93647e5a4241c76dd00328200dc2fa5bf428b168f75d23284697a27983498",
+    "redimnet2/layers/layernorm.py": "23900399027f6cae34b260e5778e076e0942ef886204b401221fe7c0c21bcabc",
+    "redimnet2/layers/poolings.py": "f03849e5944e9fa6a7392b60cf3722e3e537a3e5cfd2988bd992c92ffc39a6a6",
+    "redimnet2/layers/redim_structural.py": "93bae419bfdf11868c9e52dfb95578762b9c0a81e27a32ce930adcaefe457738",
+    "redimnet2/layers/resblocks.py": "f79fbc2c7a6d88e9aa5efc4f5764ad137eafe1f5481b33ff7ed8811ee6a80778",
+    "redimnet2/redimnet2.py": "3b6bb2b9e8a5766d1286ea18b76f94cfacdd6e895cf4b996efbaf5c5f146dc5b",
+    "LICENSE": "3d5a4bf9936a7d09dd770588c0d7cb116fc16916a0310d71fb1fff5d64562101"
+  }
+}

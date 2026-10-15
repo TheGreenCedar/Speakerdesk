@@ -32,6 +32,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [features]
 default = []
 fixtures = ["dep:tempfile"]
@@ -52,4 +55,4 @@ rusqlite = "0.40.2"
 tempfile = "3"
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Threading"] }

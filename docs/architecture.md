@@ -1,6 +1,6 @@
 # Architecture
 
-Speakerdesk is one macOS executable that runs in three modes, plus a Swift capture helper. See [ADR-0001](adr/0001-rust-core-inference-child.md) for why inference lives in a separate process.
+Speakerdesk is one executable that runs in three modes, plus a platform capture helper. The complete application runs on macOS; the Windows implementation is still under qualification and its production inference dispatcher remains disabled. See [ADR-0001](adr/0001-rust-core-inference-child.md) for why inference lives in a separate process.
 
 For feature entry points, targeted checks and debugging paths, start with
 [Maintaining Speakerdesk](maintaining.md).
@@ -10,7 +10,7 @@ For feature entry points, targeted checks and debugging paths, start with
 | Tauri shell (default) | `desktop/src-tauri/src/main.rs` | Window, native menus, exports, updater. Starts the host. |
 | `--native-host <storage> <models>` | `speakerdesk_host::native::run` | axum HTTP API and the embedded editor, persistence, capture coordination, setup, scheduling. |
 | `--inference <models>` | `speakerdesk_models::serve` | All neural inference, in one resident child process. |
-| `speakerdesk-capture` | `desktop/capture/*.swift` | Microphone (AVAudioEngine) and system audio (ScreenCaptureKit). |
+| `speakerdesk-capture` | `desktop/capture/*.swift`, `desktop/capture/windows/` | macOS: AVAudioEngine and ScreenCaptureKit. Windows candidate: WASAPI microphone and loopback capture. |
 
 Storage defaults to the app data directory (`SPEAKERDESK_HOME` overrides); `SPEAKERDESK_NATIVE_MODELS` overrides the model directory.
 
@@ -18,7 +18,7 @@ Storage defaults to the app data directory (`SPEAKERDESK_HOME` overrides); `SPEA
 
 - `speakerdesk-core`: domain types and product rules, with no I/O to models or Metal. Holds the document, edit, import, live, language, speech, timing/alignment, review, export, people and voice rules, plus the store, IPC payloads, `messages` and `security`.
 - `speakerdesk-host`: the axum process. It runs routes, the inference supervisor (`inference.rs`), capture transport/writer/processing, admission, setup and workers. The `fixtures` feature builds `speakerdesk-dev` and `inference-fixture` for tests.
-- `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring and the CTC timing model with mlx-rs, and runs ReDimNet through Core ML. Linux and Windows build a protocol stub that reports `unavailable`.
+- `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring, CTC timing and MossFormer separation with mlx-rs, and ReDimNet through Core ML. Windows native model adapters sit beside their Mac counterparts and use the pinned Windows ML/ONNX Runtime distribution with DirectML. They are exercised directly by component tests; the production Windows child and Linux child still report `unavailable`. [Windows qualification](../experiments/windows/README.md) identifies the remaining boundaries.
 - `speakerdesk-echo`: buffering and reference clock for the pinned native WebRTC AEC3 library (`desktop/capture/echo`, built by `scripts/setup_echo.py`).
 - `xtask`: bundle verification, Python-sidecar checks and the native model comparison probe (`cargo xtask --help`).
 
@@ -33,6 +33,14 @@ The editor frontend lives in `speakerdesk/static/` and `speakerdesk/templates/` 
 - Diarization turns use absolute sample coordinates.
 - CTC scores carry audio length, valid frame count, frame hop/origin, explicit column IDs, model identity and vocabulary digest. Core owns the supplied-text alignment; model output never replaces Cohere's transcript text.
 - Numerical comparisons must identify the native MLX runtime and Metal library, not just the MLX version. The build pins the macOS 15 MLX 0.32.2 archive in `scripts/fetch_mlx_runtime.sh`, and `vendor/mlx-sys` patches the build to link it (see `vendor/mlx-sys/SPEAKERDESK.md`).
+
+Windows native loading is owned by `models/src/windows_runtime.rs`. Runtime DLL
+and model pins are separate from the host's download catalog. Each loaded model
+retains verified file handles until its native objects are dropped, preventing
+replacement or writes between verification and runtime reads. `Operation` owns
+cancellation for either backend; the parent still owns bounded termination and
+reaping. MossFormer opens and drops one stage session at a time because retaining
+all stage sessions exhausted device memory on the qualification machine.
 
 ### Inference performance
 
@@ -53,9 +61,12 @@ publishing a name, retain no-replacement semantics for migration and tombstones,
 and reject cross-volume moves on Windows. Unix syncs parent directories;
 Windows uses write-through moves because read-only file handles and directory
 flushes do not provide the same API contract. Recovery deletion tombstones also
-hide receipts whose physical removal is interrupted. Initial Windows model-tree
-activation is supported by this boundary; replacing an existing model directory
-still fails explicitly until an atomic repair strategy is implemented.
+hide receipts whose physical removal is interrupted. Windows model replacement
+uses `host/src/setup_windows.rs` under the installer lock and setup lease. The
+idle child exits before replacement so it releases admitted file handles. The old
+tree is retained in `.previous` across publication, restored after a failed
+publication, and recovered at startup if interruption left no active tree. This
+is recoverable replacement, not an atomic exchange of two nonempty directories.
 
 `Job` and `Document` round-trip the fields in `document.rs`. A missing `kind` deserializes as `import`. Job IDs are 32 lowercase hex characters.
 
@@ -152,6 +163,12 @@ Recognition checks observed solo crops without waiting for an ongoing passage to
 ## Capture
 
 The helper streams PCM and events to the host (`host/src/capture/`). Apple voice-processing input is used when the route qualifies. Raw dual-source capture instead runs the bundled echo library on one writer thread. Original tracks flush before DSP, and only completed clean/mixed output advances the inference endpoint. With no detected echo, the microphone signal passes through unchanged. Resume requires a fresh producer observation that matches the original route and formats. Physical device restart is a hardware test gate; replay tests cover the protocol.
+
+The Windows helper owns WASAPI devices on one STA thread and stamps microphone
+and loopback samples on the QPC clock. Its raw capture capability qualifies
+progress and framing, never Apple voice processing. An owned silent render stream
+keeps loopback advancing when no application plays audio. Native echo tests cover
+framing and simulated inputs; they do not establish physical-room echo quality.
 
 Producer progress is fenced behind accepted audio on the helper's audio queue and
 qualified by the `audio_queue_fence_v1` capture capability. Copied microphone data

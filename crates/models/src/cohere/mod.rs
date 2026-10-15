@@ -30,3 +30,11 @@ pub fn transcribe(
 ) -> Result<AsrText, ChildError> {
     Err(ChildError::Unimplemented)
 }
+
+#[cfg(windows)]
+#[path = "network_windows.rs"]
+pub mod network;
+
+#[cfg(windows)]
+#[path = "features_windows.rs"]
+mod features;

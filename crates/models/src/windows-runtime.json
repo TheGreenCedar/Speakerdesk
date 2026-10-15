@@ -1,0 +1,30 @@
+{
+  "package": "Microsoft.Windows.AI.MachineLearning",
+  "version": "2.4.89",
+  "architecture": "x64",
+  "ort_api": 27,
+  "url": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.ai.machinelearning/2.4.89/microsoft.windows.ai.machinelearning.2.4.89.nupkg",
+  "archive_sha256": "5c68ecfb947223267abf159a023f5192ad42725e4e9cc995e7c1470dd54dff63",
+  "files": {
+    "onnxruntime.dll": {
+      "source": "runtimes/win-x64/native/onnxruntime.dll",
+      "sha256": "6c916621c1807eba630388868bff8eb4cc9718b9fa17464fc9368eb14ad0f33e"
+    },
+    "DirectML.dll": {
+      "source": "runtimes/win-x64/native/DirectML.dll",
+      "sha256": "4a263e851f513f7c60a2b5bb08c3ed92102e3007f241c6ca5d63abf29bf04358"
+    },
+    "Microsoft.Windows.AI.MachineLearning.dll": {
+      "source": "runtimes/win-x64/native/Microsoft.Windows.AI.MachineLearning.dll",
+      "sha256": "b401a47552a745755d65100828faefcf3df3895c759f96ac625ddf990711c8dd"
+    },
+    "LICENSE.txt": {
+      "source": "license.txt",
+      "sha256": "66395f8cb219087fae2bd025010bd9076b736c14f03b48f20295471c0c376814"
+    },
+    "ThirdPartyNotices.txt": {
+      "source": "ThirdPartyNotices.txt",
+      "sha256": "fb0af774b4d7cffc5b9d046f2aaeade2f37df2f80abf8033c95dfffcc77a8866"
+    }
+  }
+}

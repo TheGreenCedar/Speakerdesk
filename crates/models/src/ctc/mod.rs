@@ -6,6 +6,9 @@ use speakerdesk_core::ipc::CtcScoresOut;
 pub mod manifest;
 #[cfg(target_os = "macos")]
 pub mod network;
+#[cfg(windows)]
+#[path = "network_windows.rs"]
+pub mod network;
 #[cfg(target_os = "macos")]
 pub mod prepare;
 
