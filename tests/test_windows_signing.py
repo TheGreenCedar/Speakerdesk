@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import struct
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -185,6 +186,154 @@ class WindowsSigningTests(unittest.TestCase):
             with self.subTest(changed=changed[-80:]), self.assertRaises(ValueError):
                 SIGN.package_inputs(self.script, self.stage, self.target)
         self.script.write_text(original)
+
+    def fixture_updater(self):
+        candidate = self.root / 'candidate'
+        name = f'Speakerdesk_{self.version}_x64-setup.exe'
+        installer = put(candidate / name, self.pe + b'final-authenticode-installer')
+        signature = put(self.root / 'returned.exe.sig', b'cHVibGljLXRlc3Qtc2lnbmF0dXJl\n')
+        config = put(self.root / 'desktop/src-tauri/tauri.conf.json', {'version': self.version})
+        windows_config = put(self.root / 'desktop/src-tauri/tauri.windows.conf.json',
+            dict(bundle=dict(windows=dict(nsis=dict(installMode='currentUser')))))
+        manifest = dict(platform='windows-x86_64', version=self.version, source_commit='a' * 40,
+            public_ready=False, authenticode_status='Valid', installed_payloads_observed=False,
+            installer=dict(name=name, sha256=SIGN.digest(installer), bytes=installer.stat().st_size),
+            signing=dict(kind='azure-artifact-signing', payloads_observed_at_hook=True, receipts='signing'),
+            updater_signature=dict(filename=name, signature_filename=name + '.sig', verified=False,
+                pending=True, require_signed_version=True, configuration_sha256=SIGN.digest(config),
+                windows_configuration_sha256=SIGN.digest(windows_config)))
+        path = put(candidate / 'artifact-manifest.json', manifest)
+        patch.object(SIGN, 'verify_tools', return_value={'signtool': str(self.root / 'signtool.exe')}).start()
+        return candidate, installer, signature, path
+
+    def test_returned_updater_signature_is_verified_before_atomic_manifest_commit(self):
+        candidate, installer, signature, path = self.fixture_updater()
+        before = json.loads(path.read_text())
+        with patch.dict(SIGN.os.environ, {'LIB': 'native-sdk-library-path', 'TAURI_SIGNING_PRIVATE_KEY': 'excluded-test-value'}), \
+                patch.object(SIGN.subprocess, 'run') as native:
+            result = SIGN.finalize_updater(candidate, signature, self.root / 'tools')
+        self.assertEqual(native.call_count, 2)
+        self.assertIn('Get-AuthenticodeSignature', native.call_args_list[0].args[0][-1])
+        self.assertEqual(native.call_args_list[1].args[0][-3:],
+            [str(installer), str(signature), str(self.root / 'desktop/src-tauri/tauri.conf.json')])
+        for call in native.call_args_list:
+            self.assertEqual(call.kwargs['env']['LIB'], 'native-sdk-library-path')
+            self.assertNotIn('TAURI_SIGNING_PRIVATE_KEY', call.kwargs['env'])
+        self.assertEqual((candidate / (installer.name + '.sig')).read_bytes(), signature.read_bytes())
+        self.assertEqual(result, json.loads(path.read_text()))
+        self.assertTrue(result['updater_signature']['verified'])
+        self.assertNotIn('pending', result['updater_signature'])
+        self.assertEqual({k: v for k, v in result.items() if k != 'updater_signature'},
+                         {k: v for k, v in before.items() if k != 'updater_signature'})
+        committed = path.read_bytes()
+        with patch.object(SIGN.subprocess, 'run'):
+            SIGN.finalize_updater(candidate, signature, self.root / 'tools')
+        self.assertEqual(path.read_bytes(), committed)
+
+    def test_windows_overlay_cannot_replace_the_compiled_updater_policy(self):
+        self.fixture_updater()
+        path = self.root / 'desktop/src-tauri/tauri.windows.conf.json'
+        original = path.read_bytes()
+        approved = SIGN.updater_configuration()
+        self.assertEqual(approved['windows_configuration_sha256'], sha(original))
+        for value in ({'version': self.version}, {'plugins': None}, {'plugins': {'updater': None}},
+                      *({'plugins': {'updater': {key: changed}}} for key, changed in
+                        [('pubkey', 'different-valid-key'), ('requireSignedVersion', False), ('allowDowngrades', True)])):
+            with self.subTest(value=value):
+                put(path, value)
+                with self.assertRaisesRegex(ValueError, 'Windows overlay'):
+                    SIGN.updater_configuration()
+        path.write_bytes(original)
+        self.assertEqual(SIGN.updater_configuration(), approved)
+
+    def test_updater_finalize_rejects_missing_tampered_or_cross_version_inputs(self):
+        candidate, installer, signature, path = self.fixture_updater()
+        manifest, payload, sig = path.read_bytes(), installer.read_bytes(), signature.read_bytes()
+        original = json.loads(manifest)
+        cases = [('missing signature', signature, None), ('empty signature', signature, b''),
+            ('invalid signature encoding', signature, b'not a signature'),
+            ('changed installer', installer, payload + b'changed'),
+            ('wrong byte count', path, dict(original, installer=dict(original['installer'], bytes=1))),
+            ('wrong version', path, dict(original, version='0.7.6')),
+            ('different compiled configuration', self.root / 'desktop/src-tauri/tauri.conf.json',
+                dict(version=self.version, plugins=dict(updater=dict(pubkey='different')))),
+            ('different Windows configuration', self.root / 'desktop/src-tauri/tauri.windows.conf.json',
+                dict(bundle=dict(windows=dict(nsis=dict(installMode='perMachine'))))),
+            ('unsigned candidate', path, dict(original, authenticode_status='NotSigned')),
+            ('already public', path, dict(original, public_ready=True)),
+            ('different final manifest', path, dict(original,
+                updater_signature=dict(original['updater_signature'], verified=True, signature='different'))),
+            ('different final signature', candidate / (installer.name + '.sig'), b'different')]
+        for label, changed_path, value in cases:
+            with self.subTest(label=label):
+                before_change = changed_path.read_bytes() if changed_path.exists() else None
+                if value is None:
+                    changed_path.unlink()
+                else:
+                    put(changed_path, value)
+                pending = path.read_bytes()
+                with patch.object(SIGN.subprocess, 'run') as native, self.assertRaises((ValueError, OSError)):
+                    SIGN.finalize_updater(candidate, signature, self.root / 'tools')
+                native.assert_not_called()
+                self.assertEqual(path.read_bytes(), pending)
+                if changed_path.name.endswith('.exe.sig') and changed_path.parent == candidate:
+                    self.assertEqual(changed_path.read_bytes(), value)
+                    changed_path.unlink()
+                else:
+                    self.assertFalse((candidate / (installer.name + '.sig')).exists())
+                put(path, manifest); put(installer, payload); put(signature, sig)
+                if before_change is not None:
+                    changed_path.write_bytes(before_change)
+
+    def test_updater_verification_failure_or_concurrent_changes_keep_pending_manifest(self):
+        candidate, installer, signature, path = self.fixture_updater()
+        originals = {p: p.read_bytes() for p in (path, installer, signature)}
+        config = self.root / 'desktop/src-tauri/tauri.conf.json'
+        originals[config] = config.read_bytes()
+        windows_config = self.root / 'desktop/src-tauri/tauri.windows.conf.json'
+        originals[windows_config] = windows_config.read_bytes()
+        for failure in ('native trust', 'updater crypto', path, installer, signature, config, windows_config):
+            with self.subTest(failure=str(failure)):
+                calls = []
+                def verify(command, **kwargs):
+                    calls.append(command)
+                    if failure == 'native trust' or failure == 'updater crypto' and len(calls) == 2:
+                        raise subprocess.CalledProcessError(1, command)
+                    if isinstance(failure, Path) and len(calls) == 2:
+                        failure.write_bytes(originals[failure] + b' ')
+                with patch.object(SIGN.subprocess, 'run', side_effect=verify), self.assertRaises(ValueError) as rejected:
+                    SIGN.finalize_updater(candidate, signature, self.root / 'tools')
+                if failure in ('native trust', 'updater crypto'):
+                    self.assertIn('Native publisher' if failure == 'native trust' else 'Updater payload', str(rejected.exception))
+                self.assertEqual(len(calls), 1 if failure == 'native trust' else 2)
+                self.assertEqual(path.read_bytes(), originals[path] + (b' ' if failure == path else b''))
+                self.assertFalse((candidate / (installer.name + '.sig')).exists())
+                self.assertFalse((candidate / '.updater-finalize.lock').exists())
+                for changed_path, value in originals.items():
+                    changed_path.write_bytes(value)
+
+    def test_failed_manifest_publication_rolls_back_only_our_new_signature(self):
+        candidate, installer, signature, path = self.fixture_updater()
+        original = path.read_bytes()
+        with patch.object(SIGN.subprocess, 'run'), patch.object(SIGN.os, 'replace', side_effect=OSError('busy')):
+            with self.assertRaises(OSError):
+                SIGN.finalize_updater(candidate, signature, self.root / 'tools')
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse((candidate / (installer.name + '.sig')).exists())
+        self.assertEqual({p.name for p in candidate.iterdir()}, {path.name, installer.name})
+
+    def test_interrupt_after_manifest_commit_preserves_its_verified_signature(self):
+        candidate, installer, signature, path = self.fixture_updater()
+        replace = SIGN.os.replace
+        def interrupt_after_commit(source, destination):
+            replace(source, destination)
+            raise KeyboardInterrupt()
+        with patch.object(SIGN.subprocess, 'run'), patch.object(SIGN.os, 'replace', side_effect=interrupt_after_commit):
+            with self.assertRaises(KeyboardInterrupt):
+                SIGN.finalize_updater(candidate, signature, self.root / 'tools')
+        self.assertTrue(json.loads(path.read_text())['updater_signature']['verified'])
+        self.assertEqual((candidate / (installer.name + '.sig')).read_bytes(), signature.read_bytes())
+        self.assertFalse((candidate / '.updater-finalize.lock').exists())
 
 
 if __name__ == '__main__':

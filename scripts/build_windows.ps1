@@ -10,12 +10,14 @@ param(
     [string]$RuntimeArchive,
     [string]$OutputDirectory,
     [switch]$Sign,
+    [switch]$DeferUpdaterSignature,
     [string]$SigningTools,
     [string]$SigningMetadata
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($DeferUpdaterSignature -and -not $Sign) { throw '-DeferUpdaterSignature requires -Sign.' }
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
     $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
     throw 'Build Speakerdesk Windows candidates from x64 Windows with the installed MSVC toolchain.'
@@ -71,11 +73,16 @@ try {
     $stage = Join-Path $taskRoot '.cache/windows-bundle'
     $runtimeStage = Join-Path $stage 'runtime'
     $version = (Get-Content 'desktop/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+    $updaterConfiguration = $null
     $signer = Join-Path $PSScriptRoot 'windows_signing.ps1'
     $signingRoot = $null
     if ($Sign) {
-        if (-not $SigningTools -or -not $SigningMetadata -or -not $env:TAURI_SIGNING_PRIVATE_KEY) {
-            throw '-Sign requires pinned SigningTools, AzureCli-only SigningMetadata and the protected Tauri updater key.'
+        $updaterConfiguration = (@(Invoke-Native $Python @('scripts/windows_signing.py', 'configuration')) -join "`n") | ConvertFrom-Json
+        if (-not $SigningTools -or -not $SigningMetadata) {
+            throw '-Sign requires pinned SigningTools and AzureCli-only SigningMetadata.'
+        }
+        if (-not $DeferUpdaterSignature -and -not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw '-Sign requires the protected Tauri updater key unless -DeferUpdaterSignature is explicit.'
         }
         $env:SPEAKERDESK_SIGNING_TOOLS = [IO.Path]::GetFullPath($SigningTools)
         $env:SPEAKERDESK_SIGNING_METADATA = [IO.Path]::GetFullPath($SigningMetadata)
@@ -171,6 +178,12 @@ try {
         Invoke-Native 'npm.cmd' ($buildArguments + @('--', '--locked'))
     } finally { Pop-Location }
 
+    if ($Sign) {
+        if ((File-Digest (Join-Path $taskRoot 'desktop/src-tauri/tauri.conf.json')) -ne $updaterConfiguration.configuration_sha256 -or
+            (File-Digest (Join-Path $taskRoot 'desktop/src-tauri/tauri.windows.conf.json')) -ne $updaterConfiguration.windows_configuration_sha256) {
+            throw 'The compiled updater configuration changed during the signed build.'
+        }
+    }
     $version = (Get-Content 'desktop/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
     $installer = Join-Path $TargetDirectory "$target/release/bundle/nsis/Speakerdesk_${version}_x64-setup.exe"
     Assert-RegularFile $installer
@@ -189,15 +202,22 @@ try {
         $signedPayloads = (@(Invoke-Native $Python @('scripts/windows_signing.py', 'inventory',
             '--receipts', $signingRoot, '--stage', $stage, '--target', $env:SPEAKERDESK_SIGNING_TARGET,
             '--temporary', $env:SPEAKERDESK_SIGNING_TEMP, '--version', $version)) -join "`n") | ConvertFrom-Json
-        $finalDigest = File-Digest $installer
-        Push-Location (Join-Path $taskRoot 'desktop')
-        try { Invoke-Native node @('node_modules/@tauri-apps/cli/tauri.js', 'signer', 'sign', '--app-version', $version, $installer) }
-        finally { Pop-Location }
-        Invoke-Native cargo @('run', '--offline', '--release', '--manifest-path',
-            'scripts/windows-updater-verifier/Cargo.toml', '--', $installer, "$installer.sig", 'desktop/src-tauri/tauri.conf.json')
-        if ((File-Digest $installer) -ne $finalDigest) { throw 'Updater signing changed finalized Authenticode bytes.' }
-        $updater = [ordered]@{filename=Split-Path -Leaf $installer; signature_filename=(Split-Path -Leaf $installer)+'.sig';
-            signature=(Get-Content -LiteralPath "$installer.sig" -Raw).Trim(); verified=$true; require_signed_version=$true}
+        if ($DeferUpdaterSignature) {
+            $updater = [ordered]@{filename=Split-Path -Leaf $installer; signature_filename=(Split-Path -Leaf $installer)+'.sig';
+                pending=$true; verified=$false; require_signed_version=$true;
+                configuration_sha256=$updaterConfiguration.configuration_sha256;
+                windows_configuration_sha256=$updaterConfiguration.windows_configuration_sha256}
+        } else {
+            $finalDigest = File-Digest $installer
+            Push-Location (Join-Path $taskRoot 'desktop')
+            try { Invoke-Native node @('node_modules/@tauri-apps/cli/tauri.js', 'signer', 'sign', '--app-version', $version, $installer) }
+            finally { Pop-Location }
+            Invoke-Native cargo @('run', '--offline', '--release', '--manifest-path',
+                'scripts/windows-updater-verifier/Cargo.toml', '--', $installer, "$installer.sig", 'desktop/src-tauri/tauri.conf.json')
+            if ((File-Digest $installer) -ne $finalDigest) { throw 'Updater signing changed finalized Authenticode bytes.' }
+            $updater = [ordered]@{filename=Split-Path -Leaf $installer; signature_filename=(Split-Path -Leaf $installer)+'.sig';
+                signature=(Get-Content -LiteralPath "$installer.sig" -Raw).Trim(); verified=$true; require_signed_version=$true}
+        }
     } else {
         $executableReceipt = (@(Invoke-Native $Python @('scripts/windows_payload.py', '--executable', $executable)) -join "`n") | ConvertFrom-Json
     }
@@ -211,7 +231,7 @@ try {
     $packagedInstaller = Join-Path $OutputDirectory (Split-Path -Leaf $installer)
     Copy-Item -LiteralPath $installer -Destination $packagedInstaller
     if ($Sign) {
-        Copy-Item -LiteralPath "$installer.sig" -Destination "$packagedInstaller.sig"
+        if (-not $DeferUpdaterSignature) { Copy-Item -LiteralPath "$installer.sig" -Destination "$packagedInstaller.sig" }
         $packagedReceipts = Join-Path $OutputDirectory 'signing'
         New-Item -ItemType Directory -Path $packagedReceipts | Out-Null
         Copy-Item -LiteralPath (Join-Path $signingRoot 'payloads') -Destination $packagedReceipts -Recurse

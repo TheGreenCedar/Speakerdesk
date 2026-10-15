@@ -1,8 +1,9 @@
 <# Build-only Azure Artifact Signing adapter. No login, IAM or publication. #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)][ValidateSet('PrepareTools','PrepareMetadata','Check','Sign','VerifyPackage')][string]$Action,
+    [Parameter(Mandatory=$true)][ValidateSet('PrepareTools','PrepareMetadata','Check','Sign','VerifyPackage','FinalizeUpdater')][string]$Action,
     [string]$Path,
+    [string]$Signature,
     [string]$Tools = $env:SPEAKERDESK_SIGNING_TOOLS,
     [string]$Metadata = $env:SPEAKERDESK_SIGNING_METADATA,
     [string]$Python = $env:SPEAKERDESK_SIGNING_PYTHON,
@@ -40,6 +41,10 @@ if($Action -eq 'PrepareTools') {
         [IO.Compression.ZipFile]::ExtractToDirectory($archive,(Join-Path $Tools $package.id))
     }
     Write-Output "Prepared pinned signer packages in $Tools. Check them with the metadata before signing."
+    return
+}
+if($Action -eq 'FinalizeUpdater') {
+    Invoke-Helper @('finalize-updater','--path',$Path,'--signature',$Signature,'--tools',$Tools)
     return
 }
 $context=Invoke-Helper @('check','--tools',$Tools,'--metadata',$Metadata)

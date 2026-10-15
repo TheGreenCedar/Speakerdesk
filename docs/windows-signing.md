@@ -19,7 +19,7 @@ Use x64 Windows, the existing MSVC/Windows SDK build environment, Python 3.9+,
 the .NET 8 runtime required by Microsoft's signing client, Azure CLI and the
 normal Speakerdesk Node/Cargo dependencies. Authenticate Azure CLI through the
 already approved identity. Do not put secrets in metadata or command arguments.
-The updater private key/password must already be available through protected
+For single-machine `-Sign`, the updater key/password must be available through protected
 `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` environment
 variables; the compiled updater public key must match it.
 
@@ -27,16 +27,23 @@ variables; the compiled updater public key must match it.
 # Fresh local directories/files; no generated tools or metadata are committed.
 .\scripts\windows_signing.ps1 -Action PrepareTools -Tools C:\build\artifact-signing-tools
 .\scripts\windows_signing.ps1 -Action PrepareMetadata -Path C:\build\speakerdesk-signing.json `
-  -Endpoint https://<region>.codesigning.azure.net -Account <shared-account> `
-  -Profile <shared-public-profile> -Correlation speakerdesk-<source-commit>
+  -Endpoint https://eus.codesigning.azure.net -Account thegreencedar-signing `
+  -Profile public-release -Correlation speakerdesk-<source-commit>
 .\scripts\windows_signing.ps1 -Action Check -Tools C:\build\artifact-signing-tools `
   -Metadata C:\build\speakerdesk-signing.json
 .\scripts\build_windows.ps1 -Sign -SigningTools C:\build\artifact-signing-tools `
   -SigningMetadata C:\build\speakerdesk-signing.json -OutputDirectory C:\build\speakerdesk-signed-candidate
 ```
 
-Replace the placeholders with the approved shared resources. Metadata is
-create-new and excludes all non-CLI credentials, including environment,
+The approved shared account is `thegreencedar-signing`, regional endpoint
+`https://eus.codesigning.azure.net`, with the active `public-release` profile.
+Publisher identity validation is complete. An owned disposable copy of the
+capture helper has passed real Azure signing, RFC3161 timestamping,
+`Get-AuthenticodeSignature` (`Valid`) and `signtool verify /pa /all`; its original
+bytes were preserved. This proves the helper signing path. A complete signed
+installer and its installed behavior remain to be qualified.
+
+Metadata is create-new and excludes all non-CLI credentials, including environment,
 workload identity, managed identity, PowerShell and interactive browser
 credentials. A CI federated identity can establish the Azure CLI session
 separately; this adapter does not edit workflows or service permissions.
@@ -99,6 +106,54 @@ installation was observed: `installed_payloads_observed` and `public_ready` stay
 false. A final signed install/launch/capture/runtime/uninstall exercise and the
 owner's distribution/promotion checks are still required before publication.
 
+## Keep the updater key on the Mac
+
+For two-phase signing with the existing updater key kept on the Mac:
+
+```powershell
+.\scripts\build_windows.ps1 -Sign -DeferUpdaterSignature `
+  -SigningTools C:\build\artifact-signing-tools -SigningMetadata C:\build\speakerdesk-signing.json `
+  -OutputDirectory C:\build\speakerdesk-signed-candidate
+```
+
+`-DeferUpdaterSignature` requires `-Sign` and preserves Authenticode/payload checks.
+The manifest records updater `pending: true`, `verified: false` and SHA-256 pins
+of the base and Windows configurations captured before and checked after compilation.
+The Windows overlay must preserve the base version, updater key and version policy.
+The candidate has no `.sig`; plain `-Sign` retains its existing complete path.
+
+Freeze the manifest and transfer the final installer bytes to the Mac, checking
+their exact size/SHA-256. Use AppleRelease's independently locked Tauri CLI 2.12.1:
+`signer sign --private-key-path <existing-encrypted-key> --app-version <version> <installer>`.
+Keep the password only in the signer's child environment. Do not rerun key setup
+or copy/rotate the key. Verify the signature/version against the compiled public
+key and unchanged installer hash; return only `.sig` and public provenance.
+AppleRelease's existing workflow accepts `.app` bundles; reuse its generic
+signer/verifier tooling for this local Windows-byte signing step.
+
+Finalize from the same reviewed Speakerdesk source/configuration used to build
+the candidate:
+
+```powershell
+.\scripts\windows_signing.ps1 -Action FinalizeUpdater `
+  -Path C:\build\speakerdesk-signed-candidate -Signature C:\build\returned-installer.exe.sig `
+  -Tools C:\build\artifact-signing-tools
+```
+
+Finalization checks installer name/size/hash, the build-time configuration pin,
+app version, pinned tools, native publisher/timestamp and SignTool trust, then the
+existing Rust verifier's payload/key/signed-version contract. It rechecks all
+inputs before committing. No credentials/login are required. Different existing
+signatures or completed metadata are rejected; identical verified inputs are
+idempotent. Verification failure leaves pending metadata untouched.
+
+The candidate lock serializes finalizers. No-replacement `.sig` publication
+precedes the atomic manifest commit; interruption can leave an identical `.sig`
+beside pending metadata, verified again on retry. Remove an abandoned
+`.updater-finalize.lock` only after confirming no finalizer is active. Finalization
+keeps installed evidence and `public_ready` false; signed installed QA and
+promotion remain separate gates.
+
 ## Focused local checks
 
 ```sh
@@ -111,5 +166,5 @@ restrictions, signer extraction tampering, generated package source/destination
 changes, signed snapshot/capture receipt binding, and the restored app distinction.
 The verifier's public-only disposable-key fixture checks real cryptographic
 success and payload/key/version/comment failures. These checks do not establish
-Windows trust, Azure profile readiness, successful native signing or installed
-behavior; those require the owner-controlled Windows execution.
+Windows trust or installed behavior. Those require owner-controlled Windows
+execution; the real helper signing proof above is separate from this suite.

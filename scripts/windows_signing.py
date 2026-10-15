@@ -2,9 +2,12 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import struct
+import subprocess
+import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -227,12 +230,141 @@ def observed_payloads(receipts, stage, target, temporary, version):
     return result
 
 
+def updater_configuration():
+    """The implicit platform overlay must preserve the verifier's base policy."""
+    base = regular(ROOT / 'desktop/src-tauri/tauri.conf.json').read_bytes()
+    windows = regular(ROOT / 'desktop/src-tauri/tauri.windows.conf.json').read_bytes()
+    overlay = json.loads(windows)
+    require('version' not in overlay, 'Windows overlay must not override the updater app version')
+    plugins = overlay.get('plugins', {})
+    require(isinstance(plugins, dict), 'Windows overlay must not remove the updater policy')
+    updater = plugins.get('updater', {})
+    require(isinstance(updater, dict) and not {'pubkey', 'requireSignedVersion', 'allowDowngrades'} & updater.keys(),
+            'Windows overlay must not override the compiled updater key/version policy')
+    return dict(version=json.loads(base)['version'], configuration_sha256=hashlib.sha256(base).hexdigest(),
+                windows_configuration_sha256=hashlib.sha256(windows).hexdigest())
+
+
+def finalize_updater(candidate, signature, tools):
+    """Verify public returned bytes; the manifest is the finalization commit point."""
+    manifest_path = regular(Path(candidate) / 'artifact-manifest.json')
+    original = manifest_path.read_bytes()
+    manifest = json.loads(original)
+    config_path = regular(ROOT / 'desktop/src-tauri/tauri.conf.json')
+    config_bytes = config_path.read_bytes()
+    config = json.loads(config_bytes)
+    configuration = updater_configuration()
+    require(manifest['updater_signature']['configuration_sha256'] == configuration['configuration_sha256']
+            and manifest['updater_signature']['windows_configuration_sha256'] == configuration['windows_configuration_sha256'],
+            'Trusted updater configuration differs from the build-time pin')
+    version = manifest['version']
+    require(re.fullmatch(r'\d+\.\d+\.\d+', version) and version == config['version'],
+            'Candidate version differs from the trusted compiled updater configuration')
+    require(manifest['platform'] == 'windows-x86_64' and manifest['public_ready'] is False
+            and manifest['installed_payloads_observed'] is False and manifest['authenticode_status'] == 'Valid'
+            and manifest['signing'] == dict(kind='azure-artifact-signing', payloads_observed_at_hook=True, receipts='signing'),
+            'Expected an unpromoted Authenticode-signed Windows candidate')
+    name = f'Speakerdesk_{version}_x64-setup.exe'
+    pin = manifest['installer']
+    require(pin['name'] == name and type(pin['bytes']) is int and 0 < pin['bytes'] <= 256 * 1024**2
+            and re.fullmatch(r'[0-9a-f]{64}', pin['sha256']), 'Invalid candidate installer pin')
+    installer = regular(manifest_path.parent / name)
+    require(installer.stat().st_size == pin['bytes'] and digest(installer) == pin['sha256'],
+            'Final Authenticode installer differs from its manifest')
+    signature = regular(signature)
+    require(signature.stat().st_size <= 8192, 'Updater signature exceeds its bounded size')
+    signature_bytes = signature.read_bytes()
+    signature_text = signature_bytes.decode('ascii').strip()
+    require(re.fullmatch(r'[A-Za-z0-9+/]+={0,2}', signature_text), 'Invalid updater signature encoding')
+    destination = manifest_path.parent / (name + '.sig')
+    completed = dict(filename=name, signature_filename=destination.name, signature=signature_text,
+                     verified=True, require_signed_version=True,
+                     **{key: value for key, value in configuration.items() if key != 'version'})
+    pending = dict(filename=name, signature_filename=destination.name, pending=True,
+                   verified=False, require_signed_version=True,
+                   **{key: value for key, value in configuration.items() if key != 'version'})
+    require(manifest['updater_signature'] in (pending, completed), 'Candidate updater state differs')
+    if destination.exists() or destination.is_symlink():
+        require(regular(destination).read_bytes() == signature_bytes, 'Refusing a different existing updater signature')
+    context = verify_tools(tools)
+    # Keep signing credentials out of both verification subprocesses.
+    environment = {key: value for key, value in os.environ.items() if key.upper() in {
+        'PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'COMSPEC', 'LOCALAPPDATA', 'APPDATA',
+        'TEMP', 'TMP', 'PATHEXT', 'CARGO_HOME', 'RUSTUP_HOME', 'CARGO_TARGET_DIR', 'CARGO_BUILD_JOBS',
+        'INCLUDE', 'LIB', 'LIBPATH', 'VSINSTALLDIR', 'VCINSTALLDIR', 'VCTOOLSINSTALLDIR', 'VCTOOLSVERSION',
+        'VCTOOLSREDISTDIR', 'WINDOWSSDKDIR', 'WINDOWSSDKVERSION', 'WINDOWSSDKLIBVERSION',
+        'WINDOWSSDKBINPATH', 'WINDOWSSDKVERBINPATH', 'UNIVERSALCRTSDKDIR', 'UCRTVERSION',
+        'FRAMEWORKDIR', 'FRAMEWORKDIR32', 'FRAMEWORKVERSION', 'FRAMEWORKVERSION32', 'FRAMEWORK40VERSION',
+        'VSCMD_ARG_TGT_ARCH', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_VER', 'WINDOWSLIBPATH', 'EXTENSIONSDKDIR',
+        'NETFXSDKDIR', 'EXTERNAL_INCLUDE', 'VCIDEINSTALLDIR', 'DEVENVDIR'}}
+    environment.update(SPEAKERDESK_FINAL_INSTALLER=str(installer), SPEAKERDESK_FINAL_SIGNTOOL=context['signtool'])
+    native = """$ErrorActionPreference='Stop'
+$signature=Get-AuthenticodeSignature -LiteralPath $env:SPEAKERDESK_FINAL_INSTALLER
+if($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -cnotmatch '^CN=Albert Najjar(?:,|$)' -or $null -eq $signature.TimeStamperCertificate){throw 'Expected verified publisher and timestamp.'}
+& $env:SPEAKERDESK_FINAL_SIGNTOOL verify /pa /all /v $env:SPEAKERDESK_FINAL_INSTALLER
+if($LASTEXITCODE -ne 0){throw 'Final installer failed native trust verification.'}
+"""
+    lock = manifest_path.parent / '.updater-finalize.lock'
+    temporary_paths, published_signature = [], False
+    lock_handle = lock.open('xb')
+    try:
+        for stage, command in (('Native publisher/timestamp/trust verification',
+                                ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', native]),
+                               ('Updater payload/key/version verification',
+                                ['cargo', 'run', '--offline', '--release', '--manifest-path',
+                         str(ROOT / 'scripts/windows-updater-verifier/Cargo.toml'), '--',
+                         str(installer), str(signature), str(config_path)])):
+            try:
+                subprocess.run(command, cwd=ROOT, env=environment, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=180)
+            except subprocess.CalledProcessError as error:
+                diagnostic = (error.stderr or error.stdout or b'').decode('utf-8', errors='replace')[-4096:]
+                raise ValueError(stage + ' failed.\n' + diagnostic) from None
+            except subprocess.TimeoutExpired:
+                raise ValueError(stage + ' timed out') from None
+            except OSError:
+                raise ValueError(stage + ' tool could not start') from None
+        require(manifest_path.read_bytes() == original and config_path.read_bytes() == config_bytes
+                and updater_configuration() == configuration
+                and digest(installer) == pin['sha256'] and signature.read_bytes() == signature_bytes,
+                'Candidate inputs changed during final updater verification')
+        require(not destination.exists() or regular(destination).read_bytes() == signature_bytes,
+                'Refusing a different existing updater signature')
+        manifest['updater_signature'] = completed
+        for path, data in ((destination, signature_bytes),
+                           (manifest_path, (json.dumps(manifest, indent=2) + '\n').encode())):
+            if path == destination and destination.exists():
+                continue
+            if path == manifest_path and json.loads(original)['updater_signature'] == completed:
+                continue
+            with tempfile.NamedTemporaryFile(dir=manifest_path.parent, prefix='.updater-', delete=False) as output:
+                temporary_path = Path(output.name); temporary_paths.append(temporary_path)
+                output.write(data); output.flush(); os.fsync(output.fileno())
+            if path == destination:
+                os.link(temporary_path, destination)  # No replacement of any existing signature.
+                published_signature = True
+            else:
+                require(manifest_path.read_bytes() == original, 'Candidate manifest changed before commit')
+                os.replace(temporary_path, manifest_path)
+        return manifest
+    except BaseException:
+        if published_signature and manifest_path.read_bytes() == original and destination.read_bytes() == signature_bytes:
+            destination.unlink()
+        raise
+    finally:
+        for path in temporary_paths:
+            path.unlink(missing_ok=True)
+        lock_handle.close()
+        lock.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('metadata', 'check', 'classify', 'package', 'inventory'))
+    parser.add_argument('action', choices=('metadata', 'check', 'classify', 'package', 'inventory', 'configuration', 'finalize-updater'))
     parser.add_argument('--path'); parser.add_argument('--tools'); parser.add_argument('--metadata')
     parser.add_argument('--stage'); parser.add_argument('--target'); parser.add_argument('--temporary')
     parser.add_argument('--version'); parser.add_argument('--receipts')
+    parser.add_argument('--signature')
     parser.add_argument('--endpoint'); parser.add_argument('--account'); parser.add_argument('--profile'); parser.add_argument('--correlation')
     args = parser.parse_args()
     if args.action == 'metadata':
@@ -244,6 +376,10 @@ def main():
         result = classify(args.path, args.stage, args.target, args.temporary, args.version)
     elif args.action == 'package':
         result = package_inputs(args.path, args.stage, args.target)
+    elif args.action == 'finalize-updater':
+        result = finalize_updater(args.path, args.signature, args.tools)
+    elif args.action == 'configuration':
+        result = updater_configuration()
     else:
         result = observed_payloads(args.receipts, args.stage, args.target, args.temporary, args.version)
     print(json.dumps(result))
