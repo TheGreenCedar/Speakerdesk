@@ -567,7 +567,7 @@ pub(crate) fn native_separated_voice_policy() -> speakerdesk_core::voice::separa
 
 pub(crate) fn recording_path(root: &Path, job: &Job) -> std::io::Result<PathBuf> {
     let native = media_write_directory(root, job).join("audio.wav");
-    if native.exists() {
+    if native_media_exists(root, &native)? {
         return confined_file(
             root,
             native
@@ -584,6 +584,26 @@ pub(crate) fn recording_path(root: &Path, job: &Job) -> std::io::Result<PathBuf>
         std::io::ErrorKind::NotFound,
         "Recording audio is unavailable",
     ))
+}
+
+fn native_media_exists(root: &Path, path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    // Windows reports NotFound for a non-directory ancestor too; that must not select legacy audio.
+    for parent in path.ancestors().skip(1).take_while(|p| p.starts_with(root)) {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) if !metadata.is_dir() || metadata.is_symlink() => {
+                return Err(std::io::Error::other("Invalid native media directory"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 /// Resolve a passage on its original recording clock. Source-bound live passages
@@ -643,16 +663,15 @@ pub(crate) fn passage_recording_path(
     // Prefer an owned derived source, otherwise keep migrated v1 source audio read-only.
     // A copy of audio.wav alone does not claim ownership of its separate source files.
     let native = media_write_directory(root, job);
-    let (authority, folder) = match std::fs::symlink_metadata(native.join(basename)) {
-        Ok(_) => (root, native),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let (authority, folder) = match native_media_exists(root, &native.join(basename))? {
+        true => (root, native),
+        false => {
             if let Some(legacy) = job.extra.get("legacy_media_root").and_then(Value::as_str) {
                 (Path::new(legacy), Path::new(legacy).join(job.id.as_str()))
             } else {
                 (root, native)
             }
         }
-        Err(error) => return Err(error),
     };
     if std::fs::symlink_metadata(&folder)?.file_type().is_symlink()
         || std::fs::symlink_metadata(folder.join(basename))?
@@ -1169,6 +1188,7 @@ mod setup_tests {
             passage_recording_path(&invalid_native, &migrated, &segment).is_err(),
             "native I/O errors must not silently select legacy audio"
         );
+        assert!(recording_path(&invalid_native, &migrated).is_err());
         #[cfg(unix)]
         {
             let linked_native = root.path().join("linked-native");

@@ -6,6 +6,9 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+#[path = "support/process.rs"]
+mod process_support;
+use process_support::ObservedProcess;
 
 #[tokio::test]
 async fn native_service_reaps_on_eof_bad_control_stalled_upload_and_update_shutdown() {
@@ -48,10 +51,12 @@ async fn native_service_reaps_on_eof_bad_control_stalled_upload_and_update_shutd
         })
         .await
         .unwrap();
-        let child: i32 = std::fs::read_to_string(temp.path().join("fixture-child-pid"))
-            .unwrap()
-            .parse()
-            .unwrap();
+        let child = ObservedProcess::new(
+            std::fs::read_to_string(temp.path().join("fixture-child-pid"))
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
         let html = client.get(url).send().await.unwrap().text().await.unwrap();
         let token = html
             .split("name=\"speakerdesk-token\" content=\"")
@@ -165,19 +170,16 @@ async fn native_service_reaps_on_eof_bad_control_stalled_upload_and_update_shutd
                     .unwrap();
                 assert!(ready.contains("\"op\":\"shutdown_ready\""), "{ready}");
                 assert!(ready.contains("\"ok\":true"), "{ready}");
-                #[cfg(unix)]
-                assert_eq!(
-                    unsafe { libc::kill(child, 0) },
-                    -1,
+                assert!(
+                    child.has_exited(),
                     "shutdown_ready was emitted before the inference child exited and was reaped"
                 );
             }
             _ => unreachable!(),
         }
         // Child cleanup must not wait for the ten-second HTTP drain deadline.
-        #[cfg(unix)]
         tokio::time::timeout(Duration::from_secs(5), async {
-            while unsafe { libc::kill(child, 0) } == 0 {
+            while !child.has_exited() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })

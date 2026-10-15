@@ -53,6 +53,14 @@ node --test tests/*.test.cjs
 
 On macOS, run `bash scripts/fetch_mlx_runtime.sh` once, then add `-p speakerdesk-models -p speakerdesk-echo` to the cargo command. The Python suite also runs the Swift capture checks on macOS. To build an app, run `APPLE_SIGNING_IDENTITY=- ./scripts/build_macos.sh`, then use the in-app setup to download models.
 
+Windows support is in progress in [#20](https://github.com/TheGreenCedar/Speakerdesk/issues/20).
+With the MSVC C++ build tools, Windows SDK and Rust installed, run the same Cargo
+command with `-p speakerdesk-models` added. Windows CI covers storage, WAV I/O,
+HTTP routes and child-process cleanup; model tests cover the portable protocol
+and unavailable backend. Native capture, production inference and a Windows
+installer are still unfinished. The [AMD Silero experiment](experiments/windows/README.md)
+records actual GPU execution separately from application support.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md): processes, crates, inference boundary, storage

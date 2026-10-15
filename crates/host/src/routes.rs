@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -290,7 +289,7 @@ impl AppState {
         separation::cleanup(&data_dir, &store)?;
         Ok(Self {
             native: Arc::new(std::sync::OnceLock::new()),
-            token: Arc::from(random_hex(32)),
+            token: Arc::from(random_hex(32)?),
             shared: Arc::new(Shared {
                 store: Mutex::new(store),
                 _owner: owner,
@@ -310,7 +309,8 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::open(std::env::temp_dir().join(format!("speakerdesk-{}", random_hex(8)))).unwrap()
+        Self::open(std::env::temp_dir().join(format!("speakerdesk-{}", random_hex(8).unwrap())))
+            .unwrap()
     }
 
     pub(crate) fn store(&self) -> std::sync::MutexGuard<'_, SqliteJobStore> {
@@ -1467,13 +1467,14 @@ fn unix_now() -> f64 {
 }
 
 pub(crate) fn new_job_id() -> Result<JobId, StoreError> {
-    JobId::parse(random_hex(16)).map_err(|error| StoreError::message(error.to_string()))
+    JobId::parse(random_hex(16)?).map_err(|error| StoreError::message(error.to_string()))
 }
 
-fn random_hex(bytes: usize) -> String {
+fn random_hex(bytes: usize) -> Result<String, StoreError> {
     let mut raw = vec![0_u8; bytes];
-    let mut file = fs::File::open("/dev/urandom").expect("urandom");
-    file.read_exact(&mut raw).expect("urandom");
+    getrandom::fill(&mut raw).map_err(|error| {
+        StoreError::message(format!("Cannot obtain secure random bytes: {error}"))
+    })?;
     if bytes == 16 {
         raw[6] = (raw[6] & 0x0f) | 0x40;
         raw[8] = (raw[8] & 0x3f) | 0x80;
@@ -1484,7 +1485,7 @@ fn random_hex(bytes: usize) -> String {
         hex.push(HEX[(byte >> 4) as usize] as char);
         hex.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    hex
+    Ok(hex)
 }
 
 pub(crate) async fn blocking(work: impl FnOnce() -> Response + Send + 'static) -> Response {

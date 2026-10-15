@@ -108,7 +108,7 @@ impl SetupService {
             model
                 .files
                 .keys()
-                .any(|name| matches!(std::fs::metadata(root.join(&model.id).join(name)), Err(error) if error.kind() == io::ErrorKind::NotFound))
+                .any(|name| missing_file(&root.join(&model.id).join(name)))
         });
         self.progress
             .lock()
@@ -148,17 +148,32 @@ pub(crate) fn initial_models_missing(
     models: &[ModelArtifact],
     reports: &[speakerdesk_core::ipc::SetupModelReport],
 ) -> bool {
-    !std::fs::symlink_metadata(root)
-        .is_ok_and(|meta| meta.is_symlink() || !meta.is_dir())
+    !std::fs::symlink_metadata(root).is_ok_and(|meta| meta.is_symlink() || !meta.is_dir())
         && reports.len() >= models.len()
         && reports.iter().take(models.len()).any(|report| !report.ok)
         && models.iter().zip(reports).all(|(model, report)| {
             report.ok
                 || (!std::fs::symlink_metadata(root.join(&model.id))
                     .is_ok_and(|meta| meta.is_symlink() || !meta.is_dir())
-                    && model.files.keys().all(|name| {
-                        matches!(std::fs::symlink_metadata(root.join(&model.id).join(name)), Err(error) if error.kind() == io::ErrorKind::NotFound)
-                    }))
+                    && model
+                        .files
+                        .keys()
+                        .all(|name| missing_file(&root.join(&model.id).join(name))))
+        })
+}
+
+fn missing_file(path: &Path) -> bool {
+    if !matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
+    {
+        return false;
+    }
+    // Windows also reports NotFound when a parent is a regular file.
+    path.ancestors()
+        .skip(1)
+        .filter(|p| !p.as_os_str().is_empty())
+        .all(|parent| match std::fs::metadata(parent) {
+            Ok(metadata) => metadata.is_dir(),
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
         })
 }
 
@@ -186,6 +201,17 @@ async fn directory(path: &Path) -> io::Result<()> {
             return Err(error("Invalid model directory"));
         }
         current.push(part);
+        if let Component::Prefix(prefix) = part {
+            if matches!(
+                prefix.kind(),
+                std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+            ) && path.components().nth(1) != Some(Component::RootDir)
+            {
+                return Err(error("Invalid model directory"));
+            }
+            // A Windows drive prefix is not an addressable directory until its root is appended.
+            continue;
+        }
         match fs::symlink_metadata(&current).await {
             Ok(meta) if meta.is_dir() && !meta.is_symlink() => {}
             Ok(_) => return Err(error("Model directory contains a link or non-directory")),
@@ -534,7 +560,9 @@ impl Installer {
             sync_artifact(&source, &model)?;
             checked(&cancellation)?;
             match std::fs::symlink_metadata(&target) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => std::fs::rename(&source, &target)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    speakerdesk_core::filesystem::rename(&source, &target)?;
+                }
                 Err(e) => return Err(e),
                 Ok(meta) if meta.is_symlink() || !meta.is_dir() => {
                     return Err(error("Model destination is not a regular directory"));
@@ -543,9 +571,9 @@ impl Installer {
                     exchange_directories(&source, &target)?;
                     sync_directory(&parent)?;
                     std::fs::remove_dir_all(&source)?;
+                    sync_directory(&parent)?;
                 }
             }
-            sync_directory(&parent)?;
             Ok(())
         })
         .await
@@ -553,19 +581,23 @@ impl Installer {
     }
 }
 fn sync_directory(path: &Path) -> io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
+    speakerdesk_core::filesystem::sync_directory(path)
 }
 fn sync_artifact(root: &Path, model: &ModelArtifact) -> io::Result<()> {
     for name in model.files.keys().chain(model.prepared.keys()) {
         let path = root.join(name);
-        std::fs::File::open(&path)?.sync_all()?;
-        let mut parent = path.parent().expect("artifact parent");
-        while parent.starts_with(root) {
-            sync_directory(parent)?;
-            if parent == root {
-                break;
+        speakerdesk_core::filesystem::sync_file(&path)?;
+        // Windows publishes the complete prepared tree with a write-through directory rename.
+        #[cfg(not(windows))]
+        {
+            let mut parent = path.parent().expect("artifact parent");
+            while parent.starts_with(root) {
+                sync_directory(parent)?;
+                if parent == root {
+                    break;
+                }
+                parent = parent.parent().expect("model parent");
             }
-            parent = parent.parent().expect("model parent");
         }
     }
     Ok(())
@@ -736,6 +768,16 @@ mod tests {
             "filesystem errors leave download need unknown"
         );
         assert!(!initial_models_missing(&unknown, &models[..3], &reports));
+        let blocked = temp.path().join("blocked-model-directory");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join(&models[0].id), b"not a model directory").unwrap();
+        progress.check_downloads(&blocked, &models[..1]);
+        assert!(!progress.progress().download_required);
+        assert!(!initial_models_missing(
+            &blocked,
+            &models[..1],
+            &reports[..1]
+        ));
     }
     async fn server(
         mode: &'static str,

@@ -8,6 +8,10 @@ invalidate `mlx-rs` on every restored target. Every candidate still runs the
 locked build, native dependency preparation, bundle checks and exact-source
 artifact manifest generation.
 
+The Windows foundation job currently runs the locked core, host, model-protocol
+and xtask tests without persisted caches. It neither builds a distributable app
+nor qualifies capture or GPU inference.
+
 AppleRelease signs and notarizes an authenticated producer artifact selected by
 its immutable run, artifact, source and payload identities. Speakerdesk's
 promotion tooling verifies the signed package and native QA before publishing.

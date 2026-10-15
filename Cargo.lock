@@ -4962,6 +4962,7 @@ dependencies = [
  "unicode-general-category",
  "unicode-normalization",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4981,6 +4982,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "fs4",
+ "getrandom 0.4.3",
  "hound",
  "libc",
  "postcard",
@@ -5000,6 +5002,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -213,8 +213,9 @@ pub fn normalize_cancellable(
                     output.write_all(&buffer[..count])?;
                 }
                 output.sync_all()?;
+                drop(output);
                 check_cancelled(cancelled)?;
-                fs::rename(&staged, destination)?;
+                crate::filesystem::rename(&staged, destination)?;
                 return Ok(duration);
             }
             Err(AudioError::Message(DURATION_LIMIT)) => {
@@ -259,9 +260,9 @@ pub fn normalize_cancellable(
                 .collect())
         })?;
         let duration = wav_duration_cancellable(&staged, cancelled)?;
-        File::open(&staged)?.sync_all()?;
+        crate::filesystem::sync_file(&staged)?;
         check_cancelled(cancelled)?;
-        fs::rename(&staged, destination)?;
+        crate::filesystem::rename(&staged, destination)?;
         Ok(duration)
     })();
     let _ = fs::remove_file(staged);
@@ -450,7 +451,7 @@ impl RecordingWriter {
         self.write_block(&pcm16_bytes(samples)?)
     }
 
-    /// Read `length` bytes at `offset` without moving the file cursor.
+    /// Read `length` bytes at `offset`, independently of preceding reads and writes.
     pub fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, AudioError> {
         let mut buf = vec![0_u8; length];
         read_exact_at(&self.file, &mut buf, offset)?;
@@ -491,12 +492,30 @@ fn write_at(file: &File, bytes: &[u8], offset: u64) -> Result<(), AudioError> {
         file.write_all_at(bytes, offset)?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut remaining = bytes;
+        let mut position = offset;
+        while !remaining.is_empty() {
+            match file.seek_write(remaining, position) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
+                Ok(written) => {
+                    remaining = &remaining[written..];
+                    position += written as u64;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (file, bytes, offset);
         Err(AudioError::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "positioned WAV writes require a Unix file",
+            "positioned WAV writes are unsupported on this platform",
         )))
     }
 }
@@ -508,12 +527,30 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> Result<(), AudioEr
         file.read_exact_at(buf, offset)?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut remaining = buf;
+        let mut position = offset;
+        while !remaining.is_empty() {
+            match file.seek_read(remaining, position) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()),
+                Ok(read) => {
+                    remaining = &mut remaining[read..];
+                    position += read as u64;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (file, buf, offset);
         Err(AudioError::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "positioned WAV reads require a Unix file",
+            "positioned WAV reads are unsupported on this platform",
         )))
     }
 }
@@ -1209,9 +1246,11 @@ mod tests {
         let mut writer = RecordingWriter::create(&path).unwrap();
         writer.file.seek(SeekFrom::Start(0)).unwrap();
         writer.write_block(&1_i16.to_le_bytes()).unwrap();
+        #[cfg(unix)]
         assert_eq!(writer.file.stream_position().unwrap(), 0);
         let size = writer.read_range(40, 4).unwrap();
         assert_eq!(u32::from_le_bytes(size.try_into().unwrap()), 2);
+        #[cfg(unix)]
         assert_eq!(writer.file.stream_position().unwrap(), 0);
         let seen = fs::read(&path).unwrap();
         assert_eq!(&seen[36..40], b"data");
@@ -1223,6 +1262,10 @@ mod tests {
         assert_eq!(writer.frames(), 3);
         let samples = writer.read_range(HEADER_LEN, 6).unwrap();
         assert_eq!(samples, [1, 0, 0, 0, 2, 0]);
+        assert!(matches!(
+            writer.read_range(HEADER_LEN + 4, 4),
+            Err(AudioError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
         assert_eq!(wav_duration(&path).unwrap(), 3.0 / f64::from(SAMPLE_RATE));
         assert_eq!(
             message(writer.write_block(&[0]).unwrap_err()),

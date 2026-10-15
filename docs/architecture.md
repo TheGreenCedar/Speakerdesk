@@ -18,7 +18,7 @@ Storage defaults to the app data directory (`SPEAKERDESK_HOME` overrides); `SPEA
 
 - `speakerdesk-core`: domain types and product rules, with no I/O to models or Metal. Holds the document, edit, import, live, language, speech, timing/alignment, review, export, people and voice rules, plus the store, IPC payloads, `messages` and `security`.
 - `speakerdesk-host`: the axum process. It runs routes, the inference supervisor (`inference.rs`), capture transport/writer/processing, admission, setup and workers. The `fixtures` feature builds `speakerdesk-dev` and `inference-fixture` for tests.
-- `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring and the CTC timing model with mlx-rs, and runs ReDimNet through Core ML. Linux builds a protocol stub that reports `unavailable`.
+- `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring and the CTC timing model with mlx-rs, and runs ReDimNet through Core ML. Linux and Windows build a protocol stub that reports `unavailable`.
 - `speakerdesk-echo`: buffering and reference clock for the pinned native WebRTC AEC3 library (`desktop/capture/echo`, built by `scripts/setup_echo.py`).
 - `xtask`: bundle verification, Python-sidecar checks and the native model comparison probe (`cargo xtask --help`).
 
@@ -47,6 +47,15 @@ Performance changes must preserve transcription and speaker accuracy, publicatio
 ## Storage
 
 The store is `<storage>/speakerdesk.sqlite` (`core/src/store/`). On first start the host discovers a legacy `jobs.sqlite` and migrates it once into the new file without modifying it ([ADR-0002](adr/0002-one-way-sqlite-migration.md)). An existing native database wins. Migrated audio stays read-only, and native writes use copy-on-write media storage. The schema stores product fields only ([ADR-0003](adr/0003-product-fields-only.md)).
+
+Owned-file publication uses `core/src/filesystem.rs`: flush contents before
+publishing a name, retain no-replacement semantics for migration and tombstones,
+and reject cross-volume moves on Windows. Unix syncs parent directories;
+Windows uses write-through moves because read-only file handles and directory
+flushes do not provide the same API contract. Recovery deletion tombstones also
+hide receipts whose physical removal is interrupted. Initial Windows model-tree
+activation is supported by this boundary; replacing an existing model directory
+still fails explicitly until an atomic repair strategy is implemented.
 
 `Job` and `Document` round-trip the fields in `document.rs`. A missing `kind` deserializes as `import`. Job IDs are 32 lowercase hex characters.
 

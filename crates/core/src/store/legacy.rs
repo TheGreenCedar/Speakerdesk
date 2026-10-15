@@ -70,23 +70,11 @@ fn snapshot_legacy(source: &Path, snapshot: &Path) -> Result<(), StoreError> {
     }
 }
 
-#[cfg(unix)]
 fn recover_rollback_copy(source: &Path, snapshot: &Path) -> Result<(), StoreError> {
-    use std::os::fd::AsRawFd;
     let mut source_file = std::fs::File::open(source).map_err(io_error)?;
-    // SQLite's pending/reserved/shared byte range excludes rollback writers.
-    let lock = libc::flock {
-        l_start: 0x40000000,
-        l_len: 512,
-        l_pid: 0,
-        l_type: libc::F_RDLCK as _,
-        l_whence: libc::SEEK_SET as _,
-    };
-    if unsafe { libc::fcntl(source_file.as_raw_fd(), libc::F_SETLK, &lock) } == -1 {
-        return Err(io_error(std::io::Error::last_os_error()));
-    }
+    lock_rollback_snapshot(&source_file)?;
     // WAL writers use different locks. A normal WAL snapshot uses SQLite Backup above.
-    if sidecar(source, "-wal").exists() {
+    if sidecar(source, "-wal").try_exists().map_err(io_error)? {
         return Err(StoreError::message(
             "Legacy WAL is still present; close its writer before recovery.",
         ));
@@ -111,10 +99,53 @@ fn recover_rollback_copy(source: &Path, snapshot: &Path) -> Result<(), StoreErro
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn recover_rollback_copy(_source: &Path, _snapshot: &Path) -> Result<(), StoreError> {
+#[cfg(unix)]
+fn lock_rollback_snapshot(source_file: &std::fs::File) -> Result<(), StoreError> {
+    use std::os::fd::AsRawFd;
+    // SQLite's pending/reserved/shared byte range excludes rollback writers.
+    let lock = libc::flock {
+        l_start: 0x40000000,
+        l_len: 512,
+        l_pid: 0,
+        l_type: libc::F_RDLCK as _,
+        l_whence: libc::SEEK_SET as _,
+    };
+    if unsafe { libc::fcntl(source_file.as_raw_fd(), libc::F_SETLK, &lock) } == -1 {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn lock_rollback_snapshot(source_file: &std::fs::File) -> Result<(), StoreError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Storage::FileSystem::{LOCKFILE_FAIL_IMMEDIATELY, LockFileEx},
+        System::IO::OVERLAPPED,
+    };
+    let mut overlap = OVERLAPPED::default();
+    overlap.Anonymous.Anonymous.Offset = 0x40000000;
+    // A shared lock excludes SQLite's pending/reserved writers until this handle closes.
+    if unsafe {
+        LockFileEx(
+            source_file.as_raw_handle(),
+            LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            512,
+            0,
+            &mut overlap,
+        )
+    } == 0
+    {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn lock_rollback_snapshot(_source_file: &std::fs::File) -> Result<(), StoreError> {
     Err(StoreError::message(
-        "Stopped-writer journal recovery is currently supported on macOS only.",
+        "Stopped-writer journal recovery is unavailable on this platform.",
     ))
 }
 
@@ -626,20 +657,14 @@ impl LegacyDump {
 }
 
 fn publish(partial: &Path, destination: &Path) -> Result<(), StoreError> {
-    fsync_file(partial)?;
+    crate::filesystem::sync_file(partial).map_err(io_error)?;
     remove_sidecars(partial);
-    std::fs::hard_link(partial, destination).map_err(|err| {
+    crate::filesystem::publish_new(partial, destination).map_err(|err| {
         StoreError::message(format!(
             "Could not publish imported database {}: {err}",
             destination.display()
         ))
     })?;
-    if let Some(parent) = destination
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fsync_dir(parent)?;
-    }
     Ok(())
 }
 
@@ -675,18 +700,6 @@ fn remove_sqlite_family(path: &Path) {
     let _ = std::fs::remove_file(path);
     remove_sidecars(path);
     let _ = std::fs::remove_file(sidecar(path, "-journal"));
-}
-
-fn fsync_file(path: &Path) -> Result<(), StoreError> {
-    let file = std::fs::File::open(path).map_err(io_error)?;
-    file.sync_all().map_err(io_error)?;
-    Ok(())
-}
-
-fn fsync_dir(path: &Path) -> Result<(), StoreError> {
-    let file = std::fs::File::open(path).map_err(io_error)?;
-    file.sync_all().map_err(io_error)?;
-    Ok(())
 }
 
 fn io_error(err: std::io::Error) -> StoreError {
@@ -803,6 +816,26 @@ mod tests {
                 .name,
             "Kept"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rollback_copy_rejects_a_live_sqlite_writer_without_changing_its_files() {
+        let dir = TempDir::new("active-rollback-writer");
+        let legacy = dir.0.join("jobs.sqlite");
+        let writer = rusqlite::Connection::open(&legacy).unwrap();
+        writer.execute_batch("CREATE TABLE jobs(id TEXT PRIMARY KEY, payload TEXT); INSERT INTO jobs VALUES('one','kept'); BEGIN IMMEDIATE; UPDATE jobs SET payload='pending';").unwrap();
+        let journal = super::sidecar(&legacy, "-journal");
+        let before = std::fs::read(&legacy).unwrap();
+        let before_journal = std::fs::read(&journal).unwrap();
+        let snapshot = dir.0.join("snapshot.sqlite");
+        assert!(super::recover_rollback_copy(&legacy, &snapshot).is_err());
+        assert!(
+            !snapshot.exists(),
+            "a live writer must exclude recovery before copying"
+        );
+        assert_eq!(std::fs::read(&legacy).unwrap(), before);
+        assert_eq!(std::fs::read(&journal).unwrap(), before_journal);
     }
 
     #[test]

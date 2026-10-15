@@ -167,16 +167,29 @@ fn reply(
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
-    use std::os::unix::net::UnixStream;
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
 
     use speakerdesk_core::ipc::{Envelope, EnvelopeBody, Request, Response};
 
     use super::{read_envelope, serve_on, write_envelope};
 
+    fn stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let parent = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (child, _) = listener.accept().unwrap();
+        for stream in [&parent, &child] {
+            stream.set_nodelay(true).unwrap();
+            let timeout = Some(std::time::Duration::from_secs(5));
+            stream.set_read_timeout(timeout).unwrap();
+            stream.set_write_timeout(timeout).unwrap();
+        }
+        (child, parent)
+    }
+
     #[test]
     fn hello_and_shutdown_round_trip() {
-        let (child, mut parent) = UnixStream::pair().unwrap();
+        let (child, mut parent) = stream_pair();
         let child_read = child.try_clone().unwrap();
         let worker = thread::spawn(move || serve_on(child_read, child));
         write_envelope(
@@ -221,7 +234,7 @@ mod tests {
 
     #[test]
     fn stale_cancel_does_not_poison_the_next_request() {
-        let (child, mut parent) = UnixStream::pair().unwrap();
+        let (child, mut parent) = stream_pair();
         let child_read = child.try_clone().unwrap();
         let worker = thread::spawn(move || serve_on(child_read, child));
         write_envelope(
@@ -266,7 +279,7 @@ mod tests {
         use speakerdesk_core::ipc::Handle;
         use std::sync::atomic::Ordering;
         use std::sync::{Arc, Mutex, mpsc};
-        let (child, mut parent) = UnixStream::pair().unwrap();
+        let (child, mut parent) = stream_pair();
         let input = child.try_clone().unwrap();
         let (started, wait) = mpsc::channel();
         let closed = Arc::new(Mutex::new(Vec::new()));
