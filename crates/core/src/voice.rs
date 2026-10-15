@@ -456,9 +456,14 @@ fn observed_audio_ranges(segment: &AudioSegment, track_id: &str, live: bool) -> 
         return Vec::new();
     }
     let rate = f64::from(limits::SAMPLE_RATE);
-    if !same_f64(segment.start, start_sample as f64 / rate)
-        || !same_f64(segment.end, end_sample as f64 / rate)
-    {
+    // Equivalent displayed seconds may differ by one ULP; the PCM coordinates own the crop.
+    let matches_anchor = |seconds: f64, sample| {
+        let frames = seconds * rate;
+        frames.is_finite()
+            && (0.0..i64::MAX as f64).contains(&frames)
+            && python_round(frames) == sample
+    };
+    if !matches_anchor(segment.start, start_sample) || !matches_anchor(segment.end, end_sample) {
         return Vec::new();
     }
     let Some(activity) = segment.speaker_activity.as_ref() else {
@@ -1552,6 +1557,158 @@ mod tests {
                 ("long@288000:384000", 18.0f64.to_bits(), 24.0f64.to_bits()),
             ]
         );
+    }
+
+    fn rounded_import_segment() -> AudioSegment {
+        // Actual sealed native-import coordinates; only the displayed end differs by one ULP.
+        serde_json::from_value(serde_json::json!({
+            "id":"second","speaker":"unassigned","text":"Fixture words.",
+            "start":5.784,"end":11.655999999999999,"finalized":true,
+            "canonical_state":"sealed","canonical_utterance_id":"second",
+            "start_sample":92544,"end_sample":186496,"audio_revision":0,
+            "speaker_candidates":["speaker_0"],"source_speaker_candidates":["speaker_0"],
+            "protected_fields":[],"speaker_activity":{
+                "audio_revision":0,"observed_end_sample":186496,"regions":[
+                    {"start_sample":92544,"end_sample":96960,"speakers":[]},
+                    {"start_sample":96960,"end_sample":179520,"speakers":["speaker_0"]},
+                    {"start_sample":179520,"end_sample":186496,"speakers":[]}
+                ]}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn canonical_voice_clips_use_sample_anchors_despite_float_rendering() {
+        let row = rounded_import_segment();
+        let mut exact_display = row.clone();
+        exact_display.end = 11.656;
+        let expected = vec![(
+            "second@96960:179520".to_string(),
+            VoiceClip::try_new("m", "speaker_0", "second", 6.06, 11.22).unwrap(),
+        )];
+        assert_eq!(
+            voice_clip_choices(
+                &RecognitionMeeting::local("m", vec![exact_display]),
+                "speaker_0"
+            ),
+            expected,
+            "control: exact displayed seconds retain the independently observed solo crop"
+        );
+        assert_eq!(
+            voice_clip_choices(
+                &RecognitionMeeting::local("m", vec![row.clone()]),
+                "speaker_0"
+            ),
+            expected,
+            "the same integer audio anchors must retain the same solo crop"
+        );
+
+        let mut next = row.clone();
+        next.id = "third".into();
+        next.canonical_utterance_id = Some(next.id.clone());
+        next.start = 12.;
+        next.end = 15.;
+        next.start_sample = Some(192_000);
+        next.end_sample = Some(240_000);
+        next.speaker_activity = Some(SpeakerActivity {
+            audio_revision: 0,
+            observed_end_sample: 240_000,
+            regions: vec![ActivityRegion {
+                start_sample: 192_000,
+                end_sample: 240_000,
+                speakers: vec!["speaker_0".into()],
+            }],
+        });
+        let meeting = RecognitionMeeting::local("m", vec![row, next]);
+        let clips = clean_clips(
+            &meeting,
+            "speaker_0",
+            &["second@96960:179520".into(), "third".into()],
+            2,
+        )
+        .unwrap();
+        assert_eq!(clips, automatic_clips(&meeting, "speaker_0", 2));
+        assert_eq!(clips.len(), 2, "two nonoverlapping solo crops are eligible");
+        assert!(clips_current(&meeting, &clips));
+    }
+
+    #[test]
+    fn canonical_voice_anchors_reject_changed_samples_and_stale_clip_coordinates() {
+        let mut row = rounded_import_segment();
+        row.end = 11.656;
+        let meeting = RecognitionMeeting::local("m", vec![row.clone()]);
+        let choices = voice_clip_choices(&meeting, "speaker_0");
+        assert_eq!(
+            choices.len(),
+            1,
+            "hostile cases start from an eligible solo crop"
+        );
+        let step = 1. / f64::from(limits::SAMPLE_RATE);
+        for (label, start, end) in [
+            ("earlier start sample", row.start - step, row.end),
+            ("later start sample", row.start + step, row.end),
+            ("earlier end sample", row.start, row.end - step),
+            ("later end sample", row.start, row.end + step),
+            ("negative start", -step, row.end),
+            ("nonfinite start", f64::NAN, row.end),
+            ("infinite end", row.start, f64::INFINITY),
+            ("scaled start overflow", f64::MAX, row.end),
+            ("scaled end overflow", row.start, f64::MAX),
+        ] {
+            let mut changed = row.clone();
+            changed.start = start;
+            changed.end = end;
+            assert!(
+                voice_clip_choices(&RecognitionMeeting::local("m", vec![changed]), "speaker_0")
+                    .is_empty(),
+                "{label} must not reuse the unchanged integer anchor"
+            );
+        }
+        // A zero anchor must not accept invalid inputs through python_round's zero fallback.
+        for start in [-1e-12, f64::NAN, f64::NEG_INFINITY, f64::MAX] {
+            let mut changed = canonical_segment();
+            changed.start = start;
+            assert!(
+                voice_clip_choices(&RecognitionMeeting::local("m", vec![changed]), "speaker_0")
+                    .is_empty(),
+                "invalid zero-origin display {start} must not resolve to sample zero"
+            );
+        }
+        for field in ["start", "end", "speaker"] {
+            let mut changed = row.clone();
+            changed.protected_fields.push(field.into());
+            assert!(
+                voice_clip_choices(&RecognitionMeeting::local("m", vec![changed]), "speaker_0")
+                    .is_empty(),
+                "a protected {field} anchor still rejects an otherwise valid solo crop"
+            );
+        }
+        for endpoint in ["start", "end"] {
+            let mut changed = row.clone();
+            if endpoint == "start" {
+                *changed.start_sample.as_mut().unwrap() += 1;
+            } else {
+                *changed.end_sample.as_mut().unwrap() -= 1;
+            }
+            assert!(
+                voice_clip_choices(&RecognitionMeeting::local("m", vec![changed]), "speaker_0")
+                    .is_empty(),
+                "a changed integer {endpoint} anchor cannot reuse unchanged displayed seconds"
+            );
+        }
+        for endpoint in ["start", "end"] {
+            let mut stale = choices[0].1.clone();
+            let value = if endpoint == "start" {
+                &mut stale.start
+            } else {
+                &mut stale.end
+            };
+            *value = f64::from_bits(value.to_bits() + 1);
+            assert!(
+                !clips_current(&meeting, &[stale]),
+                "selected clip {endpoint} coordinates remain exact, even within one sample"
+            );
+        }
     }
 
     #[test]
