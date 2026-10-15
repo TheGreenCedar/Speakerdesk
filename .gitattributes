@@ -1,2 +1,3 @@
 # Preserve verbatim publisher license bytes, including their original whitespace.
 packaging/licenses/voice-runtime/** -whitespace
+experiments/windows/cohere/compact-retained-pins.json text eol=lf

@@ -3,7 +3,13 @@ use ort::{session::Session, value::Tensor};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{error::Error, fs, io::Read, path::Path, time::Instant};
+use std::{
+    error::Error,
+    fs,
+    io::{Read, Write},
+    path::Path,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -17,6 +23,28 @@ struct Case {
     repeat: usize,
     #[serde(default)]
     disable_optimizations: bool,
+    #[serde(default)]
+    require_dml_only: bool,
+    #[serde(default)]
+    disable_memory_arena: bool,
+    #[serde(default)]
+    idle_ms: u64,
+}
+
+fn idle_phase(output: &Path, name: &str, milliseconds: u64) -> Result<()> {
+    if milliseconds != 0 {
+        let phase = json!({"phase": name, "pid": std::process::id(),
+            "unix_ms": SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+            "idle_ms": milliseconds});
+        fs::write(
+            output.join(format!("phase-{name}.json")),
+            serde_json::to_vec_pretty(&phase)?,
+        )?;
+        println!("{}", phase);
+        std::io::stdout().flush()?;
+        std::thread::sleep(Duration::from_millis(milliseconds));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -125,9 +153,13 @@ fn main() -> Result<()> {
     if !(1..=1000).contains(&case.repeat) || case.inputs.is_empty() {
         return Err("case requires inputs and 1..=1000 repetitions".into());
     }
+    if case.idle_ms > 5000 || (case.require_dml_only && provider != "dml") {
+        return Err("idle must be <=5000ms and strict DirectML requires dml".into());
+    }
     let output = Path::new(&args[4]);
     fs::create_dir(output)?;
     let output = output.canonicalize()?;
+    idle_phase(&output, "baseline", case.idle_ms)?;
     let environment = ort::init_from(&runtime)?.with_telemetry(false).build()?;
     let mut builder = Session::builder(&environment)?
         .with_parallel_execution(false)?
@@ -137,6 +169,12 @@ fn main() -> Result<()> {
     if case.disable_optimizations {
         builder = builder
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Disable)?;
+    }
+    if case.require_dml_only {
+        builder = builder.with_config_entry("session.disable_cpu_ep_fallback", "1")?;
+    }
+    if case.disable_memory_arena {
+        builder = builder.with_config_entry("ep.dml.disable_memory_arena", "1")?;
     }
     if provider == "dml" {
         let adapter: i32 = args
@@ -162,6 +200,7 @@ fn main() -> Result<()> {
     let started = Instant::now();
     let mut session = builder.commit_from_file(&model)?;
     let load_ms = started.elapsed().as_secs_f64() * 1000.;
+    idle_phase(&output, "loaded", case.idle_ms)?;
     let mut inputs = Vec::new();
     let mut input_records = Vec::new();
     for input in &case.inputs {
@@ -231,6 +270,7 @@ fn main() -> Result<()> {
             output_records.push(json!({"run": run, "name": name, "shape": shape, "dtype": dtype, "file": file, "sha256": sha256(&output.join(&file))?}));
         }
     }
+    idle_phase(&output, "warm", case.idle_ms)?;
     let profile = session.end_profiling()?;
     let events: Vec<serde_json::Value> = serde_json::from_slice(&fs::read(&profile)?)?;
     let mut placement = std::collections::BTreeMap::<String, usize>::new();
@@ -243,15 +283,19 @@ fn main() -> Result<()> {
     let libraries = loaded_runtime_libraries()?;
     #[cfg(not(windows))]
     let libraries = serde_json::Value::Null;
-    let placed =
-        provider != "dml" || placement.get("DmlExecutionProvider").copied().unwrap_or(0) != 0;
+    let placed = (provider != "dml"
+        || placement.get("DmlExecutionProvider").copied().unwrap_or(0) != 0)
+        && (!case.require_dml_only || placement.keys().all(|key| key == "DmlExecutionProvider"));
     let report = json!({
+        "pid": std::process::id(),
         "runtime": runtime, "runtime_sha256": sha256(&runtime)?, "runtime_info": format!("{:?}", ort::info()),
         "provider_requested": provider, "model": model, "model_sha256": sha256(&model)?,
         "model_files": model_files, "loaded_runtime_libraries": libraries,
         "runner_sha256": sha256(&std::env::current_exe()?)?, "execution_verified": placed,
         "case_sha256": sha256(&case_path)?, "inputs": input_records, "outputs": output_records,
         "graph_optimizations_disabled": case.disable_optimizations,
+        "require_dml_only": case.require_dml_only, "memory_arena_disabled": case.disable_memory_arena,
+        "idle_ms": case.idle_ms,
         "load_ms": load_ms, "run_ms": run_ms, "executed_provider_events": placement, "profile": profile
     });
     fs::write(
@@ -260,7 +304,9 @@ fn main() -> Result<()> {
     )?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     if !placed {
-        return Err("no DirectML execution events; provider registration is insufficient".into());
+        return Err(
+            "DirectML execution policy failed; inspect the recorded provider events".into(),
+        );
     }
     Ok(())
 }
