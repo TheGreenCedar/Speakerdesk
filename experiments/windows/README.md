@@ -6,6 +6,13 @@ yet establish a qualified Windows application or public distribution. [Issue #20
 owns the complete application acceptance; [PR #49](https://github.com/TheGreenCedar/Speakerdesk/pull/49)
 remains a draft.
 
+The retained FP32 diagnostic inventory is **not the shipping design**: the owner
+rejected its 10.27 GB download and memory cost. Cohere now has an
+[original-weight compact candidate](cohere/compact-weights.md), following a
+[bounded UINT4 feasibility gate](cohere/quantized-probe.md). Conversion preserves
+the original packed bytes; full native placement, quality and residency remain
+unqualified. Do not transfer the FP32 results below to that candidate.
+
 Start at the model's adjacent Windows implementation and the linked experiment
 record when investigating a numerical or lifecycle failure. Python is used for
 export and qualification only; it is not part of the application runtime.
@@ -47,7 +54,10 @@ required. The original failed receipts are retained beside the corrected runs.
 
 Runtime pins and immutable admission live in
 `crates/models/src/windows_runtime.rs`; download/catalog activation remains a
-separate host boundary. `scripts/build_windows.ps1` builds an unsigned candidate.
+separate host boundary. `scripts/build_windows.ps1` builds an unsigned candidate
+by default. Its optional `-Sign` path uses the reviewed
+[Azure signing boundary](../../docs/windows-signing.md); account provisioning
+and a signed installation/update remain separate gates.
 Windows setup and admission share `windows-model-artifacts.json`; prebuilt
 graphs need no on-device conversion. Its model-release download prefix is
 reserved for the exact pinned artifacts and has not been published. Do not
