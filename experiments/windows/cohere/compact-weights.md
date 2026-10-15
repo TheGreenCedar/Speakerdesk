@@ -112,9 +112,8 @@ cases and references. This is an unqualified candidate, not a model release.
 Native qualification is separate. The first strict encoder initialization
 failed before inference because ORT assigned some graph nodes to CPU. One verbose
 initialization diagnostic identified CPU-preferred shape/index operations and
-was stopped at its 60-second wall-time guard; no inference ran. These records do
-not yet establish complete numerical placement, correctness, residency or
-throughput. Retain both failures when evaluating a subsequent policy.
+was stopped at its 60-second wall-time guard; no inference ran. Both failures
+remain retained.
 
 The candidate case policy
 disables ORT optimization and the DML memory arena and requests strict DML with
@@ -128,3 +127,41 @@ decoder cache continuation and existing numerical bounds, then measure full-mode
 persistent/temporary GPU allocations and latency. The synthetic packed-matrix
 result does not establish those full-model properties, particularly if DML fuses
 a larger graph. No shipping claim or production registry update is made here.
+
+## Placement admitted; execution memory gate failed
+
+Load-only native API inspection now accounts for every non-Constant graph node.
+Independent graph review matched each name/domain/operator to its assignment and
+proved every CPU output is INT64 shape/index work, with ancestry terminating only
+at Shape metadata or INT64 literals. Omitted nodes are embedded Constant literals;
+none performs numerical computation. Every complete five-node UINT4
+reconstruction chain and its numerical consumers is assigned to DirectML.
+
+| Graph | DirectML nodes | CPU shape/index nodes | Omitted Constant literals |
+| --- | ---: | ---: | ---: |
+| Encoder | 8,322 | 1,228 | 2,884 |
+| Decoder init | 1,221 | 161 | 292 |
+| Decoder step | 1,004 | 128 | 227 |
+
+The frozen placement group has SHA-256
+`b1df4f33abb3ff27b101ee1def18fc417fe30f90012220e203813f0152a0e56a`.
+The probe admits those exact graph-specific policies before Run. This permits
+the proven integer work, without admitting arbitrary numerical CPU fallback.
+
+One retained-output family then attempted the unchanged `.002` absolute/relative
+bounds and two repeats, with optimization and the DML memory arena disabled.
+The encoder loaded in 9.332 seconds and passed placement admission, but its first
+execution attempt exceeded the **6 GiB private-memory guard**. The last sample
+recorded 8,355,348,480 bytes private memory and 7,885,697,024 bytes GPU commitment.
+The owned process was killed/reaped at 16.290 seconds and independently observed
+absent afterward. No output tensors or completed profile were returned; neither
+decoder started. The 8 GiB GPU guard was not exceeded in sampled observations,
+which do not establish the true peak.
+
+This is a resource failure, not a numerical comparison result. The pre-Run
+receipt's `model_run_called: false` describes that earlier snapshot, not the
+interrupted process's final execution state. The allocation cause, numerical
+correctness, full decoding, residency and throughput remain unqualified. Keep
+the failed candidate and receipts; raising the guard does not resolve compact
+execution. Private evidence is retained under
+`cohere-compact-qualified-placement-v1-results` in the owning work record.
