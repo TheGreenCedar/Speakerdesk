@@ -2,19 +2,25 @@
 
 The draft Windows inventory pins the original-affine UINT4 encoder and the
 shape-folded decoder graphs. The loader disables ORT optimization for all three;
-the encoder disables DML pooling/fusion to bound reconstruction memory, while
-the smaller decoders enable both. Before returning a session, actual API27
-assignments must match that exact graph's reviewed placement policy.
+all three enable DML pooling to reuse transient buffers. The encoder preserves
+ordered reconstruction with fusion disabled; the smaller decoders enable fusion.
+Before returning a session, actual API27 assignments must match that exact graph's
+reviewed placement policy.
 
 The actual Rust resident path preserves all 31 reference tokens and exact text
-in two complete requests. The 9.09-second clip takes **3.78 / 2.87 seconds**
-(first after load / second request), including preprocessing, encoder, all 32
-decoder calls and text construction. Native lifetime private peak is **4.29 GiB**;
-maximum sampled GPU commitment is **3.89 GiB**. Load is separately measured at
-10.96 seconds. These are retained-clip observations, not sustained live-app proof.
+in two complete requests. With encoder pooling, the 9.09-second clip took
+**2.57 / 0.67 seconds** (first after load / second request), compared with the
+retained pre-pooling pair of **3.78 / 2.87 seconds**. These observations include
+preprocessing, encoder, all 32 decoder calls and text construction. Native lifetime
+private peak was **4.33 GiB**, maximum sampled GPU commitment **3.94 GiB**, and
+load **11.20 seconds**. Short-input, completed-session and pre-cancel checks pass.
+These are retained-clip observations, not sustained live-app proof.
 [compact-weights.md](compact-weights.md) records the original weights, failed
-proxy gates and separate complete-request decision. Combined model residency,
-assembled application qualification and distribution remain open.
+proxy gates and separate complete-request decision. The encoder graph, original
+Q4 values, placement policy and published compact model files are unchanged.
+The combined seven-model test also passes with the new setting;
+[Windows qualification](../README.md) records its memory and continuation results.
+Sustained installed application qualification remains separate.
 
 ## FP32 diagnostic exporter
 

@@ -264,8 +264,8 @@ three rewritten MatMuls added concentrated first-use cost without a useful
 steady-state improvement. Its exact prototype and failed receipts are retained
 with the task evidence; it is not a converter option or runtime dependency.
 
-The integrated candidate changes only the two decoder sessions to DML pooling
-and fusion, and pins the four existing shape graph/policy files from manifest
+That earlier candidate changed only the two decoder sessions to DML pooling
+and fusion, and pinned the four existing shape graph/policy files from manifest
 `e292b3d454db8e83f36a0473f7986dccfea60cc99b50e7084af87795fadb98e0`.
 The encoder, packed stores, tokenizer, independent references and numerical
 placement boundary are unchanged. There is no shape override, prewarm or GPU
@@ -293,3 +293,19 @@ The result receipt is `c247a75134f03bf3239aa7e59d2e3b446b7f4610538bce704ed3de56e
 This qualifies this retained English clip and these two requests. It does not
 establish all-model residency, sustained live backlog, new-speech accuracy,
 in-flight cancellation, installed behavior or public readiness.
+
+## Encoder pooling follow-up
+
+After the installed compact candidate missed its Stop drain limit, host timing
+identified ASR as the dominant worker cost. Folding encoder integer shape
+literals preserved outputs but changed retained Run times by only about 3%;
+that graph and its expanded placement policy were not adopted. Enabling DML
+pooling on the original ordered encoder reduced its retained first/second Run
+from 3332/2661 ms to 1214/603 ms within the original memory and numerical bounds.
+Encoder fusion remains disabled; no weights, model files or precision changed.
+
+The production loader now pools all three Cohere sessions. The unchanged native
+test preserves the reference tokens/text, completion, short-input and pre-cancel
+behavior. [Current complete-request and residency observations](README.md) cover
+that setting. The previous failed inspection, proxy and installed Stop gates
+remain recorded; these component results do not replace installed qualification.

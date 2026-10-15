@@ -2,7 +2,7 @@
 
 The Windows x64 inference dispatcher and host setup are enabled for assembled
 application qualification after the seven component gates passed. This does not
-yet establish a qualified Windows application or public distribution. [Issue #20](https://github.com/TheGreenCedar/Speakerdesk/issues/20)
+yet establish a qualified Windows application or a public application release. [Issue #20](https://github.com/TheGreenCedar/Speakerdesk/issues/20)
 owns the complete application acceptance; [PR #49](https://github.com/TheGreenCedar/Speakerdesk/pull/49)
 remains a draft.
 
@@ -13,9 +13,9 @@ rejected its 10.27 GB download and memory cost. Cohere now has an
 the original packed bytes. Exact native placement now admits numerical work on
 DirectML and proven integer shape work on CPU. The initial memory failure is
 retained; stable ordering subsequently passed the numerical family and full
-reference transcription within the original memory bounds. Decoder pooling
-subsequently brings the actual complete 9.09-second reference request to
-3.78 / 2.87 seconds, including the first use. Combined residency now passes the
+reference transcription within the original memory bounds. Pooling in all three Cohere sessions
+brings the actual complete 9.09-second reference request to
+2.57 / 0.67 seconds, including the first use. Combined residency now passes the
 bounded dispatcher test below; sustained live throughput and assembled
 application qualification remain open.
 [Later decoder diagnostics](cohere/compact-weights.md#decoder-throughput-diagnostics)
@@ -52,18 +52,18 @@ hash verification), with 115,085,312 bytes of native lifetime peak private commi
 The output remains exactly 1,301,979,472 bytes / SHA-256 `ebb4aa54…`; this reduces
 transport only, with no CTC runtime-memory saving.
 
-The compact **seven-model Runtime test passes in 66.53 s** on the AMD machine.
-Its cumulative load marker is 24.3031674 s and continuation-complete marker is
-63.927676 s from the same start; these are not additive intervals or ASR latency.
+The compact **seven-model Runtime test passes in 61.40 s** on the AMD machine.
+Its cumulative load marker is 23.9229764 s and continuation-complete marker is
+58.4908738 s from the same start; these are not additive intervals or ASR latency.
 All original assertions pass: loaded readiness, each model operation,
 maximum-window separation, exact continued and subsequent ASR, source and
 prepared-file write locks, closed handles and pre-cancellation recovery. Native
-lifetime peak process private commit is **17,902,706,688 bytes**, with
-**8,703,213,568 bytes** current commit at the final test receipt. Across **237
-samples**, GPU committed memory peaks at **16,814,133,248 bytes**. Process commit
+lifetime peak process private commit is **18,153,295,872 bytes**, with
+**8,891,232,256 bytes** current commit at the final test receipt. Across **220
+samples**, GPU committed memory peaks at **17,094,426,624 bytes**. Process commit
 is not resident physical RAM; sampled GPU memory is not an exact GPU lifetime
-peak. The retained receipt is `compact-seven-model-residency-v1-results/receipt.json`,
-SHA-256 `feb6b9bc3af45eb1ea5bcfa6650961dcb435b6a10fab73cd496f12fc09181133`.
+peak. The retained receipt is `compact-seven-model-residency-v2-results/receipt.json`,
+SHA-256 `0c8a87ffcd8829b35ea1a5fc56347a6d8ea9409f8958ea9c9864a2b426221e01`.
 These observations exclude host/capture/UI overhead and do not establish
 assembled setup, sustained live throughput or minimum hardware requirements.
 

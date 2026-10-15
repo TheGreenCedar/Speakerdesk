@@ -109,14 +109,14 @@ impl Backend {
         if policy.model_sha256 != model_sha256 {
             return Err(error("placement policy belongs to a different model hash"));
         }
-        // The encoder needs its ordered, unfused reconstruction to bound memory.
-        // The smaller shape-folded decoders use DML pooling and fusion; keep ORT
-        // optimization disabled so it cannot expand the packed UINT4 constants.
+        // The encoder keeps ordered, unfused reconstruction; DML pooling reuses
+        // transient buffers in all three graphs. Keep ORT optimization disabled
+        // so it cannot expand the packed UINT4 constants.
         let decoder = graph != "encoder";
         self.load_with_options(
             &admission.directory.join(graph_name),
             ort::session::builder::GraphOptimizationLevel::Disable,
-            decoder,
+            true,
             decoder,
             true,
             Some((&policy, &model_sha256)),
