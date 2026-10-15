@@ -117,7 +117,10 @@ fn begin_guarded(
             .and_then(Value::as_u64)
             .unwrap_or(0)
             != generation
-            || job.extra.get("refinement_status").and_then(Value::as_str) != Some("unresolved")
+            || !matches!(
+                job.extra.get("refinement_status").and_then(Value::as_str),
+                Some("unresolved" | "complete_with_exceptions")
+            )
         {
             return Err(ApiError::new(409, RETAINED));
         }
@@ -355,13 +358,15 @@ fn publish_candidate(
         .extra
         .entry("refinement_history")
         .or_insert_with(|| json!({}));
-    history[&prior.id] = json!({"window_id":prior.id,"created":unix_now(),"segments":[{
-        "id":prior.id,"start":prior.start,"end":prior.end,"speaker":prior.speaker,"text":prior.text
-    }]});
+    if history.get(&prior.id).is_none() {
+        history[&prior.id] = json!({"window_id":prior.id,"created":unix_now(),"segments":[{
+            "id":prior.id,"start":prior.start,"end":prior.end,"speaker":prior.speaker,"text":prior.text
+        }]});
+    }
     Ok(true)
 }
 
-fn publish_language_issue(current: &mut Job, prior: &Segment, error: &live::LiveError) {
+fn publish_passage_issue(current: &mut Job, prior: &Segment, error: &live::LiveError) {
     let Some(row) = current
         .document
         .as_mut()
@@ -373,8 +378,24 @@ fn publish_language_issue(current: &mut Job, prior: &Segment, error: &live::Live
         return;
     }
     row.rest.remove("refinement_issue");
-    if let live::LiveError::Language { reason, message } = error {
-        row.rest.insert("refinement_issue".into(),json!({"kind":"language","reason":reason,"message":message,"segment_version":live::segment_version(prior)}));
+    let (kind, reason) = match error {
+        live::LiveError::Language { reason, .. } => ("language", *reason),
+        _ => ("accuracy", "failed"),
+    };
+    row.rest.insert("refinement_issue".into(),json!({"kind":kind,"reason":reason,"message":error.to_string(),"segment_version":live::segment_version(prior)}));
+}
+
+fn completed_status(job: &Job) -> &'static str {
+    if job.document.as_ref().is_some_and(|document| {
+        document.segments.iter().any(|row| {
+            speakerdesk_core::import::refinable_segment(row)
+                && job.extra["rolling_refinement"]["failed"][&row.id].as_str()
+                    == Some(live::segment_version(row).as_str())
+        })
+    }) {
+        "complete_with_exceptions"
+    } else {
+        "complete"
     }
 }
 
@@ -427,7 +448,6 @@ fn execute(
             context_generation(&job),
         )
     };
-    let mut unresolved = false;
     for id in ids {
         let mut refreshed = false;
         loop {
@@ -444,11 +464,7 @@ fn execute(
                 else {
                     break;
                 };
-                if segment.separation.is_some()
-                    || segment
-                        .protected_fields
-                        .as_ref()
-                        .is_some_and(|f| !f.is_empty())
+                if !speakerdesk_core::import::refinable_segment(segment)
                     || checkpoint(&job, segment)
                 {
                     break;
@@ -480,6 +496,7 @@ fn execute(
                     context_generation(&original),
                 )
             })();
+            let interrupted = matches!(&result, Err(live::LiveError::Child(error)) if error.is_lifecycle_failure());
             let mut store = operation.shared.store.lock().expect("store");
             let mut retry_context = false;
             let publication = store.update_job(&operation.id, |current| {
@@ -487,7 +504,6 @@ fn execute(
                     return Err(ApiError::new(409, RETAINED));
                 }
                 if !fresh(current, &original, &prior) {
-                    unresolved = true;
                     return Ok(());
                 }
                 if result
@@ -498,13 +514,8 @@ fn execute(
                         retry_context = true;
                         return Ok(());
                     }
-                    unresolved = true;
-                    current.extra.insert(
-                        "refinement_error".into(),
-                        json!(
-                            "Language context changed again; previous words and audio are retained."
-                        ),
-                    );
+                    publish_passage_issue(current, &prior, &live::LiveError::Message("Language context changed again; previous words and audio are retained."));
+                    current.extra.get_mut("rolling_refinement").expect("plan")["failed"][&prior.id]=json!(live::segment_version(&prior));
                     return Ok(());
                 }
                 match &result {
@@ -528,20 +539,20 @@ fn execute(
                                 summary_generation = context_generation(current);
                             }
                         }
-                        Ok(false) => unresolved = true,
+                        Ok(false) => {},
                         Err(error) => {
-                            unresolved = true;
-                            current
-                                .extra
-                                .insert("refinement_error".into(), json!(error.to_string()));
+                            publish_passage_issue(current, &prior, &error);
+                            current.extra.get_mut("rolling_refinement").expect("plan")["failed"][&prior.id]=json!(live::segment_version(&prior));
                         }
                     },
                     Err(error) => {
-                        unresolved = true;
-                        publish_language_issue(current, &prior, error);
-                        current
-                            .extra
-                            .insert("refinement_error".into(), json!(error.to_string()));
+                        if interrupted {
+                            current.extra.insert("refinement_status".into(), json!("unresolved"));
+                            current.extra.insert("refinement_error".into(), json!(error.to_string()));
+                        } else {
+                            publish_passage_issue(current, &prior, error);
+                            current.extra.get_mut("rolling_refinement").expect("plan")["failed"][&prior.id]=json!(live::segment_version(&prior));
+                        }
                     }
                 }
                 Ok::<_, ApiError>(())
@@ -552,6 +563,9 @@ fn execute(
                 _ => {}
             }
             drop(store);
+            if interrupted {
+                return Ok(());
+            }
             if retry_context {
                 refreshed = true;
                 let job = load_job(
@@ -571,8 +585,9 @@ fn execute(
     let mut store = operation.shared.store.lock().expect("store");
     store.update_job(&operation.id, |job| {
         if !operation.current(job) { return Err(ApiError::new(409,RETAINED)); }
-        job.extra.insert("refinement_status".into(),json!(if unresolved {"unresolved"} else {"complete"}));
-        job.message = if unresolved {"Some passages could not be refined. Previous words and audio are retained; retry when ready."} else {"Saved accuracy pass complete. Your corrections and recorded speaker identities are retained."}.into();
+        job.extra.insert("refinement_status".into(),json!(completed_status(job)));
+        job.extra.remove("refinement_error");
+        job.message = "Saved accuracy pass finished. Previous words and any exceptions are retained beside their passages.".into();
         Ok::<_,ApiError>(())
     })?;
     Ok(())

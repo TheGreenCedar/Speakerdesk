@@ -794,9 +794,10 @@ async fn save_transcript(
                 speaker_assignments: &assignments,
                 voice_checks: &checks,
             })?;
-            let accepted_repair = if job.extra.get("refinement_status").and_then(Value::as_str)
-                == Some("unresolved")
-            {
+            let accepted_repair = if matches!(
+                job.extra.get("refinement_status").and_then(Value::as_str),
+                Some("unresolved" | "complete_with_exceptions")
+            ) {
                 job.document.as_ref().and_then(|prior| {
                     let rows: std::collections::HashMap<&str, &Segment> = prior
                         .segments

@@ -58,7 +58,7 @@ test('current/error/unavailable are quiet and manual check exposes the existing 
 });
 
 test('dismissed version remains suppressed across polls; newer version reappears; Undo stays intact',async()=>{
-  const f=app();f.run('removePassage(doc.segments[0]);');
+  const f=app();f.run("undoRemoval={jid:selected.id,timer:null};notice('Passage deleted.',false,{label:'Undo',run:()=>{}});");
   const undo=f.document.querySelector('#notice .notice-action');
   f.status({id:1,state:'available',version:'0.7.0',dismissed_version:''});await f.run('refreshUpdates()');
   await f.run('dismissUpdateNotice()');await f.run('refreshUpdates()');

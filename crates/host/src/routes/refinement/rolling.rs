@@ -2,7 +2,6 @@
 //! cancellation; SQLite owns checkpoints and the canonical document.
 use super::*;
 use crate::inference::ChildModels;
-use speakerdesk_core::error::ChildError;
 
 #[derive(Clone)]
 pub(crate) struct Rolling(Arc<Mutex<Control>>);
@@ -270,15 +269,10 @@ impl Runner {
                     None => {
                         store
                             .update_job(&operation.id, |job| {
-                                let failed = job.extra["rolling_refinement"]["failed"]
-                                    .as_object()
-                                    .is_some_and(|failed| !failed.is_empty());
                                 job.extra.insert(
                                     "refinement_status".into(),
-                                    json!(if failed {
-                                        "unresolved"
-                                    } else if job.status == "finishing" || job.status == "ready" {
-                                        "complete"
+                                    json!(if job.status == "finishing" || job.status == "ready" {
+                                        super::completed_status(job)
                                     } else {
                                         "waiting"
                                     }),
@@ -412,39 +406,24 @@ impl Runner {
                 self.rolling.published(current, Some(prior), row);
                 accepted_language(current, prior, row);
             }
-            if !accepted
-                && !matches!(
-                    result,
-                    Err(live::LiveError::Child(
-                        ChildError::ProcessLost { .. }
-                            | ChildError::Timeout
-                            | ChildError::Cancelled
-                    ))
-                )
-            {
-                if fresh(current, original, prior)
-                    && let Err(error) = &result
-                {
-                    super::publish_language_issue(current, prior, error);
-                }
+            let interrupted=matches!(&result, Err(live::LiveError::Child(error)) if error.is_lifecycle_failure());
+            if !accepted && !interrupted && fresh(current, original, prior) {
+                let error=result.as_ref().err().cloned().unwrap_or(live::LiveError::Message(if superseded {
+                    "Language context changed again; previous words and audio are retained."
+                } else { "Passage changed; previous words retained." }));
+                super::publish_passage_issue(current, prior, &error);
                 current.extra.get_mut("rolling_refinement").expect("plan")["failed"][&prior.id] =
                     json!(live::segment_version(prior));
+            }
+            if interrupted {
                 current.extra.insert(
                     "refinement_error".into(),
-                    json!(if superseded {
-                        "Language context changed again; previous words and audio are retained."
-                            .to_string()
-                    } else {
-                        result.as_ref().err().map_or(
-                            "Passage changed; previous words retained.".to_string(),
-                            ToString::to_string,
-                        )
-                    }),
+                    json!(result.as_ref().unwrap_err().to_string()),
                 );
             }
             current.extra.insert(
                 "refinement_status".into(),
-                json!(if accepted { "waiting" } else { "unresolved" }),
+                json!(if interrupted { "unresolved" } else { "waiting" }),
             );
             Ok::<_, ApiError>(None)
         });
@@ -460,9 +439,8 @@ impl Runner {
                 control.scan_from = Some(control.scan_from.map_or(index, |old| old.min(index)));
             }
         }
-        if let Err(
-            error @ live::LiveError::Child(ChildError::ProcessLost { .. } | ChildError::Timeout),
-        ) = result
+        if let Err(error @ live::LiveError::Child(_)) = result
+            && matches!(&error,live::LiveError::Child(child) if child.is_lifecycle_failure() && !matches!(child,speakerdesk_core::error::ChildError::Cancelled))
         {
             return Err(error);
         }

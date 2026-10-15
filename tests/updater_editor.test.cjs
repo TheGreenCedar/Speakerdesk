@@ -12,6 +12,12 @@ function editor() {
   const calls = [];
   f.context.fetch = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;calls.push({url,body});
+    if(options.method==='PATCH' && url.includes('/segments/')) {
+      const row=f.context.fixture.document.segments.find(row=>url.endsWith('/'+row.id));
+      Object.assign(row,body.changes);row.machine_revision++;row.protected_fields=['text'];row.refinement_state='edited';f.context.fixture.revision++;
+      return {ok:true,json:async()=>({segment:structuredClone(row),revision:f.context.fixture.revision})};
+    }
+    if(url.startsWith('/api/jobs/') && !url.endsWith('/transcript'))return {ok:true,json:async()=>structuredClone(f.context.fixture)};
     if (url.endsWith('/transcript')) {
       return {ok:true,json:async()=>({...f.context.fixture,revision:2,document:body.document})};
     }
@@ -143,22 +149,25 @@ test('expired preparation never starts a later save or clears a new Undo window'
 });
 
 test('refusing an update preserves the actual passage Undo action and exact words',async()=>{
-  const f=editor();const before=f.run('JSON.stringify(doc)');
-  f.run('removePassage(doc.segments[0]);');
+  const f=editor();const before=f.run('JSON.stringify(doc.segments.map(row=>row.text))');
+  await f.run('removePassage(doc.segments[0]);');
   const undo=f.document.querySelector('#notice .notice-action');assert.ok(undo);
   await f.run('prepareEditorUpdate(1,1)');
   assert.equal(f.document.querySelector('#notice .notice-action'),undo);
-  f.context.fetch=async()=>({ok:true,json:async()=>({id:1,state:'ready',preparation:1,reserved:false})});
+  const transport=f.context.fetch;f.context.fetch=async(url,options)=>url.startsWith('/api/jobs/')?transport(url,options):({ok:true,json:async()=>({id:1,state:'ready',preparation:1,reserved:false})});
   await f.run('refreshUpdates()');f.run('closeSettings()');undo.click();
-  assert.equal(f.run('JSON.stringify(doc)'),before);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.run('JSON.stringify(doc.segments.map(row=>row.text))'),before);
+  assert.equal(f.run('doc.segments[0].deleted'),false);
   assert.equal(f.run('undoRemoval'),null);f.run('clearTimeout(autosaveTimer)');
 });
 
 test('a stalled refusal keeps the actual Undo action and recording controls usable',async()=>{
-  const f=editor();const before=f.run('JSON.stringify(doc)');let finish;
-  f.run('removePassage(doc.segments[0]);');
+  const f=editor();const before=f.run('JSON.stringify(doc.segments.map(row=>row.text))');let finish;
+  await f.run('removePassage(doc.segments[0]);');
   const undo=f.document.querySelector('#notice .notice-action');assert.ok(undo);
-  f.context.fetch=async()=>{
+  const transport=f.context.fetch;f.context.fetch=async(url,options)=>{
+    if(url.startsWith('/api/jobs/'))return transport(url,options);
     await new Promise(resolve=>{finish=resolve;});
     return {ok:true,json:async()=>({id:1,state:'ready',preparation:1,reserved:false})};
   };
@@ -166,7 +175,8 @@ test('a stalled refusal keeps the actual Undo action and recording controls usab
   assert.equal(f.run('updateFrozen'),false,'No installation permission was given; local edit controls must remain usable.');
   assert.equal(!!f.document.getElementById('settings-close').disabled,false);
   f.run('closeSettings()');undo.click();
-  assert.equal(f.run('JSON.stringify(doc)'),before);assert.equal(f.run('undoRemoval'),null);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.run('JSON.stringify(doc.segments.map(row=>row.text))'),before);assert.equal(f.run('doc.segments[0].deleted'),false);assert.equal(f.run('undoRemoval'),null);
   finish();await refusing;f.run('clearTimeout(autosaveTimer)');
   for(const state of ['recording','paused','finishing']) {
     const live=editor();live.context.captureState=state;live.run('meeting={status:captureState};');

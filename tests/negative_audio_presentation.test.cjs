@@ -5,6 +5,30 @@ const path=require('node:path');
 const {frontend}=require('./support/frontend_dom.cjs');
 const root=process.env.FRONTEND_SOURCE_ROOT||path.resolve(__dirname,'..');
 
+test('finished accuracy exceptions keep their reason beside retained words without implying active or interrupted work',()=>{
+  const f=frontend(root);f.seed(2);
+  f.run(`selected.rolling_refinement={version:1};selected.refinement_status='complete_with_exceptions';doc.segments[0].refinement_state='provisional';
+    doc.segments[0].refinement_issue={kind:'accuracy',message:'The bounded decode returned no complete words.'};
+    renderSegments();renderRefinementStatus();`);
+  assert.match(f.document.getElementById('refinement-status').textContent,/finished.*exception/i);
+  assert.match(f.document.getElementById('segments').children[0].textContent,/bounded decode/);
+  assert.equal(f.document.getElementById('segments').children[0].querySelector('.passage-issue').closest('.rolling-review'),null);
+  assert.equal(f.document.getElementById('pending-phrases').hidden,true);
+  assert.match(f.document.getElementById('refinement-toggle').textContent,/retry/i);
+});
+
+test('an empty supported-language passage keeps its accuracy exception and repair visible after the pass finishes',()=>{
+  const f=frontend(root);f.seed(1);
+  f.run(`selected.rolling_refinement={version:1};selected.refinement_status='complete_with_exceptions';
+    Object.assign(doc.segments[0],{text:'',canonical_utterance_id:'r0',canonical_state:'sealed',refinement_state:'provisional',language:'en',audio_state:'insufficient_speech',refinement_issue:{kind:'accuracy',message:'No complete words returned.'}});
+    renderSegments();renderRefinementStatus();`);
+  const card=f.document.getElementById('segments').children[0];assert.ok(card);
+  assert.match(card.querySelector('.passage-issue').textContent,/No complete words/);
+  assert.ok(card.querySelector('.passage-repair'));
+  assert.equal(card.querySelector('.passage-issue').closest('.rolling-review'),null);
+  assert.equal(f.document.getElementById('pending-phrases').hidden,true);
+});
+
 function fixture(rows,status='recording') {
   const f=frontend(root);f.seed(1,status);
   f.context.rows=rows.map((row,index)=>({id:'negative-'+index,start:index,end:index+1,speaker:'s0',
