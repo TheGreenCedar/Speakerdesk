@@ -15,8 +15,9 @@ DirectML and proven integer shape work on CPU. The initial memory failure is
 retained; stable ordering subsequently passed the numerical family and full
 reference transcription within the original memory bounds. Decoder pooling
 subsequently brings the actual complete 9.09-second reference request to
-3.78 / 2.87 seconds, including the first use. Combined residency, sustained live
-throughput and assembled application qualification remain open.
+3.78 / 2.87 seconds, including the first use. Combined residency now passes the
+bounded dispatcher test below; sustained live throughput and assembled
+application qualification remain open.
 [Later decoder diagnostics](cohere/compact-weights.md#decoder-throughput-diagnostics)
 record their failures separately; do not transfer the FP32 results below to the
 compact candidate.
@@ -35,17 +36,36 @@ export and qualification only; it is not part of the application runtime.
 | Whisper | The separate 56-case native/actual-core gate passes: exact Mac routing parity, 32/32 natural language labels and repeatable outputs. Three original scalar checks remain failed; no scalar waiver is claimed. | `crates/models/src/whisper_lid/network_windows.rs`; [Whisper](whisper/README.md) |
 | CTC timing | The separate 19-case functional gate passes, with identical timing boundaries and 2,660 matching speaker-activity projections. Original scalar failure remains. Core preserves exact Windows provenance and advertises no acoustically calibrated timing languages. | `crates/models/src/ctc/network_windows.rs`; [CTC](ctc/README.md) |
 
-The retained five-model residency run preserves Cohere continuation across
-maximum-window separation and denies model-file writes while loaded. Its
-memory observation excludes Whisper, CTC, capture and the host. The shared
-dispatcher and IPC server now contain the Windows execution path. `crates/models/tests/windows_residency.rs` extends the same
-invariants through all seven models and the dispatcher. Its native AMD run
-passes in 78.46 s, including loaded readiness, each model operation, preserved
-ASR continuation, maximum separation, immutable artifacts, closed handles and
-pre-cancel recovery. Sampled GPU committed memory peaks at 20.38 GiB (18.22 GiB
-dedicated and 2.15 GiB shared, whose individual peaks need not coincide); process
-private memory peaks at 21.14 GiB. These observations exclude host/capture/UI
-overhead and do not establish sustained meeting throughput or minimum hardware.
+The earlier five-model residency run preserves Cohere continuation across
+maximum-window separation and denies model-file writes while loaded. It excludes
+Whisper, CTC, capture and the host. The historical **FP32 seven-model** run of
+`crates/models/tests/windows_residency.rs` passes in 78.46 s, with sampled GPU
+committed memory peaking at 20.38 GiB (18.22 GiB dedicated and 2.15 GiB shared;
+individual peaks need not coincide) and sampled process private memory at
+21.14 GiB. Those results describe the rejected FP32 diagnostic inventory.
+
+The current compact-download inventory is **74 files / 3,223,263,162 bytes**.
+CTC downloads the original INT8 parameters and reconstructs the exact qualified
+Float32 store during setup. Its [production preparation gate](ctc/README.md)
+passes in 7.7549075 s (9.6187678 s guarded wrapper, including independent output
+hash verification), with 115,085,312 bytes of native lifetime peak private commit.
+The output remains exactly 1,301,979,472 bytes / SHA-256 `ebb4aa54…`; this reduces
+transport only, with no CTC runtime-memory saving.
+
+The compact **seven-model Runtime test passes in 66.53 s** on the AMD machine.
+Its cumulative load marker is 24.3031674 s and continuation-complete marker is
+63.927676 s from the same start; these are not additive intervals or ASR latency.
+All original assertions pass: loaded readiness, each model operation,
+maximum-window separation, exact continued and subsequent ASR, source and
+prepared-file write locks, closed handles and pre-cancellation recovery. Native
+lifetime peak process private commit is **17,902,706,688 bytes**, with
+**8,703,213,568 bytes** current commit at the final test receipt. Across **237
+samples**, GPU committed memory peaks at **16,814,133,248 bytes**. Process commit
+is not resident physical RAM; sampled GPU memory is not an exact GPU lifetime
+peak. The retained receipt is `compact-seven-model-residency-v1-results/receipt.json`,
+SHA-256 `feb6b9bc3af45eb1ea5bcfa6650961dcb435b6a10fab73cd496f12fc09181133`.
+These observations exclude host/capture/UI overhead and do not establish
+assembled setup, sustained live throughput or minimum hardware requirements.
 
 `crates/host/tests/windows_capture.rs` exercises actual WASAPI capture through
 the host. `echo_quality.rs` retains a frozen simulated-room diagnostic. Both
@@ -66,8 +86,9 @@ separate host boundary. `scripts/build_windows.ps1` builds an unsigned candidate
 by default. Its optional `-Sign` path uses the reviewed
 [Azure signing boundary](../../docs/windows-signing.md); account provisioning
 and a signed installation/update remain separate gates.
-Windows setup and admission share `windows-model-artifacts.json`; prebuilt
-graphs need no on-device conversion. Its model-release download prefix is
+Windows setup and admission share `windows-model-artifacts.json`. Graphs are
+prebuilt; CTC alone reconstructs its unchanged Float32 external weights from the
+compact pinned INT8 download during setup. Its model-release download prefix is
 reserved for the exact pinned artifacts and has not been published. Do not
 advertise Windows downloads until that distribution and native activation pass.
 Signing, standard-user update, model distribution and the assembled

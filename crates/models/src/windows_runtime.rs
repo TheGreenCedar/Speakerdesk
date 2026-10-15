@@ -208,6 +208,21 @@ struct RuntimePin {
 struct ModelPin {
     id: String,
     files: BTreeMap<String, FilePin>,
+    #[serde(default)]
+    prepared: BTreeMap<String, FilePin>,
+}
+impl ModelPin {
+    fn all_files(mut self) -> Result<BTreeMap<String, FilePin>, ChildError> {
+        if self
+            .files
+            .keys()
+            .any(|name| self.prepared.contains_key(name))
+        {
+            return Err(error("Downloaded and prepared artifact names overlap"));
+        }
+        self.files.extend(self.prepared);
+        Ok(self.files)
+    }
 }
 #[derive(Deserialize)]
 struct FilePin {
@@ -218,13 +233,18 @@ struct FilePin {
 fn model_pin(id: &str) -> Result<ModelPin, ChildError> {
     let pins: Vec<ModelPin> =
         serde_json::from_str(include_str!("windows-model-artifacts.json")).map_err(error)?;
-    pins.into_iter()
+    let pin = pins
+        .into_iter()
         .find(|pin| pin.id == id)
-        .ok_or_else(|| error(format!("No admitted Windows artifact for {id}")))
+        .ok_or_else(|| error(format!("No admitted Windows artifact for {id}")))?;
+    if pin.files.keys().any(|name| pin.prepared.contains_key(name)) {
+        return Err(error("Downloaded and prepared artifact names overlap"));
+    }
+    Ok(pin)
 }
 
 pub fn verify_model(directory: &Path, id: &str) -> Result<(), ChildError> {
-    verify_files(directory, &model_pin(id)?.files)
+    verify_files(directory, &model_pin(id)?.all_files()?)
 }
 
 /// Hold verified file identities until their native model objects are dropped.
@@ -241,6 +261,13 @@ impl ModelAdmission {
     }
 
     fn read(&self, name: &str) -> Result<Vec<u8>, ChildError> {
+        let mut file = self.file(name)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(error)?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn file(&self, name: &str) -> Result<fs::File, ChildError> {
         use std::io::Seek;
         let mut file = self
             .files
@@ -249,13 +276,16 @@ impl ModelAdmission {
             .try_clone()
             .map_err(error)?;
         file.rewind().map_err(error)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(error)?;
-        Ok(bytes)
+        Ok(file)
     }
 }
 
 pub(crate) fn admit_model(directory: &Path, id: &str) -> Result<ModelAdmission, ChildError> {
+    admit_files(directory, &model_pin(id)?.all_files()?)
+}
+
+// Preparation needs pinned source handles before the prepared output exists.
+pub(crate) fn admit_source_files(directory: &Path, id: &str) -> Result<ModelAdmission, ChildError> {
     admit_files(directory, &model_pin(id)?.files)
 }
 
@@ -396,6 +426,52 @@ fn verify_open_file(mut file: fs::File, name: &str, pin: &FilePin) -> Result<fs:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_files_are_required_verified_and_locked_without_overriding_sources() {
+        let pin = |name: &str, content: &[u8]| {
+            (
+                name.to_string(),
+                FilePin {
+                    sha256: format!("{:x}", Sha256::digest(content)),
+                    size: Some(content.len() as u64),
+                },
+            )
+        };
+        let duplicate = ModelPin {
+            id: "fixture".into(),
+            files: BTreeMap::from([pin("same", b"source")]),
+            prepared: BTreeMap::from([pin("same", b"prepared")]),
+        };
+        assert!(duplicate.all_files().is_err());
+        let pins = ModelPin {
+            id: "fixture".into(),
+            files: BTreeMap::from([pin("source", b"source")]),
+            prepared: BTreeMap::from([pin("weights", b"prepared")]),
+        }
+        .all_files()
+        .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("source"), b"source").unwrap();
+        assert!(admit_files(root.path(), &pins).is_err());
+        fs::write(root.path().join("weights"), b"tampered").unwrap();
+        assert!(admit_files(root.path(), &pins).is_err());
+        fs::write(root.path().join("weights"), b"prepared").unwrap();
+        let admission = admit_files(root.path(), &pins).unwrap();
+        assert!(
+            fs::OpenOptions::new()
+                .write(true)
+                .open(root.path().join("weights"))
+                .is_err()
+        );
+        drop(admission);
+        assert!(
+            fs::OpenOptions::new()
+                .write(true)
+                .open(root.path().join("weights"))
+                .is_ok()
+        );
+    }
 
     #[test]
     fn lazy_model_admission_blocks_file_and_directory_replacement_until_drop() {

@@ -181,10 +181,18 @@ impl Runtime {
             Request::PrepareAlignment | Request::PrepareSeparation => {
                 #[cfg(windows)]
                 {
-                    Err(ChildError::failed(
-                        "Windows model preparation requires downloaded prebuilt artifacts",
-                        false,
-                    ))
+                    if matches!(request, Request::PrepareAlignment) {
+                        ctc::prepare_windows::convert_cancellable(
+                            &self.model_root.join(".staging/coarse-alignment"),
+                            cancel,
+                        )?;
+                        Ok(Response::Ack)
+                    } else {
+                        Err(ChildError::failed(
+                            "Windows separation requires downloaded prebuilt artifacts",
+                            false,
+                        ))
+                    }
                 }
                 #[cfg(target_os = "macos")]
                 {

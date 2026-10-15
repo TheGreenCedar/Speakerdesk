@@ -1,0 +1,3970 @@
+{
+  "source_sha256": "e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c",
+  "source_bytes": 365352120,
+  "graph_sha256": "233ac8980dab9c142ef9fe91ab1d3b5d6309a9549f59a284e50199f7b1081699",
+  "manifest_sha256": "6b729731170447b9680faf87287cfac235500770b5135729e970fafacf390f9b",
+  "weights_sha256": "ebb4aa54f64240fe95c079c0b3ec326498f647ebe8d9bef50d316d47a59a53e5",
+  "weights_bytes": 1301979472,
+  "tensors": [
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.0.conv.weight",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.0.conv.weight",
+      "shape": [
+        512,
+        1,
+        10
+      ],
+      "offset": 0,
+      "bytes": 20480
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.0.conv.bias",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.0.conv.bias",
+      "shape": [
+        512
+      ],
+      "offset": 20480,
+      "bytes": 2048
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.1.conv.weight",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.1.conv.weight",
+      "shape": [
+        512,
+        512,
+        3
+      ],
+      "offset": 22528,
+      "bytes": 3145728
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.1.conv.bias",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.1.conv.bias",
+      "shape": [
+        512
+      ],
+      "offset": 3168256,
+      "bytes": 2048
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.2.conv.weight",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.2.conv.weight",
+      "shape": [
+        512,
+        512,
+        3
+      ],
+      "offset": 3170304,
+      "bytes": 3145728
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.2.conv.bias",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.2.conv.bias",
+      "shape": [
+        512
+      ],
+      "offset": 6316032,
+      "bytes": 2048
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.3.conv.weight",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.3.conv.weight",
+      "shape": [
+        512,
+        512,
+        3
+      ],
+      "offset": 6318080,
+      "bytes": 3145728
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.3.conv.bias",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.3.conv.bias",
+      "shape": [
+        512
+      ],
+      "offset": 9463808,
+      "bytes": 2048
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.4.conv.weight",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.4.conv.weight",
+      "shape": [
+        512,
+        512,
+        3
+      ],
+      "offset": 9465856,
+      "bytes": 3145728
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.4.conv.bias",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.4.conv.bias",
+      "shape": [
+        512
+      ],
+      "offset": 12611584,
+      "bytes": 2048
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.5.conv.weight",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.5.conv.weight",
+      "shape": [
+        512,
+        512,
+        2
+      ],
+      "offset": 12613632,
+      "bytes": 2097152
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.5.conv.bias",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.5.conv.bias",
+      "shape": [
+        512
+      ],
+      "offset": 14710784,
+      "bytes": 2048
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.6.conv.weight",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.6.conv.weight",
+      "shape": [
+        512,
+        512,
+        2
+      ],
+      "offset": 14712832,
+      "bytes": 2097152
+    },
+    {
+      "initializer": "model.encoder_frontend.feature_extractor.layers.6.conv.bias",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.6.conv.bias",
+      "shape": [
+        512
+      ],
+      "offset": 16809984,
+      "bytes": 2048
+    },
+    {
+      "initializer": "model.encoder_frontend.post_extract_layer_norm.weight",
+      "parameter": "wav2vec2.feature_projection.layer_norm.weight",
+      "shape": [
+        512
+      ],
+      "offset": 16812032,
+      "bytes": 2048
+    },
+    {
+      "initializer": "model.encoder_frontend.post_extract_layer_norm.bias",
+      "parameter": "wav2vec2.feature_projection.layer_norm.bias",
+      "shape": [
+        512
+      ],
+      "offset": 16814080,
+      "bytes": 2048
+    },
+    {
+      "initializer": "model.encoder_frontend.model_dim_proj.bias",
+      "parameter": "wav2vec2.feature_projection.projection.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16816128,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder_frontend.pos_encoder.conv.bias",
+      "parameter": "wav2vec2.encoder.pos_conv_embed.conv.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16820224,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.0.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.0.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 16824320,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.0.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.0.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16828416,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.0.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.0.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16832512,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.0.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.0.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16836608,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.0.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.0.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16840704,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.0.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.0.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16844800,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.0.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.0.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 16848896,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.0.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.0.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16852992,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.0.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.0.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 16857088,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.0.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.0.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16873472,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.1.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.1.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 16877568,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.1.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.1.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16881664,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.1.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.1.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16885760,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.1.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.1.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16889856,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.1.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.1.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16893952,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.1.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.1.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16898048,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.1.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.1.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 16902144,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.1.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.1.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16906240,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.1.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.1.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 16910336,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.1.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.1.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16926720,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.2.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.2.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 16930816,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.2.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.2.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16934912,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.2.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.2.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16939008,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.2.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.2.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16943104,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.2.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.2.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16947200,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.2.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.2.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16951296,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.2.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.2.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 16955392,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.2.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.2.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16959488,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.2.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.2.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 16963584,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.2.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.2.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16979968,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.3.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.3.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 16984064,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.3.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.3.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16988160,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.3.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.3.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16992256,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.3.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.3.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 16996352,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.3.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.3.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17000448,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.3.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.3.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17004544,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.3.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.3.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17008640,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.3.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.3.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17012736,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.3.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.3.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17016832,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.3.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.3.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17033216,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.4.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.4.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17037312,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.4.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.4.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17041408,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.4.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.4.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17045504,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.4.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.4.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17049600,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.4.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.4.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17053696,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.4.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.4.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17057792,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.4.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.4.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17061888,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.4.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.4.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17065984,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.4.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.4.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17070080,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.4.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.4.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17086464,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.5.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.5.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17090560,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.5.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.5.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17094656,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.5.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.5.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17098752,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.5.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.5.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17102848,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.5.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.5.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17106944,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.5.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.5.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17111040,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.5.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.5.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17115136,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.5.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.5.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17119232,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.5.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.5.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17123328,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.5.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.5.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17139712,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.6.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.6.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17143808,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.6.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.6.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17147904,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.6.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.6.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17152000,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.6.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.6.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17156096,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.6.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.6.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17160192,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.6.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.6.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17164288,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.6.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.6.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17168384,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.6.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.6.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17172480,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.6.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.6.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17176576,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.6.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.6.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17192960,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.7.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.7.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17197056,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.7.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.7.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17201152,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.7.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.7.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17205248,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.7.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.7.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17209344,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.7.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.7.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17213440,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.7.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.7.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17217536,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.7.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.7.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17221632,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.7.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.7.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17225728,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.7.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.7.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17229824,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.7.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.7.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17246208,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.8.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.8.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17250304,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.8.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.8.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17254400,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.8.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.8.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17258496,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.8.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.8.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17262592,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.8.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.8.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17266688,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.8.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.8.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17270784,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.8.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.8.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17274880,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.8.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.8.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17278976,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.8.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.8.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17283072,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.8.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.8.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17299456,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.9.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.9.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17303552,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.9.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.9.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17307648,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.9.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.9.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17311744,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.9.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.9.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17315840,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.9.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.9.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17319936,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.9.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.9.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17324032,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.9.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.9.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17328128,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.9.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.9.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17332224,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.9.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.9.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17336320,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.9.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.9.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17352704,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.10.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.10.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17356800,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.10.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.10.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17360896,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.10.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.10.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17364992,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.10.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.10.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17369088,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.10.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.10.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17373184,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.10.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.10.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17377280,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.10.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.10.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17381376,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.10.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.10.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17385472,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.10.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.10.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17389568,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.10.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.10.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17405952,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.11.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.11.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17410048,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.11.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.11.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17414144,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.11.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.11.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17418240,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.11.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.11.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17422336,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.11.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.11.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17426432,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.11.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.11.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17430528,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.11.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.11.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17434624,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.11.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.11.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17438720,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.11.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.11.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17442816,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.11.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.11.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17459200,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.12.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.12.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17463296,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.12.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.12.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17467392,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.12.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.12.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17471488,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.12.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.12.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17475584,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.12.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.12.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17479680,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.12.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.12.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17483776,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.12.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.12.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17487872,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.12.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.12.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17491968,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.12.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.12.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17496064,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.12.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.12.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17512448,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.13.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.13.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17516544,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.13.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.13.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17520640,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.13.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.13.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17524736,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.13.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.13.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17528832,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.13.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.13.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17532928,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.13.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.13.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17537024,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.13.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.13.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17541120,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.13.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.13.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17545216,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.13.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.13.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17549312,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.13.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.13.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17565696,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.14.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.14.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17569792,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.14.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.14.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17573888,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.14.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.14.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17577984,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.14.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.14.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17582080,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.14.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.14.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17586176,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.14.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.14.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17590272,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.14.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.14.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17594368,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.14.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.14.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17598464,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.14.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.14.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17602560,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.14.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.14.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17618944,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.15.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.15.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17623040,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.15.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.15.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17627136,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.15.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.15.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17631232,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.15.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.15.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17635328,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.15.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.15.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17639424,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.15.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.15.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17643520,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.15.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.15.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17647616,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.15.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.15.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17651712,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.15.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.15.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17655808,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.15.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.15.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17672192,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.16.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.16.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17676288,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.16.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.16.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17680384,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.16.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.16.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17684480,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.16.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.16.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17688576,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.16.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.16.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17692672,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.16.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.16.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17696768,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.16.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.16.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17700864,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.16.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.16.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17704960,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.16.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.16.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17709056,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.16.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.16.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17725440,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.17.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.17.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17729536,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.17.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.17.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17733632,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.17.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.17.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17737728,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.17.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.17.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17741824,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.17.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.17.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17745920,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.17.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.17.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17750016,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.17.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.17.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17754112,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.17.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.17.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17758208,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.17.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.17.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17762304,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.17.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.17.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17778688,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.18.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.18.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17782784,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.18.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.18.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17786880,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.18.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.18.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17790976,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.18.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.18.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17795072,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.18.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.18.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17799168,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.18.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.18.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17803264,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.18.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.18.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17807360,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.18.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.18.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17811456,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.18.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.18.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17815552,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.18.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.18.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17831936,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.19.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.19.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17836032,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.19.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.19.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17840128,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.19.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.19.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17844224,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.19.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.19.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17848320,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.19.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.19.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17852416,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.19.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.19.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17856512,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.19.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.19.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17860608,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.19.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.19.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17864704,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.19.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.19.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17868800,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.19.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.19.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17885184,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.20.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.20.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17889280,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.20.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.20.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17893376,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.20.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.20.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17897472,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.20.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.20.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17901568,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.20.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.20.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17905664,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.20.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.20.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17909760,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.20.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.20.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17913856,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.20.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.20.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17917952,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.20.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.20.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17922048,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.20.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.20.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17938432,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.21.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.21.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17942528,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.21.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.21.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17946624,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.21.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.21.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17950720,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.21.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.21.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17954816,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.21.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.21.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17958912,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.21.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.21.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17963008,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.21.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.21.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17967104,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.21.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.21.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17971200,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.21.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.21.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 17975296,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.21.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.21.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17991680,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.22.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.22.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 17995776,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.22.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.22.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 17999872,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.22.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.22.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18003968,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.22.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.22.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18008064,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.22.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.22.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18012160,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.22.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.22.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18016256,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.22.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.22.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 18020352,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.22.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.22.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18024448,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.22.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.22.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 18028544,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.22.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.22.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18044928,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.23.self_attn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.23.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 18049024,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.23.self_attn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.23.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18053120,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.23.self_attn.q_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.23.attention.q_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18057216,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.23.self_attn.k_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.23.attention.k_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18061312,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.23.self_attn.v_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.23.attention.v_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18065408,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.23.self_attn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.23.attention.out_proj.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18069504,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.23.ffn_layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layers.23.final_layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 18073600,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.23.ffn_layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layers.23.final_layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18077696,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layers.23.ffn.inner_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.23.feed_forward.intermediate_dense.bias",
+      "shape": [
+        4096
+      ],
+      "offset": 18081792,
+      "bytes": 16384
+    },
+    {
+      "initializer": "model.encoder.layers.23.ffn.output_proj.bias",
+      "parameter": "wav2vec2.encoder.layers.23.feed_forward.output_dense.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18098176,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layer_norm.weight",
+      "parameter": "wav2vec2.encoder.layer_norm.weight",
+      "shape": [
+        1024
+      ],
+      "offset": 18102272,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.encoder.layer_norm.bias",
+      "parameter": "wav2vec2.encoder.layer_norm.bias",
+      "shape": [
+        1024
+      ],
+      "offset": 18106368,
+      "bytes": 4096
+    },
+    {
+      "initializer": "model.final_proj.bias",
+      "parameter": "lm_head.bias",
+      "shape": [
+        9812
+      ],
+      "offset": 18110464,
+      "bytes": 39248
+    },
+    {
+      "initializer": "onnx::Mul_3905",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.0.layer_norm.weight",
+      "shape": [
+        512
+      ],
+      "offset": 18149712,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Add_3906",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.0.layer_norm.bias",
+      "shape": [
+        512
+      ],
+      "offset": 18151760,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Mul_3907",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.1.layer_norm.weight",
+      "shape": [
+        512
+      ],
+      "offset": 18153808,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Add_3908",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.1.layer_norm.bias",
+      "shape": [
+        512
+      ],
+      "offset": 18155856,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Mul_3909",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.2.layer_norm.weight",
+      "shape": [
+        512
+      ],
+      "offset": 18157904,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Add_3910",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.2.layer_norm.bias",
+      "shape": [
+        512
+      ],
+      "offset": 18159952,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Mul_3911",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.3.layer_norm.weight",
+      "shape": [
+        512
+      ],
+      "offset": 18162000,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Add_3912",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.3.layer_norm.bias",
+      "shape": [
+        512
+      ],
+      "offset": 18164048,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Mul_3913",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.4.layer_norm.weight",
+      "shape": [
+        512
+      ],
+      "offset": 18166096,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Add_3914",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.4.layer_norm.bias",
+      "shape": [
+        512
+      ],
+      "offset": 18168144,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Mul_3915",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.5.layer_norm.weight",
+      "shape": [
+        512
+      ],
+      "offset": 18170192,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Add_3916",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.5.layer_norm.bias",
+      "shape": [
+        512
+      ],
+      "offset": 18172240,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Mul_3917",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.6.layer_norm.weight",
+      "shape": [
+        512
+      ],
+      "offset": 18174288,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Add_3918",
+      "parameter": "wav2vec2.feature_extractor.conv_layers.6.layer_norm.bias",
+      "shape": [
+        512
+      ],
+      "offset": 18176336,
+      "bytes": 2048
+    },
+    {
+      "initializer": "onnx::Conv_3922",
+      "parameter": "wav2vec2.encoder.pos_conv_embed.conv.weight",
+      "shape": [
+        1024,
+        64,
+        128
+      ],
+      "offset": 18178384,
+      "bytes": 33554432
+    },
+    {
+      "initializer": "onnx::MatMul_3919_quantized_dequantized",
+      "parameter": "wav2vec2.feature_projection.projection.weight",
+      "shape": [
+        512,
+        1024
+      ],
+      "offset": 51732816,
+      "bytes": 2097152
+    },
+    {
+      "initializer": "onnx::MatMul_3927_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.0.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 53829968,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3929_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.0.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 58024272,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3930_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.0.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 62218576,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3933_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.0.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 66412880,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3934_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.0.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 70607184,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3935_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.0.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 87384400,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3936_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.1.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 104161616,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3938_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.1.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 108355920,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3939_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.1.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 112550224,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3942_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.1.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 116744528,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3943_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.1.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 120938832,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3944_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.1.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 137716048,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3945_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.2.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 154493264,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3947_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.2.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 158687568,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3948_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.2.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 162881872,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3951_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.2.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 167076176,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3952_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.2.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 171270480,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3953_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.2.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 188047696,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3954_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.3.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 204824912,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3956_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.3.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 209019216,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3957_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.3.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 213213520,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3960_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.3.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 217407824,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3961_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.3.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 221602128,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3962_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.3.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 238379344,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3963_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.4.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 255156560,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3965_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.4.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 259350864,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3966_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.4.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 263545168,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3969_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.4.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 267739472,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3970_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.4.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 271933776,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3971_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.4.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 288710992,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3972_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.5.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 305488208,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3974_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.5.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 309682512,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3975_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.5.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 313876816,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3978_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.5.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 318071120,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3979_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.5.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 322265424,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3980_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.5.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 339042640,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3981_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.6.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 355819856,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3983_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.6.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 360014160,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3984_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.6.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 364208464,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3987_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.6.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 368402768,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3988_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.6.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 372597072,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3989_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.6.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 389374288,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3990_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.7.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 406151504,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3992_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.7.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 410345808,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3993_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.7.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 414540112,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3996_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.7.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 418734416,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_3997_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.7.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 422928720,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3998_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.7.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 439705936,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_3999_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.8.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 456483152,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4001_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.8.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 460677456,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4002_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.8.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 464871760,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4005_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.8.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 469066064,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4006_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.8.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 473260368,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4007_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.8.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 490037584,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4008_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.9.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 506814800,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4010_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.9.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 511009104,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4011_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.9.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 515203408,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4014_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.9.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 519397712,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4015_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.9.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 523592016,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4016_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.9.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 540369232,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4017_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.10.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 557146448,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4019_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.10.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 561340752,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4020_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.10.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 565535056,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4023_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.10.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 569729360,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4024_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.10.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 573923664,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4025_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.10.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 590700880,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4026_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.11.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 607478096,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4028_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.11.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 611672400,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4029_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.11.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 615866704,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4032_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.11.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 620061008,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4033_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.11.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 624255312,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4034_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.11.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 641032528,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4035_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.12.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 657809744,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4037_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.12.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 662004048,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4038_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.12.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 666198352,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4041_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.12.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 670392656,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4042_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.12.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 674586960,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4043_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.12.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 691364176,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4044_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.13.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 708141392,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4046_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.13.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 712335696,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4047_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.13.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 716530000,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4050_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.13.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 720724304,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4051_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.13.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 724918608,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4052_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.13.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 741695824,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4053_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.14.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 758473040,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4055_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.14.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 762667344,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4056_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.14.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 766861648,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4059_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.14.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 771055952,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4060_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.14.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 775250256,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4061_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.14.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 792027472,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4062_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.15.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 808804688,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4064_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.15.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 812998992,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4065_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.15.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 817193296,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4068_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.15.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 821387600,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4069_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.15.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 825581904,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4070_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.15.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 842359120,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4071_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.16.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 859136336,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4073_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.16.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 863330640,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4074_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.16.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 867524944,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4077_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.16.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 871719248,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4078_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.16.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 875913552,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4079_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.16.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 892690768,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4080_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.17.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 909467984,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4082_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.17.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 913662288,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4083_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.17.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 917856592,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4086_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.17.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 922050896,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4087_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.17.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 926245200,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4088_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.17.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 943022416,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4089_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.18.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 959799632,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4091_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.18.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 963993936,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4092_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.18.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 968188240,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4095_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.18.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 972382544,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4096_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.18.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 976576848,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4097_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.18.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 993354064,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4098_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.19.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1010131280,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4100_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.19.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1014325584,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4101_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.19.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1018519888,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4104_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.19.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1022714192,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4105_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.19.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 1026908496,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4106_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.19.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 1043685712,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4107_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.20.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1060462928,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4109_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.20.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1064657232,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4110_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.20.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1068851536,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4113_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.20.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1073045840,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4114_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.20.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 1077240144,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4115_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.20.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 1094017360,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4116_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.21.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1110794576,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4118_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.21.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1114988880,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4119_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.21.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1119183184,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4122_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.21.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1123377488,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4123_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.21.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 1127571792,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4124_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.21.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 1144349008,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4125_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.22.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1161126224,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4127_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.22.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1165320528,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4128_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.22.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1169514832,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4131_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.22.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1173709136,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4132_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.22.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 1177903440,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4133_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.22.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 1194680656,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4134_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.23.attention.q_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1211457872,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4136_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.23.attention.k_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1215652176,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4137_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.23.attention.v_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1219846480,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4140_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.23.attention.out_proj.weight",
+      "shape": [
+        1024,
+        1024
+      ],
+      "offset": 1224040784,
+      "bytes": 4194304
+    },
+    {
+      "initializer": "onnx::MatMul_4141_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.23.feed_forward.intermediate_dense.weight",
+      "shape": [
+        1024,
+        4096
+      ],
+      "offset": 1228235088,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4142_quantized_dequantized",
+      "parameter": "wav2vec2.encoder.layers.23.feed_forward.output_dense.weight",
+      "shape": [
+        4096,
+        1024
+      ],
+      "offset": 1245012304,
+      "bytes": 16777216
+    },
+    {
+      "initializer": "onnx::MatMul_4143_quantized_dequantized",
+      "parameter": "lm_head.weight",
+      "shape": [
+        1024,
+        9812
+      ],
+      "offset": 1261789520,
+      "bytes": 40189952
+    }
+  ]
+}

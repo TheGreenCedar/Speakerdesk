@@ -1,5 +1,64 @@
 # Windows CTC qualification
 
+Windows CTC now has an installation-only compact-download path. It downloads the
+original pinned `model.int8.onnx` (365,352,120 bytes), the unchanged qualified
+`ctc-mha.onnx`, and `tokens.txt`: **365,991,342 bytes** total, compared with the
+previous 1,302,618,694-byte download. Setup reconstructs the same 1,301,979,472-byte
+Float32 `ctc.weights`, requiring SHA-256
+`ebb4aa54f64240fe95c079c0b3ec326498f647ebe8d9bef50d316d47a59a53e5`
+before publication. This changes transport and setup only; inference graph,
+weights, precision, placement, and the functional qualification below stay fixed.
+
+The bundled `crates/models/src/ctc/windows-reconstruction.json` maps all 422
+external tensors to the existing alignment manifest. All destination spans are
+contiguous and cover the qualified store exactly. The Rust writer checks the
+source file, every converted tensor hash, and the complete output hash. It writes
+one tensor at a time into private staging, supports cancellation, flushes the
+verified file, and publishes it with the existing durable rename. It neither
+parses ONNX nor runs Python or inference during setup.
+
+Existing `files`/`prepared` semantics retain the compact source after preparation:
+the installed CTC tree is **1,667,970,814 bytes**, including the additional
+365,352,120-byte source cache. There is no runtime disk or GPU-memory saving.
+Download publication and assembled setup remain separate delivery gates.
+
+To reproduce the bundled recipe, use the build-only ONNX environment with the
+unchanged qualified graph (no external weights are loaded):
+
+```sh
+python experiments/windows/ctc/compact_recipe.py /private/ctc-mha.onnx /private/windows-reconstruction.json
+```
+
+The ignored `ctc::prepare_windows::tests::pinned_source_reconstructs_qualified_store`
+uses the production `Runtime`/`PrepareAlignment` path without inference. Set
+`SPEAKERDESK_TEST_CTC_PREPARE` to a fresh private model root containing only the
+three pinned inputs under `.staging/coarse-alignment`; the pinned DLL directory
+must be adjacent to the test executable. It independently read-admits the output,
+checks its write lock, and emits `CTC_PREPARED` with PID, elapsed time and native
+current/lifetime peak private commit. It leaves staging in place for owner review
+and activation. It is not a host-download or activation proof.
+
+```sh
+cargo test --locked -p speakerdesk-models --lib ctc::prepare_windows::tests::pinned_source_reconstructs_qualified_store -- --ignored --exact --nocapture
+```
+
+The two nonignored writer controls and prepared-file admission test passed. The
+actual production `PrepareAlignment` run then passed in **7.7549075 s**; the
+guarded wrapper took **9.6187678 s**, including its independent whole-store hash
+check. The prepared file is exactly 1,301,979,472 bytes with the unchanged
+`ebb4aa54…` SHA above. Native lifetime peak private commit was **115,085,312
+bytes**. The retained preparation receipt is
+`ctc-compact-preparation-v1-results/receipt.json`, SHA-256
+`9c96fb6fed0ad99c2ba9abcdf106b555cbac0db9bad06e90a43abb996521030f`.
+
+The prepared store subsequently passed the unchanged CTC operations and
+source/prepared-file lock assertions in the [compact seven-model Runtime
+test](../README.md), together with maximum-window separation and exact continued
+and subsequent ASR. That combined test took 66.53 s and retained a much larger
+whole-process memory peak; compact CTC transport does not reduce CTC runtime
+memory. This is neither host-download/activation nor assembled/live-application
+qualification.
+
 The owner approved a separate, prospective Windows qualification after the
 original Mac scalar tolerance failed. `windows-qualification-v1.json` freezes
 the new functional contract; all diagnostic experiments and failed original

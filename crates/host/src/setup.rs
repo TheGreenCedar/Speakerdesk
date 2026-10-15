@@ -1335,7 +1335,7 @@ mod tests {
         assert_eq!(progress.progress().downloaded_bytes, model.download_bytes());
     }
     #[test]
-    fn windows_setup_uses_prebuilt_models_in_host_load_order() {
+    fn windows_setup_uses_pinned_models_in_host_load_order() {
         let catalog = windows_artifacts();
         assert_eq!(
             catalog
@@ -1353,10 +1353,16 @@ mod tests {
             ]
         );
         for model in &catalog {
-            assert!(
-                model.prepared.is_empty(),
-                "Windows never converts models during setup"
-            );
+            if model.id == "coarse-alignment" {
+                assert_eq!(model.prepared.len(), 1);
+                assert_eq!(model.prepared["ctc.weights"].size, 1_301_979_472);
+                assert_eq!(model.files["model.int8.onnx"].size, 365_352_120);
+                assert!(!model.files.contains_key("ctc.weights"));
+                assert_eq!(model.download_bytes(), 365_991_342);
+                assert_eq!(model.stored_bytes(), 1_667_970_814);
+            } else {
+                assert!(model.prepared.is_empty());
+            }
             assert!(!model.files.is_empty());
             for (name, pin) in &model.files {
                 assert_eq!(Path::new(name).components().count(), 1);

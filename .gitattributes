@@ -1,3 +1,6 @@
 # Preserve verbatim publisher license bytes, including their original whitespace.
 packaging/licenses/voice-runtime/** -whitespace
 experiments/windows/cohere/compact-retained-pins.json text eol=lf
+# CTC's bundled reconstruction recipe binds the source manifest's exact bytes.
+speakerdesk/alignment-mlx/manifest.json text eol=lf
+crates/models/src/ctc/windows-reconstruction.json text eol=lf

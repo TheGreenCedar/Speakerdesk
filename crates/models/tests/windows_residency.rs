@@ -81,16 +81,23 @@ fn resident_primary_models_preserve_transcription_across_maximum_separation() {
         !staging.exists(),
         "residency model tree must start without staging"
     );
-    for request in [Request::PrepareAlignment, Request::PrepareSeparation] {
-        assert_eq!(
-            runtime.execute(request, &Operation::native().unwrap()),
-            Err(ChildError::failed(
-                "Windows model preparation requires downloaded prebuilt artifacts",
-                false
-            ))
-        );
-        assert!(!staging.exists(), "refused conversion created staging");
-    }
+    let cancelled = Operation::native().unwrap();
+    cancelled.cancel();
+    assert_eq!(
+        runtime.execute(Request::PrepareAlignment, &cancelled),
+        Err(ChildError::Cancelled)
+    );
+    assert_eq!(
+        runtime.execute(Request::PrepareSeparation, &Operation::native().unwrap()),
+        Err(ChildError::failed(
+            "Windows separation requires downloaded prebuilt artifacts",
+            false
+        ))
+    );
+    assert!(
+        !staging.exists(),
+        "cancelled/refused preparation created staging"
+    );
     let ids = [
         "silero-speech",
         "nemotron",
@@ -150,7 +157,12 @@ fn resident_primary_models_preserve_transcription_across_maximum_separation() {
             .iter()
             .find(|model| model["id"] == id)
             .expect("admitted model inventory");
-        for (name, pin) in model["files"].as_object().unwrap() {
+        for (name, pin) in model["files"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .chain(model["prepared"].as_object().into_iter().flatten())
+        {
             let path = root.join(id).join(name);
             let mut reader = fs::File::open(&path)
                 .unwrap_or_else(|error| panic!("unreadable artifact {}: {error}", path.display()));
@@ -513,5 +525,32 @@ fn resident_primary_models_preserve_transcription_across_maximum_separation() {
     eprintln!(
         "Seven-model Runtime continuation completed: {:?}",
         started.elapsed()
+    );
+    use windows_sys::Win32::System::{
+        ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX},
+        Threading::GetCurrentProcess,
+    };
+    let mut memory: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+    let bytes = std::mem::size_of_val(&memory) as u32;
+    memory.cb = bytes;
+    assert_ne!(
+        unsafe {
+            GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                (&mut memory as *mut PROCESS_MEMORY_COUNTERS_EX).cast(),
+                bytes,
+            )
+        },
+        0,
+        "GetProcessMemoryInfo: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(memory.PrivateUsage > 0 && memory.PeakPagefileUsage >= memory.PrivateUsage);
+    eprintln!(
+        "WINDOWS_RESIDENCY_MEMORY {}",
+        serde_json::json!({
+            "pid":std::process::id(), "current_bytes":memory.PrivateUsage,
+            "lifetime_peak_bytes":memory.PeakPagefileUsage,
+        })
     );
 }
