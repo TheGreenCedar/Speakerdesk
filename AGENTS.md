@@ -5,6 +5,7 @@
 These mirror `.github/workflows/ci.yml`:
 
 - `cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p xtask`
+- Windows: add `-p speakerdesk-models -p speakerdesk-echo`; also run `cargo test --locked --manifest-path desktop/capture/windows/Cargo.toml`. These checks need no devices or downloaded models; native hardware checks are opt-in.
 - macOS only: run `bash scripts/fetch_mlx_runtime.sh` once, then add `-p speakerdesk-models -p speakerdesk-echo`. Desktop shell: `cargo test --locked -p speakerdesk`.
 - `python3 scripts/check_source.py` and `python3 -m unittest discover -s tests -v` (the Python suite runs Swift capture checks on macOS)
 - `node --test tests/*.test.cjs`

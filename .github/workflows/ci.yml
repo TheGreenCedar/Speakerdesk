@@ -158,9 +158,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.99.0
-      # Models exercises portable contracts and the unavailable backend, not GPU inference.
-      - name: Windows host, storage and process tests
-        run: cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p speakerdesk-models -p xtask
+      # Native model/capture hardware checks remain opt-in; these need no devices or weights.
+      - name: Windows host, storage, model and echo contracts
+        run: cargo test --locked --features speakerdesk-host/fixtures -p speakerdesk-core -p speakerdesk-host -p speakerdesk-models -p speakerdesk-echo -p xtask
+      - name: Windows capture protocol tests
+        run: cargo test --locked --manifest-path desktop/capture/windows/Cargo.toml
   rust-macos:
     runs-on: macos-15
     timeout-minutes: 45
