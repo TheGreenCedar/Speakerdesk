@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import sys
@@ -205,6 +206,52 @@ $lines+='"authenticode binding passed"'
             with self.subTest(path=path), self.assertRaises((ValueError, KeyError)):
                 self.inventory()
             path.write_bytes(original)
+
+    def test_microsoft_publishers_require_exact_common_names_and_verified_receipts(self):
+        self.fixture_inventory()
+        path = self.receipts / 'package.json'
+        original = json.loads(path.read_text())
+        native_patterns = re.findall(r"-cnotmatch '(\^CN=Microsoft [^']+)'",
+            (ROOT / 'scripts/windows_signing.ps1').read_text())
+        self.assertTrue(native_patterns, 'native Microsoft publisher checks are required')
+        cases = [
+            ('CN=Microsoft Windows Publisher, O=Microsoft Corporation, L=Redmond, S=Washington, C=US', True),
+            ('CN=Microsoft Windows Publisher', True),
+            ('CN=Microsoft Corporation, O=Microsoft Corporation, C=US', True),
+            ('CN=Microsoft Windows', True),
+            ('CN=Microsoft Windows Publisher Evil, O=Microsoft Corporation', False),
+            ('CN=Microsoft Windows Publishers', False),
+            ('CN=Microsoft Windows Publisher.example', False),
+            ('CN=Microsoft Corporation Evil', False),
+            ('CN=Microsoft Windows Evil', False),
+            ('CN=Not Microsoft Windows Publisher', False),
+            ('CN=microsoft Windows Publisher', False),
+            ('O=Microsoft Corporation, CN=Microsoft Windows Publisher', False),
+        ]
+        for subject, accepted in cases:
+            with self.subTest(subject=subject):
+                package = copy.deepcopy(original)
+                for entry in package['post_build_inputs']:
+                    if entry['kind'] != 'hook_or_pinned':
+                        entry['publisher_subject'] = subject
+                put(path, package)
+                if accepted:
+                    self.inventory()
+                else:
+                    with self.assertRaisesRegex(ValueError, 'Unexpected packaged publisher'):
+                        self.inventory()
+                # The native regex subset uses the same case-sensitive CN boundaries.
+                for pattern in native_patterns:
+                    self.assertEqual(bool(re.match(pattern, subject)), accepted)
+        for change in ({'authenticode_status': 'NotSigned'}, {'authenticode_status': 'HashMismatch'},
+                       {'verified': False}):
+            with self.subTest(change=change):
+                package = copy.deepcopy(original)
+                entry = next(e for e in package['post_build_inputs'] if e['kind'] != 'hook_or_pinned')
+                entry.update(publisher_subject=cases[0][0], **change)
+                put(path, package)
+                with self.assertRaisesRegex(ValueError, 'Unverified Microsoft packaged input'):
+                    self.inventory()
 
     def test_package_rejects_new_pe_classes_sources_destinations_and_incomplete_inputs(self):
         self.fixture_inventory()

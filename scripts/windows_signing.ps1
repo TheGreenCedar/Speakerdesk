@@ -58,7 +58,7 @@ if($Action -eq 'VerifyPackage') {
     foreach($inputFile in $inputs) {
         if($inputFile.kind -eq 'hook_or_pinned'){continue}
         $authenticode=Get-AuthenticodeSignature -LiteralPath $inputFile.path
-        if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows)(?:,|$)'){throw 'Packaged Microsoft input has an unexpected signature.'}
+        if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows|Windows Publisher)(?:,|$)'){throw 'Packaged Microsoft input has an unexpected signature.'}
         & $context.signtool verify /pa /all /v $inputFile.path
         if($LASTEXITCODE -ne 0){throw 'Packaged Microsoft input failed native trust verification.'}
         if((Get-FileHash -LiteralPath $inputFile.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $inputFile.sha256){throw 'Packaged input changed during verification.'}
@@ -87,7 +87,7 @@ if($classification.disposition -eq 'owned_signed') {
     $authenticode=Get-AuthenticodeSignature -LiteralPath $target
     if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Albert Najjar(?:,|$)' -or $null -eq $authenticode.TimeStamperCertificate){throw 'Expected verified publisher and timestamp were not produced.'}
 } elseif($classification.disposition -eq 'microsoft_preserved') {
-    if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows)(?:,|$)'){throw 'Pinned Microsoft signature is not valid.'}
+    if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows|Windows Publisher)(?:,|$)'){throw 'Pinned Microsoft signature is not valid.'}
 }
 if($classification.disposition -ne 'nsis_preserved') {
     & $context.signtool verify /pa /all /v $target
