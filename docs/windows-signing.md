@@ -76,10 +76,24 @@ paths, plugins and changed runtime bytes stop the signed build.
 The generated NSIS script is checked for the exact app/resource sources and
 destinations. Its embedded WebView2 bootstrapper and Visual C++ CRT inputs bypass
 Tauri's hook, so the adapter separately records their hashes and verifies their
-Microsoft signatures with both Authenticode and `signtool verify /pa /all`.
+Microsoft signatures with Authenticode and SignTool. CRT inputs retain
+`signtool verify /pa /all`; only the exact pinned WebView2 bootstrapper uses
+`verify /pa /ds 0 /tw /v`, requiring exit 0, Microsoft Corporation and a timestamp.
+Its package receipt must record `signature_index: 0` and `timestamped: true`;
+primary-only receipt markers on other file classes are rejected.
 New packaged input classes fail closed. These upstream files remain unchanged.
 The bootstrapper is embedded for installation, rather than left in the app's
 installed file inventory. Bundled CRT DLLs are included in that inventory.
+
+`windows-signing.json` pins the independently downloaded [official bootstrapper](https://go.microsoft.com/fwlink/p/?LinkId=2124703)
+at **1,860,304 bytes**, SHA-256
+`baa78c71c5615533a1ee0c4d2ca2ea3fd24dae01965f9033ac530a61b5aa93a0`,
+and records its resolved source URL. Its primary signature passed native trust
+and timestamp verification with zero warnings. `/all` fails on its supplementary
+self-signed EdgeBuild signature; that signature is preserved without trusting its
+root. A different Tauri cache file stops the build and must be replaced with the
+reviewed pinned bytes. There is no automatic download, trust-store change,
+signature removal or re-signing. All other signed inputs retain `/pa /all`.
 
 Tauri restores the loose app to unsigned `UNK` bytes after bundling. Accordingly,
 `package.json.post_build_inputs` describes the files observed **after** bundling;
@@ -169,7 +183,12 @@ actual Mac verifier receipt: kind `nsis-installer-updater-verification`, exact
 dirty source, pending signatures, changed reports/configurations or missing signed
 snapshots fail preparation. These are explicit local operator assertions bound to
 files; preparation does not rerun native trust or cryptography, authenticate CI, prove
-an app-driven update, or permit publication. See [releasing](releasing.md#windows-preparation).
+an app-driven update, or itself publish a release. For publication, this same hashed
+installation report must explicitly record `app_driven_update_observed: true` after
+an older installed app downloads, verifies, installs and restarts into this exact
+target through its compiled production feed. Direct overinstallation is not that
+observation. Missing or non-true values still permit preparation and block publication.
+See [releasing](releasing.md#windows-preparation-and-promotion) for staging and merge order.
 
 ## Focused local checks
 

@@ -59,7 +59,16 @@ if($Action -eq 'VerifyPackage') {
         if($inputFile.kind -eq 'hook_or_pinned'){continue}
         $authenticode=Get-AuthenticodeSignature -LiteralPath $inputFile.path
         if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows|Windows Publisher)(?:,|$)'){throw 'Packaged Microsoft input has an unexpected signature.'}
-        & $context.signtool verify /pa /all /v $inputFile.path
+        if($inputFile.kind -eq 'microsoft_bootstrapper') {
+            # package_inputs pins all bytes; preserve its known supplemental EdgeBuild signature.
+            if($authenticode.SignerCertificate.Subject.Split(',')[0] -cne 'CN=Microsoft Corporation' -or $null -eq $authenticode.TimeStamperCertificate){throw 'Pinned WebView2 bootstrapper lacks the Microsoft primary publisher/timestamp.'}
+            & $context.signtool verify /pa /ds 0 /tw /v $inputFile.path
+            if($LASTEXITCODE -ne 0){throw 'Pinned WebView2 bootstrapper primary signature failed native trust verification.'}
+            $inputFile | Add-Member -NotePropertyName signature_index -NotePropertyValue 0
+            $inputFile | Add-Member -NotePropertyName timestamped -NotePropertyValue $true
+        } else {
+            & $context.signtool verify /pa /all /v $inputFile.path
+        }
         if($LASTEXITCODE -ne 0){throw 'Packaged Microsoft input failed native trust verification.'}
         if((Get-FileHash -LiteralPath $inputFile.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $inputFile.sha256){throw 'Packaged input changed during verification.'}
         $inputFile | Add-Member -NotePropertyName authenticode_status -NotePropertyValue ([string]$authenticode.Status)

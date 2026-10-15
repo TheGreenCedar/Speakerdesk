@@ -9,6 +9,12 @@
   ],
   "dlib": "Microsoft.ArtifactSigning.Client/bin/x64/Azure.CodeSigning.Dlib.dll",
   "signtool": "Microsoft.Windows.SDK.BuildTools/bin/10.0.26100.0/x64/signtool.exe",
+  "webview2_bootstrapper": {
+    "url": "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
+    "resolved_url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/9712cd13-5db8-48a4-8252-116d1e072184/MicrosoftEdgeWebview2Setup.exe",
+    "bytes": 1860304,
+    "sha256": "baa78c71c5615533a1ee0c4d2ca2ea3fd24dae01965f9033ac530a61b5aa93a0"
+  },
   "nsis_plugin_sources": {
     "archive":"https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip",
     "archive_sha1":"EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D",

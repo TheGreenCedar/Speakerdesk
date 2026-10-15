@@ -43,6 +43,7 @@ class WindowsSigningTests(unittest.TestCase):
             put(self.stage / 'runtime' / name, b'microsoft-runtime' if name.endswith('.dll') else b'license')
         self.contract = copy.deepcopy(SIGN.CONTRACT)
         self.contract['nsis_plugins'] = {'System.dll': sha(b'pinned-plugin')}
+        self.contract['webview2_bootstrapper'] = dict(bytes=len(b'microsoft-webview'), sha256=sha(b'microsoft-webview'))
         self.addCleanup(patch.stopall)
         patch.object(SIGN, 'ROOT', self.root).start()
         patch.object(SIGN, 'CONTRACT', self.contract).start()
@@ -181,6 +182,8 @@ $lines+='"authenticode binding passed"'
         for entry in package:
             if entry['kind'] != 'hook_or_pinned':
                 entry.update(authenticode_status='Valid', publisher_subject='CN=Microsoft Corporation', verified=True)
+            if entry['kind'] == 'microsoft_bootstrapper':
+                entry.update(signature_index=0, timestamped=True)
         put(self.receipts / 'package.json', {'script_sha256': SIGN.digest(self.script), 'post_build_inputs': package,
             'app_packaged_sha256': sha(self.app)})
 
@@ -232,7 +235,7 @@ $lines+='"authenticode binding passed"'
             with self.subTest(subject=subject):
                 package = copy.deepcopy(original)
                 for entry in package['post_build_inputs']:
-                    if entry['kind'] != 'hook_or_pinned':
+                    if entry['kind'] == 'microsoft_vc_runtime':
                         entry['publisher_subject'] = subject
                 put(path, package)
                 if accepted:
@@ -247,10 +250,50 @@ $lines+='"authenticode binding passed"'
                        {'verified': False}):
             with self.subTest(change=change):
                 package = copy.deepcopy(original)
-                entry = next(e for e in package['post_build_inputs'] if e['kind'] != 'hook_or_pinned')
+                entry = next(e for e in package['post_build_inputs'] if e['kind'] == 'microsoft_vc_runtime')
                 entry.update(publisher_subject=cases[0][0], **change)
                 put(path, package)
                 with self.assertRaisesRegex(ValueError, 'Unverified Microsoft packaged input'):
+                    self.inventory()
+
+    def test_bootstrapper_primary_signature_exception_is_byte_exact_and_scoped(self):
+        self.fixture_inventory()
+        self.inventory()
+        path = self.receipts / 'package.json'
+        original = json.loads(path.read_text())
+        bootstrap = self.root / 'tauri/MicrosoftEdgeWebview2Setup.exe'
+        data = bootstrap.read_bytes()
+        for changed in (data + b'changed', bytes([data[0] ^ 1]) + data[1:]):
+            with self.subTest(changed=changed):
+                bootstrap.write_bytes(changed)
+                try:
+                    with self.assertRaisesRegex(ValueError, 'Pinned MicrosoftEdgeWebview2Setup.exe'):
+                        SIGN.package_inputs(self.script, self.stage, self.target)
+                finally:
+                    bootstrap.write_bytes(data)
+        mutations = [
+            ('microsoft_bootstrapper', 'signature_index', None),
+            ('microsoft_bootstrapper', 'signature_index', 1),
+            ('microsoft_bootstrapper', 'signature_index', False),
+            ('microsoft_bootstrapper', 'timestamped', None),
+            ('microsoft_bootstrapper', 'timestamped', False),
+            ('microsoft_bootstrapper', 'publisher_subject', 'CN=Microsoft Windows Publisher'),
+            ('microsoft_bootstrapper', 'publisher_subject', 'CN=Microsoft Corporation Evil'),
+            ('microsoft_bootstrapper', 'authenticode_status', 'NotSigned'),
+            ('microsoft_bootstrapper', 'verified', False),
+            ('microsoft_vc_runtime', 'signature_index', 0),
+            ('hook_or_pinned', 'signature_index', 0),
+        ]
+        for kind, key, value in mutations:
+            with self.subTest(kind=kind, key=key, value=value):
+                package = copy.deepcopy(original)
+                entry = next(e for e in package['post_build_inputs'] if e['kind'] == kind)
+                if value is None:
+                    entry.pop(key)
+                else:
+                    entry[key] = value
+                put(path, package)
+                with self.assertRaises(ValueError):
                     self.inventory()
 
     def test_package_rejects_new_pe_classes_sources_destinations_and_incomplete_inputs(self):

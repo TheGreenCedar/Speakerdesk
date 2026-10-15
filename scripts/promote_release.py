@@ -109,7 +109,7 @@ def prepare(manifest_path, qa_path, notes, signer_archive):
             'files':files,'notes_file':str(notes),'notes':body,'native_gate_sha256':digest_file(qa_path)}
 
 def prepare_windows(manifest_path,qa_path,notes,manifest,qa):
-    """Bind local operator observations, without claiming Actions provenance or publication."""
+    """Bind local operator observations without claiming Actions provenance."""
     regular=windows_signing.regular
     require(not {'fixture','qualification_fixture'} & manifest.keys(),'Helper fixtures are not Windows release candidates')
     require(not {'fixture','qualification_fixture'} & qa.keys(),'Fixture QA is not signed installed evidence')
@@ -155,9 +155,9 @@ def prepare_windows(manifest_path,qa_path,notes,manifest,qa):
             'Exact signed Windows installed QA required')
     reports={}
     for field in ('verification','updater_verification'):
-        path=regular(qa[field])
-        require(digest_file(path)==qa.get(field+'_sha256'),'Windows operator report changed: '+field)
-        reports[field]=json.loads(path.read_text(encoding='utf-8-sig'))
+        data=regular(qa[field]).read_bytes()
+        require(hashlib.sha256(data).hexdigest()==qa.get(field+'_sha256'),'Windows operator report changed: '+field)
+        reports[field]=json.loads(data.decode('utf-8-sig'))
     observed=reports['verification'];verified=reports['updater_verification']
     require(not {'fixture','qualification_fixture'} & observed.keys()
             and observed.get('kind')=='signed-standard-user-install' and observed.get('passed') is True
@@ -175,7 +175,8 @@ def prepare_windows(manifest_path,qa_path,notes,manifest,qa):
     files={path.name:{'filename':path.name,'bytes':path.stat().st_size,'sha256':digest_file(path),'path':str(path)}
            for path in (installer,signature,regular(manifest_path))}
     return {'repository':REPOSITORY,'platform':'windows-x86_64','provenance':'local-operator-controlled',
-            'publication_enabled':False,'tag':'v'+version,'version':version,'source_commit':source,
+            'app_driven_update_observed':observed.get('app_driven_update_observed') is True,
+            'tag':'v'+version,'version':version,'source_commit':source,
             'files':files,'signed_payloads':signed,'notes_file':str(notes),'notes':body,
             'native_gate_sha256':digest_file(regular(qa_path)),
             'verification_sha256':qa['verification_sha256'],'updater_verification_sha256':qa['updater_verification_sha256']}
@@ -271,14 +272,25 @@ def verify_repository(repo):
     require(repo['id']==REPOSITORY_ID and repo['full_name']==REPOSITORY,'Repository identity differs')
 
 def publish(plan):
-    require(plan.get('platform')!='windows-x86_64','Windows publication is disabled; this contract prepares local operator evidence only')
+    windows=plan.get('platform')=='windows-x86_64'
+    if windows:
+        require(plan.get('app_driven_update_observed') is True,'Windows publication requires actual app-driven update observations')
     verify_repository(api('repos/'+REPOSITORY))
-    require(api('repos/'+REPOSITORY+'/commits/main')['sha']==plan['source_commit'],'Candidate is not the current reviewed main')
+    main=api('repos/'+REPOSITORY+'/commits/main')
+    if windows:
+        comparison=api('repos/'+REPOSITORY+'/compare/'+plan['source_commit']+'...'+main['sha'])
+        ancestor=comparison.get('merge_base_commit',{})
+        tree=main.get('commit',{}).get('tree',{}).get('sha','')
+        require(ancestor.get('sha')==plan['source_commit'] and re.fullmatch(r'[0-9a-f]{40}',tree)
+                and ancestor.get('commit',{}).get('tree',{}).get('sha')==tree,
+                'Windows candidate must be an ancestor of reviewed main with the same Git tree')
+    else:
+        require(main['sha']==plan['source_commit'],'Candidate is not the current reviewed main')
     check_tag(plan)
     releases=api('repos/'+REPOSITORY+'/releases?per_page=100')
     require(not any(r['tag_name']==plan['tag'] for r in releases),'Existing release/draft must be inspected; never overwrite')
     result=subprocess.run(['gh','release','create',plan['tag'],'--repo',REPOSITORY,'--target',plan['source_commit'],
-          '--title','Speakerdesk '+plan['version'],'--notes-file',plan['notes_file'],'--draft']+
+          '--title','Speakerdesk '+plan['version']+(' for Windows' if windows else ''),'--notes-file',plan['notes_file'],'--draft']+
           [item['path'] for item in plan['files'].values()],text=True,capture_output=True,timeout=180)
     require(result.returncode==0,'Draft upload failed; preserve any partial draft')
     # The tag endpoint exposes published releases; drafts are listed by identity.
@@ -292,7 +304,10 @@ def publish(plan):
     if not check_tag(plan):
         api('repos/'+REPOSITORY+'/git/refs',{'ref':'refs/tags/'+plan['tag'],'sha':plan['source_commit']},method='POST')
     check_tag(plan,required=True)
-    release=api('repos/'+REPOSITORY+'/releases/'+str(release_id),{'draft':False,'prerelease':False,'make_latest':'true'})
+    if windows:
+        require(api('repos/'+REPOSITORY+'/commits/main')['sha']==main['sha'],
+                'Reviewed main changed during Windows upload; preserve the draft for inspection')
+    release=api('repos/'+REPOSITORY+'/releases/'+str(release_id),{'draft':False,'prerelease':False,'make_latest':'false' if windows else 'true'})
     require(release.get('id')==release_id,'Published release identity differs')
     verify(release,plan);require(release['draft'] is False and release['published_at'],'Publication incomplete')
     check_tag(plan,required=True)

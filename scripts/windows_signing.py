@@ -167,7 +167,13 @@ def package_inputs(script, stage, target):
                 and re.fullmatch(r'Microsoft\.VC\d+\.CRT', source.parent.name)
                 and source.parent.parent.name == 'x64', 'Unknown packaged input: ' + name)
             kind = 'microsoft_vc_runtime'
-        result.append(dict(path=str(source), name=name, kind=kind, sha256=digest(source)))
+        source_sha256 = digest(source)
+        if kind == 'microsoft_bootstrapper':
+            pin = CONTRACT['webview2_bootstrapper']
+            require(source.stat().st_size == pin['bytes'] and source_sha256 == pin['sha256'],
+                    'Pinned MicrosoftEdgeWebview2Setup.exe differs; replace the Tauri bootstrapper cache '
+                    'with the reviewed official file (SHA-256 ' + pin['sha256'] + ').')
+        result.append(dict(path=str(source), name=name, kind=kind, sha256=source_sha256))
     require(set(expected) <= seen and any(v['kind'] == 'microsoft_bootstrapper' for v in result),
             'Incomplete generated payload inventory')
     return result
@@ -220,11 +226,18 @@ def observed_payloads(receipts, stage, target, temporary, version):
     require(package['app_packaged_sha256'] == result['speakerdesk.exe'], 'Package app hash does not identify hook payload')
     for entry in package['post_build_inputs']:
         require(digest(entry['path']) == entry['sha256'], 'Packaged source changed after verification')
+        if entry['kind'] != 'microsoft_bootstrapper':
+            require('signature_index' not in entry, 'Primary-signature exception is only for the pinned WebView2 bootstrapper')
         if entry['kind'] != 'hook_or_pinned':
             require(entry['authenticode_status'] == 'Valid' and entry['verified'] is True,
                     'Unverified Microsoft packaged input')
             require(re.match(r'^CN=Microsoft (Corporation|Windows|Windows Publisher)(?:,|$)', entry['publisher_subject']),
                     'Unexpected packaged publisher')
+        if entry['kind'] == 'microsoft_bootstrapper':
+            require(type(entry.get('signature_index')) is int and entry['signature_index'] == 0
+                    and entry.get('timestamped') is True
+                    and entry['publisher_subject'].split(',', 1)[0] == 'CN=Microsoft Corporation',
+                    'Missing verified Microsoft primary signature/timestamp for pinned WebView2 bootstrapper')
         if entry['kind'] == 'microsoft_vc_runtime':
             result[entry['name']] = entry['sha256']
     return result
