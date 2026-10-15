@@ -192,6 +192,8 @@
 .primary .shortcut-hint{background:transparent;border-color:currentColor;box-shadow:none;color:inherit;opacity:.7}
 #new-meeting{gap:8px;padding-left:12px;padding-right:12px}
 .editor-hints kbd{font:inherit}
+.processing-menu{position:relative;font-size:12px}.processing-menu>summary{white-space:nowrap;cursor:pointer}.processing-info{position:absolute;right:0;top:38px;z-index:8;width:min(370px,calc(100vw - 48px));padding:14px;background:var(--paper);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px var(--shadow)}.processing-info .refinement-controls,.processing-info #meeting-separation-readiness{padding:0;margin:0 0 12px;flex-wrap:wrap;border:0}.processing-info .editor-hints{margin:8px 0;line-height:1.6}
+@media(max-width:1000px){.recording-heading{grid-template-columns:minmax(0,1fr)}.recording-actions{flex-wrap:wrap}.processing-menu{margin-left:auto}}
 @media(max-width:900px){#new-meeting{gap:6px;padding-left:9px;padding-right:9px;font-size:13px}.shortcut-hint{font-size:10px;padding:2px 4px}.transcript-search .shortcut-hint{min-width:25px}}
 
 #job-progress{width:120px;min-width:60px;height:8px;accent-color:var(--green)}

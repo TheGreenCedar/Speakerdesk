@@ -21,6 +21,20 @@ const parts=[{text:'Hello 🙂, français.  ',speaker:'speaker_0',start:0,end:3}
   {text:'Last words stay exact.',speaker:'speaker_0',start:6,end:9}];
 const card=f=>f.document.getElementById('segments').children[0];
 
+test('a bounded unassigned tail remains inline with explicit uncertainty and unchanged acoustic ownership',()=>{
+  const f=fixture([{text:'The named speaker says the whole ',speaker:'speaker_0',start:1,end:4},
+    {text:'phrase.',speaker:'unassigned',attribution:'unknown'}]);
+  f.run("doc.segments[0].speaker='speaker_0';doc.segments[0].speaker_candidates=['speaker_0'];window.original=JSON.stringify(doc);renderSegments()");
+  const rows=card(f).querySelectorAll('.reading-turn');
+  assert.equal(rows.length,1);assert.equal(rows[0].dataset.attribution,'single_with_unassigned');
+  assert.equal(rows[0].querySelector('.reading-turn-unassigned').getAttribute('aria-label'),'Unassigned words: phrase.');
+  assert.equal(rows[0].querySelector('.reading-turn-time'),null);
+  assert.equal(f.run('JSON.stringify(doc)===original'),true);
+  card(f).querySelector('.edit-whole-passage').click();
+  assert.equal(card(f).querySelector('textarea').value,'The named speaker says the whole phrase.');
+  assert.match(card(f).querySelector('textarea').getAttribute('aria-label'),/Full passage 00:00.000–05:39.000/);
+});
+
 test('canonical unassigned words use current temporal concurrency, never candidate union, for overlap warnings',()=>{
   const f=fixture(parts);
   f.run(`(()=>{const s=doc.segments[0];delete s.reading_turns;

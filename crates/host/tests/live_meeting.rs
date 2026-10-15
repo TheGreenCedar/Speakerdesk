@@ -2050,6 +2050,155 @@ async fn ordinary_live_language_evidence_survives_routing_edits_and_restart() {
 }
 
 #[tokio::test]
+async fn deleted_passage_survives_active_accuracy_reopen_and_all_exports_without_changing_audio() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let host = Running::open(root, false).await;
+    let id = host.start_live_only(json!(["microphone"])).await;
+    trigger(root, 1);
+    let path = format!("api/jobs/{id}");
+    host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
+        .await;
+    let before = host.stop(&id).await;
+    let old = &before["document"]["segments"][0];
+    let row_id = old["id"].as_str().unwrap();
+    let audio = fs::read(root.join("data").join(&id).join("microphone.wav")).unwrap();
+    fs::write(root.join("hold-live-asr"), b"hold saved accuracy").unwrap();
+    assert_eq!(
+        host.post(&format!("{path}/refinement/resume"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    wait_file(&root.join("edit-asr-started")).await;
+    let deleted = host
+        .client
+        .patch(format!("{}{path}/segments/{row_id}", host.url))
+        .header("X-Speakerdesk-Token", &host.token)
+        .json(&json!({"segment_revision":old["machine_revision"],"changes":{"deleted":true}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), 200);
+    fs::remove_file(root.join("hold-live-asr")).unwrap();
+    let done = host
+        .wait(&path, |job| job["inference_owned"] == false)
+        .await;
+    assert_eq!(done["refinement_status"], "complete");
+    assert_eq!(done["document"]["segments"][0]["deleted"], true);
+    assert_eq!(done["document"]["segments"][0]["text"], old["text"]);
+    assert_eq!(
+        fs::read(root.join("data").join(&id).join("microphone.wav")).unwrap(),
+        audio
+    );
+    host.close(root).await;
+    let reopened = Running::open(root, false).await;
+    let saved = reopened.get(&path).await;
+    assert_eq!(saved["document"], done["document"]);
+    for kind in ["txt", "srt", "vtt", "json"] {
+        let body = reopened
+            .client
+            .get(format!("{}{path}/export/{kind}", reopened.url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(!body.contains(old["text"].as_str().unwrap()), "{kind}");
+        if kind == "json" {
+            assert!(
+                serde_json::from_str::<Value>(&body).unwrap()["segments"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+    let restored=reopened.client.patch(format!("{}{path}/segments/{row_id}",reopened.url))
+        .header("X-Speakerdesk-Token",&reopened.token)
+        .json(&json!({"segment_revision":saved["document"]["segments"][0]["machine_revision"],"changes":{"deleted":false}}))
+        .send().await.unwrap();
+    assert_eq!(restored.status(), 200);
+    assert_eq!(
+        reopened.get(&path).await["document"]["segments"][0]["text"],
+        old["text"]
+    );
+    reopened.close(root).await;
+}
+
+#[tokio::test]
+async fn saved_accuracy_finishes_local_failure_and_skips_unanchored_and_protected_rows() {
+    use speakerdesk_core::{
+        ids::JobId,
+        store::{JobStore, SqliteJobStore},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let host = Running::open(root, true).await;
+    let id = host.start_live_only(json!(["microphone", "system"])).await;
+    trigger(root, 1);
+    let path = format!("api/jobs/{id}");
+    host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
+        .await;
+    let before = host.stop(&id).await;
+    assert_eq!(before["document"]["segments"].as_array().unwrap().len(), 2);
+    {
+        let mut store = SqliteJobStore::open(root.join("data/speakerdesk.sqlite")).unwrap();
+        let mut job = store
+            .get(&JobId::parse(&id).unwrap(), false)
+            .unwrap()
+            .unwrap();
+        let document = job.document.as_mut().unwrap();
+        document.segments.push(serde_json::from_value(json!({"id":"unanchored-gap","start":0.,"end":0.1,"speaker":"unassigned","text":""})).unwrap());
+        let mut protected = document.segments[0].clone();
+        protected.id = "protected-correction".into();
+        protected.text = "Keep this correction".into();
+        protected.protected_fields = Some(vec!["text".into()]);
+        document.segments.push(protected);
+        job.revision += 1;
+        store.put(&job, None).unwrap();
+    }
+    fs::write(root.join("transcribe-crops"), "").unwrap();
+    fs::write(
+        root.join("context-replay.json"),
+        json!([{"text":""},{"text":"Improved later passage"}]).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        host.post(&format!("{path}/refinement/resume"), json!({}))
+            .await
+            .status(),
+        202
+    );
+    let done = host
+        .wait(&path, |job| job["inference_owned"] == false)
+        .await;
+    assert_eq!(done["refinement_status"], "complete_with_exceptions");
+    let rows = done["document"]["segments"].as_array().unwrap();
+    assert_eq!(rows[0]["text"], before["document"]["segments"][0]["text"]);
+    assert_eq!(rows[0]["refinement_issue"]["kind"], "accuracy");
+    assert_eq!(rows[1]["text"], "Improved later passage");
+    assert_eq!(rows[2]["refinement_issue"], Value::Null);
+    assert_eq!(rows[3]["text"], "Keep this correction");
+    assert_eq!(
+        fs::read_to_string(root.join("transcribe-crops"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    host.close(root).await;
+    let reopened = Running::open(root, true).await;
+    let saved = reopened.get(&path).await;
+    assert_eq!(saved["document"], done["document"]);
+    assert_eq!(saved["refinement_status"], "complete_with_exceptions");
+    reopened.close(root).await;
+}
+
+#[tokio::test]
 async fn saved_long_accuracy_reaches_bounded_context_models_and_retains_missing_timing() {
     // Native helper/model protocol replay. Missing CTC must retain prior words,
     // but the long route must actually attempt bounded decoding rather than reject duration.
@@ -2094,9 +2243,19 @@ async fn saved_long_accuracy_reaches_bounded_context_models_and_retains_missing_
             > calls,
         "long saved accuracy work must reach bounded model crops"
     );
-    assert_eq!(after["refinement_status"], "unresolved");
+    assert_eq!(after["refinement_status"], "complete_with_exceptions");
+    let mut retained = after["document"].clone();
+    for row in retained["segments"].as_array_mut().unwrap() {
+        let issue = row
+            .as_object_mut()
+            .unwrap()
+            .remove("refinement_issue")
+            .unwrap();
+        assert_eq!(issue["kind"], "accuracy");
+        assert!(issue["message"].as_str().unwrap().len() > 10);
+    }
     assert_eq!(
-        after["document"], before["document"],
+        retained, before["document"],
         "unqualified boundaries keep prior words and timing"
     );
     host.close(root).await;
@@ -2505,11 +2664,17 @@ async fn saved_long_context_publication_timing_and_late_terminal_case(case: &str
                         .contains("language ownership")
                 );
             }
+            for row in retained["segments"].as_array_mut().unwrap() {
+                row.as_object_mut().unwrap().remove("refinement_issue");
+            }
             assert_eq!(
                 retained, before["document"],
                 "{case} must retain previous legible words"
             );
-            assert_eq!(after["refinement_status"], "unresolved", "{case}");
+            assert_eq!(
+                after["refinement_status"], "complete_with_exceptions",
+                "{case}"
+            );
         }
         host.close(root).await;
     }
@@ -2817,9 +2982,7 @@ async fn rolling_accuracy_stop_retries_failed_anchors_once_and_preserves_protect
             202
         );
         host.wait(&path, |job| {
-            job["refinement_status"] == "unresolved"
-                && job["rolling_refinement"]["failed"][priors[0]["id"].as_str().unwrap()]
-                    .is_string()
+            job["rolling_refinement"]["failed"][priors[0]["id"].as_str().unwrap()].is_string()
         })
         .await;
         if case == "protected" {
@@ -2853,9 +3016,16 @@ async fn rolling_accuracy_stop_retries_failed_anchors_once_and_preserves_protect
                 assert_eq!(row["text"], "Final complete accuracy words");
             }
             "incomplete" => {
-                assert_eq!(finished["refinement_status"], "unresolved");
+                assert_eq!(finished["refinement_status"], "complete_with_exceptions");
+                let mut retained = row.clone();
+                let issue = retained
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("refinement_issue")
+                    .unwrap();
+                assert_eq!(issue["kind"], "accuracy");
                 assert_eq!(
-                    row, &priors[0],
+                    retained, priors[0],
                     "another empty result retains the original words and evidence"
                 );
             }
@@ -3006,7 +3176,7 @@ async fn rolling_accuracy_default_sources_language_recovery_and_shutdown_matrix(
         let accepted = host
             .wait(&path, |job| {
                 if case == "epoch" {
-                    job["refinement_status"] == "unresolved"
+                    job["refinement_status"] == "waiting"
                 } else {
                     priors.iter().all(|prior| {
                         job["document"]["segments"]
@@ -3414,7 +3584,8 @@ async fn accepted_language_repair_resumes_remaining_saved_accuracy_once() {
         );
         let failed = host
             .wait(&path, |job| {
-                job["refinement_status"] == "unresolved" && job["inference_owned"] == false
+                job["refinement_status"] == "complete_with_exceptions"
+                    && job["inference_owned"] == false
             })
             .await;
         let rows = failed["document"]["segments"].as_array().unwrap();
@@ -3475,7 +3646,7 @@ async fn accepted_language_repair_resumes_remaining_saved_accuracy_once() {
             })
             .await;
         assert_eq!(
-            ready["refinement_status"], "unresolved",
+            ready["refinement_status"], "complete_with_exceptions",
             "a proposed repair is not acceptance"
         );
         if matches!(case, "queued_name_save" | "cancelled") {
@@ -3649,7 +3820,9 @@ async fn rolling_main_language_learns_later_speech_before_stop_retries() {
     let first = host
         .wait(&path, |job| {
             job["duration"].as_f64().unwrap_or(0.) >= 3.5
-                && job["refinement_status"] == "unresolved"
+                && job["rolling_refinement"]["failed"]
+                    .as_object()
+                    .is_some_and(|failures| !failures.is_empty())
         })
         .await;
     let earlier_id = first["document"]["segments"][0]["id"]
@@ -3898,7 +4071,7 @@ async fn saved_main_language_refreshes_superseded_context_without_overwriting_co
             }
             "majority" => {
                 assert_eq!(target["text"], "");
-                assert_eq!(finished["refinement_status"], "unresolved");
+                assert_eq!(finished["refinement_status"], "complete_with_exceptions");
                 assert_eq!(calls, 1, "no repeated decode with an unqualified tie");
             }
             _ => unreachable!(),

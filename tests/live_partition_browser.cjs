@@ -38,6 +38,7 @@ async function main(){
       if(url.pathname==='/fixture/release'){if(held){const pending=held;held=null;pending.res.setHeader('Content-Type','application/json');pending.res.end(JSON.stringify(pending.snapshot));}send({ok:true});return;}
       if(url.pathname==='/api/config'){send({languages:{auto:'Automatic',en:'English',fr:'French'},default_language:'en',readiness:{configured:true,automatic_language:true}});return;}
       if(url.pathname==='/api/jobs'){send([{id:jid,name:job.name,created:1,status:job.status}]);return;}
+      if(url.pathname===`/api/jobs/${jid}/refinement/revisions/r0`){send({segments:[{id:'r0',start:0,end:10,text:'Prior first passage words.'}]});return;}
       if(url.pathname===`/api/jobs/${jid}`){
         const snapshot=structuredClone(job);
         if(holdNext){holdNext=false;held={res,snapshot};return;}
@@ -48,6 +49,13 @@ async function main(){
       if(url.pathname==='/api/people'){send({people:[],voice_available:false});return;}
       if(url.pathname==='/api/recovery'){send({receipts:recoveryReceipt?[{id:recoveryId,name:'Recovery fixture',job_id:jid,revision:1}]:[]});return;}
       if(url.pathname===`/api/recovery/${recoveryId}`){if(req.method==='DELETE'){recoveryReceipt=null;send({discarded:true});}else send(recoveryReceipt);return;}
+      if(url.pathname===`/api/jobs/${jid}/transcript` && req.method==='PUT'){
+        let raw='';for await(const part of req)raw+=part;const body=JSON.parse(raw);
+        if(body.revision!==job.revision){res.statusCode=409;send({error:'Transcript changed'});return;}
+        for(const row of body.document.segments){const prior=job.document.segments.find(item=>item.id===row.id);if(prior?.deleted)row.deleted=true;
+          if(prior && prior.text!==row.text){row.protected_fields=['text'];row.machine_revision++;row.refinement_state='edited';delete row.reading_turns;}}
+        job.document=body.document;job.revision++;send(job);return;
+      }
       if(url.pathname===`/api/jobs/${jid}/cancel`){job.status='uploaded';job.inference_owned=true;job.revision++;send(job);return;}
       if(url.pathname===`/api/jobs/${jid}/run`){job.status='processing';job.inference_owned=true;job.revision++;send(job);return;}
       if(url.pathname===`/api/jobs/${jid}/segments/r0` && req.method==='PATCH'){
@@ -74,12 +82,60 @@ async function main(){
     ws.onmessage=event=>{const message=JSON.parse(event.data);if(message.method==='Runtime.exceptionThrown')errors.push(message.params.exceptionDetails.text);if(pending.has(message.id)){const [resolve,reject]=pending.get(message.id);pending.delete(message.id);message.error?reject(new Error(message.error.message)):resolve(message.result);}};
     const send=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;pending.set(key,[resolve,reject]);ws.send(JSON.stringify({id:key,method,params}));});
     const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value;};
-    const wait=async expression=>{for(let i=0;i<100;i++){if(await evaluate(expression))return;await delay(100);}throw new Error(`Timed out: ${expression}`);};
+    const wait=async expression=>{for(let i=0;i<100;i++){try{if(await evaluate(expression))return;}catch(error){if(!/navigated|context.*destroyed/i.test(error.message))throw error;}await delay(100);}throw new Error(`Timed out: ${expression}`);};
     const screenshot=async name=>{await evaluate('document.fonts.ready.then(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))');const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});await writeFile(join(output,name),Buffer.from(shot.data,'base64'));};
     await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:1280,height:800,deviceScaleFactor:1,mobile:false});
     await send('Page.navigate',{url:`${base}/?meeting=${jid}`});await wait('typeof selected!=="undefined" && selected?.id && !polling && !meetingPoll');
     const checks=[],measurements=[],source={sha256:{}};
     for(const file of ['speakerdesk/static/app.js','speakerdesk/static/live_editor.js','speakerdesk/static/style.css','speakerdesk/static/recovery.js','speakerdesk/static/theme.js','speakerdesk/templates/index.html'])source.sha256[file]=createHash('sha256').update(await readFile(join(root,file))).digest('hex');
+    if(mode==='--release-transcript') {
+      const pieces=[['First speaker words. ','speaker_0','single'],['An uncertain phrase. ','unassigned','unknown'],['Second speaker replies. ','speaker_1','single'],['First speaker concludes.','speaker_0','single']];
+      let offset=0;const turns=pieces.map(([text,speaker,attribution],i)=>{const start_offset=offset;offset+=text.length;return {text,speaker,attribution,start_offset,end_offset:offset,start:attribution==='unknown'?null:i,end:attribution==='unknown'?null:i+1};});
+      job.status='ready';job.refinement_status='complete_with_exceptions';job.rolling_refinement={version:1};job.message='Previous retry finished';job.inference_owned=false;
+      job.document.speakers={speaker_0:'Alex',speaker_1:'Sam',multiple_speakers:'Multiple speakers',unassigned:'Unassigned'};
+      job.document.segments=Array.from({length:90},(_,i)=>({id:'r'+i,start:i*10,end:i*10+10,speaker:'speaker_0',text:'A later readable passage '+i+'.',language:'en',machine_revision:1,refinement_state:'refined',refinement_window:'r'+i}));
+      Object.assign(job.document.segments[0],{text:turns.map(turn=>turn.text).join(''),speaker:'multiple_speakers',speaker_candidates:['speaker_0','speaker_1'],reading_turns:turns});
+      Object.assign(job.document.segments[1],{text:'A coherent phrase.',speaker_candidates:['speaker_0'],reading_turns:[{text:'A coherent ',start_offset:0,end_offset:11,start:10,end:12,speaker:'speaker_0',attribution:'single'},{text:'phrase.',start_offset:11,end_offset:18,start:null,end:null,speaker:'unassigned',attribution:'unknown'}]});
+      job.document.segments[2].refinement_issue={kind:'accuracy',message:'This passage returned no complete words.'};job.revision++;
+      await evaluate('poll()');await wait("$('segments').children.length===90 && !polling");
+      assert.equal(await evaluate("$('segments').querySelectorAll('.passage-history').length"),0,'Refined history adds no repeated reading rows');
+      assert.equal(await evaluate("Array.from($('segments').querySelectorAll('button')).some(button=>button.textContent==='Compare prior words')"),false);
+      for(const width of [1280,760]) {
+        await send('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false});
+        const view=await evaluate(`(()=>{const first=$('segments').firstElementChild,tail=$('segments').children[1],pane=$('transcript-pane').getBoundingClientRect();return {rows:$('segments').children.length,processingHidden:$('processing-row').hidden,menuClosed:!$('processing-details').open,routineInMenu:$('processing-details').contains($('refinement-controls')) && $('processing-details').contains($('meeting-separation-readiness')) && $('processing-details').contains($('editor-hints')),paragraphs:first.querySelectorAll('.reading-turn').length,tailParagraphs:tail.querySelectorAll('.reading-turn').length,tailUnassigned:tail.querySelector('.reading-turn-unassigned').textContent,deleteVisible:first.querySelector('.remove-segment').getBoundingClientRect().width>0,paneHeight:pane.height,overflow:document.body.scrollWidth>innerWidth};})()`);
+        assert.equal(view.processingHidden,true);assert.equal(view.menuClosed,true);assert.equal(view.routineInMenu,true);assert.equal(view.paragraphs,4);assert.equal(view.tailParagraphs,1);assert.equal(view.tailUnassigned,'phrase.');assert.equal(view.deleteVisible,true);assert(view.paneHeight>450);assert.equal(view.overflow,false);measurements.push({width,...view});await screenshot(`release-reading-${width}.png`);
+      }
+      checks.push('Saved wide/narrow long transcript prioritizes reading; status and help are collapsed, passage exception remains local, unassigned tail stays explicit inline.');
+      await evaluate("$('segments').firstElementChild.querySelector('.passage-details-toggle').focus()");
+      await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',text:' '});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});
+      assert.equal(await evaluate("$('inspector').hidden"),false);
+      await evaluate("Array.from($('segment-details').querySelectorAll('button')).find(button=>button.textContent==='Compare prior words').click()");
+      await wait("$('segment-details').querySelector('.prior-words')?.textContent==='Prior first passage words.'");
+      assert.equal(await evaluate("Array.from($('segment-details').querySelectorAll('button')).some(button=>button.textContent==='Restore prior words')"),true);
+      await screenshot('release-passage-history-details.png');await evaluate("$('inspector-close').click()");
+      checks.push('All 90 refined passages keep history out of reading; keyboard Details exposes comparison and restoration in the existing inspector.');
+      await evaluate("$('processing-summary').focus()");
+      await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',text:' '});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});
+      assert.equal(await evaluate("$('processing-details').open"),true);await screenshot('release-processing-menu.png');await evaluate("$('processing-details').open=false");
+      await evaluate("$('segments').firstElementChild.querySelector('.edit-whole-passage').click()");
+      assert.equal(await evaluate("document.activeElement===$('segments').firstElementChild.querySelector('textarea')"),true);
+      assert.equal(await evaluate("document.activeElement.value"),turns.map(turn=>turn.text).join(''));
+      assert(String(await evaluate("$('segments').firstElementChild.querySelector('.whole-passage-note').textContent")).includes('00:00.000–00:10.000'));
+      await screenshot('release-full-passage-edit.png');
+      await evaluate("(()=>{const text=document.activeElement;text.value+=' Human correction.';text.dispatchEvent(new Event('input',{bubbles:true}));text.blur();})()");
+      await evaluate('flushSave()');assert(job.document.segments[0].text.endsWith('Human correction.'));
+      await evaluate('window.browserReloadPending=true');await send('Page.reload');await wait("!window.browserReloadPending && typeof selected!=='undefined' && selected?.document?.segments[0]?.text.endsWith('Human correction.') && !polling");
+      await evaluate("$('segments').firstElementChild.querySelector('.remove-segment').click()");await wait("doc.segments[0].deleted && $('segments').children.length===89");
+      assert.equal(mutations.at(-1).changes.deleted,true);await screenshot('release-deleted.png');
+      await evaluate("$('notice').querySelector('.notice-action').click()");await wait("doc.segments[0].deleted===false && $('segments').children.length===90");
+      checks.push('Keyboard opens status/help; full multi-speaker edit focuses every word, saves/reloads, and full passage deletion/Undo use normal PATCH.');
+      job.status='recording';job.refinement_status='refining';job.revision++;await evaluate('poll()');
+      assert.equal(await evaluate("$('processing-row').hidden"),false);
+      assert.equal(await evaluate("$('segments').firstElementChild.querySelector('.remove-segment').hidden"),false);await screenshot('release-live.png');
+      checks.push('Live recording progress and passage deletion remain visible.');
+      assert.deepEqual(errors,[]);await writeFile(join(output,'release-transcript-browser-report.json'),JSON.stringify({fixture:'Synthetic HTTP snapshots + shipped editor in disposable headless Chrome',modelsOrCaptureExecuted:false,source,checks,measurements,pageErrors:errors},null,2));
+      console.log(JSON.stringify({checks,measurements,pageErrors:errors},null,2));return;
+    }
     if(mode==='--overlap-setup') {
       await evaluate(`(async()=>{setupState={models:[],ready:true,core_ready:true,automatic_language:true,status:'failed',supported:true,total_bytes:100,downloaded_bytes:0,voice:{available:false,enabled:false,status:'ready'},operation:{target:'separation',status:'failed',error:'Connection interrupted. Retry this download.'},separation:{installed:true,ready:false,active:false,bytes:670353271,can_download:true}};
         setupState.models=${JSON.stringify(JSON.parse(await readFile(join(root,'crates/host/src/model-artifacts.json'),'utf8')).map(model=>({id:model.id,name:model.name,bytes:Object.values(model.files).reduce((sum,file)=>sum+file.size,0),installed:true})))};setupState.models.push({id:'mossformer2-16k',name:'Voice separation',bytes:670353271,installed:true,optional:true});window.browserSetup=structuredClone(setupState);window.retryRoutes=[];

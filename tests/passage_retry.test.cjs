@@ -1,6 +1,96 @@
 // Shipped renderer contract; router/model behavior is exercised separately.
 const test=require('node:test'),assert=require('node:assert/strict'),path=require('node:path');
 const {frontend}=require('./support/frontend_dom.cjs');
+function openPassageDetails(f,index=0) {
+  const card=f.document.getElementById('segments').children[index];
+  card.querySelector('.passage-details-toggle').click();
+  return f.run('isLive()')?card.querySelector('.rolling-review'):f.document.getElementById('segment-details');
+}
+
+test('prior words can be compared and explicitly restored through protected passage editing in saved and live views',async()=>{
+  for(const status of ['ready','recording']) {
+    const f=frontend(path.resolve(__dirname,'..'));f.seed(1,status);
+    f.run(`doc.segments[0].refinement_window='r0';window.calls=[];flushSave=async()=>{};poll=async()=>{};
+      api=async(path,options={})=>{
+        calls.push({path,options});
+        if(!options.method)return {segments:[{id:'r0',start:0,end:10,text:'Earlier complete words'}]};
+        const segment=structuredClone(doc.segments[0]);segment.text=JSON.parse(options.body).changes.text;
+        segment.machine_revision++;segment.protected_fields=['text'];segment.refinement_state='edited';return {segment,revision:2};
+      };renderSegments();`);
+    const card=f.document.getElementById('segments').firstChild;
+    assert.equal(card.querySelector('.passage-history'),null,'history adds no separate row to the reading view');
+    if(status==='ready')assert.equal(card.querySelectorAll('button').some(button=>button.textContent==='Compare prior words'),false);
+    else assert.equal(card.querySelector('.rolling-review').hidden,true);
+    const details=openPassageDetails(f);
+    const compare=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+    assert.ok(compare,'history remains available through passage Details');
+    compare.click();await Promise.all(compare.lastEventResults);
+    assert.equal(f.run('doc.segments[0].text'),'Words 0','comparison alone does not select text');
+    const restore=details.querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
+    restore.click();await Promise.all(restore.lastEventResults);
+    assert.equal(f.run('doc.segments[0].text'),'Earlier complete words');
+    assert.equal(f.run('doc.segments[0].protected_fields[0]'),'text');
+    assert.equal(f.run('JSON.parse(calls[1].options.body).segment_revision'),1);
+    assert.equal(f.run('doc.segments[0].start'),0);assert.equal(f.run('doc.segments[0].end'),10);
+  }
+});
+
+test('a pending history comparison cannot append one passage\'s words or restore action to another passage\'s inspector',async()=>{
+  const f=frontend(path.resolve(__dirname,'..'));f.seed(2);
+  f.run(`doc.segments.forEach(row=>row.refinement_window=row.id);window.historyRequests={};
+    api=path=>new Promise(resolve=>historyRequests[path.split('/').pop()]=resolve);renderSegments();`);
+  const details=openPassageDetails(f),compareA=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+  compareA.click();
+  assert.equal(openPassageDetails(f,1),details,'the inspector is reused for the newly selected passage');
+  const compareB=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+  assert.notEqual(compareB,compareA);
+  f.run("historyRequests.r0({segments:[{id:'r0',start:0,end:10,text:'Earlier A words'}]})");
+  await Promise.all(compareA.lastEventResults);
+  assert.equal(details.querySelector('.prior-words'),null,'A response must stay out of B details');
+  assert.equal(details.querySelectorAll('button').some(button=>button.textContent==='Restore prior words'),false);
+  compareB.click();
+  f.run("historyRequests.r1({segments:[{id:'r1',start:10,end:20,text:'Earlier B words'}]})");
+  await Promise.all(compareB.lastEventResults);
+  assert.equal(details.querySelector('.prior-words').textContent,'Earlier B words');
+  assert.equal(details.querySelectorAll('button').some(button=>button.textContent==='Restore prior words'),true);
+  assert.equal(f.run('doc.segments[0].text'),'Words 0');assert.equal(f.run('doc.segments[1].text'),'Words 1');
+});
+
+test('prior words stay copyable after a trim and a compared stale or deleted passage cannot be restored',async()=>{
+  for(const change of ['trim','revision','deleted']) {
+    const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
+    f.run(`doc.segments[0].refinement_window='r0';window.writes=0;flushSave=async()=>{};poll=async()=>{};
+      api=async(path,options={})=>{if(options.method){writes++;throw Error('Unexpected stale restore');}
+        return {segments:[{id:'r0',start:0,end:10,text:'Old full-range text'}]};};`);
+    if(change==='trim')f.run('doc.segments[0].end=5');
+    f.run('renderSegments()');
+    const details=openPassageDetails(f),compare=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+    compare.click();await Promise.all(compare.lastEventResults);
+    assert.match(details.textContent,/Old full-range text/);
+    const restore=details.querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
+    if(change==='trim')assert.equal(restore,undefined);
+    else {f.run(change==='revision'?'doc.segments[0].machine_revision++':'doc.segments[0].deleted=true');restore.click();await Promise.all(restore.lastEventResults);}
+    assert.equal(f.run('writes'),0);assert.equal(f.run('doc.segments[0].text'),'Words 0');
+  }
+});
+
+test('a pre-restore poll cannot overwrite explicitly restored words after PATCH acknowledgement',async()=>{
+  const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
+  f.run(`doc.segments[0].refinement_window='r0';window.before=structuredClone(selected);before.revision=2;flushSave=async()=>{};
+    api=async(path,options={})=>{
+      if(path.includes('/refinement/revisions/'))return {segments:[{id:'r0',start:0,end:10,text:'Restored earlier words'}]};
+      if(options.method==='PATCH'){const segment=structuredClone(doc.segments[0]);segment.text=JSON.parse(options.body).changes.text;segment.machine_revision++;return {segment,revision:3};}
+      if(path==='/api/jobs')return [];
+      return new Promise(resolve=>window.releaseOldPoll=()=>resolve(before));
+    };renderSegments();`);
+  const details=openPassageDetails(f),compare=details.querySelectorAll('button').find(button=>button.textContent==='Compare prior words');
+  compare.click();await Promise.all(compare.lastEventResults);
+  f.run('window.pendingPoll=poll()');await new Promise(resolve=>setImmediate(resolve));
+  const restore=details.querySelectorAll('button').find(button=>button.textContent==='Restore prior words');
+  restore.click();await Promise.all(restore.lastEventResults);
+  f.run('releaseOldPoll()');await f.run('pendingPoll');
+  assert.equal(f.run('doc.segments[0].text'),'Restored earlier words');
+});
 test('pending retry prevents duplicate retries while the saved transcript stays editable',()=>{
   const f=frontend(path.resolve(__dirname,'..'));f.seed(1);
   f.run("selected.passage_retry={id:'pending',segment_id:'r0'};setStatus();renderSegments()");
