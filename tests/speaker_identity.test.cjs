@@ -147,3 +147,65 @@ test('group refresh refuses an equal-name correction to the source person',async
   assert.equal(f.document.getElementById('name-dialog').open,false);
   assert.equal(f.context.requests.length,0);
 });
+
+test('delayed voice readiness refreshes an open picker without replacing drafts or taking consent',async()=>{
+  for(const mode of ['confirmed','typed-name','selected-person','busy','failed']) {
+    const f=fixture();wireNaming(f);
+    f.run(`window.voiceReady=false;window.setupFailed=false;window.deferSetup=true;window.readinessCalls=[];
+      api=async(url,options)=>{
+        readinessCalls.push({url,method:options?.method || 'GET'});
+        if(options?.method && options.method!=='GET')throw Error('Readiness must not mutate identities or voices');
+        if(url==='/api/setup') {
+          if(deferSetup){deferSetup=false;await new Promise(resolve=>{window.releaseSetup=resolve;});}
+          return {status:setupFailed?'failed':voiceReady?'ready':'loading',ready:voiceReady&&!setupFailed,supported:true,total_bytes:0,downloaded_bytes:0,models:[],
+            voice:{status:setupFailed?'unavailable':voiceReady?'ready':'loading',available:voiceReady&&!setupFailed,enabled:true,message:setupFailed?'Voice unavailable':voiceReady?'Voice ready':'Voice loading'}};
+        }
+        if(url==='/api/people')return {people:[{id:'person-a',name:'Ada'},{id:'person-b',name:'Ada'}],voice_available:voiceReady&&!setupFailed};
+        if(url.endsWith('/voice-clips'))return {revision:selected.revision,status:setupFailed?'unavailable':voiceReady?'ready':'loading',next_action:setupFailed?'updates':null,
+          minimum_clips:2,audio_available:true,message:setupFailed?'Voice unavailable':voiceReady?'Choose passages':'Voice loading',recommended_ids:['clip-a','clip-b'],excluded:[],
+          clips:[{id:'clip-a',segment_id:'r0',start:0,end:3,text:'First passage'},{id:'clip-b',segment_id:'r1',start:4,end:7,text:'Second passage'}]};
+        throw Error('Unexpected route '+url);
+      };`);
+    await f.run('loadPeople()');f.run('renderPeople()');
+    const personDraft=f.document.getElementById('people-list').querySelector('input');
+    personDraft.value='Unsaved People name';
+    await f.run("openNamePicker('speaker_0')");
+    assert.equal(f.run('nameClipState.status'),'loading',mode);
+    assert.equal(f.document.getElementById('remember-voice').disabled,true,mode);
+    const pending=f.run('refreshSetup()');
+    const name=f.document.getElementById('name-value'),person=f.document.getElementById('name-person');
+    if(mode==='typed-name') {
+      name.value='My draft speaker spelling';name.dispatchEvent({type:'input'});
+    }else if(mode==='selected-person') {
+      person.value='person-b';person.dispatchEvent({type:'change'});
+    }else if(mode==='busy')f.run('identityBusy=true;updateNameControls()');
+    const expectedName=name.value,expectedPerson=person.value;
+    if(mode==='failed')f.run('setupFailed=true');
+    f.run('voiceReady=true;releaseSetup()');await pending;
+    if(mode==='busy') {
+      assert.equal(f.run('nameClipState.status'),'loading','Busy identity work defers the refresh');
+      assert.equal(f.run("readinessCalls.filter(c=>c.url.endsWith('/voice-clips')).length"),1);
+      f.run('identityBusy=false;updateNameControls()');
+      await f.run('refreshSetup()');
+    }
+    assert.equal(f.run('nameClipState.status'),mode==='failed'?'unavailable':'ready',`${mode}: no manual passage refresh is needed`);
+    assert.equal(name.value,expectedName,mode);assert.equal(person.value,expectedPerson,mode);
+    assert.equal(f.document.getElementById('name-dialog').open,true,mode);
+    assert.equal(f.document.getElementById('name-apply').disabled,false,mode);
+    assert.equal(f.document.getElementById('remember-voice').disabled,!['confirmed','busy'].includes(mode),mode);
+    assert.equal(f.document.getElementById('voice-clip-list').querySelectorAll('input').every(input=>!input.disabled),mode!=='failed',mode);
+    assert.equal(f.document.getElementById('voice-settings').hidden,mode!=='failed',mode);
+    assert.deepEqual(JSON.parse(f.run('JSON.stringify(selectedVoiceClips())')),['clip-a','clip-b'],mode);
+    assert.equal(f.document.getElementById('people-list').querySelector('input'),personDraft,'People forms must not be replaced');
+    assert.equal(personDraft.value,'Unsaved People name',mode);
+    assert.equal(f.run("readinessCalls.some(c=>c.method!=='GET')"),false,'Readiness is not enrollment or identity consent');
+    assert.equal(f.context.requests.length,0,mode);
+    if(mode==='failed') {
+      f.run('setupFailed=false');await f.run('refreshSetup()');
+      assert.equal(f.run('nameClipState.status'),'ready','An accepted setup repair refreshes the terminal unavailable picker too');
+      assert.equal(f.document.getElementById('remember-voice').disabled,false);
+      assert.equal(name.value,expectedName);assert.equal(person.value,expectedPerson);
+      assert.equal(f.run("readinessCalls.some(c=>c.method!=='GET')"),false);
+    }
+  }
+});

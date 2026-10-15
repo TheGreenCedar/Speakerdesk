@@ -145,6 +145,15 @@ function updateNameControls() {
     : nameClipState?.next_action === 'models' ? 'Set up voice model' : 'Voice settings';
   $('name-voice-section').hidden = false;
 }
+async function refreshVoicePickerAfterSetup() {
+  const context = nameContext;
+  const status = nameClipState?.status;
+  if (!context || context.allPersonTracks || !$('name-dialog').open
+      || identityBusy || nameLoading || saving || dirty || selected?.id !== context.jid
+      || selected.revision !== context.revision
+      || !(['loading', 'downloading'].includes(status) || voiceAvailable && status === 'unavailable')) return;
+  await refreshVoiceClips();
+}
 async function refreshVoiceClips() {
   const context = nameContext, generation = ++nameLoadGeneration;
   if (!context) return;

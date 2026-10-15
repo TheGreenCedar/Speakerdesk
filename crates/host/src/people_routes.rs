@@ -22,6 +22,8 @@ use crate::routes::AppState;
 const NOT_FOUND: &str = "The requested URL was not found on the server. If you entered the URL manually please check your spelling and try again.";
 const NAMING_BUSY: &[&str] = &["preparing", "queued", "processing", "finishing"];
 const VOICE_READY: &str = "Saved voices can recognize speakers in new recordings. Confirm a speaker before saving their voice.";
+pub(crate) const VOICE_SETUP_PENDING: &str =
+    "Voice recognition setup is in progress. Saved voices and names are kept.";
 const VOICE_UNQUALIFIED: &str = "Voice recognition needs a qualified GPU/ANE runtime. Saved names and voices are kept. Install a Speakerdesk update with qualified voice recognition.";
 mod automatic;
 mod voice_http;
@@ -99,9 +101,13 @@ async fn database(
 }
 
 async fn list_people(State(app): State<AppState>) -> Response {
+    let pending_setup = app
+        .native
+        .get()
+        .and_then(|native| native.pending_setup_status());
     let policy = app.models().voice_policy();
     database(app, StatusCode::OK, move |store| {
-        Ok(people_view(&Catalog::load(store, policy)?))
+        Ok(people_view(&Catalog::load(store, policy)?, pending_setup))
     })
     .await
 }
@@ -229,7 +235,7 @@ fn invalid_job(error: serde_json::Error) -> HttpError {
     )
 }
 
-fn people_view(catalog: &Catalog) -> Value {
+fn people_view(catalog: &Catalog, pending_setup: Option<&str>) -> Value {
     let available = catalog.policy.is_some();
     let mut rows: Vec<people::Person> = catalog.people.iter().cloned().collect();
     rows.sort_by(|left, right| {
@@ -248,17 +254,24 @@ fn people_view(catalog: &Catalog) -> Value {
             )
         })
         .collect::<Vec<_>>();
-    let mut body = readiness_fields(available);
+    let mut body = readiness_fields(available, pending_setup);
     body["people"] = json!(people);
     body
 }
 
-fn readiness_fields(available: bool) -> Value {
+fn readiness_fields(available: bool, pending_setup: Option<&str>) -> Value {
     if available {
         json!({
             "voice_available": true,
             "voice_message": VOICE_READY,
             "readiness_code": "runtime_ready",
+            "next_action": Value::Null,
+        })
+    } else if let Some(status) = pending_setup {
+        json!({
+            "voice_available": false,
+            "voice_message": VOICE_SETUP_PENDING,
+            "readiness_code": format!("runtime_{status}"),
             "next_action": Value::Null,
         })
     } else {

@@ -1694,6 +1694,7 @@ async function refreshSetup() {
     $('install-models').disabled=busy || voiceBusy || !state.supported || state.can_download===false;
     $('install-models').textContent=downloading?'Downloading…':(failedModels || state.status==='failed')?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
     if(voiceAvailable!==voice.available) await loadPeople();
+    if(!busy) await refreshVoicePickerAfterSetup();
     $('settings-voice-note').textContent=voice.enabled?voice.message:`Recognition is off. Saved names and voices stay on this ${localDevice}.`;
     if(document.activeElement!==$('recognize-voices')) $('recognize-voices').checked=voice.enabled;
     if(typeof state.core_ready==='boolean' && (state.core_ready !== config.readiness.configured || (state.automatic_language??true)!==config.readiness.automatic_language || (state.alignment?.ready??config.readiness.word_alignment)!==config.readiness.word_alignment)) {

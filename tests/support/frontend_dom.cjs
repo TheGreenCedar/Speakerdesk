@@ -80,7 +80,7 @@ function frontend(root,{platform='macos'}={}) {
     getComputedStyle:()=>({paddingRight:'0px'}),setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,
     localStorage:{getItem:()=>null,setItem(){}},crypto:{randomUUID:()=> 'cpu-fixture'},CSS:{escape:s=>s},
     Event:class{constructor(type){this.type=type;}preventDefault(){}},FormData:class{},fetch:async()=>{throw Error('No HTTP in CPU fixture');},
-    identityBusy:false,voiceAvailable:false,wirePeople(){},refreshIdentitySuggestions(){},updateNameControls(){},
+    identityBusy:false,voiceAvailable:false,wirePeople(){},refreshIdentitySuggestions(){},updateNameControls(){},refreshVoicePickerAfterSetup(){},
     lucide:{createIcons(){}},speakerdeskTheme:{set(){},get:()=> 'light'},confirm:()=>true});
   context.window=context;context.addEventListener=()=>{};
   for(const file of ['live_editor.js','app.js']){

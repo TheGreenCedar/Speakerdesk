@@ -184,6 +184,11 @@ impl ApplicationModels for NativeModels {
 }
 
 impl NativeModels {
+    pub(crate) fn pending_setup_status(&self) -> Option<&'static str> {
+        let status = self.setup.progress().status;
+        matches!(status, "loading" | "downloading").then_some(status)
+    }
+
     fn start(
         self: &Arc<Self>,
         app: AppState,
@@ -1326,8 +1331,8 @@ async fn setup(State(app): State<AppState>) -> Response {
             "alignment":{"id":alignment.id,"status":if busy {progress.status}else if timing {"ready"}else {"idle"},"ready":timing,"can_download":false,
                 "supported_languages":languages::LANGUAGES.iter().map(|(code,_)| *code).collect::<Vec<_>>(),"timing_accuracy_calibrated_languages":timing_languages,"total_bytes":alignment.download_bytes(),"stored_bytes":alignment.stored_bytes(),"required_free_bytes":alignment.stored_bytes(),
                 "message":"Supplied-text timing preserves authoritative transcript words. Use Download models below to finish setup for all local models.","phase":progress.phase,"downloaded_bytes":0},
-            "voice":{"status":if voice {"ready"}else {"unavailable"},"enabled":enabled,"available":voice,"released":false,
-                "message":if voice {"Native voice enrollment and manual and automatic checks are available."}else {"The native voice model did not initialize. Saved voices and names are kept."}},
+            "voice":{"status":if voice {"ready"}else if busy {progress.status}else {"unavailable"},"enabled":enabled,"available":voice,"released":false,
+                "message":if voice {"Native voice enrollment and manual and automatic checks are available."}else if busy {crate::people_routes::VOICE_SETUP_PENDING}else {"The native voice model did not initialize. Saved voices and names are kept."}},
             "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing for imports and supported sealed live passages: {}. Live and saved accuracy passes recheck sealed, unedited canonical passages using their captured Auto or explicit language. Long passages require one confidently routed language and unambiguous context timing. {timing_accuracy} Uncertain, mixed-language or unsupported passages retain their previous words. Live recording continues during accuracy work; pause it independently when needed.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
         })).into_response()
     }).await
@@ -1592,7 +1597,43 @@ mod setup_tests {
             duplicate.json::<Value>().await.unwrap()["status"],
             "loading"
         );
+        async fn assert_pending_voice(
+            client: &reqwest::Client,
+            url: &str,
+            jid: &str,
+            status: &str,
+        ) {
+            let people: Value = client
+                .get(format!("{url}/api/people"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(people["voice_available"], false);
+            assert_eq!(people["readiness_code"], format!("runtime_{status}"));
+            assert!(
+                people["next_action"].is_null(),
+                "initialization needs no update action"
+            );
+            let clips: Value = client
+                .get(format!(
+                    "{url}/api/jobs/{jid}/speakers/speaker_0/voice-clips"
+                ))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(clips["status"], status);
+            assert_eq!(clips["readiness_code"], people["readiness_code"]);
+            assert_eq!(clips["message"], people["voice_message"]);
+            assert!(clips["next_action"].is_null());
+        }
         let setup_status = || client.get(format!("{url}/api/setup"));
+        assert_pending_voice(&client, &url, jid, "loading").await;
         let loading = setup_status()
             .send()
             .await
@@ -1602,6 +1643,12 @@ mod setup_tests {
             .unwrap();
         assert_eq!(loading["status"], "loading");
         assert_eq!(loading["alignment"]["status"], "loading");
+        assert_eq!(loading["voice"]["status"], "loading");
+        assert_eq!(loading["voice"]["available"], false);
+        assert_ne!(
+            loading["voice"]["message"],
+            "The native voice model did not initialize. Saved voices and names are kept."
+        );
         assert_eq!(loading["can_cancel"], true);
         assert_eq!(loading["can_download"], false);
         assert_eq!(loading["download_required"], false);
@@ -1631,6 +1678,9 @@ mod setup_tests {
             .await
             .unwrap();
         assert_eq!(downloading["status"], "downloading");
+        assert_eq!(downloading["voice"]["status"], "downloading");
+        assert_eq!(downloading["voice"]["available"], false);
+        assert_pending_voice(&client, &url, jid, "downloading").await;
         assert_eq!(downloading["downloaded_bytes"], 12);
         assert_eq!(downloading["download_required"], true);
         native.setup.loading();
@@ -1716,6 +1766,18 @@ mod setup_tests {
             .await
             .unwrap();
         assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["voice"]["status"], "unavailable");
+        assert_eq!(failed["voice"]["available"], false);
+        let failed_people: Value = client
+            .get(format!("{url}/api/people"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(failed_people["readiness_code"], "runtime_unqualified");
+        assert_eq!(failed_people["next_action"], "updates");
         assert_eq!(failed["can_cancel"], false);
         assert_eq!(failed["operation"]["target"], "models");
         assert_eq!(failed["operation"]["status"], "failed");
