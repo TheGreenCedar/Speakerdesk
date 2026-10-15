@@ -816,7 +816,7 @@ function appendPassageHistory(host,segment) {
   prior.addEventListener('click',async()=>{
     try {
       const history=await api(`/api/jobs/${jid}/refinement/revisions/${encodeURIComponent(segment.refinement_window)}`);
-      if(selected?.id!==jid || !host.isConnected)return;
+      if(selected?.id!==jid || !host.isConnected || !host.contains(prior))return;
       const previous=history.segments.filter(row=>row.start<segment.end && row.end>segment.start).map(row=>row.text).filter(Boolean).join('\n');
       const compared=structuredClone(doc.segments.find(row=>row.id===segment.id));
       const original=history.segments.find(row=>row.id===segment.id);
