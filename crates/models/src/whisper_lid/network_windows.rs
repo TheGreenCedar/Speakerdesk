@@ -1,4 +1,4 @@
-//! Request-local Windows Whisper execution; numerical admission remains blocked.
+//! Request-local execution of the frozen Windows Whisper graph.
 use super::{LANGUAGE_COUNT, parse_language_tokens};
 use crate::{
     operation::Operation,
@@ -25,8 +25,7 @@ pub struct Network {
 
 impl Network {
     pub fn load(directory: &Path, backend: &Backend) -> Result<Self, ChildError> {
-        // Admission precedes metadata reads and session creation. The current
-        // catalog deliberately has no admitted Windows Whisper artifact.
+        // Admission precedes metadata reads and session creation for both qualification and production.
         let admission = crate::windows_runtime::admit_model(directory, "whisper-language")?;
         let directory = admission.directory();
         let codes = language_codes(&fs::read(directory.join("languages.json")).map_err(error)?)?;

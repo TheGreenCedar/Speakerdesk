@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "approved_for_recognition": true,
+  "approval": {
+    "basis": "preserved_mac_behavior",
+    "decision": "Approve the preserved Mac behavior (recommended)",
+    "thresholds_or_profiles_changed": false
+  },
+  "model": {
+    "model_id": "PalabraAI/redimnet2",
+    "revision": "2a8d15f65b1dfb5d73fede2f11ee42bcccca3035:b6-vb2+vox2_v0-lm:sd-pcm-v1:windowsml-2.4.89-directml-v1:ort-opt-disabled",
+    "artifact_sha256": "89c532e48539bebddc168e773cdcbf014b1941043c50d0a4ff7ccd1139efa5f1",
+    "dimension": 192,
+    "sample_rate": 16000
+  },
+  "compute_policy": "DirectML:ORT_DISABLE_ALL",
+  "ordinary": {
+    "approved_for_recognition": true,
+    "admission_basis": "owner_approved_preserved_mac_behavior",
+    "calibration": {
+      "dataset_id": "librispeech-clean-ordinary-windows-v1:preserved-mac-behavior",
+      "threshold": 0.7264125328398843,
+      "margin": 0.10003429964182987,
+      "minimum_clips": 2,
+      "genuine_trials": 12,
+      "impostor_trials": 4,
+      "false_accept_rate": 0.0,
+      "false_reject_rate": 0.08333333333333333
+    },
+    "observations": {
+      "clean_embeddings": 44,
+      "known_matches": 11,
+      "known_trials": 12,
+      "unknown_rejects": 4,
+      "unknown_trials": 4,
+      "wrong_accepted_identities": 0,
+      "same_mac_windows_decisions": 16,
+      "preserved_known_abstention": "known-5142-1",
+      "minimum_cross_backend_cosine": 0.9999667948084634,
+      "maximum_cross_backend_cosine": 0.9999857759915454
+    },
+    "original_strict_gate": {
+      "passed": false,
+      "requirement": "All 12 known pairs accepted correctly and all four unknown pairs rejected",
+      "policy_sha256": "0c21f21805f2988297bfd128abb2935767308c875dc60442346e26455be9239d",
+      "failed_decisions_sha256": "f76225f74442dcb38836c16600c39a62775010aa07b15f4328947f6d91128c75"
+    },
+    "evidence_sha256": {
+      "ordinary-cases.json": "85df77b04cfb1330a5859c70cd24d27a86466beddfd74b0d28fd97df8d57f635",
+      "ordinary-policy.json": "0c21f21805f2988297bfd128abb2935767308c875dc60442346e26455be9239d",
+      "ordinary-windows-v1.json": "d5436c4038240ef1f9ac459fdac4f8ab9e82927f2a1177e9fd3fa7025a3f4cb6",
+      "ordinary-decisions-windows-v1.json": "f76225f74442dcb38836c16600c39a62775010aa07b15f4328947f6d91128c75",
+      "ordinary-mac-v1.json": "2f8d220e1fc578c3ef9f6fc6960074993e9821d4a6f4454b866f690ad043369b",
+      "ordinary-decisions-mac-v1.json": "72eb3d4d090f02332047e2c85106fad09e1c54faa6f41d08ccc7246503088dba"
+    },
+    "limit": "Owner-approved preservation of the existing Mac decision behavior on this small public natural-reading pilot. The original all-correct prospective gate remains failed. Observed rates are not population accuracy or a new fitted threshold."
+  },
+  "separated": {
+    "approved_for_recognition": true,
+    "admission_basis": "frozen_natural_separated_query_pilot",
+    "separator_model": "mossformer2-16k@407cb030cd66340918ebb6c8cc63b18f8592cdbe",
+    "calibration": {
+      "dataset_id": "librispeech-clean-generated-query-v1:development-6-speakers",
+      "threshold": 0.7264125328398843,
+      "margin": 0.10003429964182987,
+      "minimum_clips": 2,
+      "genuine_trials": 6,
+      "impostor_trials": 36,
+      "false_accept_rate": 0.0,
+      "false_reject_rate": 0.0
+    },
+    "observations": {
+      "frozen_expectations_met": 13,
+      "wrong_accepted_identities": 0,
+      "preserved_holdout_abstention": "5639-40744-0034_4507-16021-0058-ch1"
+    },
+    "evidence_sha256": {
+      "prospective-policy-fixed-crops.json": "8a146574442c1040ad9717c6ff9018fca10952d5d6366ddefda90293422b4dd1",
+      "development-fixed-crops.json": "bc0fb551da2d4f363dcacf4c603ff5ac3132ab7d2b31250e58d8383061bed16e",
+      "holdout-fixed-crops.json": "5196dcf60928753215d9e69bba04ce040ea5b76574608219ccce29d096823870",
+      "development-windows-v1.json": "9cafba251f4a64a1e68c605cbfb9871dc2641e66f862f5a8e5d4939f41e47701",
+      "holdout-windows-v1.json": "36e18883356947c4be34cfde74097f3a2fe786324dd6dedfb5c55f963b7bbbb7",
+      "decisions-windows-v1.json": "dd7cc2bc7e43906725abf12f517167a511d2b21953afaf0c5986f0624d074bb9"
+    },
+    "limit": "Prepared Mac separated-query PCM with Windows native reference/query embeddings. Calibration counts retain the frozen source development policy metadata; 13 observed Windows decision expectations are reported separately. This does not qualify Windows separation or population accuracy."
+  },
+  "profile_compatibility": "Exact model identity only. Existing Mac, legacy or other incompatible profiles remain stored unchanged and do not participate. Cross-backend cosine agreement never relabels saved vectors or grants enrollment consent."
+}

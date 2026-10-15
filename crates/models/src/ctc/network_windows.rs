@@ -1,4 +1,4 @@
-//! Execution boundary for the frozen CTC candidate; artifact admission is still absent.
+//! Execution boundary for the frozen Windows CTC graph.
 use crate::{
     operation::Operation,
     windows_runtime::{Backend, ModelAdmission, error},
@@ -19,8 +19,7 @@ pub struct Network {
 
 impl Network {
     pub fn load(directory: &Path, backend: &Backend) -> Result<Self, ChildError> {
-        // No Windows artifact is currently admitted for this id. Never load an
-        // experimental graph through an alternate constructor or the Mac pins.
+        // Qualification and production use the same immutable artifact admission.
         let admission = crate::windows_runtime::admit_model(directory, "coarse-alignment")?;
         let directory = admission.directory();
         Ok(Self {
@@ -78,9 +77,7 @@ impl Network {
             frame_hop_samples: 320,
             frame_origin_samples: 0,
             token_ids: token_ids.to_vec(),
-            // This is the actual Windows graph, not the qualified MLX-F32
-            // timing identity. Current core timing rejects it until a separate
-            // Windows provenance/calibration decision is integrated.
+            // Core resolves this exact Windows identity without borrowing Mac calibration.
             model: ARTIFACT_SHA256.into(),
             vocabulary_sha256: super::TOKENS_SHA256.into(),
             gathered,

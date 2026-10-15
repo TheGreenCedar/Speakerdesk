@@ -4,7 +4,7 @@
 //! uses acoustic cell identity and never writes normalized or matched spelling.
 use super::*;
 use crate::timing_policy::{
-    NORMALIZATION_POLICY_ID, PROVIDER_ID, TIMING_UNIT_POLICY_ID, UPSTREAM_NORMALIZATION_REVISION,
+    Descriptor, NORMALIZATION_POLICY_ID, TIMING_UNIT_POLICY_ID, UPSTREAM_NORMALIZATION_REVISION,
 };
 use serde_json::json;
 use std::ops::Range;
@@ -24,6 +24,7 @@ struct Word {
 }
 struct Context {
     request: DecodeRequest,
+    descriptor: &'static Descriptor,
     language: String,
     raw: Vec<char>,
     cells: Vec<Cell>,
@@ -38,20 +39,13 @@ impl Context {
         let result = part.alignment?;
         let request = part.request;
         let language = result["language"].as_str()?;
-        let calibration = crate::alignment::calibration_for_language(language);
+        let descriptor = crate::alignment::descriptor_for_alignment(&result)?;
         if !part.complete
             || !languages::is_supported(language)
             || result["raw_text"] != part.text
             || result["text_sha256"] != sha256_hex(part.text.as_bytes())
             || result["audio_anchor"]
                 != json!({"start_sample":request.start_sample,"end_sample":request.end_sample})
-            || result["provider_identity_sha256"] != crate::alignment::NATIVE_PROVIDER
-            || result["provider_id"] != PROVIDER_ID
-            || result["model_sha256"] != timing::MODEL
-            || result["normalization_policy_id"] != NORMALIZATION_POLICY_ID
-            || result["timing_unit_policy_id"] != TIMING_UNIT_POLICY_ID
-            || result["frame_calibration_id"] != calibration
-            || result["score_calibration_id"] != calibration
             || result["complete"] != true
             || result["status"] != "aligned"
         {
@@ -153,6 +147,7 @@ impl Context {
         }
         Some(Self {
             request,
+            descriptor,
             language: language.into(),
             raw,
             cells,
@@ -246,6 +241,9 @@ impl Composer {
             if previous.language != next.language {
                 return Err("context_language_mismatch");
             }
+            if previous.descriptor != next.descriptor {
+                return Err("context_timing_provider_mismatch");
+            }
             let (left_end, right_start) = boundary(&previous, &next)?;
             self.append(&previous, self.from, left_end)?;
             self.from = right_start;
@@ -329,6 +327,7 @@ pub struct Refinement {
     detection: Option<Value>,
     selected_language: Option<String>,
     english_calibrated: bool,
+    descriptor: Option<&'static Descriptor>,
     probes: Vec<Value>,
     audio_hash: Sha256,
     review: bool,
@@ -415,6 +414,7 @@ impl Refinement {
             detection: None,
             selected_language: None,
             english_calibrated: true,
+            descriptor: None,
             probes: Vec::new(),
             audio_hash: Sha256::new(),
             review: false,
@@ -546,6 +546,14 @@ impl Refinement {
         }
         let vocabulary=vocabulary.ok_or(LiveError::Message("Long context accuracy needs supplied-text timing; previous words and audio are retained."))?;
         let alignment = vocabulary.align(models, &pcm, &text, request.start_sample, &language)?;
+        let descriptor = crate::alignment::descriptor_for_alignment(&alignment)
+            .ok_or(LiveError::Message("unavailable_boundary_timing"))?;
+        if self.descriptor.is_some_and(|prior| prior != descriptor) {
+            return Err(LiveError::Message(
+                "Long context timing model changed; previous words and audio are retained.",
+            ));
+        }
+        self.descriptor = Some(descriptor);
         self.english_calibrated &=
             alignment["qualified_scope"] == "bounded_ami_english_coarse_envelopes";
         for sample in &pcm[(request.core_start_sample - request.start_sample) as usize
@@ -601,11 +609,13 @@ impl Refinement {
         "unit_kind":u.unit_kind.as_str(),
         "status":if w.start_sample.is_some(){"aligned"}else{"unresolved"}})).collect();
         let complete = assembly.words.iter().all(|w| w.start_sample.is_some());
-        let calibration = crate::alignment::calibration_for_language(&language);
+        let descriptor = self.descriptor.expect("nonempty validated context plan");
+        let calibration = descriptor.calibration_for_language(&language);
         let alignment = json!({"raw_text":candidate.text,"text_sha256":sha256_hex(candidate.text.as_bytes()),
         "audio_anchor":{"start_sample":start,"end_sample":end},"audio_float32_sha256":hex::encode(std::mem::take(&mut self.audio_hash).finalize()),
         "schema_version":1,"text_source":"cohere","offset_unit":"unicode_codepoint","timing_kind":"ctc_emission_cell_envelope",
-        "model_sha256":timing::MODEL,"provider_id":PROVIDER_ID,"provider_identity_sha256":crate::alignment::NATIVE_PROVIDER,
+        "model_sha256":descriptor.model_sha256,"provider_id":descriptor.provider_id,"provider_identity_sha256":descriptor.provider_identity_sha256,
+        "candidate_runtime":descriptor.candidate_runtime,
         "language":language,"normalization_policy_id":NORMALIZATION_POLICY_ID,"timing_unit_policy_id":TIMING_UNIT_POLICY_ID,
         "upstream_normalization_revision":UPSTREAM_NORMALIZATION_REVISION,"linguistic_word_claim":false,
         "frame_calibration_id":calibration,"score_calibration_id":calibration,
@@ -669,5 +679,61 @@ mod tests {
                     .all(|word| word.start_sample.is_some())
             );
         }
+    }
+
+    #[test]
+    fn windows_context_keeps_its_provider_and_rejects_crossed_or_mixed_tuples() {
+        use crate::timing_policy::{MAC, WINDOWS};
+        let alignment = crate::alignment::tests::functional_fixture("ja");
+        let start = alignment["audio_anchor"]["start_sample"].as_i64().unwrap();
+        let end = alignment["audio_anchor"]["end_sample"].as_i64().unwrap();
+        let mac = TailPart {
+            request: DecodeRequest {
+                utterance_id: "backend-boundary".into(),
+                start_sample: start,
+                end_sample: end,
+                core_start_sample: start,
+                core_end_sample: end,
+                machine_revision: 1,
+                audio_revision: 1,
+                language_epoch: 0,
+            },
+            text: alignment["raw_text"].as_str().unwrap().into(),
+            complete: true,
+            alignment: Some(alignment),
+        };
+        let mut windows = mac.clone();
+        let alignment = windows.alignment.as_mut().unwrap();
+        for (key, value) in [
+            ("model_sha256", WINDOWS.model_sha256),
+            ("provider_id", WINDOWS.provider_id),
+            ("provider_identity_sha256", WINDOWS.provider_identity_sha256),
+            ("candidate_runtime", WINDOWS.candidate_runtime),
+            ("score_calibration_id", WINDOWS.functional_policy_id),
+            ("frame_calibration_id", WINDOWS.functional_policy_id),
+        ] {
+            alignment[key] = json!(value);
+        }
+        assert_eq!(
+            Context::parse(windows.clone()).unwrap().descriptor,
+            &WINDOWS
+        );
+        for (key, value) in [
+            ("model_sha256", MAC.model_sha256),
+            ("provider_id", MAC.provider_id),
+            ("provider_identity_sha256", MAC.provider_identity_sha256),
+            ("score_calibration_id", MAC.functional_policy_id),
+            ("frame_calibration_id", MAC.functional_policy_id),
+        ] {
+            let mut crossed = windows.clone();
+            crossed.alignment.as_mut().unwrap()[key] = json!(value);
+            assert!(Context::parse(crossed).is_none(), "{key}");
+        }
+        let mut composer = Composer::default();
+        composer.push(mac).unwrap();
+        assert_eq!(
+            composer.push(windows),
+            Err("context_timing_provider_mismatch")
+        );
     }
 }

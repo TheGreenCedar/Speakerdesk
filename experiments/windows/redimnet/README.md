@@ -199,7 +199,8 @@ remain unchanged. The embedding receipt SHA-256 is
 the failed decision receipt is
 `f76225f74442dcb38836c16600c39a62775010aa07b15f4328947f6d91128c75`.
 This small pilot does not estimate population accuracy or establish old profile
-compatibility. Ordinary Windows policy activation remains blocked.
+compatibility. The prospective all-correct gate remains failed; the later owner-approved
+admission basis is recorded below.
 
 The completed Mac comparison uses the same frozen 44 inputs and sixteen ordinary
 trials through the existing Core ML `CPU_AND_GPU` runner and the shared actual
@@ -223,9 +224,9 @@ known trials on both backends. The historical Mac synthetic approval in
 `speakerdesk/voice_calibration.json` records maximum FAR `0` and maximum FRR
 `0.25`; those numeric limits are less strict than this pilot's frozen all-correct
 requirement. That approval binds its own Mac identity and synthetic corpus.
-The parity result does not transfer approval to the Windows identity or change
-this prospective gate. Any different admission basis needs an explicit owner
-decision; the failed gate and all receipts remain retained.
+The parity measurement alone does not transfer approval to the Windows identity
+or change this prospective gate. The explicit owner decision below supplies a
+separate admission basis; the failed gate and all receipts remain retained.
 
 To reproduce in a fresh evidence directory, with `SPEAKERDESK_TEST_VOICE` set to
 the admitted Mac Core ML model:
@@ -241,3 +242,42 @@ cargo test --release --locked -p speakerdesk-models --test redimnet frozen_natur
 
 Both Mac result paths must be fresh. Passing the comparison diagnostic does not
 activate a policy or relax the ordinary Windows qualification test.
+
+
+## Approved preservation of Mac behavior
+
+The owner approved **“Approve the preserved Mac behavior (recommended)”** after
+reviewing the same 11/12 known matches, 4/4 unknown rejections and sole abstention
+on both native backends. `speakerdesk/voice_windows_calibration.json` records
+that decision, the exact Windows model identity, the unchanged thresholds and
+all ordinary/separated receipt hashes. It records the original prospective
+ordinary gate as failed. No utterance, receipt, acceptance assertion or threshold
+in that pilot changes.
+
+The host admits ordinary Windows recognition only for this declared identity
+and approved ordinary section. Separated-query recognition additionally needs
+its own approved section and exact separator identity; its calibration counts
+retain the existing source development policy metadata, with the thirteen
+Windows decision expectations recorded separately. Missing or mismatched
+metadata leaves the corresponding policy unavailable. Setup still checks the
+actual model revision, and embedding results still require exact model identity.
+These policies do not establish Windows separation or the complete product flow.
+
+Existing Mac, legacy and other incompatible profiles stay stored unchanged and
+ineligible for the Windows vector space. New profiles keep the existing explicit
+Remember voice consent requirement. Vector cosine parity never relabels a profile
+or supplies consent. Mac policies, display names and saved profiles are unchanged.
+
+The host unit matrix covers altered model fields, revoked approval, missing
+ordinary/separated sections, changed thresholds and foreign saved profiles even
+when their vectors would be perfect cosine matches. It also checks the active
+platform factory against the declared policy. Run without model inference:
+
+```sh
+cargo test --locked -p speakerdesk-host --lib native::voice_policy_tests -- --nocapture
+```
+
+The existing core voice and people-route tests continue to cover explicit
+consent, protected names, wrong runtime identity and profile persistence. The
+strict `frozen_natural_ordinary_voice_decisions` test remains an expected failure
+for the retained pilot; this approval does not reinterpret it as a passing test.

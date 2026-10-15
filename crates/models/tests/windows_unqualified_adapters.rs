@@ -4,15 +4,21 @@ use speakerdesk_models::windows_runtime::verify_model;
 use std::path::Path;
 
 #[test]
-fn unqualified_ctc_and_whisper_cannot_acquire_model_admission() {
+fn qualification_inventory_does_not_advertise_production_readiness() {
     for id in ["coarse-alignment", "whisper-language"] {
-        let error = verify_model(Path::new("not-an-installed-model"), id)
-            .expect_err("unqualified Windows graph acquired artifact admission");
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("No admitted Windows artifact for {id}")),
-            "unexpected admission failure: {error}"
-        );
+        assert!(verify_model(Path::new("not-an-installed-model"), id).is_err());
     }
+    use speakerdesk_core::ipc::{Request, Response};
+    let reply = speakerdesk_models::dispatch::dispatch(
+        Request::Hello {
+            build_id: "qualification".into(),
+        },
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    let Response::Ready { device, models, .. } = reply else {
+        panic!("expected readiness")
+    };
+    assert_eq!(device, "unavailable");
+    assert!(models.is_empty());
 }

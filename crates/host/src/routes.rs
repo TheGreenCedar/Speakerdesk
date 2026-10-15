@@ -415,7 +415,12 @@ impl AppState {
             .lock()
             .expect("reports")
             .iter()
-            .any(|report| report.ok && report.model == speakerdesk_core::alignment::CHECKPOINT)
+            .any(|report| {
+                report.ok
+                    && [speakerdesk_core::timing_policy::MAC, speakerdesk_core::timing_policy::WINDOWS]
+                        .iter()
+                        .any(|provider| report.model == provider.checkpoint)
+            })
     }
 
     pub(crate) fn cancel_all(&self) -> Result<(), StoreError> {

@@ -1,5 +1,44 @@
 [
   {
+    "id": "silero-speech",
+    "name": "Speech detection",
+    "repo": "mlx-community/silero-vad-v6",
+    "revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/silero-speech--",
+    "files": {
+      "silero.onnx": {
+        "sha256": "57150d9d2c01f6cd87cc2bac74fba8b4ae34a6e634789f21804f35e90559962d",
+        "size": 1239042
+      }
+    }
+  },
+  {
+    "id": "nemotron",
+    "name": "Speaker diarization",
+    "repo": "mlx-community/Nemotron-3-Diarization",
+    "revision": "59ed2dbfc1346dcea9d423c71306a3a2499c568f",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/nemotron--",
+    "files": {
+      "frontend.onnx": {
+        "sha256": "9eadc60955f3846ee7a007c0eac97e67068e4dfcf186dec954f34790d01e408d",
+        "size": 1187520
+      },
+      "nemotron.onnx": {
+        "sha256": "4da4e441ccd0d691caa5eab96207c814390de3e4f9f0d0b50657ef4be41c0115",
+        "size": 397049845
+      },
+      "silence.f32": {
+        "sha256": "d4417b3c0eabdf7c47032fac2b5b5a7ee83d819a6ddda8fd8eaf74e2b5cc4ac7",
+        "size": 2048
+      }
+    }
+  },
+  {
+    "id": "cohere-speech",
+    "name": "Transcription",
+    "repo": "spokedotso/cohere-transcribe-03-2026-mlx-4bit",
+    "revision": "064e51eab6db47066cbeaa85e2894b5691bd8d12",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/cohere-speech--",
     "files": {
       "decoder-init.onnx": {
         "sha256": "dfa9b651acd135de51cd6653b43646325d8a3819212ffee02ed49d4711a959b3",
@@ -53,37 +92,56 @@
         "sha256": "780ccca2de2ccd289971b1fb7d4f0b5ec2dc908872f6e350181c7eba9db3fa9f",
         "size": 1816694
       }
-    },
-    "id": "cohere-speech"
+    }
   },
   {
+    "id": "whisper-language",
+    "name": "Automatic language",
+    "repo": "mlx-community/whisper-tiny-asr-fp16",
+    "revision": "77fa3f52b482ec80d086df55f893065a9baab172",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/whisper-language--",
     "files": {
+      "whisper.onnx": {
+        "size": 105848793,
+        "sha256": "1c47965522f7495fc85814c70c6b17dc4952436774c43225d55665e4ecbc7f14"
+      },
       "frontend.onnx": {
-        "sha256": "9eadc60955f3846ee7a007c0eac97e67068e4dfcf186dec954f34790d01e408d",
-        "size": 1187520
+        "size": 710294,
+        "sha256": "b8a9f7efcdbd35686356de24e18095b31e1dae089e826e2ce5b3d3f880cb2347"
       },
-      "nemotron.onnx": {
-        "sha256": "4da4e441ccd0d691caa5eab96207c814390de3e4f9f0d0b50657ef4be41c0115",
-        "size": 397049845
-      },
-      "silence.f32": {
-        "sha256": "d4417b3c0eabdf7c47032fac2b5b5a7ee83d819a6ddda8fd8eaf74e2b5cc4ac7",
-        "size": 2048
+      "languages.json": {
+        "size": 2137,
+        "sha256": "a8bff869e0297baa2b5d50504628f4abf267484cff2a1c2b3bc7dd5f346f5d48"
       }
-    },
-    "id": "nemotron"
+    }
   },
   {
+    "id": "coarse-alignment",
+    "name": "Transcript timing",
+    "repo": "csukuangfj2/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12",
+    "revision": "6fc542a3b0661c8278cca1230c34deb989f31202",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/coarse-alignment--",
     "files": {
-      "silero.onnx": {
-        "sha256": "57150d9d2c01f6cd87cc2bac74fba8b4ae34a6e634789f21804f35e90559962d",
-        "size": 1239042
+      "ctc-mha.onnx": {
+        "size": 552799,
+        "sha256": "233ac8980dab9c142ef9fe91ab1d3b5d6309a9549f59a284e50199f7b1081699"
+      },
+      "ctc.weights": {
+        "size": 1301979472,
+        "sha256": "ebb4aa54f64240fe95c079c0b3ec326498f647ebe8d9bef50d316d47a59a53e5"
+      },
+      "tokens.txt": {
+        "sha256": "a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31",
+        "size": 86423
       }
-    },
-    "id": "silero-speech"
+    }
   },
   {
     "id": "redimnet2-b6",
+    "name": "Voice recognition",
+    "repo": "PalabraAI/redimnet2",
+    "revision": "2a8d15f65b1dfb5d73fede2f11ee42bcccca3035",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/redimnet2-b6--",
     "files": {
       "redimnet.onnx": {
         "size": 749313,
@@ -97,6 +155,10 @@
   },
   {
     "id": "mossformer2-16k",
+    "name": "Overlapping voice separation",
+    "repo": "alibabasglab/MossFormer2_SS_16K",
+    "revision": "407cb030cd66340918ebb6c8cc63b18f8592cdbe",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/mossformer2-16k--",
     "files": {
       "program.json": {
         "sha256": "3c82696f94670d288fd2f7a9e795ec6131e7f1417fb224b77842cd3252169246",

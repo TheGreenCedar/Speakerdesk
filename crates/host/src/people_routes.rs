@@ -994,7 +994,7 @@ mod tests {
         let original = state.store().voice_profiles().unwrap()[&pid].clone();
         assert_eq!(
             original["model"],
-            json!(crate::native::native_voice_policy().model)
+            json!(crate::native::native_voice_policy().unwrap().model)
         );
         assert_eq!(original["clips"].as_array().unwrap().len(), 2);
         assert_eq!(original["consent"], "explicit_remember_voice");
@@ -1803,7 +1803,7 @@ mod tests {
                 .ok_or_else(|| "Voice replay only".into())
         }
         fn voice_policy(&self) -> Option<speakerdesk_core::voice::Calibration> {
-            Some(crate::native::native_voice_policy())
+            crate::native::native_voice_policy()
         }
         fn embed_voice(
             &self,
@@ -1830,7 +1830,7 @@ mod tests {
             }
             let mut vector = vec![0.; 192];
             vector[0] = 1.;
-            let mut model = crate::native::native_voice_policy().model;
+            let mut model = crate::native::native_voice_policy().unwrap().model;
             if self.wrong_identity {
                 model.revision = "changed".into();
             }

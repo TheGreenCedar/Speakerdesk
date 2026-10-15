@@ -1,8 +1,8 @@
 # Windows qualification
 
-The Windows production inference dispatcher remains disabled. Native component
-implementations and their tests are available, but they do not yet constitute a
-working Windows application. [Issue #20](https://github.com/TheGreenCedar/Speakerdesk/issues/20)
+The Windows x64 inference dispatcher and host setup are enabled for assembled
+application qualification after the seven component gates passed. This does not
+yet establish a qualified Windows application or public distribution. [Issue #20](https://github.com/TheGreenCedar/Speakerdesk/issues/20)
 owns the complete application acceptance; [PR #49](https://github.com/TheGreenCedar/Speakerdesk/pull/49)
 remains a draft.
 
@@ -15,16 +15,22 @@ export and qualification only; it is not part of the application runtime.
 | Silero | Native recurrent/reference, reset, framing and cancellation checks pass. | `crates/models/src/silero/network_windows.rs`; original experiment below |
 | Cohere | Native text, tokens, decoder continuation and sharded artifact checks pass. | `crates/models/src/cohere/network_windows.rs`; [Cohere](cohere/README.md) |
 | Nemotron | Native offline/live sessions and cache compression reproduce the qualified long run. | `crates/models/src/sortformer/{network,session}_windows.rs`; [Nemotron](nemotron/README.md) |
-| ReDimNet | Component vectors and frozen separated-voice decisions pass. Ordinary recognition matches Mac, but the strict new pilot has one abstention; Windows policy approval is pending. | `crates/models/src/redimnet/network_windows.rs`; [ReDimNet](redimnet/README.md) |
+| ReDimNet | Component vectors and frozen separated-voice decisions pass. The owner approved the preserved Mac recognition behavior, including one known-speaker abstention. Windows has its own admitted policy identity; the strict pilot failure remains recorded. | `crates/models/src/redimnet/network_windows.rs`; [ReDimNet](redimnet/README.md) |
 | MossFormer | Both independent waveform windows, bounded session lifetime and cancellation pass on the AMD machine. | `crates/models/src/mossformer2/network_windows.rs`; [MossFormer](mossformer/README.md) |
-| Whisper | Three of four original numerical checks fail. All four observed language-routing outcomes match. The execution adapter is compiled but artifact admission remains blocked. | `crates/models/src/whisper_lid/network_windows.rs`; [Whisper](whisper/README.md) |
-| CTC timing | Original numerical check fails. One supplemental replay preserves 130 character frames and 23 word envelopes; Windows provenance and calibration remain unresolved. The compiled adapter reports its actual Windows graph identity, which core rejects today. | `crates/models/src/ctc/network_windows.rs`; [CTC](ctc/README.md) |
+| Whisper | The separate 56-case native/actual-core gate passes: exact Mac routing parity, 32/32 natural language labels and repeatable outputs. Three original scalar checks remain failed; no scalar waiver is claimed. | `crates/models/src/whisper_lid/network_windows.rs`; [Whisper](whisper/README.md) |
+| CTC timing | The separate 19-case functional gate passes, with identical timing boundaries and 2,660 matching speaker-activity projections. Original scalar failure remains. Core preserves exact Windows provenance and advertises no acoustically calibrated timing languages. | `crates/models/src/ctc/network_windows.rs`; [CTC](ctc/README.md) |
 
-`crates/models/tests/windows_residency.rs` exercises all five implemented
-networks together, including Cohere continuation across maximum-window
-separation and denial of model-file writes while loaded. It does not include
-Whisper, CTC, capture or the host. Its memory observation is not seven-model
-headroom or sustained meeting throughput.
+The retained five-model residency run preserves Cohere continuation across
+maximum-window separation and denies model-file writes while loaded. Its
+memory observation excludes Whisper, CTC, capture and the host. The shared
+dispatcher and IPC server now contain the Windows execution path. `crates/models/tests/windows_residency.rs` extends the same
+invariants through all seven models and the dispatcher. Its native AMD run
+passes in 78.46 s, including loaded readiness, each model operation, preserved
+ASR continuation, maximum separation, immutable artifacts, closed handles and
+pre-cancel recovery. Sampled GPU committed memory peaks at 20.38 GiB (18.22 GiB
+dedicated and 2.15 GiB shared, whose individual peaks need not coincide); process
+private memory peaks at 21.14 GiB. These observations exclude host/capture/UI
+overhead and do not establish sustained meeting throughput or minimum hardware.
 
 `crates/host/tests/windows_capture.rs` exercises actual WASAPI capture through
 the host. `echo_quality.rs` retains a frozen simulated-room diagnostic. Both
@@ -42,6 +48,10 @@ required. The original failed receipts are retained beside the corrected runs.
 Runtime pins and immutable admission live in
 `crates/models/src/windows_runtime.rs`; download/catalog activation remains a
 separate host boundary. `scripts/build_windows.ps1` builds an unsigned candidate.
+Windows setup and admission share `windows-model-artifacts.json`; prebuilt
+graphs need no on-device conversion. Its model-release download prefix is
+reserved for the exact pinned artifacts and has not been published. Do not
+advertise Windows downloads until that distribution and native activation pass.
 Signing, standard-user update, model distribution and the assembled
 import/live/edit/save/reopen interactions remain required before release.
 

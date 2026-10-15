@@ -1,0 +1,38 @@
+{
+  "id": "windows-ctc-functional-v1",
+  "claim": "Bounded cross-backend supplied-text timing compatibility, not acoustic boundary accuracy",
+  "graph_sha256": "233ac8980dab9c142ef9fe91ab1d3b5d6309a9549f59a284e50199f7b1081699",
+  "mac_model_sha256": "38ff6a225e75caa6e19c35a9b5823015e2550451bd0a394a10f6cda87f42058d",
+  "tokens_sha256": "a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31",
+  "onnxruntime_sha256": "6c916621c1807eba630388868bff8eb4cc9718b9fa17464fc9368eb14ad0f33e",
+  "directml_sha256": "4a263e851f513f7c60a2b5bb08c3ed92102e3007f241c6ca5d63abf29bf04358",
+  "mlx_sha256": "0c9db159aedd2951bb77610c8b028c4ef79bc64ccc4c73b07a4452a60612ac03",
+  "original_reference_sha256": "35f8801b46b121326e7708881f8a181b27ef4388b9c43c8abe99efa3cbdfb50b",
+  "original_scalar_gate": "Retain max_absolute_error < 0.0001 and its failed Windows results separately; this protocol does not replace or relabel them",
+  "selection": {
+    "original": "All six original crops and ordered columns; append needed transcript columns without changing the original ten",
+    "librispeech": "First complete retained utterance per known speaker in frozen ordinary-cases.json order; require start=0, end=source_samples, WAV length=source_samples, 400..392000 samples. Fail if any speaker has no complete retained utterance. Never pair a cropped waveform with its full transcript.",
+    "ordinary_manifest_sha256": "85df77b04cfb1330a5859c70cd24d27a86466beddfd74b0d28fd97df8d57f635",
+    "known_speakers": ["4077", "5142", "6930", "5683", "1188", "4992"],
+    "fleurs_revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+    "fleurs": ["fr_fr-0", "fr_fr-1", "en_us-0", "en_us-1", "fr-1-noise10db"],
+    "derived": "en_us-0 raw float32 PCM divided by 256; en_us-0 multiplied by 4 and clipped to [-1,1]. Preserve its full transcript. These are stress controls, not independently labelled boundary references.",
+    "total_cases": 19
+  },
+  "execution": {
+    "boundary": "Actual Rust Network::scores on raw PCM, including its own normalization and admitted model loading; actual core Vocabulary::align and reading-turn projection replay",
+    "repetitions": "Two complete passes in frozen case order, requiring bit-exact scores per backend across intervening requests",
+    "successful_calls_per_backend_max": 40,
+    "new_graph_candidates": 0,
+    "new_download_bytes": 0,
+    "freeze": "Write and hash complete cases.json, raw PCM and source transcripts before either backend produces new scores; capture Mac once and seal its receipt before the Windows pass. Preserve failed outputs; no case substitution or tuning on results."
+  },
+  "criteria": {
+    "numeric": "Finite nonpositive gathered log probabilities; exact frame geometry, ordered column IDs, model/vocabulary identity; selected-column exp sums <= exp(0.001); exact same-backend repeats",
+    "original": "Report all six unchanged ten-column scalar comparisons. Original whole supplied-text character frames and word envelopes must remain exact.",
+    "natural": "Identical raw text, Unicode offsets, normalization, character/word inventory, acceptance/status/reason and repeated-token handling. Each emitted frame and cell/word envelope may differ by at most 320 samples (20 ms), a prospectively selected cross-backend difference budget, not quantization equivalence. Word envelopes must be derived consistently from accepted cells.",
+    "reading_turns": "Identical text-offset partitions, speakers and attribution under the same frozen activity: single speaker; alternating speakers at half the crop; overlap centered at half the crop; and transitions at every admitted Mac word boundary with offsets -4000,-320,0,320,4000 samples. Keep exact existing two-voice activity replay. Do not use Windows results to select the activity sequence.",
+    "invalid_requests": "Reject empty/nonfinite/oversized PCM and missing/out-of-range IDs; sub-400-sample input has zero frames; cancellation is not a score and does not poison the following request",
+    "provenance": "Windows has its own exact model/provider/functional-policy tuple and timing_accuracy_calibrated_languages=[] for every language, including English. Never inherit the Mac AMI calibration."
+  }
+}

@@ -33,11 +33,34 @@ pub(crate) struct ModelArtifact {
     pub name: String,
     pub repo: String,
     pub revision: String,
+    #[serde(default)]
+    pub download_prefix: Option<String>,
     pub files: BTreeMap<String, FilePin>,
     #[serde(default)]
     pub prepared: BTreeMap<String, FilePin>,
 }
 impl ModelArtifact {
+    fn download_url(&self, name: &str) -> String {
+        match &self.download_prefix {
+            Some(prefix) => format!("{prefix}{name}"),
+            None => format!(
+                "https://huggingface.co/{}/resolve/{}/{name}?download=true",
+                self.repo, self.revision
+            ),
+        }
+    }
+    // A setup-action hint only; native loading still verifies every artifact.
+    pub fn present(&self, root: &Path) -> bool {
+        // Mac conversion sources are not needed to use already prepared weights.
+        let runtime_files = if self.prepared.is_empty() {
+            &self.files
+        } else {
+            &self.prepared
+        };
+        runtime_files
+            .keys()
+            .all(|name| root.join(&self.id).join(name).is_file())
+    }
     pub fn download_bytes(&self) -> u64 {
         self.files.values().map(|f| f.size).sum()
     }
@@ -46,10 +69,45 @@ impl ModelArtifact {
     }
 }
 pub(crate) fn artifacts() -> Vec<ModelArtifact> {
+    #[cfg(windows)]
+    {
+        windows_artifacts()
+            .into_iter()
+            .filter(|model| model.id != "mossformer2-16k")
+            .collect()
+    }
+    #[cfg(not(windows))]
     serde_json::from_str(include_str!("model-artifacts.json")).expect("bundled model pins")
 }
 pub(crate) fn separation_artifact() -> ModelArtifact {
+    #[cfg(windows)]
+    {
+        windows_artifacts()
+            .into_iter()
+            .find(|model| model.id == "mossformer2-16k")
+            .expect("bundled Windows separation pins")
+    }
+    #[cfg(not(windows))]
     serde_json::from_str(include_str!("separation-artifact.json")).expect("bundled separation pins")
+}
+
+#[cfg(any(windows, test))]
+fn windows_artifacts() -> Vec<ModelArtifact> {
+    serde_json::from_str(include_str!(
+        "../../models/src/windows-model-artifacts.json"
+    ))
+    .expect("bundled Windows model pins")
+}
+
+pub(crate) fn import_artifact_identity() -> &'static [u8] {
+    #[cfg(windows)]
+    {
+        include_bytes!("../../models/src/windows-model-artifacts.json")
+    }
+    #[cfg(not(windows))]
+    {
+        include_bytes!("model-artifacts.json")
+    }
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -490,10 +548,7 @@ impl Installer {
         for (name, pin) in &model.files {
             checked(cancel)?;
             progress.phase(format!("Downloading {} · {name}", model.name));
-            let url = format!(
-                "https://huggingface.co/{}/resolve/{}/{name}?download=true",
-                model.repo, model.revision
-            );
+            let url = model.download_url(name);
             self.download(&url, &staging.join(name), pin, done, progress, cancel)
                 .await?;
             done += pin.size;
@@ -1002,6 +1057,7 @@ mod tests {
             name: "Replay".into(),
             repo: "fixture/test".into(),
             revision: "pin".into(),
+            download_prefix: None,
             files: BTreeMap::from([
                 ("weights".into(), pin(b"abcdef")),
                 ("config.json".into(), pin(b"config")),
@@ -1080,6 +1136,7 @@ mod tests {
             name: "Fixture".into(),
             repo: "fixture/test".into(),
             revision: "pin".into(),
+            download_prefix: None,
             files: BTreeMap::from([("weights".into(), pin(b"abcdef"))]),
             prepared: BTreeMap::new(),
         };
@@ -1277,6 +1334,78 @@ mod tests {
         assert!(installer.installed(&model, &cancel).await.unwrap());
         assert_eq!(progress.progress().downloaded_bytes, model.download_bytes());
     }
+    #[test]
+    fn windows_setup_uses_prebuilt_models_in_host_load_order() {
+        let catalog = windows_artifacts();
+        assert_eq!(
+            catalog
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "silero-speech",
+                "nemotron",
+                "cohere-speech",
+                "whisper-language",
+                "coarse-alignment",
+                "redimnet2-b6",
+                "mossformer2-16k",
+            ]
+        );
+        for model in &catalog {
+            assert!(
+                model.prepared.is_empty(),
+                "Windows never converts models during setup"
+            );
+            assert!(!model.files.is_empty());
+            for (name, pin) in &model.files {
+                assert_eq!(Path::new(name).components().count(), 1);
+                assert!(relative(name).is_ok());
+                assert!(pin.size > 0 && pin.size < 2 * 1024 * 1024 * 1024);
+                assert_eq!(pin.sha256.len(), 64);
+                assert_eq!(
+                    model.download_url(name),
+                    format!(
+                        "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/{}--{name}",
+                        model.id
+                    )
+                );
+            }
+        }
+        assert!(catalog[4].files.contains_key("ctc-mha.onnx"));
+        assert!(catalog[5].files.contains_key("redimnet.onnx"));
+        assert!(catalog[6].files.contains_key("program.json"));
+        let mac: Vec<ModelArtifact> =
+            serde_json::from_str(include_str!("model-artifacts.json")).unwrap();
+        assert_eq!(
+            mac[0].download_url("model.safetensors"),
+            "https://huggingface.co/mlx-community/silero-vad-v6/resolve/2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06/model.safetensors?download=true"
+        );
+    }
+
+    #[test]
+    fn separation_presence_requires_the_platform_artifact_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let model = windows_artifacts().pop().unwrap();
+        let root = temp.path().join(&model.id);
+        std::fs::create_dir(&root).unwrap();
+        // A legacy Mac weight file cannot offer an unusable Windows separation action.
+        std::fs::write(root.join("model.safetensors"), b"legacy").unwrap();
+        assert!(!model.present(temp.path()));
+        let mac: ModelArtifact =
+            serde_json::from_str(include_str!("separation-artifact.json")).unwrap();
+        assert!(
+            mac.present(temp.path()),
+            "Mac needs only its prepared runtime weights"
+        );
+        for name in model.files.keys() {
+            std::fs::write(root.join(name), b"presence only").unwrap();
+        }
+        assert!(model.present(temp.path()));
+        std::fs::remove_file(root.join("program.json")).unwrap();
+        assert!(!model.present(temp.path()));
+    }
+
     #[test]
     fn catalog_is_pinned_and_paths_are_relative() {
         let catalog = artifacts();

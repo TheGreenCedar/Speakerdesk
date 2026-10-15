@@ -6,6 +6,35 @@ use speakerdesk_core::ipc::{Request, Response};
 use crate::{cohere, ctc, memory, redimnet, sortformer, whisper_lid};
 
 #[cfg(target_os = "macos")]
+use redimnet::coreml::Network as VoiceNetwork;
+#[cfg(windows)]
+use redimnet::network_windows::Network as VoiceNetwork;
+
+#[cfg(any(target_os = "macos", windows))]
+macro_rules! load_network {
+    ($runtime:expr, $network:ty, $model:expr) => {{
+        let directory = $runtime.model_root.join($model);
+        #[cfg(target_os = "macos")]
+        {
+            <$network>::load(&directory)
+        }
+        #[cfg(windows)]
+        {
+            <$network>::load(&directory, &$runtime.backend)
+        }
+    }};
+}
+
+#[cfg(target_os = "macos")]
+const ALIGNMENT_CHECKPOINT: &str = speakerdesk_core::alignment::CHECKPOINT;
+#[cfg(windows)]
+const ALIGNMENT_CHECKPOINT: &str = speakerdesk_core::timing_policy::WINDOWS.checkpoint;
+#[cfg(target_os = "macos")]
+const RUNTIME_DEVICE: &str = "metal";
+#[cfg(windows)]
+const RUNTIME_DEVICE: &str = "directml";
+
+#[cfg(any(target_os = "macos", windows))]
 pub struct Runtime {
     model_root: std::path::PathBuf,
     silero: Option<crate::silero::network::Network>,
@@ -13,21 +42,41 @@ pub struct Runtime {
     cohere: Option<cohere::network::Network>,
     whisper: Option<whisper_lid::network::Network>,
     ctc: Option<ctc::network::Network>,
-    voice: Option<redimnet::coreml::Network>,
+    voice: Option<VoiceNetwork>,
     separation: Option<crate::mossformer2::network::Network>,
     separation_session: Option<(u64, crate::mossformer2::network::Session)>,
     transcription_session: Option<(u64, cohere::network::Session)>,
     vad_sessions: std::collections::HashMap<u64, crate::silero::session::Session>,
     diar_sessions: std::collections::HashMap<u64, sortformer::session::Session>,
     next_session: u64,
+    // Drop native sessions and owned tensors before releasing private DLL search state.
+    #[cfg(windows)]
+    backend: crate::windows_runtime::Backend,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl Runtime {
+    fn load_voice(&self) -> Result<VoiceNetwork, ChildError> {
+        let directory = self.model_root.join("redimnet2-b6");
+        #[cfg(target_os = "macos")]
+        {
+            VoiceNetwork::load(&directory, redimnet::coreml::ComputePolicy::CpuAndGpu)
+        }
+        #[cfg(windows)]
+        {
+            VoiceNetwork::load(&directory, &self.backend)
+        }
+    }
+
     pub fn new(model_root: std::path::PathBuf) -> Result<Self, ChildError> {
-        crate::metallib::prepare(None)?;
-        // Weights stay resident; released intermediate buffers need not stay cached.
-        mlx_rs::memory::set_cache_limit(0).map_err(crate::weights::error)?;
+        #[cfg(target_os = "macos")]
+        {
+            crate::metallib::prepare(None)?;
+            // Weights stay resident; released intermediate buffers need not stay cached.
+            mlx_rs::memory::set_cache_limit(0).map_err(crate::weights::error)?;
+        }
+        #[cfg(windows)]
+        let backend = crate::windows_runtime::Backend::new()?;
         Ok(Self {
             model_root,
             silero: None,
@@ -42,6 +91,8 @@ impl Runtime {
             vad_sessions: Default::default(),
             diar_sessions: Default::default(),
             next_session: 1,
+            #[cfg(windows)]
+            backend,
         })
     }
 
@@ -61,49 +112,41 @@ impl Runtime {
                 let pin = match model.as_str() {
                     "silero-speech" => {
                         if self.silero.is_none() {
-                            self.silero = Some(crate::silero::network::Network::load(
-                                &self.model_root.join(model),
-                            )?);
+                            self.silero =
+                                Some(load_network!(self, crate::silero::network::Network, model)?);
                         }
                         crate::silero::WEIGHT_PIN.to_string()
                     }
                     "nemotron" => {
                         if self.nemotron.is_none() {
-                            self.nemotron = Some(sortformer::network::Network::load(
-                                &self.model_root.join(model),
-                            )?);
+                            self.nemotron =
+                                Some(load_network!(self, sortformer::network::Network, model)?);
                         }
                         sortformer::WEIGHT_PIN.to_string()
                     }
                     "cohere-speech" => {
                         if self.cohere.is_none() {
-                            self.cohere = Some(cohere::network::Network::load(
-                                &self.model_root.join(model),
-                            )?);
+                            self.cohere =
+                                Some(load_network!(self, cohere::network::Network, model)?);
                         }
                         cohere::WEIGHT_PIN.to_string()
                     }
                     "whisper-language" => {
                         if self.whisper.is_none() {
-                            self.whisper = Some(whisper_lid::network::Network::load(
-                                &self.model_root.join(model),
-                            )?);
+                            self.whisper =
+                                Some(load_network!(self, whisper_lid::network::Network, model)?);
                         }
                         whisper_lid::WEIGHT_PIN.to_string()
                     }
                     "coarse-alignment" => {
                         if self.ctc.is_none() {
-                            self.ctc =
-                                Some(ctc::network::Network::load(&self.model_root.join(model))?);
+                            self.ctc = Some(load_network!(self, ctc::network::Network, model)?);
                         }
-                        speakerdesk_core::alignment::CHECKPOINT.to_string()
+                        ALIGNMENT_CHECKPOINT.to_string()
                     }
                     "redimnet2-b6" => {
                         if self.voice.is_none() {
-                            self.voice = Some(redimnet::coreml::Network::load(
-                                &self.model_root.join(model),
-                                redimnet::coreml::ComputePolicy::CpuAndGpu,
-                            )?);
+                            self.voice = Some(self.load_voice()?);
                         }
                         self.voice
                             .as_ref()
@@ -113,8 +156,10 @@ impl Runtime {
                     }
                     "mossformer2-16k" => {
                         if self.separation.is_none() {
-                            self.separation = Some(crate::mossformer2::network::Network::load(
-                                &self.model_root.join(model),
+                            self.separation = Some(load_network!(
+                                self,
+                                crate::mossformer2::network::Network,
+                                model
                             )?);
                         }
                         speakerdesk_core::separation::MODEL.into()
@@ -134,39 +179,51 @@ impl Runtime {
         }
         match request {
             Request::PrepareAlignment | Request::PrepareSeparation => {
-                let separation = matches!(request, Request::PrepareSeparation);
-                let directory = self.model_root.join(if separation {
-                    ".staging/mossformer2-16k"
-                } else {
-                    ".staging/coarse-alignment"
-                });
-                // The parent owns this private staging directory; never follow an old partial link.
-                let output = directory.join("model.safetensors.part");
-                match std::fs::symlink_metadata(&output) {
-                    Ok(meta) if !meta.is_file() || meta.is_symlink() => {
-                        return Err(crate::weights::error(
-                            "Model staging output is not a regular file",
-                        ));
+                #[cfg(windows)]
+                {
+                    Err(ChildError::failed(
+                        "Windows model preparation requires downloaded prebuilt artifacts",
+                        false,
+                    ))
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let separation = matches!(request, Request::PrepareSeparation);
+                    let directory = self.model_root.join(if separation {
+                        ".staging/mossformer2-16k"
+                    } else {
+                        ".staging/coarse-alignment"
+                    });
+                    // The parent owns this private staging directory; never follow an old partial link.
+                    let output = directory.join("model.safetensors.part");
+                    match std::fs::symlink_metadata(&output) {
+                        Ok(meta) if !meta.is_file() || meta.is_symlink() => {
+                            return Err(crate::weights::error(
+                                "Model staging output is not a regular file",
+                            ));
+                        }
+                        Ok(_) => std::fs::remove_file(&output).map_err(crate::weights::error)?,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(crate::weights::error(error)),
                     }
-                    Ok(_) => std::fs::remove_file(&output).map_err(crate::weights::error)?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(crate::weights::error(error)),
+                    if separation {
+                        crate::mossformer2::prepare::convert_cancellable(
+                            &directory, &output, cancel,
+                        )?;
+                    } else {
+                        ctc::prepare::convert_cancellable(&directory, &output, cancel)?;
+                    }
+                    if cancel.load(Ordering::Acquire) {
+                        return Err(ChildError::Cancelled);
+                    }
+                    std::fs::rename(output, directory.join("model.safetensors"))
+                        .map_err(crate::weights::error)?;
+                    Ok(Response::Ack)
                 }
-                if separation {
-                    crate::mossformer2::prepare::convert_cancellable(&directory, &output, cancel)?;
-                } else {
-                    ctc::prepare::convert_cancellable(&directory, &output, cancel)?;
-                }
-                if cancel.load(Ordering::Acquire) {
-                    return Err(ChildError::Cancelled);
-                }
-                std::fs::rename(output, directory.join("model.safetensors"))
-                    .map_err(crate::weights::error)?;
-                Ok(Response::Ack)
             }
             Request::Hello { .. } => Ok(Response::Ready {
                 build_id: env!("CARGO_PKG_VERSION").into(),
-                device: "metal".into(),
+                device: RUNTIME_DEVICE.into(),
                 models: [
                     self.silero
                         .as_ref()
@@ -178,9 +235,7 @@ impl Runtime {
                     self.whisper
                         .as_ref()
                         .map(|_| whisper_lid::WEIGHT_PIN.into()),
-                    self.ctc
-                        .as_ref()
-                        .map(|_| speakerdesk_core::alignment::CHECKPOINT.into()),
+                    self.ctc.as_ref().map(|_| ALIGNMENT_CHECKPOINT.into()),
                     self.voice
                         .as_ref()
                         .map(|network| network.identity().revision),
@@ -195,8 +250,10 @@ impl Runtime {
             Request::VadOpen { conditioning } => {
                 let session = crate::silero::session::Session::new(conditioning)?;
                 if self.silero.is_none() {
-                    self.silero = Some(crate::silero::network::Network::load(
-                        &self.model_root.join("silero-speech"),
+                    self.silero = Some(load_network!(
+                        self,
+                        crate::silero::network::Network,
+                        "silero-speech"
                     )?);
                 }
                 let id = self.next_session;
@@ -235,8 +292,10 @@ impl Runtime {
             }
             Request::DiarOpen { preset } => {
                 if self.nemotron.is_none() {
-                    self.nemotron = Some(sortformer::network::Network::load(
-                        &self.model_root.join("nemotron"),
+                    self.nemotron = Some(load_network!(
+                        self,
+                        sortformer::network::Network,
+                        "nemotron"
                     )?);
                 }
                 let session = sortformer::session::Session::new(preset)?;
@@ -282,8 +341,10 @@ impl Runtime {
                 padding,
             } => {
                 if self.cohere.is_none() {
-                    self.cohere = Some(cohere::network::Network::load(
-                        &self.model_root.join("cohere-speech"),
+                    self.cohere = Some(load_network!(
+                        self,
+                        cohere::network::Network,
+                        "cohere-speech"
                     )?);
                 }
                 self.cohere
@@ -294,8 +355,10 @@ impl Runtime {
             }
             Request::LanguageProbe { pcm } => {
                 if self.whisper.is_none() {
-                    self.whisper = Some(whisper_lid::network::Network::load(
-                        &self.model_root.join("whisper-language"),
+                    self.whisper = Some(load_network!(
+                        self,
+                        whisper_lid::network::Network,
+                        "whisper-language"
                     )?);
                 }
                 self.whisper
@@ -306,8 +369,10 @@ impl Runtime {
             }
             Request::CtcScores { pcm, token_ids } => {
                 if self.ctc.is_none() {
-                    self.ctc = Some(ctc::network::Network::load(
-                        &self.model_root.join("coarse-alignment"),
+                    self.ctc = Some(load_network!(
+                        self,
+                        ctc::network::Network,
+                        "coarse-alignment"
                     )?);
                 }
                 self.ctc
@@ -318,12 +383,9 @@ impl Runtime {
             }
             Request::EmbedVoice { pcm } => {
                 if self.voice.is_none() {
-                    self.voice = Some(redimnet::coreml::Network::load(
-                        &self.model_root.join("redimnet2-b6"),
-                        redimnet::coreml::ComputePolicy::CpuAndGpu,
-                    )?);
+                    self.voice = Some(self.load_voice()?);
                 }
-                let network = self.voice.as_ref().expect("loaded above");
+                let network = self.voice.as_mut().expect("loaded above");
                 Ok(Response::Embedding(speakerdesk_core::ipc::VoiceEmbedding {
                     model: network.identity(),
                     clip: network.embed(&pcm, cancel)?,
@@ -334,8 +396,10 @@ impl Runtime {
                     return Err(ChildError::failed("separation session already open", false));
                 }
                 if self.separation.is_none() {
-                    self.separation = Some(crate::mossformer2::network::Network::load(
-                        &self.model_root.join("mossformer2-16k"),
+                    self.separation = Some(load_network!(
+                        self,
+                        crate::mossformer2::network::Network,
+                        "mossformer2-16k"
                     )?);
                 }
                 let session = self
@@ -405,8 +469,10 @@ impl Runtime {
                     ));
                 }
                 if self.cohere.is_none() {
-                    self.cohere = Some(cohere::network::Network::load(
-                        &self.model_root.join("cohere-speech"),
+                    self.cohere = Some(load_network!(
+                        self,
+                        cohere::network::Network,
+                        "cohere-speech"
                     )?);
                 }
                 let session = self
@@ -464,8 +530,10 @@ impl Runtime {
                     return Err(ChildError::failed("separation session already open", false));
                 }
                 if self.separation.is_none() {
-                    self.separation = Some(crate::mossformer2::network::Network::load(
-                        &self.model_root.join("mossformer2-16k"),
+                    self.separation = Some(load_network!(
+                        self,
+                        crate::mossformer2::network::Network,
+                        "mossformer2-16k"
                     )?);
                 }
                 let channels = self

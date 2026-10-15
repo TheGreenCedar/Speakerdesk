@@ -1,4 +1,48 @@
-# CTC maintained-attention candidate
+# Windows CTC qualification
+
+The owner approved a separate, prospective Windows qualification after the
+original Mac scalar tolerance failed. `windows-qualification-v1.json` freezes
+the new functional contract; all diagnostic experiments and failed original
+comparisons below remain historical evidence. No new graph candidate is planned.
+
+`prepare_windows_qualification.py` seals 19 raw-PCM cases and source transcripts
+without inference. It uses complete retained public utterances, rejects cropped
+audio paired with full text, and preserves the original six cases and column order.
+`ctc_windows_qualification.rs` calls the actual Mac and Windows adapters, including
+their normalization, model admission, repeated requests and cancellation boundary.
+Seal the Mac capture before running Windows; retain both complete receipts.
+
+The core replay checks text/offset/acceptance compatibility and reading-turn
+attribution under shared speaker activity. The selected 20 ms envelope budget
+for new natural cases is not a claim of acoustic accuracy. Windows metadata has
+its own provider identity and no calibrated timing languages, including English.
+The fixed graph inventory permits qualification loading; production readiness
+still depends on the native gate and assembled application checks.
+
+The frozen functional run passed on 2026-10-15: the actual Mac and Windows
+adapters produced identical character and word boundaries across all 19 cases
+(1,544 character cells and 283 words), and all 2,660 actual-core activity
+projections matched. Each backend completed 38 ordered probes plus short-input
+and post-cancellation controls. Same-backend repeats were bit-exact. The native
+captures took 48.56 s on Mac and 12.15 s on the AMD PC; these are harness totals,
+not application throughput measurements.
+
+| Retained record | SHA-256 |
+| --- | --- |
+| Prospective protocol | `f45fdd309f979a3d491a00732aeb82a68e9e0c0e5f28b628d0cd5530ee67dac2` |
+| Frozen input manifest | `132a9c5e47f7740b8a28423926bcbea62b3d2c554271987c1be82b455fcb8020` |
+| Mac capture receipt | `81aad3d054be365345fbcd264068e3c855e40cdbf2733cfb0b57cf112dc82a24` |
+| Windows capture receipt | `bf0b8252a74ae93a7872c05b761e2ccb5cf37e0e945036967a204f3dc940a67e` |
+| Core replay report | `e3ec8f33fd0918b900aef827b38870b30be6b1c68e4f1044ea7ebea91a8d45c1` |
+
+The independent original whole-clip scalar comparison still fails: maximum
+Windows error is `0.0020656585693359375` against the unchanged `<1e-4` bound.
+The other five original control comparisons pass, and Mac reproduces all six
+original Float32 references exactly. Functional compatibility does not establish
+human-labelled acoustic boundary accuracy: Windows retains no calibrated timing
+languages. Pre-cancellation checks do not establish in-flight interruption.
+
+## Retained maintained-attention experiment
 
 `fuse_attention.py` prepares one **unqualified** full-model candidate. It accepts
 only the original Float32 graph (`4e9c26ad…`) and unchanged external weights

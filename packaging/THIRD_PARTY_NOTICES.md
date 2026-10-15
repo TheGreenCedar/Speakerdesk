@@ -14,3 +14,41 @@ The native Mac app uses Rust, Apple MLX and Core ML. Model weights are downloade
 - Lucide 0.577.0: ISC and the MIT terms for portions derived from Feather. The app icon and interface icons use [Lucide](https://lucide.dev). Fonts come from the operating system.
 
 Speakerdesk is not affiliated with the upstream model, framework or icon authors. Synthetic test fixtures use macOS speech voices and are identified as scripted material.
+
+
+## Windows converted model materials
+
+The prepared Windows graphs are derived model materials, separate from their
+original checkpoints, conversion code and native runtime libraries. Their exact
+source revisions and output file hashes are recorded in
+`crates/models/src/windows-model-artifacts.json`. The reserved model release is
+`TheGreenCedar/Speakerdesk` tag `windows-models-20261015`; this notice does not
+assert that it has been published. Each asset name starts with its model ID and
+`--`. Model terms continue to apply when these converted files are downloaded
+separately from the application.
+
+| Asset prefix | Weight origin and declared terms | Speakerdesk alterations |
+| --- | --- | --- |
+| `silero-speech--` | Silero Team, through `mlx-community/silero-vad-v6@2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06`; MIT. | The pinned Float32 checkpoint is represented as an ONNX inference graph; recurrent state and frame preparation are explicit. |
+| `nemotron--` | NVIDIA Nemotron 3 Diarization, through `mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f`; OpenMDW 1.1. MLX conversion by Lucas Newman / MLX Community. | BF16 parameters are represented as Float32; inference omits training heads and exposes cache/state. The frontend uses standard ONNX operators. |
+| `cohere-speech--` | CohereLabs `cohere-transcribe-03-2026`, quantized by Spoke in `spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12`, following the MLX Speech conversion; Apache 2.0. | Exact affine 4-bit parameter values are expanded to Float32. Encoder and request-local decoder/KV graphs are separate; encoder external weights are sharded without changing tensor bytes. |
+| `whisper-language--` | OpenAI Whisper code and weights: MIT. The MLX Community `whisper-tiny-asr-fp16@77fa3f52b482ec80d086df55f893065a9baab172` conversion declares Apache 2.0; both notices are retained. | Language-identification-only encoder/first-decoder-step graph, explicit frontend and precision/materialization lowering. |
+| `coarse-alignment--` | Meta Omnilingual ASR, distributed by `csukuangfj2/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12@6fc542a3b0661c8278cca1230c34deb989f31202`; Apache 2.0. Copyright 2025 Meta Platforms, Inc. and affiliates. | Quantized parameters are dequantized to Float32; attention is lowered to the maintained Microsoft operator. Output is selected CTC scores for supplied-text alignment. |
+| `redimnet2-b6--` | Palabra.ai, `PalabraAI/redimnet2@2a8d15f65b1dfb5d73fede2f11ee42bcccca3035`, release checkpoint `b6-vb2+vox2_v0-lm.pt`; MIT. | Maintained graph converted to ONNX, with a half-precision backbone and Float32 waveform/frontend/output boundaries. The Mac Core ML artifact is a different conversion. |
+| `mossformer2-16k--` | Alibaba / Shengkui Zhao, `alibabasglab/MossFormer2_SS_16K@407cb030cd66340918ebb6c8cc63b18f8592cdbe`; Apache 2.0. ClearerVoice source at `6b3774dc79c46ae8bed2a4fa5f706f0ac8c75c61`; Apache 2.0. | Raw full-window inference split into 50 ONNX stages; dynamic padding, bounded centered-normalization reductions and decomposed attention. The upstream sliding-window/RMS wrapper is omitted. |
+
+Graph implementation references retain their separate terms: MLX Audio and MLX
+Speech are MIT; Hugging Face Transformers 5.7.0 is Apache 2.0. The ClearerVoice
+source acknowledges SpeechBrain and its MossFormer2 block acknowledges
+FLASH-pytorch by Phil Wang; the latter's MIT copyright and terms are included.
+The existing OpenAI Whisper, Palabra.ai and ClearerVoice source notices above
+remain applicable. Python conversion packages are build tools, not application
+runtime libraries. Model assets do not contain the evaluation WAVs or corpora.
+
+The complete generated `THIRD_PARTY_NOTICES.txt`, including the full OpenMDW,
+Apache and MIT texts and applicable copyright notices, must accompany the model
+release as well as the application. Keep this origin/change notice available
+with that distribution. These notices identify modifications and retain upstream
+terms; they do not relicense third-party materials under Speakerdesk's license
+or suggest endorsement by the original authors. Immutable declaration URLs and
+hashes are recorded in `experiments/windows/model-distribution.md`.

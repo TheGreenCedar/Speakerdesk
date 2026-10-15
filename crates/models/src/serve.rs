@@ -10,7 +10,7 @@ pub use speakerdesk_core::ipc::{read_envelope, write_envelope};
 type Active = Arc<Mutex<Option<(u64, Arc<Operation>)>>>;
 
 pub fn serve(model_root: std::path::PathBuf) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(windows, target_arch = "x86_64")))]
     {
         let mut runtime = dispatch::Runtime::new(model_root).map_err(std::io::Error::other)?;
         serve_with(
@@ -20,7 +20,7 @@ pub fn serve(model_root: std::path::PathBuf) -> std::io::Result<()> {
             Operation::native,
         )
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(windows, target_arch = "x86_64"))))]
     {
         let _ = model_root;
         Err(std::io::Error::other(ChildError::MetalUnavailable))

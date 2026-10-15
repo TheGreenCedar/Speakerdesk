@@ -1,16 +1,18 @@
-# Whisper language graph candidate — qualification incomplete
+# Whisper language scoring — Windows functional qualification
 
-This tool exports the exact pinned Whisper-tiny language scoring path and
-prepares executable native Windows probe cases. The latest frozen candidate is
-**diagnostic only**: three of four independent cases exceed the original strict
-maximum probability error bound of `<1e-4`. Source pins, language thresholds,
-and existing reference files remain unchanged. This experiment batch is closed;
-the complete graph is not admitted for production Windows inference.
+The frozen Windows graph passed the separate, prospectively reviewed v2
+functional contract: 56 cases through the actual native adapters and frontends,
+with zero changed core routing decisions or comparison errors. This establishes
+the component result described below. Three original scalar-fidelity cases
+still fail the unchanged strict `<1e-4` bound; no source-equivalence or general
+language-calibration claim follows from the functional pass.
+
+## Retained scalar comparison
 
 The final native candidate is `compiled-gelu-v1`, graph SHA-256
 `1c47965522f7495fc85814c70c6b17dc4952436774c43225d55665e4ecbc7f14`.
-Windows ML 2.4.89 / ORT 1.27.1 executed all model work on DirectML on the
-RX 7900 XT, with graph optimizations disabled:
+The earlier standalone neural probes used Windows ML 2.4.89 / ORT 1.27.1 on the
+RX 7900 XT, with graph optimizations disabled and all model work on DirectML:
 
 | Original case | Maximum probability error | Strict `<1e-4` gate |
 | --- | ---: | --- |
@@ -22,6 +24,154 @@ RX 7900 XT, with graph optimizations disabled:
 All four cases retained the reference language/confidence routing decisions and
 had bitexact repeats. That does not waive scalar failures or establish human
 language accuracy. Earlier CPU results below describe earlier graph revisions.
+
+## Separate Windows qualification
+
+The native v2 comparison **passed**, with `errors: []`. Both adapters completed
+113 successful probes: two passes over all 56 inputs and one valid post-failure
+isolation probe. All 99 columns met the finite/range/normalization rules;
+same-backend repeats and the context-boundary metamorphic checks were bitexact.
+
+All 56 projected core outcomes matched: 32 `detected`, 20 `best_effort`, one
+`unsupported` and three `needs_language`. On the 32 natural utterances, both
+backends matched all 32 human top-language labels. The 28 supported-language
+utterances produced 24 confident detections and four best-effort routes. All
+four Russian/Hindi utterances returned no supported-language route: one
+confident unsupported result and three needing a language choice. There were
+no confident human-label mistakes or unsupported-to-supported leaks in this
+fixed sample. Two utterances per language do not establish general accuracy
+or probability calibration.
+
+The maximum observed Mac/Windows probability drift was `0.005328834056854248`
+on `natural-hi_in-1`; one case had a different third-ranked candidate without
+changing the winner or core decision. These remain diagnostics, with no new
+scalar tolerance. The complete adapter replay against the independent legacy
+reference again passed only `whole` (`9.69757093116641e-6`), while `first_probe`
+(`0.00028502941131591797`), `partial_frame` (`0.0016963481903076172`) and
+`silence` (`0.0009639859199523926`) failed the original strict `<1e-4` test.
+The earlier standalone results above and their failed receipts remain intact.
+
+The evidence binds the source checkpoint
+`mlx-community/whisper-tiny-asr-fp16@77fa3f52b482ec80d086df55f893065a9baab172`,
+including `model.safetensors` SHA-256
+`1267601753d2996d68dc065d1de786895a7ad9a874d1d3548a5274c1bc067444`,
+to the frozen Windows graph above. Exact config/token/frontend/runtime pins
+are in the contract and verified by the sealed captures.
+
+| Evidence file | SHA-256 |
+| --- | --- |
+| `cases.json` | `733e23ad9c6bb270104dc2cae07dfbf4d927bba5c46353c77443a4b03b67b579` |
+| Native Mac `mac.json` | `8d526419c5d374200a1639276cb4bfaf2e7ace837e271697f880e790874bed96` |
+| Native Windows `windows.json` | `5e1eb8977e1a80ebff1a381aa5d7cbfd287dc7d471284ecdda808f1c61899e4d` |
+| `comparison.json` | `52a04d2e0376da9332bac00511482024fca5b6cba14760956d3baa92e1d1289c` |
+
+The comparator always writes `activation_recommended: false`: it makes no
+application activation decision. `passed: true` certifies this component
+contract; assembled lifecycle qualification and activation remain separate.
+
+The active, independently reviewed amendment is
+[`windows-qualification-v2.json`](windows-qualification-v2.json), SHA-256
+`c49f415cc4d68e429d803ee9f793cdd9c24a26e267d88cadf4304d7a459d1598`.
+The attempted [`v1`](windows-qualification-v1.json) is retained unchanged.
+Before any inference under either contract, v2 replaced the blocked viewer
+row transport/selector with fixed first-two archive-member selection. Its
+acceptance rules, case count and model-call budget are unchanged.
+It does not replace the failed scalar checks above. No new graph, arithmetic
+candidate, language threshold or independent expectation is introduced.
+
+The frozen matrix contains the original four cases, the first two regular WAV
+members in each FLEURS validation/dev archive for the 14 supported languages
+plus Russian and Hindi, and 20 deterministic stress cases. Every natural input
+is bound to FLEURS revision `70bb2e84b976b7e960aa89f1c648e09c59f894dd`;
+the noisy French case reuses the retained quality pilot. Quiet, clipped,
+constructed mixed/overlapping speech, nine nonzero short crops and three
+30-second context boundaries have fixed recipes selected before inference.
+The short/silent cases test numerical behavior; they do not bypass Silero's
+speech-admission role or establish acoustic language accuracy.
+
+Each backend calls its actual native `Network::probe`, including its frontend,
+twice for all 56 inputs. All 99 columns must retain their code order, finite
+probabilities in `[0,1]`, sum error at most `1e-5`, and bitexact same-backend
+repeats. A fresh actual `LanguagePolicy` supplies each case's winner, routed
+language, review flag, reason and remembered context; all five fields must
+match the frozen Mac capture exactly. Top-three candidates, all-column scalar
+drift and threshold distances are reported, without a new scalar tolerance.
+Actual-core sequence tests separately cover unsupported speech, speaker
+isolation, ties and adjacent confidence values.
+
+Natural human labels are also checked. A new confident label mistake, or an
+unsupported utterance routed to a supported language, fails. A confident
+mistake shared with Mac remains an acoustic failure that blocks an activation
+recommendation; it is never relabeled correct. Shared uncertain mistakes stay
+visible. This small fixed sample is functional qualification, not a claim of
+general calibration or accuracy in all 14 languages.
+
+Prepare inputs once, without model execution, in a fresh private directory:
+
+```sh
+python experiments/windows/whisper/windows_qualification.py prepare \
+  --retained /private/retained/quality-pilot --output /private/whisper-windows-v2
+python -m unittest discover -s experiments/windows/whisper \
+  -p test_windows_qualification.py -v
+```
+
+Preparation uses `numpy==2.3.3` and `soundfile==0.14.0` with its declared
+dependencies. It bounds new corpus downloads to 60 MiB and prepared storage
+to 150 MiB, and records source/normalized/derived byte hashes. Freeze `cases.json` before
+the Mac capture; do not replace selected rows after any model result.
+
+The Italian viewer request exceeds Hugging Face's server-side 300 MB Parquet
+scan limit. `fleurs_archive.py` instead streams `dev.tar.gz` with stdlib
+`tarfile` mode `r|gz`, closes after two complete regular WAV members, and
+matches their basenames to the same revision's `dev.tsv` for ID, transcript
+and sample count. Archive member order is authoritative; neither TSV nor
+filename sorting changes selection. The Italian pilot obtained both complete
+utterances after 1,198,080 compressed bytes, versus the 288,887,332-byte archive.
+V2 permits up to 1 MiB for a complete per-config TSV; the aggregate cap remains
+60 MiB. Compressed bytes consumed and the pinned tree's LFS identity are
+recorded, without claiming a hash of the unread complete archive. No Parquet
+reader is needed by the preparation or runtime path.
+If transport preparation failed earlier, pass its cumulative byte cost with
+`--prior-downloaded-bytes`; the same 60 MiB budget is reduced by that amount.
+
+The ignored integration test is the same native adapter boundary on each
+platform. Set `SPEAKERDESK_WHISPER_CASES` to the frozen manifest,
+`SPEAKERDESK_WHISPER_RESULT` to a fresh result filename, and
+`SPEAKERDESK_TEST_WHISPER` to the pinned platform model directory. On Mac, also
+set `SPEAKERDESK_TEST_MLX` and `DYLD_LIBRARY_PATH` to the pinned runtime's `lib`
+directory. The shared runtime guard checks the actual loaded dylib and
+explicit Metal library before capture. On Windows, set
+`SPEAKERDESK_TEST_WINDOWS_RUNTIME` to the private pinned runtime and
+`SPEAKERDESK_WHISPER_MAC_REFERENCE` to the completed Mac capture; its SHA-256 is
+bound before inference. Model loading still requires normal `ModelAdmission`.
+
+```sh
+cargo test --locked -p speakerdesk-models --test whisper_windows_qualification \
+  native_adapter_captures_frozen_windows_contract -- --ignored --exact --nocapture
+python experiments/windows/whisper/windows_qualification.py compare \
+  --cases /private/whisper-windows-v2/cases.json --mac /returned/mac.json \
+  --windows /returned/windows.json --output /returned/comparison.json
+```
+
+The harness writes every returned vector, exact Float32 bits and its hash to
+a fresh failed-by-default receipt before checking validity or repeats. Errors
+and unwinds retain those observations. The comparator preserves raw capture
+identities and partial comparisons in a fresh failure report, then exits
+nonzero. Complete comparable captures report the old strict results separately.
+Neither tool activates inference or rewrites a reference.
+
+The completed matrix used 112 complete probes per backend plus one valid
+post-failure isolation probe, within the frozen maximum of 128. Empty and
+nonfinite input rejection and pre-cancellation occur before graph entry.
+Pre-cancellation does not prove in-flight ORT termination or reuse; that stays
+an assembled lifecycle gate. Loaded DLL hashes bind the runtime, while the
+existing exact-graph profile receipts establish component DML placement;
+this adapter capture adds no per-node placement or application-latency claim.
+Windows x64 dispatcher/setup is now enabled for assembled application
+qualification. Release still requires the assembled application and
+distribution gates; this component report does not decide activation.
+
+## Retained scalar diagnosis and export tools
 
 The observer graph reproduced the failed full graph's final probability bits
 exactly. Conv1, Conv2 and added positions matched retained source values; the
@@ -49,9 +199,10 @@ remaining scalar target would require more source arithmetic compatibility
 work inside the block and renewed full-case qualification. Its cost is not
 bounded by a demonstrated single remaining fix; it also adds source/runtime
 pin and cross-device verification obligations. Further candidate guesses are
-not authorized by this batch. The next step requires an owner decision about
-the source scalar contract or a different maintained backend/export approach,
-without changing the existing gate or independent references here.
+not authorized by this closed arithmetic-matching batch. The owner instead
+authorized the separate prospective functional contract above, which has now
+passed. That decision preserves the original scalar gate and independent
+references; it does not establish matching source reductions or normalization.
 
 The checkpoint is
 [`mlx-community/whisper-tiny-asr-fp16@77fa3f5`](https://huggingface.co/mlx-community/whisper-tiny-asr-fp16/tree/77fa3f52b482ec80d086df55f893065a9baab172).

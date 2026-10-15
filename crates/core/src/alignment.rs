@@ -10,6 +10,8 @@ use unicode_normalization::{UnicodeNormalization, char::canonical_combining_clas
 
 #[cfg(test)]
 mod timing_replay;
+#[cfg(test)]
+mod windows_qualification;
 
 pub const TOKENS_SHA256: &str = "a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31";
 pub const CHECKPOINT: &str = "omnilingual-ctc-native-f32-v1-38ff6a225e75";
@@ -54,7 +56,14 @@ pub(crate) fn retain_growing_prefix(
     ) else {
         return;
     };
-    reading.installed_provider_identity = Some(NATIVE_PROVIDER.into());
+    let Some(descriptor) = reading
+        .reading_turn_provenance
+        .as_ref()
+        .and_then(|receipt| descriptor_for_model(&receipt.model_sha256))
+    else {
+        return;
+    };
+    reading.installed_provider_identity = Some(descriptor.provider_identity_sha256.into());
     if timing::validated_turns(&reading).is_empty() {
         return;
     }
@@ -72,6 +81,33 @@ pub(crate) fn retain_growing_prefix(
 
 fn attach_through(segment: &mut crate::document::Segment, alignment: Value, anchor_end: i64) {
     use timing::{AudioAnchor, ReadingRow, ReadingWordEvidence, SpeakerActivity, TimedWord};
+    let descriptor = descriptor_for_alignment(&alignment);
+    let neutral = alignment["status"] == "unresolved"
+        && alignment["complete"] == false
+        && alignment["qualified_scope"] == "unqualified"
+        && alignment["timing_accuracy_calibrated_languages"] == json!([])
+        && alignment["characters"] == json!([])
+        && alignment["non_speech_proof"] == false
+        && [
+            "model_sha256",
+            "provider_id",
+            "provider_identity_sha256",
+            "candidate_runtime",
+            "frame_calibration_id",
+            "score_calibration_id",
+        ]
+        .iter()
+        .all(|key| alignment.get(*key).is_some_and(Value::is_null))
+        && alignment["words"].as_array().is_some_and(|words| {
+            words.iter().all(|word| {
+                word["status"] == "unresolved"
+                    && word["start_sample"].is_null()
+                    && word["end_sample"].is_null()
+            })
+        });
+    if descriptor.is_none() && !neutral {
+        return;
+    }
     let start = (segment.start * 16000.).round() as i64;
     let end = (segment.end * 16000.).round() as i64;
     let machine_revision = segment.machine_revision.unwrap_or(0);
@@ -94,8 +130,6 @@ fn attach_through(segment: &mut crate::document::Segment, alignment: Value, anch
     if alignment["raw_text"] != segment.text
         || alignment["text_sha256"] != sha256_hex(segment.text.as_bytes())
         || alignment["audio_anchor"] != anchor
-        || alignment["provider_identity_sha256"] != NATIVE_PROVIDER
-        || alignment["model_sha256"] != timing::MODEL
     {
         return;
     }
@@ -106,6 +140,11 @@ fn attach_through(segment: &mut crate::document::Segment, alignment: Value, anch
     segment
         .rest
         .insert("reading_alignment".into(), alignment.clone());
+    let Some(descriptor) = descriptor else {
+        segment.reading_turns = None;
+        segment.reading_turn_provenance = None;
+        return;
+    };
     let Some(activity) = segment.speaker_activity.clone() else {
         return;
     };
@@ -158,7 +197,7 @@ fn attach_through(segment: &mut crate::document::Segment, alignment: Value, anch
                 start_sample: start,
                 end_sample: anchor_end,
             },
-            model_sha256: timing::MODEL.into(),
+            model_sha256: descriptor.model_sha256.into(),
             calibration_id: alignment["score_calibration_id"]
                 .as_str()
                 .map(str::to_owned),
@@ -166,13 +205,13 @@ fn attach_through(segment: &mut crate::document::Segment, alignment: Value, anch
                 .as_str()
                 .map(str::to_owned),
             timing_unit_policy_id: Some(TIMING_UNIT_POLICY_ID.into()),
-            provider_id: Some(PROVIDER_ID.into()),
-            provider_identity_sha256: Some(NATIVE_PROVIDER.into()),
+            provider_id: Some(descriptor.provider_id.into()),
+            provider_identity_sha256: Some(descriptor.provider_identity_sha256.into()),
             normalization_policy_id: Some(NORMALIZATION_POLICY_ID.into()),
             words,
         }),
         speaker_activity: Some(activity.clone()),
-        installed_provider_identity: Some(NATIVE_PROVIDER.into()),
+        installed_provider_identity: Some(descriptor.provider_identity_sha256.into()),
     };
     let turns = timing::project_turns(&row);
     if turns.is_empty() {
@@ -198,8 +237,8 @@ fn attach_through(segment: &mut crate::document::Segment, alignment: Value, anch
         json!({"utterance_id":identity,"canonical_machine_revision":canonical_revision,"machine_revision":machine_revision,"audio_revision":audio_revision,"language_epoch":epoch,"capture_source":segment.capture_source,
         "text_sha256":sha256_hex(segment.text.as_bytes()),"audio_anchor":anchor,"activity_sha256":sha256_hex(activity_json.as_bytes()),"turns_sha256":sha256_hex(turns_json.as_bytes()),
         "method":"ctc_units_temporal_nvidia_v3","transition_margin_samples":4000,"uncertainty_policy":"emission_inside_activity_no_competing_owner_in_margin",
-        "model_sha256":timing::MODEL,"calibration_id":alignment["score_calibration_id"],"frame_calibration_id":alignment["frame_calibration_id"],
-        "timing_unit_policy_id":TIMING_UNIT_POLICY_ID,"provider_id":PROVIDER_ID,"provider_identity_sha256":NATIVE_PROVIDER,"normalization_policy_id":NORMALIZATION_POLICY_ID}),
+        "model_sha256":descriptor.model_sha256,"calibration_id":alignment["score_calibration_id"],"frame_calibration_id":alignment["frame_calibration_id"],
+        "timing_unit_policy_id":TIMING_UNIT_POLICY_ID,"provider_id":descriptor.provider_id,"provider_identity_sha256":descriptor.provider_identity_sha256,"normalization_policy_id":NORMALIZATION_POLICY_ID}),
     );
 }
 
@@ -306,7 +345,11 @@ impl Vocabulary {
         let Some(valid_frames) = pcm.len().checked_sub(400).map(|samples| samples / 320 + 1) else {
             return false;
         };
-        let expected = base(&prepared, start, pcm.len(), language);
+        let Some(descriptor) = descriptor_for_alignment(alignment) else {
+            return false;
+        };
+        let mut expected = base(&prepared, start, pcm.len(), language);
+        bind_descriptor(&mut expected, descriptor);
         if [
             "schema_version",
             "text_source",
@@ -472,7 +515,7 @@ impl Vocabulary {
             || scores.audio_num_samples as usize != n
             || scores.frame_hop_samples != 320
             || scores.frame_origin_samples != 0
-            || scores.model != timing::MODEL
+            || descriptor_for_model(&scores.model).is_none()
             || scores.vocabulary_sha256 != TOKENS_SHA256
             || width == 0
             || columns.len() != width
@@ -496,6 +539,10 @@ impl Vocabulary {
             result["reason"] = json!("insufficient_acoustic_context");
             return;
         }
+        bind_descriptor(
+            result,
+            descriptor_for_model(&scores.model).expect("validated model"),
+        );
         let mut expanded = Vec::new();
         let mut positions = Vec::new();
         let mut separators = HashMap::new();
@@ -701,16 +748,50 @@ fn kana(c: char) -> bool {
     c != 'ー' && matches!(c as u32,0x3041..=0x3096|0x30a1..=0x30fa|0xff66..=0xff9d)
 }
 
-pub(crate) fn calibration_for_language(language: &str) -> &'static str {
-    if language == "en" {
-        timing::CALIBRATION
+pub(crate) fn descriptor_for_alignment(alignment: &Value) -> Option<&'static Descriptor> {
+    let descriptor = descriptor_for_model(alignment["model_sha256"].as_str()?)?;
+    let calibration = descriptor.calibration_for_language(alignment["language"].as_str()?);
+    (alignment["provider_id"] == descriptor.provider_id
+        && alignment["provider_identity_sha256"] == descriptor.provider_identity_sha256
+        && alignment["frame_calibration_id"] == calibration
+        && alignment["score_calibration_id"] == calibration
+        && alignment["normalization_policy_id"] == NORMALIZATION_POLICY_ID
+        && alignment["timing_unit_policy_id"] == TIMING_UNIT_POLICY_ID)
+        .then_some(descriptor)
+}
+
+fn bind_descriptor(result: &mut Value, descriptor: &Descriptor) {
+    let language = result["language"].as_str().expect("prepared language");
+    let calibration = descriptor.calibration_for_language(language);
+    let calibrated = descriptor.accuracy_languages.contains(&language)
+        && result["normalization_spans"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        && result["words"].as_array().is_some_and(|words| {
+            words
+                .iter()
+                .all(|word| word["unit_kind"] == "whitespace_run")
+        });
+    let accuracy_languages = if calibrated {
+        vec![language.to_owned()]
     } else {
-        FUNCTIONAL_POLICY_ID
-    }
+        vec![]
+    };
+    result["model_sha256"] = json!(descriptor.model_sha256);
+    result["provider_id"] = json!(descriptor.provider_id);
+    result["provider_identity_sha256"] = json!(descriptor.provider_identity_sha256);
+    result["candidate_runtime"] = json!(descriptor.candidate_runtime);
+    result["frame_calibration_id"] = json!(calibration);
+    result["score_calibration_id"] = json!(calibration);
+    result["qualified_scope"] = json!(if calibrated {
+        "bounded_ami_english_coarse_envelopes"
+    } else {
+        "multilingual_functional_ctc_units"
+    });
+    result["timing_accuracy_calibrated_languages"] = json!(accuracy_languages);
 }
 
 fn base(p: &Prepared, start: i64, samples: usize, language: &str) -> Value {
-    let calibration = calibration_for_language(language);
     let words:Vec<_> = timing::raw_units(&p.text,TIMING_UNIT_POLICY_ID).expect("known policy").iter().map(|u| json!({"text":u.text,"start_char":u.start_char,"end_char":u.end_char,"start_utf16":u.start_utf16,"end_utf16":u.end_utf16,"unit_kind":u.unit_kind.as_str(),"status":"unresolved","start_sample":null,"end_sample":null})).collect();
     let spans: Vec<_> = p
         .aliases
@@ -725,16 +806,13 @@ fn base(p: &Prepared, start: i64, samples: usize, language: &str) -> Value {
             v
         })
         .collect();
-    let english = language == "en"
-        && spans.is_empty()
-        && words.iter().all(|w| w["unit_kind"] == "whitespace_run");
-    json!({"schema_version":1,"text_source":"cohere","raw_text":p.text,"text_sha256":sha256_hex(p.text.as_bytes()),"model_sha256":timing::MODEL,
+    json!({"schema_version":1,"text_source":"cohere","raw_text":p.text,"text_sha256":sha256_hex(p.text.as_bytes()),"model_sha256":null,
         "offset_unit":"unicode_codepoint","timing_kind":"ctc_emission_cell_envelope","audio_anchor":{"start_sample":start,"end_sample":start+samples as i64},
         "status":"unresolved","complete":false,"reason":null,"words":words,"characters":[],"unsupported":p.unsupported,"acoustic_aliases":p.aliases,"non_speech_proof":false,
         "language":language,"normalization_policy_id":NORMALIZATION_POLICY_ID,"timing_unit_policy_id":TIMING_UNIT_POLICY_ID,"linguistic_word_claim":false,
-        "upstream_normalization_revision":UPSTREAM_NORMALIZATION_REVISION,"normalization_spans":spans,"frame_calibration_id":calibration,"score_calibration_id":calibration,
-        "provider_id":PROVIDER_ID,"provider_identity_sha256":NATIVE_PROVIDER,"candidate_runtime":"rust_mlx_dequantized_float32_GPU",
-        "qualified_scope":if english {"bounded_ami_english_coarse_envelopes"} else {"multilingual_functional_ctc_units"},"timing_accuracy_calibrated_languages":if english {vec!["en"]} else {vec![]}})
+        "upstream_normalization_revision":UPSTREAM_NORMALIZATION_REVISION,"normalization_spans":spans,"frame_calibration_id":null,"score_calibration_id":null,
+        "provider_id":null,"provider_identity_sha256":null,"candidate_runtime":null,
+        "qualified_scope":"unqualified","timing_accuracy_calibrated_languages":[]})
 }
 
 #[cfg(test)]
@@ -889,6 +967,7 @@ pub(crate) mod tests {
             v.materialize(&p, &s, &mut result);
             assert_eq!(result["reason"], "invalid_ctc_scores");
             assert_eq!(result["complete"], false);
+            assert_unqualified(&result);
         }
         let (v, p, mut s, mut result) = replay(case);
         s.valid_frames = 0;
@@ -899,6 +978,63 @@ pub(crate) mod tests {
         assert_eq!(result["reason"], "insufficient_acoustic_context");
         assert_eq!(result["raw_text"], "oo");
         assert_eq!(result["non_speech_proof"], false);
+        assert_unqualified(&result);
+    }
+
+    fn assert_unqualified(result: &Value) {
+        for key in [
+            "model_sha256",
+            "provider_id",
+            "provider_identity_sha256",
+            "candidate_runtime",
+            "frame_calibration_id",
+            "score_calibration_id",
+        ] {
+            assert!(result[key].is_null(), "{key}: {result}");
+        }
+        assert_eq!(result["qualified_scope"], "unqualified");
+        assert_eq!(result["timing_accuracy_calibrated_languages"], json!([]));
+    }
+
+    #[test]
+    fn skipped_acoustic_requests_do_not_claim_a_backend_or_accuracy() {
+        let vocabulary =
+            Vocabulary::parse_tokens("<s> 0\n<pad> 1\n</s> 2\n<unk> 3\n  4\na 5\n").unwrap();
+        let models = crate::import::tests::Scripted::new(vec![], vec![]);
+        for (text, reason) in [
+            ("日本", "unsupported_text"),
+            ("  !!!", "no_acoustic_target"),
+        ] {
+            let result = vocabulary
+                .align(&models, &[0.; 720], text, 16000, "en")
+                .unwrap();
+            assert_eq!(result["raw_text"], text);
+            assert_eq!(result["reason"], reason);
+            assert_eq!(result["status"], "unresolved");
+            assert_unqualified(&result);
+            let segment = crate::transcript::bare_segment("neutral", 1., 1.045, "speaker_0", text);
+            let mut retained = segment.clone();
+            retained.reading_turns = Some(json!([{"text":"stale"}]));
+            attach(&mut retained, result.clone());
+            assert_eq!(retained.rest["reading_alignment"], result);
+            assert!(retained.reading_turns.is_none());
+            assert!(retained.reading_turn_provenance.is_none());
+            for (key, wrong) in [
+                ("model_sha256", json!(WINDOWS.model_sha256)),
+                ("provider_id", json!(MAC.provider_id)),
+                (
+                    "qualified_scope",
+                    json!("bounded_ami_english_coarse_envelopes"),
+                ),
+                ("timing_accuracy_calibrated_languages", json!(["en"])),
+            ] {
+                let mut crossed = result.clone();
+                crossed[key] = wrong;
+                let mut rejected = segment.clone();
+                attach(&mut rejected, crossed);
+                assert!(!rejected.rest.contains_key("reading_alignment"), "{key}");
+            }
+        }
     }
     #[test]
     fn repeated_tokens_need_observed_blank_and_low_scores_are_not_renormalized() {
@@ -1102,62 +1238,150 @@ pub(crate) mod tests {
 
     #[test]
     fn native_projection_survives_serialization_and_exports_reject_stale_or_forged_evidence() {
-        let all = cases();
-        let case = &all["cases"][0];
-        let (v, p, s, mut result) = replay(case);
-        v.materialize(&p, &s, &mut result);
-        let end = 1. + s.audio_num_samples as f64 / 16000.;
-        let mut segment: crate::document::Segment=serde_json::from_value(json!({
+        for descriptor in [&MAC, &WINDOWS] {
+            let all = cases();
+            let case = &all["cases"][0];
+            let (v, p, mut s, mut result) = replay(case);
+            // Independent score replay tests provenance transport, not Windows model accuracy.
+            s.model = descriptor.model_sha256.into();
+            v.materialize(&p, &s, &mut result);
+            assert_eq!(result["complete"], true);
+            assert_eq!(result["model_sha256"], descriptor.model_sha256);
+            assert_eq!(result["provider_id"], descriptor.provider_id);
+            assert_eq!(
+                result["provider_identity_sha256"],
+                descriptor.provider_identity_sha256
+            );
+            assert_eq!(result["candidate_runtime"], descriptor.candidate_runtime);
+            assert_eq!(
+                result["timing_accuracy_calibrated_languages"],
+                json!(descriptor.accuracy_languages)
+            );
+            let pcm = vec![0.; s.audio_num_samples as usize];
+            result["audio_float32_sha256"] = json!(pcm_sha256(&pcm));
+            assert!(v.matches_input(&result, &pcm, &p.text, 16000, "en"));
+            for (key, wrong) in [
+                ("model_sha256", "unknown"),
+                ("provider_id", "wrong-provider"),
+                ("provider_identity_sha256", "wrong-identity"),
+                ("score_calibration_id", "crossed-calibration"),
+                ("frame_calibration_id", "crossed-calibration"),
+            ] {
+                let mut crossed = result.clone();
+                crossed[key] = json!(wrong);
+                assert!(
+                    !v.matches_input(&crossed, &pcm, &p.text, 16000, "en"),
+                    "{key}"
+                );
+            }
+            let end = 1. + s.audio_num_samples as f64 / 16000.;
+            let mut segment: crate::document::Segment=serde_json::from_value(json!({
             "id":"seg-0","start":1.,"end":end,"speaker":"unassigned","text":case["text"],"language":"en",
             "machine_revision":7,"audio_revision":11,"canonical_machine_revision":7,"language_epoch":3,
             "capture_source":{"source_id":"system","source_revision":1,"catalog_sha256":"retained-catalog"},
             "speaker_activity":{"audio_revision":11,"observed_end_sample":(end*16000.).round() as i64,
                 "regions":[{"start_sample":16000,"end_sample":(end*16000.).round() as i64,"speakers":["speaker_0"]}]}
         })).unwrap();
-        attach(&mut segment, result);
-        assert_eq!(segment.machine_revision, Some(7));
-        assert_eq!(segment.audio_revision, Some(11));
-        assert_eq!(segment.rest["language_epoch"], 3);
-        assert!(segment.reading_turns.is_some());
-        let document:crate::document::Document=serde_json::from_value(json!({"schema_version":1,"segments":[segment],"speakers":{"unassigned":"Unknown","speaker_0":"Alice"}})).unwrap();
-        let roundtrip: crate::document::Document =
-            serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
-        let export = crate::export::export(&roundtrip, "txt").unwrap().body;
-        assert!(export.contains("Alice:"), "{export}");
-        assert!(export.contains(case["text"].as_str().unwrap()));
-        for changes in [
-            json!({"text":"Edited words"}),
-            json!({"start":1.01}),
-            json!({"speaker":"speaker_0"}),
-        ] {
-            let edited = crate::edit::edit_passage(crate::edit::PassageEditInput {
-                status: "ready",
-                duration: end,
-                revision: 1,
-                document: Some(&roundtrip),
-                segment_id: "seg-0",
-                body: &json!({"segment_revision":7,"changes":changes}),
-                now: 1.,
-            })
-            .unwrap();
-            let late =
-                crate::live::apply_canonical_candidate(&edited.document, &roundtrip.segments[0]);
-            assert!(late.segments[0].reading_turns.is_none());
-            assert!(late.segments[0].reading_turn_provenance.is_none());
-            assert!(!late.segments[0].rest.contains_key("reading_alignment"));
+            for other in [&MAC, &WINDOWS]
+                .into_iter()
+                .filter(|other| *other != descriptor)
+            {
+                for (key, wrong) in [
+                    ("model_sha256", other.model_sha256),
+                    ("provider_id", other.provider_id),
+                    ("provider_identity_sha256", other.provider_identity_sha256),
+                    ("score_calibration_id", other.calibration_for_language("en")),
+                    ("frame_calibration_id", other.calibration_for_language("en")),
+                ] {
+                    let mut crossed = result.clone();
+                    crossed[key] = json!(wrong);
+                    let mut rejected = segment.clone();
+                    attach(&mut rejected, crossed);
+                    assert!(rejected.reading_turns.is_none(), "{key}");
+                    assert!(!rejected.rest.contains_key("reading_alignment"), "{key}");
+                }
+            }
+            attach(&mut segment, result);
+            assert_eq!(segment.machine_revision, Some(7));
+            assert_eq!(segment.audio_revision, Some(11));
+            assert_eq!(segment.rest["language_epoch"], 3);
+            assert!(segment.reading_turns.is_some());
+            assert_eq!(
+                segment.reading_turn_provenance.as_ref().unwrap()["model_sha256"],
+                descriptor.model_sha256
+            );
+            let mut growing = segment.clone();
+            growing.end += 1.;
+            crate::edit::clear_alignment_bundle(&mut growing);
+            retain_growing_prefix(&segment, &mut growing);
+            assert_eq!(
+                growing.rest["reading_alignment"]["provider_identity_sha256"],
+                descriptor.provider_identity_sha256
+            );
+            assert!(
+                growing
+                    .reading_turns
+                    .as_ref()
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|turn| turn["attribution"] == "unknown")
+            );
+            // Extending audio alone supplies no speaker lookahead. Fresh same-owner
+            // observations through the new endpoint restore the prior attribution.
+            growing.machine_revision = Some(8);
+            growing.audio_revision = Some(12);
+            let observed = (growing.end * 16000.).round() as i64;
+            let activity = growing.speaker_activity.as_mut().unwrap();
+            activity["audio_revision"] = json!(12);
+            activity["observed_end_sample"] = json!(observed);
+            activity["regions"][0]["end_sample"] = json!(observed);
+            crate::edit::clear_alignment_bundle(&mut growing);
+            retain_growing_prefix(&segment, &mut growing);
+            assert_eq!(growing.reading_turns, segment.reading_turns);
+            let document:crate::document::Document=serde_json::from_value(json!({"schema_version":1,"segments":[segment],"speakers":{"unassigned":"Unknown","speaker_0":"Alice"}})).unwrap();
+            let roundtrip: crate::document::Document =
+                serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
+            let export = crate::export::export(&roundtrip, "txt").unwrap().body;
+            assert!(export.contains("Alice:"), "{export}");
+            assert!(export.contains(case["text"].as_str().unwrap()));
+            for changes in [
+                json!({"text":"Edited words"}),
+                json!({"start":1.01}),
+                json!({"speaker":"speaker_0"}),
+            ] {
+                let edited = crate::edit::edit_passage(crate::edit::PassageEditInput {
+                    status: "ready",
+                    duration: end,
+                    revision: 1,
+                    document: Some(&roundtrip),
+                    segment_id: "seg-0",
+                    body: &json!({"segment_revision":7,"changes":changes}),
+                    now: 1.,
+                })
+                .unwrap();
+                let late = crate::live::apply_canonical_candidate(
+                    &edited.document,
+                    &roundtrip.segments[0],
+                );
+                assert!(late.segments[0].reading_turns.is_none());
+                assert!(late.segments[0].reading_turn_provenance.is_none());
+                assert!(!late.segments[0].rest.contains_key("reading_alignment"));
+            }
+            let mut stale = roundtrip.clone();
+            stale.segments[0].text = "Edited words".into();
+            let export = crate::export::export(&stale, "txt").unwrap().body;
+            assert!(export.contains("Unknown: Edited words"), "{export}");
+            let mut forged = roundtrip;
+            forged.segments[0].reading_turn_provenance.as_mut().unwrap()["provider_identity_sha256"] =
+                json!("forged");
+            forged.segments[0]
+                .rest
+                .insert("installed_provider_identity".into(), json!("forged"));
+            let export = crate::export::export(&forged, "txt").unwrap().body;
+            assert!(export.contains("Unknown:"), "{export}");
+            assert!(!export.contains("Alice:"), "{export}");
         }
-        let mut stale = roundtrip.clone();
-        stale.segments[0].text = "Edited words".into();
-        let export = crate::export::export(&stale, "txt").unwrap().body;
-        assert!(export.contains("Unknown: Edited words"), "{export}");
-        let mut forged = roundtrip;
-        forged.segments[0].reading_turn_provenance.as_mut().unwrap()["provider_identity_sha256"] =
-            json!("forged");
-        forged.segments[0]
-            .rest
-            .insert("installed_provider_identity".into(), json!("forged"));
-        let export = crate::export::export(&forged, "txt").unwrap().body;
-        assert!(export.contains("Unknown:"), "{export}");
-        assert!(!export.contains("Alice:"), "{export}");
     }
 }

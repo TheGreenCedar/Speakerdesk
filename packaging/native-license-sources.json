@@ -138,6 +138,30 @@
     "ReDimNet2 model terms": {
       "url": "https://raw.githubusercontent.com/PalabraAI/redimnet2/2a8d15f65b1dfb5d73fede2f11ee42bcccca3035/LICENSE",
       "sha256": "3d5a4bf9936a7d09dd770588c0d7cb116fc16916a0310d71fb1fff5d64562101"
+    },
+    "Silero VAD v6 model and source MIT terms": {
+      "url": "https://raw.githubusercontent.com/snakers4/silero-vad/fba061dc5559f696e62171e9a0741782b0fdc23c/LICENSE",
+      "sha256": "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b"
+    },
+    "Nemotron model materials OpenMDW 1.1 terms": {
+      "url": "https://raw.githubusercontent.com/OpenMDW/OpenMDW/9067ba54b2f84bc9e15a05734f570ec88e9f445d/1.1/LICENSE.OpenMDW-1.1",
+      "sha256": "2ab44b68365473c112f5092211a38f231cb23e50de68b75a13369adbd76a74df"
+    },
+    "Apache 2.0 model terms for Cohere, Whisper conversion, Omnilingual CTC and MossFormer2": {
+      "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    "Omnilingual CTC Meta model copyright and license notice": {
+      "url": "https://huggingface.co/csukuangfj2/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12/resolve/6fc542a3b0661c8278cca1230c34deb989f31202/LICENSE",
+      "sha256": "a70a523bafbb595c2844104feb313d204904dac91c3d186c05f22a10a71c7a94"
+    },
+    "Transformers 5.7.0 graph reference source": {
+      "url": "https://raw.githubusercontent.com/huggingface/transformers/6ffbb07f93d9e44457450d1150136309b0dc966b/LICENSE",
+      "sha256": "77fd4710def9ec3c0f6225800e0235f15a425abd4a8b03559127fcd782612049"
+    },
+    "FLASH-pytorch source acknowledged by the MossFormer2 block": {
+      "url": "https://raw.githubusercontent.com/lucidrains/FLASH-pytorch/7484ce9c00781f0aa6223073acde0eb3c1912750/LICENSE",
+      "sha256": "c590e42ada471364cf0807aa29ed5f8dda4a7ab9e5d585be774d63ff596d9005"
     }
   }
 }

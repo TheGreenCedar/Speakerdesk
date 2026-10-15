@@ -1,6 +1,6 @@
 # Architecture
 
-Speakerdesk is one executable that runs in three modes, plus a platform capture helper. The complete application runs on macOS; the Windows implementation is still under qualification and its production inference dispatcher remains disabled. See [ADR-0001](adr/0001-rust-core-inference-child.md) for why inference lives in a separate process.
+Speakerdesk is one executable that runs in three modes, plus a platform capture helper. The complete application runs on macOS; the Windows x64 implementation is enabled for assembled application qualification and is not yet released. See [ADR-0001](adr/0001-rust-core-inference-child.md) for why inference lives in a separate process.
 
 For feature entry points, targeted checks and debugging paths, start with
 [Maintaining Speakerdesk](maintaining.md).
@@ -18,7 +18,7 @@ Storage defaults to the app data directory (`SPEAKERDESK_HOME` overrides); `SPEA
 
 - `speakerdesk-core`: domain types and product rules, with no I/O to models or Metal. Holds the document, edit, import, live, language, speech, timing/alignment, review, export, people and voice rules, plus the store, IPC payloads, `messages` and `security`.
 - `speakerdesk-host`: the axum process. It runs routes, the inference supervisor (`inference.rs`), capture transport/writer/processing, admission, setup and workers. The `fixtures` feature builds `speakerdesk-dev` and `inference-fixture` for tests.
-- `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring, CTC timing and MossFormer separation with mlx-rs, and ReDimNet through Core ML. Windows native model adapters sit beside their Mac counterparts and use the pinned Windows ML/ONNX Runtime distribution with DirectML. They are exercised directly by component tests; the production Windows child and Linux child still report `unavailable`. [Windows qualification](../experiments/windows/README.md) identifies the remaining boundaries.
+- `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring, CTC timing and MossFormer separation with mlx-rs, and ReDimNet through Core ML. Windows native model adapters sit beside their Mac counterparts and use the pinned Windows ML/ONNX Runtime distribution with DirectML through the same dispatcher and IPC server. Linux remains a protocol stub. [Windows qualification](../experiments/windows/README.md) identifies the remaining application and release gates.
 - `speakerdesk-echo`: buffering and reference clock for the pinned native WebRTC AEC3 library (`desktop/capture/echo`, built by `scripts/setup_echo.py`).
 - `xtask`: bundle verification, Python-sidecar checks and the native model comparison probe (`cargo xtask --help`).
 
@@ -32,10 +32,12 @@ The editor frontend lives in `speakerdesk/static/` and `speakerdesk/templates/` 
 - Offline diarization uses the same open/feed/close sessions as live capture. The child never reads files and has no whole-recording request.
 - Diarization turns use absolute sample coordinates.
 - CTC scores carry audio length, valid frame count, frame hop/origin, explicit column IDs, model identity and vocabulary digest. Core owns the supplied-text alignment; model output never replaces Cohere's transcript text.
+- `timing_policy.rs` binds each known score model to its provider and qualification. Alignment, continuation and export validate that same tuple. Qualification is attached only after valid acoustic scores; the Windows provider has functional timing provenance and does not inherit the Mac English accuracy calibration.
 - Numerical comparisons must identify the native MLX runtime and Metal library, not just the MLX version. The build pins the macOS 15 MLX 0.32.2 archive in `scripts/fetch_mlx_runtime.sh`, and `vendor/mlx-sys` patches the build to link it (see `vendor/mlx-sys/SPEAKERDESK.md`).
 
 Windows native loading is owned by `models/src/windows_runtime.rs`. Runtime DLL
-and model pins are separate from the host's download catalog. Each loaded model
+pins are separate from model artifacts; native model admission and host setup
+share `models/src/windows-model-artifacts.json`. Each loaded model
 retains verified file handles until its native objects are dropped, preventing
 replacement or writes between verification and runtime reads. `Operation` owns
 cancellation for either backend; the parent still owns bounded termination and
