@@ -1,6 +1,6 @@
 # Architecture
 
-Speakerdesk is one executable that runs in three modes, plus a platform capture helper. The complete application runs on macOS; the Windows x64 implementation is enabled for assembled application qualification and is not yet released. See [ADR-0001](adr/0001-rust-core-inference-child.md) for why inference lives in a separate process.
+Speakerdesk is one executable that runs in three modes, plus a platform capture helper. The application is released for Apple Silicon macOS and [Windows x64](https://github.com/TheGreenCedar/Speakerdesk/releases/tag/v0.7.7). Windows qualification covers the available AMD PC; see [Windows qualification](../experiments/windows/README.md) for evidence and remaining limits. See [ADR-0001](adr/0001-rust-core-inference-child.md) for why inference lives in a separate process.
 
 For feature entry points, targeted checks and debugging paths, start with
 [Maintaining Speakerdesk](maintaining.md).
@@ -10,7 +10,7 @@ For feature entry points, targeted checks and debugging paths, start with
 | Tauri shell (default) | `desktop/src-tauri/src/main.rs` | Window, native menus, exports, updater. Starts the host. |
 | `--native-host <storage> <models>` | `speakerdesk_host::native::run` | axum HTTP API and the embedded editor, persistence, capture coordination, setup, scheduling. |
 | `--inference <models>` | `speakerdesk_models::serve` | All neural inference, in one resident child process. |
-| `speakerdesk-capture` | `desktop/capture/*.swift`, `desktop/capture/windows/` | macOS: AVAudioEngine and ScreenCaptureKit. Windows candidate: WASAPI microphone and loopback capture. |
+| `speakerdesk-capture` | `desktop/capture/*.swift`, `desktop/capture/windows/` | macOS: AVAudioEngine and ScreenCaptureKit. Windows: WASAPI microphone and loopback capture. |
 
 Storage defaults to the app data directory (`SPEAKERDESK_HOME` overrides); `SPEAKERDESK_NATIVE_MODELS` overrides the model directory.
 
@@ -18,7 +18,7 @@ Storage defaults to the app data directory (`SPEAKERDESK_HOME` overrides); `SPEA
 
 - `speakerdesk-core`: domain types and product rules, with no I/O to models or Metal. Holds the document, edit, import, live, language, speech, timing/alignment, review, export, people and voice rules, plus the store, IPC payloads, `messages` and `security`.
 - `speakerdesk-host`: the axum process. It runs routes, the inference supervisor (`inference.rs`), capture transport/writer/processing, admission, setup and workers. The `fixtures` feature builds `speakerdesk-dev` and `inference-fixture` for tests.
-- `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring, CTC timing and MossFormer separation with mlx-rs, and ReDimNet through Core ML. Windows native model adapters sit beside their Mac counterparts and use the pinned Windows ML/ONNX Runtime distribution with DirectML through the same dispatcher and IPC server. Linux remains a protocol stub. [Windows qualification](../experiments/windows/README.md) identifies the remaining application and release gates.
+- `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring, CTC timing and MossFormer separation with mlx-rs, and ReDimNet through Core ML. Windows native model adapters sit beside their Mac counterparts and use the pinned Windows ML/ONNX Runtime distribution with DirectML through the same dispatcher and IPC server. Linux remains a protocol stub. [Windows qualification](../experiments/windows/README.md) records platform evidence and remaining limits.
 - `speakerdesk-echo`: buffering and reference clock for the pinned native WebRTC AEC3 library (`desktop/capture/echo`, built by `scripts/setup_echo.py`).
 - `xtask`: bundle verification, Python-sidecar checks and the native model comparison probe (`cargo xtask --help`).
 

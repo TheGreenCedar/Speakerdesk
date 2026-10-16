@@ -1,14 +1,15 @@
 # Windows qualification
 
-The Windows x64 inference dispatcher and host setup are enabled for assembled
-application qualification after the seven component gates passed. This does not
-yet establish a qualified Windows application or a public application release. [Issue #20](https://github.com/TheGreenCedar/Speakerdesk/issues/20)
-owns the complete application acceptance; [PR #49](https://github.com/TheGreenCedar/Speakerdesk/pull/49)
-remains a draft.
+Windows x64 [0.7.7](https://github.com/TheGreenCedar/Speakerdesk/releases/tag/v0.7.7)
+is released from `ac664935116ee104c98f6a36b41f0f9004abb549` through
+[PR #49](https://github.com/TheGreenCedar/Speakerdesk/pull/49) for
+[issue #20](https://github.com/TheGreenCedar/Speakerdesk/issues/20). Signed installed
+qualification covers the available AMD PC. Physical-room AEC, NVIDIA/Intel GPUs,
+Windows ARM64 and broad transcription/speaker accuracy remain unqualified.
 
 The retained FP32 diagnostic inventory is **not the shipping design**: the owner
 rejected its 10.27 GB download and memory cost. Cohere now has an
-[original-weight compact candidate](cohere/compact-weights.md), following a
+[original-weight compact runtime](cohere/compact-weights.md), following a
 [bounded UINT4 feasibility gate](cohere/quantized-probe.md). Conversion preserves
 the original packed bytes. Exact native placement now admits numerical work on
 DirectML and proven integer shape work on CPU. The initial memory failure is
@@ -16,8 +17,8 @@ retained; stable ordering subsequently passed the numerical family and full
 reference transcription within the original memory bounds. Pooling in all three Cohere sessions
 brings the actual complete 9.09-second reference request to
 2.57 / 0.67 seconds, including the first use. Combined residency now passes the
-bounded dispatcher test below; sustained live throughput and assembled
-application qualification remain open.
+bounded dispatcher test below; signed installed application evidence is
+summarized below.
 [Later decoder diagnostics](cohere/compact-weights.md#decoder-throughput-diagnostics)
 record their failures separately; do not transfer the FP32 results below to the
 compact candidate.
@@ -48,8 +49,8 @@ The current compact-download inventory is **74 files / 3,223,263,162 bytes**.
 Cohere's ten assets now target `windows-models-20261016`: only the encoder's
 48 finite attention-mask literals and its graph-bound policy differ. The other
 eight Cohere files are unchanged; all other models retain `windows-models-20261015`.
-Artifact publication and the corrected candidate's installed 600-second gate
-remain separate from the component evidence above.
+Artifact publication and the signed installed 600-second gate below are
+separate from the component evidence above.
 CTC downloads the original INT8 parameters and reconstructs the exact qualified
 Float32 store during setup. Its [production preparation gate](ctc/README.md)
 passes in 7.7549075 s (9.6187678 s guarded wrapper, including independent output
@@ -89,17 +90,28 @@ Runtime pins and immutable admission live in
 `crates/models/src/windows_runtime.rs`; download/catalog activation remains a
 separate host boundary. `scripts/build_windows.ps1` builds an unsigned candidate
 by default. Its optional `-Sign` path uses the reviewed
-[Azure signing boundary](../../docs/windows-signing.md); account provisioning
-and a signed installation/update remain separate gates.
+[Azure signing boundary](../../docs/windows-signing.md); signed installation
+and update evidence is summarized below.
 Windows setup and admission share `windows-model-artifacts.json`. Graphs are
 prebuilt; CTC alone reconstructs its unchanged Float32 external weights from the
-compact pinned INT8 download during setup. Its model-release download prefix is
-reserved for the exact pinned artifacts and has not been published. Do not
-advertise Windows downloads until that distribution and native activation pass.
-Signing, standard-user update, model distribution and the assembled
-import/live/edit/save/reopen interactions remain required before release.
+compact pinned INT8 download during setup. The pinned model releases are published,
+and model repair was exercised in the signed installed qualification below. Future
+releases retain separate model-distribution and assembled-application gates.
 
 ## Windows installer qualification
+
+The signed 0.7.7 installer passed standard-user qualification with all **21 installed
+payloads** matching its manifest. Its **600-second public-speech loopback gate**
+passed with a maximum live backlog of **6.23 s**, **29.328 s** Stop drain and
+**69 completed accuracy passages**. Signed lifecycle proof covers save/reopen,
+uninstall/reinstall with data preserved, model repair, normal Quit and owned-process
+cleanup. The actual **0.7.6 to 0.7.7 app-driven update** used the production feed,
+download, install and restart path, matched the same 21 payloads and preserved saved
+data and audio. These bounded results do not establish minimum hardware or
+unlimited recording duration.
+
+The [release evidence record](https://github.com/TheGreenCedar/Speakerdesk/issues/20#issuecomment-6183683342)
+preserves earlier failed candidates and the limits of these observations.
 
 Run `scripts/build_windows.ps1` from the x64 MSVC environment. It writes a new
 candidate directory under `release/windows/<version>/` and records its source
@@ -122,14 +134,18 @@ the UI, quit/reopen, uninstall and reinstall. Check exactly one native host afte
 launch and none after closing. Normal uninstall retains the separate database;
 explicitly requesting app-data deletion is a different operation.
 
-A clean Windows Sandbox run of the unsigned `cef62f2` candidate established
+A historical Windows Sandbox run of the unsigned `cef62f2` candidate established
 non-admin install, WebView2 launch, a UI theme change surviving whole-app reopen,
 owned-host cleanup, and normal uninstall preserving the database byte for byte.
 It also reproduced the loose-versus-installed executable hash defect described
 above. WebView2 was already present; that run does not qualify bootstrapper
 installation, SmartScreen, a signed update, model execution or recording.
 
-## Original Silero feasibility probe
+## Historical Silero feasibility probe
+
+The remaining sections retain the original 2026-10-14 probe and its then-open
+work estimates. Their application gaps describe that historical snapshot, not
+the current release status above.
 
 This is a disposable experiment for issue #20. It exports the exact pinned
 Silero-v6 weights and runs them through native ONNX Runtime CPU and DirectML.
@@ -261,7 +277,7 @@ The owning lane retained `run.log`, profiles, placement and provenance under
 its private `silero-evidence` directory; they are not committed model or audio
 artifacts.
 
-## Seven pinned models
+## Original seven-model work estimates (historical)
 
 | Model and current artifact | Windows inference work still needed | Decisive next evidence |
 | --- | --- | --- |
@@ -277,7 +293,7 @@ These are source-based work estimates. Only Silero has been exported and run in
 this lane; the table does not claim the other graphs are supported or blocked
 by an accelerator.
 
-## Backend direction
+## Original backend direction (historical)
 
 [Windows ML](https://learn.microsoft.com/en-us/windows/ai/new-windows-ml/overview)
 is Windows' maintained ONNX Runtime distribution and preserves the ONNX API.
