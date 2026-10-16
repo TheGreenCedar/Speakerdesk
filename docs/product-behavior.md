@@ -119,6 +119,7 @@ Owner: `desktop/src-tauri/src/updates.rs`, `menus.rs`, `host/src/native_updates.
 
 - The app checks for an update once when it opens. A notice offers **Download update…**, and installing needs a separate **Install and restart**. Dismissing a notice hides that version across restarts, and a newer version shows a new notice. **Speakerdesk → Check for Updates…** checks manually.
 - Download and install are refused while recording, processing, model setup or saves are active. Downgrades are disabled.
+- Windows setup offers a per-user installation or an all-users installation in Program Files. All-users setup requires administrator authorization. Updates retain the running installation's scope and registered folder; an all-users update can request elevation while Speakerdesk itself restarts as the desktop user. An unwritable destination is refused before copying the app or recording a new installation. Meetings and models remain in the user's existing data directory in either scope.
 
 | Shortcut | Action |
 | --- | --- |

@@ -20,7 +20,8 @@
         "silent": true
       },
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "both",
+        "installerHooks": "windows-installer.nsh"
       }
     },
     "resources": {

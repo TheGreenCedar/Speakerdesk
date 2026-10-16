@@ -112,6 +112,8 @@ struct Coordinator {
     control: Control,
     generation: u64,
     selected: Option<Update>,
+    #[cfg(windows)]
+    installation: Option<crate::update_location::WindowsInstallation>,
     verified: Option<Vec<u8>>,
     task: Option<tauri::async_runtime::JoinHandle<()>>,
     downloaded: u64,
@@ -136,6 +138,8 @@ impl Coordinator {
             control: Control::default(),
             generation: 0,
             selected: None,
+            #[cfg(windows)]
+            installation: None,
             verified: None,
             task: None,
             downloaded: 0,
@@ -259,9 +263,22 @@ impl Coordinator {
                     let app = self.app.clone();
                     let sender = self.sender.clone();
                     let epoch = self.epoch;
+                    #[cfg(windows)]
+                    let installer_args = {
+                        self.installation = std::env::current_exe().ok().and_then(|exe| {
+                            crate::update_location::windows_registration(&exe).ok()
+                        });
+                        self.installation
+                            .as_ref()
+                            .map(|installation| installation.installer_arg())
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                    };
                     self.task = Some(tauri::async_runtime::spawn(async move {
-                        let result = match app
-                            .updater_builder()
+                        let builder = app.updater_builder();
+                        #[cfg(windows)]
+                        let builder = builder.installer_args(installer_args);
+                        let result = match builder
                             .endpoints(vec![ENDPOINT.parse().unwrap()])
                             .and_then(|builder| builder.timeout(Duration::from_secs(15)).build())
                         {
@@ -316,10 +333,7 @@ impl Coordinator {
                 // Establish the fresh preparation token before any terminal
                 // refusal, so the runtime can clear its pending install safely.
                 self.status();
-                let location = std::env::current_exe()
-                    .map_err(|_| "Speakerdesk's installed app location could not be verified.")
-                    .and_then(|exe| crate::update_location::preflight(&exe));
-                if let Err(error) = location {
+                if let Err(error) = self.validate_installation() {
                     self.fail(error);
                     self.status();
                     return;
@@ -524,6 +538,12 @@ impl Coordinator {
             .show(|_| {});
     }
     fn install(&mut self) {
+        // Recheck after the service drains, before launching the privileged installer.
+        if let Err(error) = self.validate_installation() {
+            self.error = Some(error.into());
+            self.recover();
+            return;
+        }
         let Some(update) = self.selected.take() else {
             self.recover();
             return;
@@ -542,6 +562,16 @@ impl Coordinator {
             let result = update.install(&bytes).map_err(|e| e.to_string());
             let _ = sender.send(Event::Installed(id, result));
         });
+    }
+    fn validate_installation(&self) -> Result<(), &'static str> {
+        let executable = std::env::current_exe()
+            .map_err(|_| "Speakerdesk's installed app location could not be verified.")?;
+        crate::update_location::preflight(&executable)?;
+        #[cfg(windows)]
+        if Some(crate::update_location::windows_registration(&executable)?) != self.installation {
+            return Err("Speakerdesk's installation changed after checking for updates. Check for updates again before installing.");
+        }
+        Ok(())
     }
     fn recover(&mut self) {
         self.verified = None;
