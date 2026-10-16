@@ -53,19 +53,16 @@ pub fn preflight(executable: &Path) -> Result<(), &'static str> {
 
 #[cfg(windows)]
 pub fn preflight(executable: &Path) -> Result<(), &'static str> {
+    let installation = windows_registration(executable)?;
+    // The all-users installer requests elevation; the app itself stays unelevated.
+    if installation.scope == WindowsScope::AllUsers {
+        return Ok(());
+    }
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ADD_FILE, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
-    if registered_value("DisplayName")? != "Speakerdesk"
-        || !registered_value("MainBinaryName")?.eq_ignore_ascii_case("speakerdesk.exe")
-    {
-        return Err("Speakerdesk's current-user installer registration does not match this app. Reinstall the approved Windows installer.");
-    }
-    let directory = registry_path(&registered_value("InstallLocation")?)?;
-    let uninstaller = registry_path(&registered_value("UninstallString")?)?;
-    let directory = windows_installation(executable, &directory, &uninstaller)?;
     // Request the rights NSIS needs on the existing directory. Opening this
     // handle changes no bytes and creates no probe file inside the installation.
     std::fs::OpenOptions::new()
@@ -73,29 +70,90 @@ pub fn preflight(executable: &Path) -> Result<(), &'static str> {
         .access_mode(FILE_ADD_FILE | FILE_DELETE_CHILD)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(directory)
+        .open(installation.directory)
         .map_err(|_| "Speakerdesk cannot replace files in its install folder. Reinstall the approved Windows installer for this user and try again.")?;
     Ok(())
 }
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowsScope {
+    CurrentUser,
+    AllUsers,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowsInstallation {
+    scope: WindowsScope,
+    directory: PathBuf,
+}
+
+#[cfg(any(windows, test))]
+impl WindowsInstallation {
+    pub fn installer_arg(&self) -> &'static str {
+        match self.scope {
+            WindowsScope::CurrentUser => "/CurrentUser",
+            WindowsScope::AllUsers => "/AllUsers",
+        }
+    }
+}
+
 #[cfg(windows)]
-fn registered_value(name: &str) -> Result<String, &'static str> {
+pub fn windows_registration(executable: &Path) -> Result<WindowsInstallation, &'static str> {
+    let installations = [WindowsScope::CurrentUser, WindowsScope::AllUsers].map(|scope| {
+        const UNINSTALL: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Speakerdesk";
+        if registered_value(scope, UNINSTALL, "DisplayName")? != "Speakerdesk"
+            || !registered_value(scope, UNINSTALL, "MainBinaryName")?.eq_ignore_ascii_case("speakerdesk.exe")
+        {
+            return Err("Speakerdesk's installer registration does not match this app.");
+        }
+        let directory = registry_path(&registered_value(scope, UNINSTALL, "InstallLocation")?)?;
+        let uninstaller = registry_path(&registered_value(scope, UNINSTALL, "UninstallString")?)?;
+        let remembered = registry_path(&registered_value(scope, "Software\\speakerdesk\\Speakerdesk", "")?)?;
+        let directory = windows_installation(executable, &directory, &uninstaller)?;
+        // NSIS restores this path in the selected scope, including passive updates.
+        if windows_installation(executable, &remembered, &uninstaller)? != directory {
+            return Err("Speakerdesk's remembered installation location has changed. Reinstall the approved installer.");
+        }
+        Ok(WindowsInstallation { scope, directory })
+    });
+    select_windows_installation(installations)
+}
+
+#[cfg(any(windows, test))]
+fn select_windows_installation(
+    installations: [Result<WindowsInstallation, &'static str>; 2],
+) -> Result<WindowsInstallation, &'static str> {
+    match installations {
+        [Ok(installation), Err(_)] | [Err(_), Ok(installation)] => Ok(installation),
+        [Ok(_), Ok(_)] => Err("Speakerdesk is registered for both this user and all users at the same location. Reinstall the approved Windows installer before updating."),
+        [Err(_), Err(_)] => Err("Open Speakerdesk from its registered Windows install folder before updating. Reinstall the approved installer if this copy was moved."),
+    }
+}
+
+#[cfg(windows)]
+fn registered_value(scope: WindowsScope, key: &str, name: &str) -> Result<String, &'static str> {
     use windows_sys::Win32::{
         Foundation::ERROR_SUCCESS,
-        System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ},
+        System::Registry::{
+            RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+            RRF_SUBKEY_WOW6464KEY,
+        },
     };
-    let key: Vec<_> = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Speakerdesk"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
+    let hive = match scope {
+        WindowsScope::CurrentUser => HKEY_CURRENT_USER,
+        WindowsScope::AllUsers => HKEY_LOCAL_MACHINE,
+    };
+    let key: Vec<_> = key.encode_utf16().chain(Some(0)).collect();
     let name: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
     let mut bytes = 0;
     let result = unsafe {
         RegGetValueW(
-            HKEY_CURRENT_USER,
+            hive,
             key.as_ptr(),
             name.as_ptr(),
-            RRF_RT_REG_SZ,
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             &mut bytes,
@@ -107,10 +165,10 @@ fn registered_value(name: &str) -> Result<String, &'static str> {
     let mut value = vec![0_u16; bytes as usize / 2];
     let result = unsafe {
         RegGetValueW(
-            HKEY_CURRENT_USER,
+            hive,
             key.as_ptr(),
             name.as_ptr(),
-            RRF_RT_REG_SZ,
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
             std::ptr::null_mut(),
             value.as_mut_ptr().cast(),
             &mut bytes,
@@ -315,5 +373,37 @@ mod tests {
         fs::remove_file(&executable).unwrap();
         std::os::unix::fs::symlink(&uninstaller, &executable).unwrap();
         assert!(windows_installation(&executable, &fixture.0, &uninstaller).is_err());
+    }
+
+    #[test]
+    fn windows_update_scope_requires_one_registration_for_the_running_copy() {
+        let fixture = Fixture::new();
+        let current = WindowsInstallation {
+            scope: WindowsScope::CurrentUser,
+            directory: fixture.0.clone(),
+        };
+        let machine = WindowsInstallation {
+            scope: WindowsScope::AllUsers,
+            directory: fixture.0.clone(),
+        };
+        // A missing, stale or different installation must not mask the matching scope.
+        for (registrations, expected, argument) in [
+            (
+                [Ok(current.clone()), Err("different installation")],
+                &current,
+                "/CurrentUser",
+            ),
+            (
+                [Err("different installation"), Ok(machine.clone())],
+                &machine,
+                "/AllUsers",
+            ),
+        ] {
+            let selected = select_windows_installation(registrations).unwrap();
+            assert_eq!(&selected, expected);
+            assert_eq!(selected.installer_arg(), argument);
+        }
+        assert!(select_windows_installation([Ok(current.clone()), Ok(machine)]).is_err());
+        assert!(select_windows_installation([Err("missing"), Err("missing")]).is_err());
     }
 }
