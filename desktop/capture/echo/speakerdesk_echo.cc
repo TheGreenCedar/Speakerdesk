@@ -7,6 +7,7 @@
 #include "api/audio/audio_processing.h"
 #include "api/environment/environment_factory.h"
 #include "modules/audio_processing/aec3/echo_canceller3.h"
+#include "modules/audio_processing/ns/noise_suppressor.h"
 
 namespace {
 constexpr size_t kFrame = 160;
@@ -14,7 +15,9 @@ webrtc::EchoCanceller3Config Configuration(bool stereo) {
   webrtc::EchoCanceller3Config config;
   config.filter.export_linear_aec_output = true;
   config.multi_channel.detect_stereo_content = false;
-  config.delay.use_external_delay_estimator = true;
+  // The internal estimator must run before the broadband reference clock has
+  // validated a delay. External-only mode skips EchoRemover until that happens.
+  config.delay.use_external_delay_estimator = false;
   // Retain a 128 ms room tail. A shorter startup filter converges on the
   // direct speaker path first; upstream also shortens the stereo coarse filter.
   config.filter.refined.length_blocks = 32;
@@ -42,16 +45,20 @@ struct Bank {
   webrtc::AudioBuffer capture{16000, 1, 16000, 1, 16000, 1};
   webrtc::AudioBuffer linear{16000, 1, 16000, 1, 16000, 1};
   std::unique_ptr<webrtc::EchoCanceller3> echo;
+  std::unique_ptr<webrtc::NoiseSuppressor> noise;
   int channels;
   Bank(const webrtc::Environment& environment, int render_channels)
       : env(environment), config(Configuration(render_channels == 2)),
         render(16000, render_channels, 16000, render_channels, 16000, render_channels),
         channels(render_channels) { Reset(); }
   void Reset() {
-    // nullptr explicitly selects ordinary residual-echo DSP. Only the linear
-    // prediction error is returned: no AGC, VAD, neural model or suppressor gain.
+    // No neural estimator. The established linear prediction error feeds NS;
+    // the residual suppressor output is deliberately not used.
     echo = std::make_unique<webrtc::EchoCanceller3>(
         env, config, std::nullopt, nullptr, 16000, channels, 1);
+    // Upstream's default moderate (12 dB) policy, fixed before acoustic trials.
+    // No automatic gain control, level normalization or application mute gate.
+    noise = std::make_unique<webrtc::NoiseSuppressor>(webrtc::NsConfig{}, 16000, 1);
   }
   void Process(const float* const* reference, const float* microphone,
                float* output, int delay_ms) {
@@ -62,7 +69,11 @@ struct Bank {
     float* cleaned[] = {output};
     capture.CopyFrom(microphone_channels, webrtc::StreamConfig(16000, 1));
     echo->AnalyzeCapture(&capture);
+    // Match the default upstream ordering: analyze before AEC comfort noise,
+    // then suppress noise in the linear echo-cancelled signal.
+    noise->Analyze(capture);
     echo->ProcessCapture(&capture, &linear, false);
+    noise->Process(&linear);
     linear.CopyTo(webrtc::StreamConfig(16000, 1), cleaned);
   }
 };
@@ -75,7 +86,7 @@ struct State {
   void Reset() { mono.Reset();stereo.Reset();stereo_weight=0;stereo_hold=0; }
 };
 }
-extern "C" int speakerdesk_echo_abi(void) { return 3; }
+extern "C" int speakerdesk_echo_abi(void) { return 5; }
 extern "C" void* speakerdesk_echo_create(void) {
   try { return new State; } catch (...) { return nullptr; }
 }

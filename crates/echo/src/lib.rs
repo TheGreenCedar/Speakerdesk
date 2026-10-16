@@ -1,4 +1,4 @@
-//! Explicit-reference DSP with the shipped ABI-3 WebRTC component.
+//! Explicit-reference DSP with the shipped ABI-5 WebRTC component.
 mod clock;
 mod fft;
 pub use clock::{
@@ -48,7 +48,6 @@ pub struct EchoMixer {
     pending_system: VecDeque<f32>,
     position: usize,
     discard: usize,
-    raw_delay: [f32; DELAY],
     failed: bool,
 }
 pub struct EchoOutput {
@@ -101,7 +100,7 @@ impl EchoMixer {
             let abi: unsafe extern "C" fn() -> i32 = *library
                 .get(b"speakerdesk_echo_abi\0")
                 .map_err(|_| EchoError::IncompatibleVersion)?;
-            if abi() != 3 {
+            if abi() != 5 {
                 return Err(EchoError::IncompatibleVersion);
             }
             let create: unsafe extern "C" fn() -> *mut c_void = *library
@@ -128,13 +127,12 @@ impl EchoMixer {
                 pending_system: VecDeque::new(),
                 position: 0,
                 discard: DELAY,
-                raw_delay: [0.; DELAY],
                 failed: false,
             })
         }
     }
     /// At most one second per aligned writer tile. Steady held input is half a
-    /// second plus one frame. Final drains the native 64-sample framing delay.
+    /// second plus one frame. Final drains the native 160-sample DSP delay.
     pub fn add(
         &mut self,
         microphone: &[f32],
@@ -174,7 +172,7 @@ impl EchoMixer {
         self.pending_system.extend(system);
         let length = self.input.len();
         let process_length = if final_tail {
-            length.div_ceil(FRAME) * FRAME + FRAME
+            length.div_ceil(FRAME) * FRAME + DELAY.div_ceil(FRAME) * FRAME
         } else {
             length.saturating_sub(LOOKAHEAD) / FRAME * FRAME
         };
@@ -204,11 +202,8 @@ impl EchoMixer {
             {
                 return Err(EchoError::Processing);
             }
-            if !self.clock.echo() {
-                output[..DELAY].copy_from_slice(&self.raw_delay);
-                output[DELAY..].copy_from_slice(&original[..FRAME - DELAY]);
-            }
-            self.raw_delay.copy_from_slice(&original[FRAME - DELAY..]);
+            // Noise suppression remains active even without a validated echo
+            // correlation. AEC3 estimates delay internally until hints exist.
             let skip = self.discard.min(FRAME);
             self.discard -= skip;
             let count = (FRAME - skip).min(self.pending_system.len() - clean.len());
@@ -226,7 +221,6 @@ impl EchoMixer {
             self.clock = ReferenceClock::default();
             self.position = 0;
             self.discard = DELAY;
-            self.raw_delay = [0.; DELAY];
         }
         Ok(EchoOutput { clean, system })
     }
@@ -288,23 +282,31 @@ mod tests {
         } else {
             "libspeakerdesk_echo.dylib"
         };
-        let library = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../desktop/capture/echo")
-            .join(name);
+        let library = std::env::var_os("SPEAKERDESK_TEST_ECHO")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../desktop/capture/echo")
+                    .join(name)
+            });
         let mut mixer = EchoMixer::start(&library).unwrap();
         let mut expected = Vec::new();
         let mut actual = Vec::new();
+        let mut system = Vec::new();
+        let mut expected_system = Vec::new();
         for i in 0..500 {
             let count = [1, 37, 159, 511, 4000][i % 5];
             let input: Vec<_> = (expected.len()..expected.len() + count)
                 .map(|sample| if sample % 2 == 0 { 0.125 } else { -0.25 })
                 .collect();
             expected.extend_from_slice(&input);
+            let reference_system: Vec<_> = (0..count).map(|s| (s % 17) as f32 / 32.).collect();
+            expected_system.extend_from_slice(&reference_system);
             let output = mixer
-                .add(&input, &vec![0.; count], &vec![[0.; 2]; count], false)
+                .add(&input, &reference_system, &vec![[0.; 2]; count], false)
                 .unwrap();
-            assert_eq!(output.system, vec![0.; output.clean.len()]);
             actual.extend(output.clean);
+            system.extend(output.system);
             assert!(mixer.input.len() < LOOKAHEAD + FRAME);
             assert!(mixer.pending_system.len() < LOOKAHEAD + FRAME + DELAY);
             assert_eq!(
@@ -312,8 +314,29 @@ mod tests {
                 mixer.input.len() + DELAY - mixer.discard
             );
         }
-        actual.extend(mixer.add(&[], &[], &[], true).unwrap().clean);
-        assert_eq!(actual, expected);
+        let final_tail = mixer.add(&[], &[], &[], true).unwrap();
+        actual.extend(final_tail.clean);
+        system.extend(final_tail.system);
+        assert_eq!(actual.len(), expected.len());
+        assert_eq!(system, expected_system);
+        assert!(actual.iter().all(|v| v.is_finite()));
+        // A zero reference must no longer bypass noise suppression.
+        assert_ne!(actual, expected);
+        let mut contiguous = EchoMixer::start(&library).unwrap();
+        let mut contiguous_clean = Vec::new();
+        let mut contiguous_system = Vec::new();
+        for (mic, original_system) in expected.chunks(RATE).zip(system.chunks(RATE)) {
+            let out = contiguous
+                .add(mic, original_system, &vec![[0.; 2]; mic.len()], false)
+                .unwrap();
+            contiguous_clean.extend(out.clean);
+            contiguous_system.extend(out.system);
+        }
+        let tail = contiguous.add(&[], &[], &[], true).unwrap();
+        contiguous_clean.extend(tail.clean);
+        contiguous_system.extend(tail.system);
+        assert_eq!(actual, contiguous_clean);
+        assert_eq!(system, contiguous_system);
         assert!(mixer.input.is_empty());
         assert!(mixer.pending_system.is_empty());
         assert_eq!(mixer.discard, DELAY);
@@ -321,7 +344,13 @@ mod tests {
         let resumed = mixer
             .add(&[0.375; 513], &[0.; 513], &[[0.; 2]; 513], true)
             .unwrap();
-        assert_eq!(resumed.clean, vec![0.375; 513]);
+        let fresh = EchoMixer::start(&library)
+            .unwrap()
+            .add(&[0.375; 513], &[0.; 513], &[[0.; 2]; 513], true)
+            .unwrap();
+        assert_eq!(resumed.clean.len(), 513);
+        assert_eq!(resumed.clean, fresh.clean);
+        assert_eq!(resumed.system, vec![0.; 513]);
         assert!(mixer.input.is_empty() && mixer.pending_system.is_empty());
     }
 }

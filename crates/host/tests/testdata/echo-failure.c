@@ -1,4 +1,4 @@
-/* Test-only ABI-3 failure fixture. No DSP or acoustic-quality claim.
+/* Test-only ABI-5 failure fixture. No DSP or acoustic-quality claim.
  * The mounted test launches a separate host with this explicit library path.
  * Build once: cc -dynamiclib -o /tmp/speakerdesk-echo-failure.dylib echo-failure.c
  */
@@ -11,7 +11,7 @@ static int mode(const char *expected) {
     const char *value = getenv("SPEAKERDESK_TEST_ECHO_FAILURE");
     return value && strcmp(value, expected) == 0;
 }
-int speakerdesk_echo_abi(void) { return mode("abi") ? 2 : 3; }
+int speakerdesk_echo_abi(void) { return mode("abi") ? 4 : 5; }
 void *speakerdesk_echo_create(void) {
     struct state *state = calloc(1, sizeof(*state));
     if (state) {

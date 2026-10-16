@@ -89,6 +89,7 @@ pub(super) struct SourceWriter {
     reset_points: Vec<u32>,
     reset_history: Vec<u32>,
     late_pcm: Option<File>,
+    private_reference: Option<File>,
     fence_sequence: u64,
     pub snapshot: CaptureSnapshot,
 }
@@ -115,7 +116,11 @@ impl SourceWriter {
         {
             return Err(invalid("Invalid capture recording or source selection."));
         }
-        let echo = if config.microphone && config.system && !helper.processed_microphone() {
+        let reference_only = config.microphone && !config.system && helper.windows_capture();
+        let echo = if config.microphone
+            && (config.system || reference_only)
+            && !helper.processed_microphone()
+        {
             let path = config
                 .echo_library
                 .as_deref()
@@ -144,7 +149,7 @@ impl SourceWriter {
         if config.system {
             names.extend([("system", 1), ("system_reference", 2)]);
         }
-        if config.microphone && config.system {
+        if config.microphone && (config.system || echo.is_some()) {
             names.push(("microphone_clean", 1));
         }
         // Reject collisions before creating any recording. No previous WAV is overwritten.
@@ -170,9 +175,30 @@ impl SourceWriter {
             wav.flush()?;
             files.insert(name, wav);
         }
+        let private_reference = if reference_only {
+            let file = tempfile::tempfile_in(&config.folder)?;
+            let reader = file.try_clone()?;
+            let mut wav = hound::WavWriter::new(
+                file,
+                hound::WavSpec {
+                    channels: 2,
+                    sample_rate: RATE,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )?;
+            wav.flush()?;
+            files.insert("private_reference", wav);
+            Some(reader)
+        } else {
+            None
+        };
         let mut snapshot = CaptureSnapshot::default();
         if echo.is_some() {
-            snapshot.source_catalog = Some(super::processing::source_catalog(&config.job_id));
+            snapshot.source_catalog = Some(super::processing::source_catalog(
+                &config.job_id,
+                config.system,
+            ));
         }
         if config.microphone {
             snapshot.levels.insert("microphone".into(), 0.);
@@ -195,6 +221,7 @@ impl SourceWriter {
             reset_points: Vec::new(),
             reset_history: Vec::new(),
             late_pcm: None,
+            private_reference,
             fence_sequence: 0,
             snapshot,
         })
@@ -385,7 +412,7 @@ impl SourceWriter {
     fn source(&self, source: &str) -> Result<usize, CaptureError> {
         match source {
             "microphone" if self.config.microphone => Ok(0),
-            "system" if self.config.system => Ok(1),
+            "system" if self.config.system || self.private_reference.is_some() => Ok(1),
             _ => Err(invalid("Invalid capture source.")),
         }
     }
@@ -487,7 +514,9 @@ impl SourceWriter {
                 .sqrt()
                 .min(1.) as f32
         };
-        self.snapshot.levels.insert(packet.source, rms);
+        if source == 0 || self.config.system {
+            self.snapshot.levels.insert(packet.source, rms);
+        }
         self.last_packet[source] =
             self.last_packet[source].max(packet.time + frames as f64 / f64::from(RATE));
         let mut offset = self
@@ -497,27 +526,46 @@ impl SourceWriter {
             .min(frames as u32) as usize;
         self.snapshot.late_samples += offset as u64;
         if offset > 0 {
-            // Journal the validated original before doing anything to a committed prefix.
-            // Replaying this journal at EOF repairs source WAVs, then rebuilds derived audio.
-            if self.late_pcm.is_none() {
-                self.late_pcm = Some(private_create(
-                    &self.config.folder.join("capture-late-pcm.jsonl"),
-                )?);
-            }
-            let original = if source == 0 {
-                mono.clone()
-            } else {
-                reference.iter().flatten().copied().collect()
-            };
-            let original_bytes =
-                pcm16_bytes(&original).map_err(|error| invalid(error.to_string()))?;
-            let mono_bytes = pcm16_bytes(&mono).map_err(|error| invalid(error.to_string()))?;
-            let entry = serde_json::json!({"source":source,"start_sample":position,"channels":if source==0 {1}else{2},
+            let repaired = (|| {
+                if source == 1
+                    && let Some(file) = &mut self.private_reference
+                {
+                    let bytes = pcm16_bytes(
+                        &reference[..offset]
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|e| invalid(e.to_string()))?;
+                    // Cloned handles share a cursor; restore it before the writer appends.
+                    let cursor = file.stream_position()?;
+                    let patched = patch_wav_file(file.try_clone()?, position, &bytes);
+                    file.seek(SeekFrom::Start(cursor))?;
+                    return patched;
+                }
+                // Retain only selected sources in the recovery journal.
+                if self.late_pcm.is_none() {
+                    self.late_pcm = Some(private_create(
+                        &self.config.folder.join("capture-late-pcm.jsonl"),
+                    )?);
+                }
+                let original = if source == 0 {
+                    mono.clone()
+                } else {
+                    reference.iter().flatten().copied().collect()
+                };
+                let original_bytes =
+                    pcm16_bytes(&original).map_err(|error| invalid(error.to_string()))?;
+                let mono_bytes = pcm16_bytes(&mono).map_err(|error| invalid(error.to_string()))?;
+                let entry = serde_json::json!({"source":source,"start_sample":position,"channels":if source==0 {1}else{2},
                 "pcm16":STANDARD.encode(original_bytes),"mono_pcm16":STANDARD.encode(mono_bytes)});
-            let journal = self.late_pcm.as_mut().expect("late PCM journal");
-            serde_json::to_writer(&mut *journal, &entry).map_err(|e| invalid(e.to_string()))?;
-            journal.write_all(b"\n")?;
-            journal.sync_data()?;
+                let journal = self.late_pcm.as_mut().expect("late PCM journal");
+                serde_json::to_writer(&mut *journal, &entry).map_err(|e| invalid(e.to_string()))?;
+                journal.write_all(b"\n")?;
+                journal.sync_data()?;
+                Ok(())
+            })();
             let affected = position / TILE * TILE;
             let cutoff = self
                 .snapshot
@@ -527,19 +575,25 @@ impl SourceWriter {
             self.snapshot.committed_sample = self.snapshot.committed_sample.min(cutoff);
             self.clean_failed = true;
             self.snapshot.error.get_or_insert_with(|| "Delayed capture PCM changed saved audio. Recording stopped; originals are retained and playable audio is being rebuilt. Transcript after the affected boundary requires review.".into());
+            if repaired.is_err() {
+                self.write_failed = true;
+            }
+            repaired?;
         }
         position += offset as u32;
         while offset < frames {
             let within = (position % TILE) as usize;
             let count = (TILE as usize - within).min(frames - offset);
             let tile = self.tiles.entry(position / TILE).or_default();
-            let buffer = if source == 0 {
-                &mut tile.microphone
-            } else {
-                &mut tile.system
-            };
-            buffer.get_or_insert_with(|| vec![0.; TILE as usize])[within..within + count]
-                .copy_from_slice(&mono[offset..offset + count]);
+            if source == 0 || self.config.system {
+                let buffer = if source == 0 {
+                    &mut tile.microphone
+                } else {
+                    &mut tile.system
+                };
+                buffer.get_or_insert_with(|| vec![0.; TILE as usize])[within..within + count]
+                    .copy_from_slice(&mono[offset..offset + count]);
+            }
             if source == 1 {
                 tile.reference
                     .get_or_insert_with(|| vec![[0.; 2]; TILE as usize])[within..within + count]
@@ -601,6 +655,7 @@ impl SourceWriter {
                     ("microphone", microphone.as_slice()),
                     ("system", system.as_slice()),
                     ("system_reference", stereo.as_slice()),
+                    ("private_reference", stereo.as_slice()),
                 ] {
                     if let Some(wav) = self.files.get_mut(name) {
                         write_samples(wav, samples)?;
@@ -641,7 +696,7 @@ impl SourceWriter {
         let mixed: Vec<_> = clean
             .iter()
             .zip(system)
-            .map(|(m, s)| (m + s).clamp(-1., 1.))
+            .map(|(m, s)| (m + if self.config.system { *s } else { 0. }).clamp(-1., 1.))
             .collect();
         if let Some(wav) = self.files.get_mut("microphone_clean") {
             write_samples(wav, clean)?;
@@ -703,8 +758,13 @@ impl SourceWriter {
             match repaired {
                 Ok(()) => self.snapshot.derived_rebuilt = true,
                 Err(error) => {
+                    let retained = if self.private_reference.is_some() {
+                        "Selected original audio is retained; the private echo reference is not saved."
+                    } else {
+                        "Original packets are retained in capture-late-pcm.jsonl."
+                    };
                     self.snapshot.error = Some(format!(
-                        "Capture audio repair did not finish: {error}. Original packets are retained in capture-late-pcm.jsonl."
+                        "Capture audio repair did not finish: {error}. {retained}"
                     ));
                     // Never leave stale processed audio looking complete.
                     let cutoff = self.snapshot.repaired_from_sample.unwrap();
@@ -730,9 +790,16 @@ impl SourceWriter {
         if let Some(journal) = self.late_pcm.take() {
             journal.sync_all()?;
         }
-        let journal = BufReader::new(File::open(
-            self.config.folder.join("capture-late-pcm.jsonl"),
-        )?);
+        let journal = match File::open(self.config.folder.join("capture-late-pcm.jsonl")) {
+            Ok(file) => BufReader::new(file),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && self.private_reference.is_some() =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
         for line in journal.lines() {
             let entry: Value = serde_json::from_str(&line?).map_err(|e| invalid(e.to_string()))?;
             let source = entry["source"]
@@ -781,11 +848,16 @@ impl SourceWriter {
             .system
             .then(|| hound::WavReader::open(self.config.folder.join("system.wav")))
             .transpose()?;
-        let mut reference = self
-            .config
-            .system
-            .then(|| hound::WavReader::open(self.config.folder.join("system_reference.wav")))
-            .transpose()?;
+        let mut reference = if self.config.system {
+            Some(hound::WavReader::open(
+                self.config.folder.join("system_reference.wav"),
+            )?)
+        } else if let Some(file) = &mut self.private_reference {
+            file.rewind()?;
+            Some(hound::WavReader::new(BufReader::new(file.try_clone()?))?)
+        } else {
+            None
+        };
         let mut echo = if self.echo.is_some() {
             Some(
                 EchoMixer::start(
@@ -808,7 +880,8 @@ impl SourceWriter {
         let audio_path = self.config.folder.join("audio.repair.wav");
         let clean_path = self.config.folder.join("microphone_clean.repair.wav");
         let mut audio = hound::WavWriter::new(private_create(&audio_path)?, spec)?;
-        let mut clean = (self.config.microphone && self.config.system)
+        let retain_clean = self.config.microphone && (self.config.system || self.echo.is_some());
+        let mut clean = retain_clean
             .then(|| {
                 private_create(&clean_path)
                     .and_then(|file| hound::WavWriter::new(file, spec).map_err(CaptureError::from))
@@ -863,7 +936,7 @@ impl SourceWriter {
             clean.finalize()?;
         }
         fs::rename(audio_path, self.config.folder.join("audio.wav"))?;
-        if self.config.microphone && self.config.system {
+        if retain_clean {
             fs::rename(clean_path, self.config.folder.join("microphone_clean.wav"))?;
         }
         self.snapshot.committed_sample = committed;
@@ -872,7 +945,12 @@ impl SourceWriter {
 
     fn max_frames(&self) -> u32 {
         // A system source also retains an interleaved stereo PCM16 reference.
-        (u32::MAX - 36) / if self.config.system { 4 } else { 2 }
+        (u32::MAX - 36)
+            / if self.config.system || self.private_reference.is_some() {
+                4
+            } else {
+                2
+            }
     }
 
     #[cfg(test)]
@@ -931,6 +1009,11 @@ fn wav_data(path: &std::path::Path) -> Result<(File, u64, u16, u32), CaptureErro
         .read(true)
         .write(true)
         .open(path)?;
+    wav_data_file(file)
+}
+
+fn wav_data_file(mut file: File) -> Result<(File, u64, u16, u32), CaptureError> {
+    file.rewind()?;
     let reader = hound::WavReader::new(file)?;
     let spec = reader.spec();
     if spec.bits_per_sample != 16 || spec.sample_format != hound::SampleFormat::Int {
@@ -943,7 +1026,18 @@ fn wav_data(path: &std::path::Path) -> Result<(File, u64, u16, u32), CaptureErro
 }
 
 fn patch_wav(path: &std::path::Path, start: u32, bytes: &[u8]) -> Result<(), CaptureError> {
-    let (mut file, offset, channels, frames) = wav_data(path)?;
+    patch_wav_file(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?,
+        start,
+        bytes,
+    )
+}
+
+fn patch_wav_file(file: File, start: u32, bytes: &[u8]) -> Result<(), CaptureError> {
+    let (mut file, offset, channels, frames) = wav_data_file(file)?;
     let frame_bytes = u64::from(channels) * 2;
     if !bytes.len().is_multiple_of(frame_bytes as usize)
         || u64::from(start) + bytes.len() as u64 / frame_bytes > u64::from(frames)

@@ -69,7 +69,7 @@ pub fn run() {
     let start = rx.recv().unwrap();
     assert_eq!(start["type"], "start");
     let dual = start["microphone"] == true && start["system"] == true;
-    let receipt = if dual && start["capture_export_contract"].is_string() {
+    let receipt = if dual && start["capture_export_contract"] == "apple_processed_mono16k_v1" {
         let mut receipt: Value =
             serde_json::from_slice(&fs::read(root.join("receipt.json")).unwrap()).unwrap();
         receipt["job_id"] = start["job_id"].clone();

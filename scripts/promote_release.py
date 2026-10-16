@@ -13,6 +13,8 @@ import subprocess
 import os
 import selectors
 import signal
+import shutil
+import tempfile
 import time
 import zipfile
 import windows_signing
@@ -181,6 +183,26 @@ def prepare_windows(manifest_path,qa_path,notes,manifest,qa):
             'native_gate_sha256':digest_file(regular(qa_path)),
             'verification_sha256':qa['verification_sha256'],'updater_verification_sha256':qa['updater_verification_sha256']}
 
+def prepare_combined(manifest_path,qa_path,notes,signer_archive,windows_manifest,windows_qa):
+    """One release, retaining each platform's existing trust and QA boundary."""
+    apple=prepare(manifest_path,qa_path,notes,signer_archive)
+    windows=prepare(windows_manifest,windows_qa,notes,None)
+    require(apple.get('platform') is None and windows.get('platform')=='windows-x86_64',
+            'Combined release requires Apple and Windows candidates')
+    require(all(apple[key]==windows[key] for key in ('repository','version','tag','source_commit')),
+            'Both platforms must have the same version and source')
+    files=dict(apple['files'])
+    for name,item in windows['files'].items():
+        # Preserve the authenticated manifest bytes; only its public asset name differs.
+        name='artifact-manifest-windows-x86_64.json' if name=='artifact-manifest.json' else name
+        require(name not in files,'Combined release asset names collide')
+        files[name]=dict(item,filename=name)
+    return dict(apple,platform='macos-windows',files=files,
+                app_driven_update_observed=windows['app_driven_update_observed'],
+                windows_native_gate_sha256=windows['native_gate_sha256'],
+                windows_verification_sha256=windows['verification_sha256'],
+                windows_updater_verification_sha256=windows['updater_verification_sha256'])
+
 def api(endpoint,body=None,*,method='PATCH'):
     command=['gh','api',endpoint]
     if body is not None:command+=['--method',method,'--input','-']
@@ -273,7 +295,8 @@ def verify_repository(repo):
 
 def publish(plan):
     windows=plan.get('platform')=='windows-x86_64'
-    if windows:
+    includes_windows=windows or plan.get('platform')=='macos-windows'
+    if includes_windows:
         require(plan.get('app_driven_update_observed') is True,'Windows publication requires actual app-driven update observations')
     verify_repository(api('repos/'+REPOSITORY))
     main=api('repos/'+REPOSITORY+'/commits/main')
@@ -289,9 +312,19 @@ def publish(plan):
     check_tag(plan)
     releases=api('repos/'+REPOSITORY+'/releases?per_page=100')
     require(not any(r['tag_name']==plan['tag'] for r in releases),'Existing release/draft must be inspected; never overwrite')
-    result=subprocess.run(['gh','release','create',plan['tag'],'--repo',REPOSITORY,'--target',plan['source_commit'],
-          '--title','Speakerdesk '+plan['version']+(' for Windows' if windows else ''),'--notes-file',plan['notes_file'],'--draft']+
-          [item['path'] for item in plan['files'].values()],text=True,capture_output=True,timeout=180)
+    with tempfile.TemporaryDirectory(prefix='speakerdesk-release-') as staging:
+        uploads=[]
+        for name,item in plan['files'].items():
+            require(Path(name).name==name,'Invalid release asset name')
+            path=Path(item['path'])
+            if path.name!=name:
+                path=Path(staging)/name;shutil.copyfile(item['path'],path)
+            require(path.stat().st_size==item['bytes'] and digest_file(path)==item['sha256'],
+                    'Release payload changed before upload')
+            uploads.append(str(path))
+        result=subprocess.run(['gh','release','create',plan['tag'],'--repo',REPOSITORY,'--target',plan['source_commit'],
+              '--title','Speakerdesk '+plan['version']+(' for Windows' if windows else ''),'--notes-file',plan['notes_file'],'--draft']+
+              uploads,text=True,capture_output=True,timeout=180)
     require(result.returncode==0,'Draft upload failed; preserve any partial draft')
     # The tag endpoint exposes published releases; drafts are listed by identity.
     drafts=[r for r in api('repos/'+REPOSITORY+'/releases?per_page=100') if r['tag_name']==plan['tag']]
@@ -304,7 +337,7 @@ def publish(plan):
     if not check_tag(plan):
         api('repos/'+REPOSITORY+'/git/refs',{'ref':'refs/tags/'+plan['tag'],'sha':plan['source_commit']},method='POST')
     check_tag(plan,required=True)
-    if windows:
+    if includes_windows:
         require(api('repos/'+REPOSITORY+'/commits/main')['sha']==main['sha'],
                 'Reviewed main changed during Windows upload; preserve the draft for inspection')
     release=api('repos/'+REPOSITORY+'/releases/'+str(release_id),{'draft':False,'prerelease':False,'make_latest':'false' if windows else 'true'})
@@ -321,7 +354,15 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--manifest',type=Path,required=True)
     parser.add_argument('--native-qa',type=Path,required=True);parser.add_argument('--notes',type=Path,required=True);parser.add_argument('--publish',action='store_true')
     parser.add_argument('--signer-archive',type=Path)
-    args=parser.parse_args();plan=prepare(args.manifest,args.native_qa,args.notes,args.signer_archive)
+    parser.add_argument('--windows-manifest',type=Path)
+    parser.add_argument('--windows-native-qa',type=Path)
+    args=parser.parse_args()
+    if bool(args.windows_manifest)!=bool(args.windows_native_qa):
+        parser.error('--windows-manifest and --windows-native-qa must be supplied together')
+    if args.windows_manifest:
+        plan=prepare_combined(args.manifest,args.native_qa,args.notes,args.signer_archive,args.windows_manifest,args.windows_native_qa)
+    else:
+        plan=prepare(args.manifest,args.native_qa,args.notes,args.signer_archive)
     print(json.dumps(publish(plan) if args.publish else {k:v for k,v in plan.items() if k!='notes'},indent=2))
 
 if __name__=='__main__':main()

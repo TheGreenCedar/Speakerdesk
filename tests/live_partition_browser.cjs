@@ -79,7 +79,7 @@ async function main(){
     const targets=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();ws=new WebSocket(targets.find(t=>t.type==='page').webSocketDebuggerUrl);
     await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=reject;});
     let id=0;const pending=new Map(),errors=[];
-    ws.onmessage=event=>{const message=JSON.parse(event.data);if(message.method==='Runtime.exceptionThrown')errors.push(message.params.exceptionDetails.text);if(pending.has(message.id)){const [resolve,reject]=pending.get(message.id);pending.delete(message.id);message.error?reject(new Error(message.error.message)):resolve(message.result);}};
+    ws.onmessage=event=>{const message=JSON.parse(event.data);if(message.method==='Runtime.exceptionThrown')errors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);if(pending.has(message.id)){const [resolve,reject]=pending.get(message.id);pending.delete(message.id);message.error?reject(new Error(message.error.message)):resolve(message.result);}};
     const send=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;pending.set(key,[resolve,reject]);ws.send(JSON.stringify({id:key,method,params}));});
     const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value;};
     const wait=async expression=>{for(let i=0;i<100;i++){try{if(await evaluate(expression))return;}catch(error){if(!/navigated|context.*destroyed/i.test(error.message))throw error;}await delay(100);}throw new Error(`Timed out: ${expression}`);};
@@ -88,6 +88,56 @@ async function main(){
     await send('Page.navigate',{url:`${base}/?meeting=${jid}`});await wait('typeof selected!=="undefined" && selected?.id && !polling && !meetingPoll');
     const checks=[],measurements=[],source={sha256:{}};
     for(const file of ['speakerdesk/static/app.js','speakerdesk/static/live_editor.js','speakerdesk/static/style.css','speakerdesk/static/recovery.js','speakerdesk/static/theme.js','speakerdesk/templates/index.html'])source.sha256[file]=createHash('sha256').update(await readFile(join(root,file))).digest('hex');
+    if(mode==='--hover-layout') {
+      const failures=[];
+      for(const state of ['saved','rolling','live'])for(const width of [1280,760]) {
+        job.status=state==='live'?'recording':'ready';job.refinement_status=state==='rolling'?'refining':'complete';job.inference_owned=false;
+        job.document.speakers={s0:'Alex with a deliberately long name',s1:'Sam',multiple_speakers:'Multiple speakers'};
+        job.document.segments=Array.from({length:5},(_,i)=>({id:'r'+i,start:i*10,end:i*10+10,speaker:i<3?'s0':i===3?'s1':'multiple_speakers',text:i===2?'A wrapped continuation stays in the same place while its passage controls appear. '.repeat(4):'Readable passage '+i+'.',language:'en',machine_revision:1,refinement_state:'refined'}));
+        const multi=job.document.segments[4],pieces=['First speaker words. ','Another speaker replies.'];let offset=0;
+        multi.text=pieces.join('');multi.reading_turns=pieces.map((text,i)=>{const start_offset=offset;offset+=text.length;return {text,start_offset,end_offset:offset,start:40+i,end:41+i,speaker:'s'+i,attribution:'single'};});
+        job.revision++;
+        await send('Emulation.setDeviceMetricsOverride',{width,height:1600,deviceScaleFactor:1,mobile:false});
+        await evaluate(`select('${jid}')`);await wait("$('segments').children.length===5 && !polling");
+        const geometry=()=>evaluate(`Array.from($('segments').children).map(card=>{const text=card.querySelector('.segment-body').querySelector(':scope > .reading-turn-view:not([hidden]),:scope > textarea:not([hidden]),:scope > .segment-text'),r=text.getBoundingClientRect(),c=card.getBoundingClientRect();return {id:card.dataset.segmentId,x:r.x,y:r.y,width:r.width,height:r.height,cardHeight:c.height};})`);
+        for(const index of [1,2,3,4]) {
+          await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:1,y:1});await evaluate('document.activeElement?.blur()');
+          const before=await geometry(),target=await evaluate(`(()=>{const r=$('segments').children[${index}].querySelector('.seek').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+          if(index===1 && state==='saved')await screenshot(`rest-${width}.png`);
+          await send('Input.dispatchMouseEvent',{type:'mouseMoved',...target});
+          const hovered=await geometry();
+          if(JSON.stringify(before)!==JSON.stringify(hovered))failures.push(`${state}/${width}/r${index}: hover moved transcript`);
+          const controls=await evaluate(`(()=>{const card=$('segments').children[${index}],words=card.querySelector('.segment-body').querySelector(':scope > .reading-turn-view:not([hidden]),:scope > textarea:not([hidden]),:scope > .segment-text').getBoundingClientRect(),top=card.querySelector('.passage-actions-menu:not([open])>summary,.segment-top').getBoundingClientRect(),play=card.querySelector('.seek svg');return {wordRect:{x:words.x,y:words.y,width:words.width,height:words.height},controlRect:{x:top.x,y:top.y,width:top.width,height:top.height},hovered:card.matches(':hover'),playOpacity:play?getComputedStyle(play).opacity:null,overlap:top.width>0 && top.height>0 && top.bottom>words.top+.5 && top.top<words.bottom-.5 && top.right>words.left+.5 && top.left<words.right-.5};})()`);
+          assert.equal(controls.hovered,true);if(state==='saved')assert.equal(controls.playOpacity,'1');if(controls.overlap)failures.push(`${state}/${width}/r${index}: passage controls overlap words`);
+          if(state==='saved') {
+            await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:1,y:1});
+            await evaluate(`$('segments').children[${index}].querySelector('.seek').focus()`);
+            const focused=await geometry();if(JSON.stringify(before)!==JSON.stringify(focused))failures.push(`${state}/${width}/r${index}: keyboard focus moved transcript`);
+            assert.equal(await evaluate("document.activeElement.classList.contains('seek')"),true);
+          }
+          if(index<3) {
+            await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:1,y:1});await evaluate('document.activeElement?.blur()');
+            await evaluate(`$('segments').children[${index}].querySelector('.passage-actions-menu>summary').focus()`);
+            const focused=await geometry();if(JSON.stringify(before)!==JSON.stringify(focused))failures.push(`${state}/${width}/r${index}: action focus moved transcript`);
+            assert.match(await evaluate('document.activeElement.getAttribute("aria-label")'),/^Passage actions at /);
+            await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',text:' '});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});
+            assert.equal(await evaluate(`$('segments').children[${index}].querySelector('.passage-actions-menu').open`),true);
+            assert.equal(await evaluate(`$('segments').children[${index}].querySelector('.passage-details-toggle').getBoundingClientRect().height>=28`),true);
+            assert.equal(await evaluate(`(()=>{const body=$('segments').children[${index}].querySelector('.segment-body'),top=body.querySelector('.segment-top').getBoundingClientRect(),words=body.querySelector(':scope > .reading-turn-view:not([hidden]),:scope > textarea:not([hidden]),:scope > .segment-text').getBoundingClientRect();return top.bottom<=words.top+.5 && document.body.scrollWidth<=innerWidth;})()`),true,'Opened passage controls fit above the words');
+            if(index===1 && state==='saved')await screenshot(`actions-${width}.png`);
+            await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',text:' '});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});
+            assert.deepEqual(await geometry(),before,'Closing actions restores compact reading geometry');
+          }
+          measurements.push({state,width,index,before,hovered,controls});
+          if(index===1 && state==='saved')await screenshot(`hover-${width}.png`);
+        }
+      }
+      job.status='ready';job.refinement_status='complete';job.revision++;await evaluate(`select('${jid}')`);
+      await send('Runtime.evaluate',{expression:"$('segments').children[1].querySelector('.seek').click()",userGesture:true});
+      await wait("!$('player').paused && $('player').currentTime>=10");assert.deepEqual(errors,[]);
+      await writeFile(join(output,'hover-layout-report.json'),JSON.stringify({source,measurements,failures,pageErrors:errors},null,2));
+      assert.deepEqual(failures,[]);console.log(JSON.stringify({cases:measurements.length,failures,pageErrors:errors}));return;
+    }
     if(mode==='--release-transcript') {
       const pieces=[['First speaker words. ','speaker_0','single'],['An uncertain phrase. ','unassigned','unknown'],['Second speaker replies. ','speaker_1','single'],['First speaker concludes.','speaker_0','single']];
       let offset=0;const turns=pieces.map(([text,speaker,attribution],i)=>{const start_offset=offset;offset+=text.length;return {text,speaker,attribution,start_offset,end_offset:offset,start:attribution==='unknown'?null:i,end:attribution==='unknown'?null:i+1};});
@@ -137,17 +187,17 @@ async function main(){
       console.log(JSON.stringify({checks,measurements,pageErrors:errors},null,2));return;
     }
     if(mode==='--overlap-setup') {
-      await evaluate(`(async()=>{setupState={models:[],ready:true,core_ready:true,automatic_language:true,status:'failed',supported:true,total_bytes:100,downloaded_bytes:0,voice:{available:false,enabled:false,status:'ready'},operation:{target:'separation',status:'failed',error:'Connection interrupted. Retry this download.'},separation:{installed:true,ready:false,active:false,bytes:670353271,can_download:true}};
-        setupState.models=${JSON.stringify(JSON.parse(await readFile(join(root,'crates/host/src/model-artifacts.json'),'utf8')).map(model=>({id:model.id,name:model.name,bytes:Object.values(model.files).reduce((sum,file)=>sum+file.size,0),installed:true})))};setupState.models.push({id:'mossformer2-16k',name:'Voice separation',bytes:670353271,installed:true,optional:true});window.browserSetup=structuredClone(setupState);window.retryRoutes=[];
-        window.originalApi=api;api=async(path,options)=>{if(path==='/api/setup'){return structuredClone(browserSetup);}if(path==='/api/setup/separation'){retryRoutes.push(path);return {};}return originalApi(path,options);};await refreshSetup();openSettings('models');})()`);
+      await evaluate(`(async()=>{setupState={models:[],ready:false,core_ready:false,automatic_language:true,status:'failed',supported:true,total_bytes:100,downloaded_bytes:0,voice:{available:false,enabled:false,status:'ready'},operation:{target:'separation',status:'failed',error:'Connection interrupted. Retry this download.'},separation:{installed:true,ready:false,active:false,bytes:670353271,can_download:true}};
+        setupState.models=${JSON.stringify(JSON.parse(await readFile(join(root,'crates/host/src/model-artifacts.json'),'utf8')).map(model=>({id:model.id,name:model.name,bytes:Object.values(model.files).reduce((sum,file)=>sum+file.size,0),installed:true})))};setupState.models.push({id:'mossformer2-16k',name:'Voice separation',bytes:670353271,installed:true});window.browserSetup=structuredClone(setupState);window.retryRoutes=[];
+        window.originalApi=api;api=async(path,options)=>{if(path==='/api/setup'){if(options){retryRoutes.push(path);browserSetup.status='downloading';}return structuredClone(browserSetup);}return originalApi(path,options);};await refreshSetup();openSettings('models');})()`);
       assert(!String(await evaluate("$('model-status').textContent")).startsWith('Could not'),await evaluate("$('model-error').textContent"));
       for(const width of [1280,760]) {
         await send('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false});
-        const placement=await evaluate(`(()=>{const card=$('model-list').firstElementChild,b=card.querySelector('button'),e=card.querySelector('.model-failure'),note=card.querySelector('.separation-model-note'),view=document.querySelector('.settings-card');return {button:b.textContent,error:e.textContent,retryVisible:b.getBoundingClientRect().bottom<=view.getBoundingClientRect().bottom,errorBeforeRetry:e.getBoundingClientRect().top<=b.getBoundingClientRect().top,retryBeforeExplanation:b.getBoundingClientRect().bottom<=note.getBoundingClientRect().top,genericHidden:$('install-models').hidden,overflow:document.body.scrollWidth>innerWidth};})()`);
-        assert.equal(placement.button,'Retry separation download');assert.equal(placement.retryVisible,true);assert.equal(placement.retryBeforeExplanation,true);assert.equal(placement.genericHidden,true);assert.equal(placement.overflow,false);
+        const placement=await evaluate(`(()=>{const b=$('install-models'),view=document.querySelector('.settings-card');return {button:b.textContent,error:$('model-error').textContent,retryVisible:b.getBoundingClientRect().bottom<=view.getBoundingClientRect().bottom,retryBeforeExplanation:b.getBoundingClientRect().bottom<=$('model-list').getBoundingClientRect().top,genericHidden:b.hidden,overflow:document.body.scrollWidth>innerWidth};})()`);
+        assert.equal(placement.button,'Retry setup');assert.match(placement.error,/Connection interrupted/);assert.equal(placement.retryVisible,true);assert.equal(placement.retryBeforeExplanation,true);assert.equal(placement.genericHidden,false);assert.equal(placement.overflow,false);
         measurements.push({width,...placement});await screenshot(`overlap-setup-${width}.png`);
       }
-      await evaluate("$('model-list').querySelector('button').click()");await wait('retryRoutes.length===1');assert.deepEqual(await evaluate('retryRoutes'),['/api/setup/separation']);checks.push('Visible scoped separation retry above explanation at desktop and narrow widths');
+      await evaluate("$('install-models').click()");await wait('retryRoutes.length===1');assert.deepEqual(await evaluate('retryRoutes'),['/api/setup']);checks.push('Visible required-model setup retry above explanation at desktop and narrow widths');
       await evaluate(`closeSettings();jobFixture=null;doc.speakers={multiple_speakers:'Multiple speakers',speaker_0:'Voice One',speaker_1:'Voice Two'};let offset=0;const words=['First original sentence. ','Second original sentence. ','Third original sentence.'];const row={id:'r0',start:0,end:10,text:words.join(''),speaker:'multiple_speakers',language:'en',refinement_state:'refined',machine_revision:1,reading_turns:words.map((text,i)=>{const start_offset=offset;offset+=text.length;return {text,start_offset,end_offset:offset,start:i,end:i+1,speaker:'speaker_'+(i%2),attribution:'single'};})};row.separation_candidate={id:'estimate',original:structuredClone(row),voices:[{text:'First voice estimate.',language:'en'},{text:'Second voice estimate.',language:'en'}]};doc.segments=[row];selected.status='recording';selected.document=structuredClone(doc);renderEditor();`);
       for(const width of [1280,760]) {
         await send('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});

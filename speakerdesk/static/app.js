@@ -215,7 +215,7 @@ function renderJobs() {
 }
 function languageReady(mode) {
   return config.readiness.configured && (mode !== 'auto' || config.readiness.automatic_language)
-    && setupState?.core_ready !== false
+    && setupState?.core_ready !== false && setupState?.separation?.ready !== false
     && (config.readiness.word_alignment === false || setupState?.alignment?.ready !== false);
 }
 function setStatus() {
@@ -996,7 +996,7 @@ function renderPassageSeparation(panel,segment) {
   action.disabled=!!reason || !!selected.passage_retry || !!selected.passage_separation || setupState?.separation?.active===true;
   action.title=reason;action.addEventListener('click',async()=>{
     try {
-      if(!setupState?.separation?.installed){openSettings('models');throw new Error('Download the optional voice separation model in Settings → Models first.');}
+      if(!(setupState?.separation?.ready??setupState?.separation?.installed)){openSettings('models');throw new Error('Finish model setup in Settings → Models to separate overlapping voices.');}
       await separationRequest('/separation',()=>({revision:selected.revision,segment_id:segment.id}));
     }catch(error){notice(error.message,true);}
   });
@@ -1102,7 +1102,21 @@ function groupConsecutivePassages(host) {
     const section=card.dataset.transcriptSection || 'transcript',start=section!==previousSection;
     const continuation=!start && previous && !card.dataset.separationEpisode && !previous.dataset.separationEpisode && !['unassigned','multiple_speakers'].includes(card.dataset.speaker) && speakerIdentity(previous.dataset.speaker)===speakerIdentity(card.dataset.speaker);
     setPassageClass(card,'speaker-continuation',!!continuation);
-    setPassageClass(card,'passage-exception',!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)'));
+    const exception=!!card.querySelector('.review-tag:not(.routine-state),.refinement-badge:not(.routine-state)');
+    const compact=continuation && !exception;
+    setPassageClass(card,'has-passage-menu',!!compact);
+    let menu=card.querySelector('.passage-actions-menu');
+    const top=card.querySelector('.segment-top');
+    if(compact && !menu && top) {
+      menu=node('details',undefined,'passage-actions-menu');
+      const toggle=node('summary','⋯','segment-action');
+      toggle.setAttribute('aria-label',`Passage actions at ${card.querySelector('.seek span')?.textContent || ''}`);
+      toggle.title='Passage actions';
+      top.parentElement.insertBefore(menu,top);menu.append(toggle,top);
+    }else if(!compact && menu) {
+      menu.parentElement.insertBefore(top,menu);menu.remove();
+    }
+    setPassageClass(card,'passage-exception',exception);
     setPassageClass(card,'retained-correction',section==='corrections');
     const correctionStart=section==='corrections' && start;
     setPassageClass(card,'transcript-section-start',correctionStart);
@@ -1581,8 +1595,13 @@ function closeSettings() { if(updateFrozen)return; $('setup').hidden=true;docume
 function formatBytes(bytes) {
   return bytes<1e8?`${Math.round(bytes/1e6)} MB`:`${(bytes/1e9).toFixed(1)} GB`;
 }
+let modelSetupRequest=false;
 async function installModels() {
-  await api('/api/setup',{method:'POST'}); await refreshSetup();
+  if(modelSetupRequest)return;
+  modelSetupRequest=true;
+  $('install-models').disabled=$('setup-card-install').disabled=true;
+  try { await api('/api/setup',{method:'POST'}); }
+  finally { modelSetupRequest=false;await refreshSetup(); }
 }
 function modelSetupMessage(state) {
   if(!state.supported)return hostPlatform==='windows'?'Local transcription is not available in this Windows build. Model setup is disabled.':'This Mac can’t run the local models. Speakerdesk needs Apple Silicon and macOS 15 or later.';
@@ -1600,7 +1619,7 @@ function renderStartState() {
     $('setup-card-text').textContent=downloading?`Downloading local models. Meetings are transcribed offline on this ${localDevice}.`:modelSetupMessage(state);
     $('setup-card-progress').hidden=!downloading;$('setup-card-progress').value=percent;
     $('setup-card-status').textContent=downloading?`${state.phase} · ${percent}%`:'';
-    $('setup-card-install').disabled=busy || !state.supported || state.can_download===false || state.voice?.status==='downloading';
+    $('setup-card-install').disabled=modelSetupRequest || busy || !state.supported || state.can_download===false || state.voice?.status==='downloading';
     $('setup-card-install').querySelector('span').textContent=downloading?'Downloading…':state.status==='failed'?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
   }
   renderSeparationReadiness();
@@ -1610,11 +1629,11 @@ function renderStartState() {
 }
 function renderSeparationReadiness() {
   const separation=setupState?.separation;if(!separation)return;
-  const failed=separation.ready!==true && setupState.operation?.target==='separation' && ['failed','interrupted'].includes(setupState.operation.status);
+  const failed=separation.ready!==true && ['failed','interrupted'].includes(setupState.operation?.status);
   const message=failed?'Automatic separation needs attention':separation.active?'Automatic separation is setting up':(separation.ready??separation.installed)?'Automatic separation is ready':separation.installed?'Automatic separation needs setup':'Automatic separation needs a model';
   for(const id of ['start-separation-readiness','meeting-separation-readiness']) {
     const host=$(id);host.replaceChildren();host.append(node('span',message));
-    if(!(separation.ready??separation.installed) || failed){const action=node('button',failed?'Retry download':separation.installed?'Finish setup':'Download','text-button');action.addEventListener('click',()=>openSettings('models'));host.append(action);}
+    if(!(separation.ready??separation.installed) || failed){const action=node('button',failed?'Retry setup':'Finish setup','text-button');action.addEventListener('click',()=>openSettings('models'));host.append(action);}
   }
 }
 let alignmentChanging=false,alignmentGeneration=0;
@@ -1652,30 +1671,14 @@ async function refreshSetup() {
     setupState=state;
     const downloading=state.status==='downloading', loading=state.status==='loading', busy=downloading || loading;
     const list=$('model-list'),existing=new Map(Array.from(list.children).map(row=>[row.dataset.modelId,row])),retained=new Set();
-    const models=[...state.models].sort((a,b)=>Number(b.id==='mossformer2-16k')-Number(a.id==='mossformer2-16k'));
-    models.forEach(model => {
+    state.models.forEach(model => {
       const size=formatBytes(model.bytes);
       let item=existing.get(model.id);
       if(!item){item=node('div',undefined,'model-item');item.dataset.modelId=model.id;item.append(node('strong',model.name),node('span'));list.append(item);}
       retained.add(item);
       const alignment=model.id===state.alignment?.id?state.alignment:null;
-      const label=loading?'Loading…':model.name==='Voice recognition' && state.voice?.released===false && !state.voice?.available?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':model.optional?`Optional · ${size}`:size;
+      const label=loading?'Loading…':model.name==='Voice recognition' && state.voice?.released===false && !state.voice?.available?'Unavailable':alignment?(alignment.ready?'Ready':alignment.status==='downloading'?'Setting up…':'Needs setup'):model.installed?'Installed':size;
       if(item.querySelector('span').textContent!==label)item.querySelector('span').textContent=label;
-      if(model.id==='mossformer2-16k' && state.separation) {
-        item.classList.add('separation-model');
-        let install=item.querySelector('button');
-        if(!install){
-          item.append(node('p','Separates saved passages where two voices overlap.','separation-model-note'));
-          install=node('button',undefined,'quiet');item.insertBefore(install,item.querySelector('.separation-model-note'));
-          install.addEventListener('click',async()=>{install.dataset.requesting='true';install.disabled=true;try{await api('/api/setup/separation',{method:'POST'});await refreshSetup();}catch(error){notice(error.message,true);}finally{install.dataset.requesting='false';await refreshSetup();}});
-        }
-        const failed=state.separation.ready!==true && state.operation?.target==='separation' && ['failed','interrupted'].includes(state.operation.status);
-        if(failed)item.querySelector('span').textContent='Needs attention';
-        let failure=item.querySelector('.model-failure');if(!failure){failure=node('p',undefined,'model-failure');item.insertBefore(failure,install);}
-        failure.hidden=!failed;failure.textContent=failed?(state.operation.error || 'Separation setup did not finish. Retry the download.') : '';
-        install.textContent=failed?'Retry separation download':state.separation.active?'Setting up separation…':state.separation.installed?'Check separation model':`Download separation · ${formatBytes(state.separation.bytes)}`;
-        install.disabled=install.dataset.requesting==='true' || state.separation.active || state.separation.can_download===false || busy;
-      }
     });
     for(const item of Array.from(list.children))if(!retained.has(item))item.remove();
     renderAlignment(state);
@@ -1683,15 +1686,14 @@ async function refreshSetup() {
     $('setup-disk-note').hidden=loading || state.ready || (state.status==='failed' && !state.download_required);
     $('model-progress').hidden=!downloading;
     $('model-progress').value=state.total_bytes?100*state.downloaded_bytes/state.total_bytes:0;
-    const operation=state.operation,failedModels=!state.ready && operation?.target==='models' && ['failed','interrupted'].includes(operation.status);
-    const failedSeparation=state.separation?.ready!==true && operation?.target==='separation' && ['failed','interrupted'].includes(operation.status);
-    $('model-status').textContent=hostPlatform==='windows' && !state.supported?modelSetupMessage(state):failedModels?'Transcription setup did not finish. Retry setup.':loading?(state.phase || 'Loading models…'):downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?`Ready to transcribe on this ${localDevice}.`:modelSetupMessage(state);
+    const operation=state.operation,failedModels=!state.ready && ['failed','interrupted'].includes(operation?.status);
+    $('model-status').textContent=hostPlatform==='windows' && !state.supported?modelSetupMessage(state):failedModels?'Model setup did not finish. Retry setup.':loading?(state.phase || 'Loading models…'):downloading?`${state.phase} · ${state.total_bytes?Math.round(100*state.downloaded_bytes/state.total_bytes):0}%`:state.ready?`Ready to transcribe on this ${localDevice}.`:modelSetupMessage(state);
     $('model-error').textContent=[...new Set([state.error,state.message,operation?.error && operation.error!==state.error?`Previous setup attempt: ${operation.error}`:null].filter(Boolean))].join('\n');
     $('model-error-details').hidden=!$('model-error').textContent;
-    $('install-models').hidden=loading || (state.ready && !failedModels) || failedSeparation;
+    $('install-models').hidden=loading || state.ready;
     $('cancel-model-setup').hidden=!state.can_cancel;
     const voice=state.voice,voiceBusy=voice.status==='downloading';
-    $('install-models').disabled=busy || voiceBusy || !state.supported || state.can_download===false;
+    $('install-models').disabled=modelSetupRequest || busy || voiceBusy || !state.supported || state.can_download===false;
     $('install-models').textContent=downloading?'Downloading…':(failedModels || state.status==='failed')?'Retry setup':`Download models · ${formatBytes(state.total_bytes)}`;
     if(voiceAvailable!==voice.available) await loadPeople();
     if(!busy) await refreshVoicePickerAfterSetup();

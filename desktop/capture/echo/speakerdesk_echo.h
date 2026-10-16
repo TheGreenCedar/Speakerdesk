@@ -19,6 +19,9 @@ SPEAKERDESK_ECHO_EXPORT int speakerdesk_echo_abi(void);
 // The caller aligns both streams by capture host timestamps before this call.
 // delay_ms is a validated external reference/capture lag, or -1 while unknown.
 // `render` is a reference only: this library never opens or plays audio.
+// ABI 5 output: linear echo cancellation and default 12 dB noise suppression,
+// without AGC. Fixed latency is 160 samples (10 ms); the caller must discard
+// that prefix and supply enough zero frames to drain it on Pause/Stop.
 SPEAKERDESK_ECHO_EXPORT void* speakerdesk_echo_create(void);
 SPEAKERDESK_ECHO_EXPORT void speakerdesk_echo_destroy(void* state);
 SPEAKERDESK_ECHO_EXPORT int speakerdesk_echo_reset(void* state);

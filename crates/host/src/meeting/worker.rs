@@ -89,8 +89,11 @@ impl RecoveryPlan {
             .get("sources")
             .and_then(Value::as_array)
             .is_some_and(|s| s.len() == 2);
-        let mut source_ends =
-            BTreeMap::from([("microphone_clean".to_owned(), 0), ("system".to_owned(), 0)]);
+        let source_bound = dual || job.extra.contains_key("capture_source_catalog");
+        let mut source_ends = BTreeMap::from([("microphone_clean".to_owned(), 0)]);
+        if dual {
+            source_ends.insert("system".to_owned(), 0);
+        }
         let mut start = 0;
         for row in &document.segments {
             let original_start = row
@@ -106,7 +109,7 @@ impl RecoveryPlan {
             if original_start < 0 || end < original_start || end > through {
                 return Err(conflict("Saved passages exceed retained audio."));
             }
-            if dual {
+            if source_bound {
                 let source = row
                     .capture_source
                     .as_ref()
@@ -127,8 +130,8 @@ impl RecoveryPlan {
                 .expect("origin")
                 .epoch
         };
-        let source_boundaries: BTreeMap<String, RecoveryBoundary> = if dual {
-            start = *source_ends.values().min().expect("two sources");
+        let source_boundaries: BTreeMap<String, RecoveryBoundary> = if source_bound {
+            start = *source_ends.values().min().expect("capture source");
             source_ends
                 .into_iter()
                 .map(|(source, end)| {
@@ -655,6 +658,13 @@ pub(super) async fn worker(
             }
             if let Some(catalog) = capture.source_catalog {
                 use sha2::{Digest, Sha256};
+                if !dual {
+                    // Mic-only Windows capture still owns a cleaned source; the
+                    // playback reference is private and never becomes a passage source.
+                    config.source_id = catalog["sources"][0]["source_id"]
+                        .as_str()
+                        .map(str::to_owned);
+                }
                 config.capture_catalog_sha256 = Some(format!(
                     "{:x}",
                     Sha256::digest(serde_json::to_vec(&catalog).expect("catalog JSON"))

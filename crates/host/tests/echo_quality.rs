@@ -101,7 +101,8 @@ fn native_echo_quality_on_frozen_simulated_room() {
     fs::create_dir(&output).expect("SPEAKERDESK_ECHO_QUALITY_OUTPUT must be a fresh directory");
     write_new(&output.join("ordinary-cases.json"), &manifest_bytes);
     let recipe = json!({
-        "schema_version":1,"kind":"fixed_public_voice_simulated_room_diagnostic_v1",
+        "schema_version":2,"kind":"fixed_public_voice_simulated_room_diagnostic_v2",
+        "native_contract":{"abi":5,"latency_samples":160,"noise_suppression":"upstream default 12 dB","gain_control":false},
         "source_manifest_sha256":MANIFEST,"far":{"id":FAR.0,"wav_sha256":FAR.1,"samples":FAR.2},
         "near":{"id":NEAR.0,"wav_sha256":NEAR.1,"samples":NEAR.2},
         "sample_rate":RATE,"samples":SAMPLES,"source_rms":RMS,"repeat_zero_gap_samples":GAP,
@@ -113,7 +114,7 @@ fn native_echo_quality_on_frozen_simulated_room() {
         "measurement_end_sample":SAMPLES,"alignment":"original sample coordinates; no fitted lag or gain",
         "metrics":"error_reduction_db=10*log10(sum((microphone-near)^2)/sum((clean-near)^2)); near_error_nrms=sqrt(sum((clean-near)^2)/sum(near^2)); energy floor 1e-30 only for log10",
         "gates":{"all":"exact lengths, finite output, bit-exact system",
-            "local_only":"bit-exact clean near at every sample",
+            "local_only":"near projection gain 0.8..1.2, correlation >= 0.9, target NRMS <= 0.25; bit-exactness observed only",
             "far_only_min_echo_reduction_db":6.0,
             "double_talk":"output-target error energy < input-target error energy; target NRMS < 1"},
         "limit":"Simulated FIR diagnostic only. No physical speaker, microphone, headset, room or acoustic-quality qualification."
@@ -202,6 +203,8 @@ fn native_echo_quality_on_frozen_simulated_room() {
         let mut input_error = 0.;
         let mut output_error = 0.;
         let mut target_energy = 0.;
+        let mut clean_energy = 0.;
+        let mut near_cross = 0.;
         let mut maximum = 0_f64;
         if geometry && finite {
             for index in EXCLUDE..SAMPLES {
@@ -210,14 +213,23 @@ fn native_echo_quality_on_frozen_simulated_room() {
                 let error = f64::from(clean[index]) - target;
                 output_error += error * error;
                 target_energy += target * target;
+                clean_energy += f64::from(clean[index]).powi(2);
+                near_cross += f64::from(clean[index]) * target;
                 maximum = maximum.max(error.abs());
             }
         }
         let reduction_db = 10. * (input_error.max(1e-30) / output_error.max(1e-30)).log10();
         let nrms = (target_energy > 0.).then(|| (output_error / target_energy).sqrt());
+        let gain = (target_energy > 0.).then(|| near_cross / target_energy);
+        let correlation = (target_energy * clean_energy > 0.)
+            .then(|| near_cross / (target_energy * clean_energy).sqrt());
         let quality = match name {
             "far_only" => reduction_db >= 6.,
-            "local_only" => near_exact,
+            "local_only" => {
+                gain.is_some_and(|v| (0.8..=1.2).contains(&v))
+                    && correlation.is_some_and(|v| v >= 0.9)
+                    && nrms.is_some_and(|v| v <= 0.25)
+            }
             _ => output_error < input_error && nrms.is_some_and(|value| value < 1.),
         };
         results.push(
@@ -226,6 +238,7 @@ fn native_echo_quality_on_frozen_simulated_room() {
             "measurement_samples":SAMPLES-EXCLUDE,"input_error_energy":input_error,
             "output_error_energy":output_error,"target_energy":target_energy,
             "error_reduction_db":reduction_db,"near_error_nrms":nrms,"near_error_max_abs":maximum,
+            "near_projection_gain":gain,"near_correlation":correlation,
             "passed":geometry && finite && system_exact && quality}),
         );
     }

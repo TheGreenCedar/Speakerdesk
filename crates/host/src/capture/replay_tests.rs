@@ -43,9 +43,15 @@ fn windows_raw_capability_requires_echo_and_fenced_progress_without_apple_receip
         SourceWriter::create(config(folder.path(), true), owned.clone()).is_err(),
         "a raw Windows capability must not bypass bundled echo processing"
     );
-    let mut writer = SourceWriter::create(config(folder.path(), false), owned).unwrap();
+    assert!(
+        SourceWriter::create(config(folder.path(), false), owned.clone()).is_err(),
+        "Windows microphone-only capture must also require the bundled DSP"
+    );
+    let mut system_only = config(folder.path(), true);
+    system_only.microphone = false;
+    let mut writer = SourceWriter::create(system_only, owned).unwrap();
     accept(&mut writer, &json!({"type":"recording"})).unwrap();
-    accept(&mut writer, &audio("microphone", 0., &[0.25; 1600], 1)).unwrap();
+    accept(&mut writer, &audio("system", 0., &[0.25; 3200], 2)).unwrap();
     let unfenced = parse_event(r#"{"type":"clock","time":0.1,"paused":false}"#).unwrap();
     assert!(writer.accept(unfenced).is_err());
     let fenced = json!({"type":"clock","time":0.1,"paused":false,
@@ -60,10 +66,7 @@ fn windows_raw_capability_requires_echo_and_fenced_progress_without_apple_receip
     assert!(saved.error.is_none());
     assert!(saved.processing.is_none());
     assert_eq!(saved.committed_sample, 1600);
-    assert_eq!(
-        pcm(&folder.path().join("microphone.wav")),
-        [0, 32].repeat(1600)
-    );
+    assert_eq!(pcm(&folder.path().join("system.wav")), [0, 32].repeat(1600));
 }
 
 #[test]
@@ -92,25 +95,29 @@ fn raw_dual_capture_opens_and_preserves_partial_pause_tail() {
         result.processing.is_none(),
         "raw AEC must not acquire Apple qualification"
     );
-    for name in ["audio.wav", "microphone.wav", "microphone_clean.wav"] {
-        assert_eq!(
-            pcm(&folder.path().join(name)),
-            [0, 32].repeat(513),
-            "{name}"
-        );
-    }
+    assert_eq!(
+        pcm(&folder.path().join("microphone.wav")),
+        [0, 32].repeat(513)
+    );
+    let clean = pcm(&folder.path().join("microphone_clean.wav"));
+    assert_eq!(clean.len(), 513 * 2);
+    assert_eq!(pcm(&folder.path().join("audio.wav")), clean);
 }
 
 #[cfg(target_os = "macos")]
 fn native_echo_library() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../desktop/capture/echo/libspeakerdesk_echo.dylib")
+    std::env::var_os("SPEAKERDESK_TEST_ECHO_LIBRARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../desktop/capture/echo/libspeakerdesk_echo.dylib")
+        })
 }
 
 #[test]
 #[cfg(target_os = "macos")]
 #[ignore = "Requires independent v0.6.6 echo replay root in SPEAKERDESK_ECHO_REFERENCE"]
-fn raw_echo_matches_independent_v066_retention() {
+fn current_dsp_preserves_independent_v066_original_sources() {
     use std::io::BufRead;
     let reference = PathBuf::from(
         std::env::var_os("SPEAKERDESK_ECHO_REFERENCE").expect("independent replay root"),
@@ -122,12 +129,8 @@ fn raw_echo_matches_independent_v066_retention() {
         "91f7593fc9c890c69befd6663cdcdeb0072d5f70"
     );
     let library = native_echo_library();
-    assert_eq!(
-        format!("{:x}", Sha256::digest(fs::read(&library).unwrap())),
-        manifest["library_sha256"].as_str().unwrap()
-    );
-    // Retain output alongside the independently generated reference for the DSP
-    // comparison. This test asserts exact raw/no-echo retention, not echo quality.
+    // Current DSP must preserve the independent raw sources and clocks.
+    // ABI3 processed bytes and its library identity remain historical quality evidence.
     let output = tempfile::Builder::new()
         .prefix("native-")
         .tempdir_in(&reference)
@@ -176,12 +179,7 @@ fn raw_echo_matches_independent_v066_retention() {
                 u64::from(audio.duration()),
                 case["samples"].as_u64().unwrap()
             );
-            if matches!(track.as_str(), "microphone" | "system" | "system_reference")
-                || matches!(
-                    name,
-                    "no_echo" | "near_only" | "inverted_no_echo" | "partial_pause"
-                )
-            {
+            if matches!(track.as_str(), "microphone" | "system" | "system_reference") {
                 assert_eq!(
                     format!("{:x}", Sha256::digest(pcm(&path))),
                     expected["pcm16_sha256"].as_str().unwrap(),
@@ -1060,4 +1058,208 @@ async fn real_wav_write_failure_reaps_helper_and_retains_last_commit() {
         [0_u8, 32].repeat(4000)
     );
     assert_reaped(pid);
+}
+
+fn windows_helper(folder: &Path, script: &str) -> PathBuf {
+    let path = helper(folder, false, script);
+    fs::write(
+        folder.join("capture-helper.capability.json"),
+        serde_json::to_vec(&json!({
+            "helper_sha256":format!("{:x}",Sha256::digest(fs::read(&path).unwrap())),
+            "export_contract":"raw_dual_mono_stereo16k_v1",
+            "capability_version":"windows_wasapi_shared_v1",
+            "progress_contract":"audio_queue_fence_v1",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "Requires SPEAKERDESK_TEST_ECHO_LIBRARY pointing to the actual ABI4 native component"]
+fn windows_microphone_reference_stays_private_through_pause_late_repair_failure_and_drop() {
+    let library = native_echo_library();
+    for case in [
+        "success",
+        "pause",
+        "late-reference",
+        "late-microphone",
+        "rebuild-failure",
+        "drop",
+    ] {
+        let folder = TempDir::new().unwrap();
+        let path = windows_helper(
+            folder.path(),
+            "Windows protocol identity; native host DSP replay, no devices",
+        );
+        let mut cfg = config(folder.path(), false);
+        let owned_library = folder.path().join("echo.dylib");
+        cfg.echo_library = Some(if case == "rebuild-failure" {
+            fs::copy(&library, &owned_library).unwrap();
+            owned_library.clone()
+        } else {
+            library.clone()
+        });
+        let mut writer = SourceWriter::create(cfg, Helper::inspect(&path).unwrap()).unwrap();
+        assert!(writer.snapshot.processing.is_none());
+        assert_eq!(
+            writer.snapshot.source_catalog.as_ref().unwrap()["sources"],
+            json!([
+                {"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1}
+            ])
+        );
+        accept(&mut writer, &json!({"type":"recording"})).unwrap();
+        let late = case.starts_with("late-") || case == "rebuild-failure";
+        let mut frames = 513;
+        if late {
+            accept(&mut writer, &json!({"type":"clock","time":0.75})).unwrap();
+            accept(&mut writer, &audio("system", 1000., &[0.75; 1026], 2)).unwrap();
+            if case == "late-microphone" {
+                accept(&mut writer, &audio("microphone", 1000., &[0.25; 513], 1)).unwrap();
+            }
+            // New reference data after the correction checks the shared file cursor is restored.
+            accept(&mut writer, &audio("system", 4000., &[0.75; 1026], 2)).unwrap();
+            accept(&mut writer, &audio("microphone", 4000., &[0.25; 513], 1)).unwrap();
+            frames = 4513;
+        } else {
+            accept(&mut writer, &audio("microphone", 0., &[0.; 513], 1)).unwrap();
+            accept(&mut writer, &audio("system", 0., &[0.75; 1026], 2)).unwrap();
+        }
+        if case == "pause" {
+            accept(&mut writer, &json!({"type":"paused","time":513./16000.})).unwrap();
+            assert_eq!(writer.snapshot.committed_sample, 513);
+            assert!(accept(&mut writer, &audio("system", 513., &[0.5; 34], 2)).is_err());
+            writer.resume().unwrap();
+            accept(&mut writer, &json!({"type":"recording"})).unwrap();
+            accept(&mut writer, &audio("microphone", 513., &[0.25; 17], 1)).unwrap();
+            accept(&mut writer, &audio("system", 513., &[0.5; 34], 2)).unwrap();
+            frames += 17;
+        }
+        assert!(!writer.snapshot.levels.contains_key("system"));
+        if case == "drop" {
+            accept(&mut writer, &json!({"type":"clock","time":0.75})).unwrap();
+            assert_eq!(writer.snapshot.raw_sample, 4000);
+            drop(writer);
+        } else {
+            accept(
+                &mut writer,
+                &json!({"type":"stopped","time":frames as f64/16000.}),
+            )
+            .unwrap();
+            if case == "rebuild-failure" {
+                fs::remove_file(&owned_library).unwrap();
+            }
+            let result = writer.finish();
+            assert_eq!(result.raw_sample, frames, "{case}");
+            assert_eq!(
+                result.committed_sample,
+                if case == "rebuild-failure" { 0 } else { frames },
+                "{case}: {:?}",
+                result.error
+            );
+            assert_eq!(
+                result.derived_rebuilt,
+                late && case != "rebuild-failure",
+                "{case}"
+            );
+            if case == "rebuild-failure" {
+                assert!(
+                    result
+                        .error
+                        .as_deref()
+                        .unwrap()
+                        .contains("repair did not finish")
+                );
+            } else if !late {
+                assert!(result.error.is_none(), "{case}: {:?}", result.error);
+            }
+            assert_eq!(
+                pcm(&folder.path().join("microphone.wav")).len(),
+                frames as usize * 2,
+                "{case}"
+            );
+            assert_eq!(
+                pcm(&folder.path().join("audio.wav")),
+                pcm(&folder.path().join("microphone_clean.wav")),
+                "private render audio must not enter the retained mix: {case}"
+            );
+            if case == "late-microphone" {
+                assert_eq!(
+                    &pcm(&folder.path().join("microphone.wav"))[2000..3026],
+                    &[0, 32].repeat(513)
+                );
+            }
+        }
+        for name in [
+            "system.wav",
+            "system_reference.wav",
+            "private_reference.wav",
+            "capture-overflow-input.json",
+        ] {
+            assert!(!folder.path().join(name).exists(), "{case}: {name}");
+        }
+        let journal = folder.path().join("capture-late-pcm.jsonl");
+        assert_eq!(journal.exists(), case == "late-microphone", "{case}");
+        if journal.exists() {
+            for line in fs::read_to_string(journal).unwrap().lines() {
+                assert_eq!(serde_json::from_str::<Value>(line).unwrap()["source"], 0);
+            }
+        }
+        for entry in fs::read_dir(folder.path()).unwrap() {
+            let name = entry.unwrap().file_name();
+            assert!(
+                [
+                    "capture-helper",
+                    "capture-helper.capability.json",
+                    "audio.wav",
+                    "microphone.wav",
+                    "microphone_clean.wav",
+                    "capture-late-pcm.jsonl"
+                ]
+                .iter()
+                .any(|expected| name == *expected),
+                "anonymous reference left a directory entry: {name:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+#[ignore = "Requires SPEAKERDESK_TEST_ECHO_LIBRARY pointing to the actual ABI4 native component"]
+async fn windows_microphone_only_requests_a_private_system_reference_from_the_helper() {
+    let folder = TempDir::new().unwrap();
+    let frames = [
+        audio("microphone", 0., &[0.; 513], 1),
+        audio("system", 0., &[0.75; 1026], 2),
+        json!({"type":"stopped","time":513./16000.}),
+    ];
+    let script = format!(
+        "#!/bin/sh\nIFS= read -r start\nprintf '%s' \"$start\" > '{}'\nprintf '%s\\n' {}\n",
+        folder.path().join("start.json").display(),
+        frames
+            .iter()
+            .map(|event| format!("'{event}'"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let path = windows_helper(folder.path(), &script);
+    let mut cfg = config(folder.path(), false);
+    cfg.echo_library = Some(native_echo_library());
+    let session = CaptureSupervisor::spawn(&path, cfg).await.unwrap();
+    let result = session.finish().await.unwrap();
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert_eq!(result.committed_sample, 513);
+    let start: Value =
+        serde_json::from_slice(&fs::read(folder.path().join("start.json")).unwrap()).unwrap();
+    assert_eq!(start["microphone"], true);
+    assert_eq!(start["system"], true);
+    assert_eq!(
+        start["capture_export_contract"],
+        "raw_dual_mono_stereo16k_v1"
+    );
+    assert!(!folder.path().join("system.wav").exists());
+    assert!(!result.levels.contains_key("system"));
 }

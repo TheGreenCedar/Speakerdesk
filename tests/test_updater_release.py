@@ -329,6 +329,85 @@ class WindowsPreparationTests(unittest.TestCase):
     def prepare(self):
         return promotion.prepare(self.manifest_path, self.qa_path, self.notes, None)
 
+    def combined_candidate(self):
+        apple=self.root/'apple';apple.mkdir()
+        stem=f'Speakerdesk_{self.version}_AppleSilicon'
+        payloads={stem+'.dmg':b'fixture dmg',stem+'.app.zip':b'fixture app',
+                  stem+'.app.tar.gz':b'fixture updater',stem+'.app.tar.gz.sig':self.signature.read_bytes()}
+        for name,data in payloads.items():(apple/name).write_bytes(data)
+        manifest=dict(version=self.version,source_commit=self.source,source_repository=promotion.REPOSITORY,
+            runtime_kind='native',signing='developer-id',notarized=True,
+            notarization=[dict(kind='app',status='Accepted'),dict(kind='dmg',status='Accepted')],
+            files=[dict(filename=name,bytes=len(data),sha256=hashlib.sha256(data).hexdigest()) for name,data in payloads.items()],
+            updater=dict(platform='darwin-aarch64',filename=stem+'.app.tar.gz',signature_filename=stem+'.app.tar.gz.sig',
+                         signature=self.signature.read_text(),public_key=self.key,require_signed_version=True))
+        (apple/'artifact-manifest.json').write_text(json.dumps(manifest))
+        (apple/'SHA256SUMS').write_text(''.join(f'{p["sha256"]}  {p["filename"]}\n' for p in manifest['files']))
+        qa=dict(passed=True,source_commit=self.source,version=self.version,
+                app_archive_sha256=promotion.digest_file(apple/(stem+'.app.zip')),
+                verification=str(self.install_report),verification_sha256=promotion.digest_file(self.install_report))
+        (apple/'native-qa.json').write_text(json.dumps(qa))
+        return (apple/'artifact-manifest.json',apple/'native-qa.json',self.notes,apple/'signer.zip',self.manifest_path,self.qa_path)
+
+    def test_combined_release_preserves_both_manifests_and_publishes_one_exact_source_tag(self):
+        report=json.loads(self.install_report.read_text())
+        self.install_report.write_text(json.dumps(dict(report,app_driven_update_observed=True)))
+        self.qa_path.write_text(json.dumps(dict(self.qa,verification_sha256=promotion.digest_file(self.install_report))))
+        args=self.combined_candidate()
+        with patch.object(promotion,'verify_signing') as signer:
+            prepared=promotion.prepare_combined(*args)
+        signer.assert_called_once()
+        original=self.manifest_path.read_bytes()
+        alias='artifact-manifest-windows-x86_64.json'
+        self.assertEqual(prepared['files'][alias]['sha256'],hashlib.sha256(original).hexdigest())
+        self.assertNotEqual(prepared['files'][alias]['sha256'],prepared['files']['artifact-manifest.json']['sha256'])
+        self.api_patch.stop()
+        plan,state,command,download=UpdaterReleaseTests.publication_fixture(self,prepared)
+        def inspect_upload(arguments,**kwargs):
+            if arguments[:3]==['gh','release','create']:
+                paths=[Path(p) for p in arguments[arguments.index('--draft')+1:]]
+                self.assertEqual({p.name for p in paths},set(plan['files']))
+                self.assertEqual(next(p for p in paths if p.name==alias).read_bytes(),original)
+            return command(arguments,**kwargs)
+        with patch.object(promotion.subprocess,'run',side_effect=inspect_upload),patch.object(promotion,'downloaded_digest',side_effect=download) as downloads:
+            promotion.publish(plan)
+        self.assertEqual(state['mutations'],['draft','tag','publish'])
+        self.assertEqual(downloads.call_count,9)
+        self.assertEqual(state['create_arguments'][state['create_arguments'].index('--title')+1],'Speakerdesk '+self.version)
+        self.assertEqual(self.manifest_path.read_bytes(),original)
+
+    def test_combined_preparation_rejects_different_sources_or_unqualified_windows(self):
+        args=self.combined_candidate()
+        with patch.object(promotion,'verify_signing'):
+            manifest=json.loads(args[0].read_text());manifest['source_commit']='b'*40
+            qa=json.loads(args[1].read_text());qa['source_commit']='b'*40
+            args[0].write_text(json.dumps(manifest));args[1].write_text(json.dumps(qa))
+            self.notes.write_text('Sources: '+self.source+' '+'b'*40)
+            with self.assertRaisesRegex(ValueError,'same version and source'):promotion.prepare_combined(*args)
+            manifest['source_commit']=self.source;qa['source_commit']=self.source
+            args[0].write_text(json.dumps(manifest));args[1].write_text(json.dumps(qa))
+            self.qa_path.write_text(json.dumps(dict(self.qa,passed=False)))
+            with self.assertRaisesRegex(ValueError,'Exact signed Windows installed QA'):promotion.prepare_combined(*args)
+
+    def test_combined_publication_requires_windows_update_and_current_main(self):
+        args=self.combined_candidate()
+        with patch.object(promotion,'verify_signing'):prepared=promotion.prepare_combined(*args)
+        with self.assertRaisesRegex(ValueError,'actual app-driven update'):promotion.publish(prepared)
+        self.network.assert_not_called()
+        self.api_patch.stop()
+        prepared['app_driven_update_observed']=True
+        for case in ('different main','main moves during upload'):
+            with self.subTest(case=case):
+                plan,state,command,download=UpdaterReleaseTests.publication_fixture(self,prepared)
+                if case=='different main':state['main']['sha']='b'*40
+                def move_main(arguments,**kwargs):
+                    result=command(arguments,**kwargs)
+                    if arguments[:3]==['gh','release','create']:state['main']['sha']='b'*40
+                    return result
+                with patch.object(promotion.subprocess,'run',side_effect=move_main),patch.object(promotion,'downloaded_digest',side_effect=download) as downloads:
+                    with self.assertRaisesRegex(ValueError,'current reviewed main|main changed during'):promotion.publish(plan)
+                self.assertFalse(state['published']);downloads.assert_not_called()
+
     def test_local_windows_preparation_binds_signed_bytes_and_operator_reports_without_network(self):
         result = self.prepare()
         self.assertEqual(result['provenance'], 'local-operator-controlled')
