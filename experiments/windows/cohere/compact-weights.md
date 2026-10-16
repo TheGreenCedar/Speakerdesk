@@ -309,3 +309,39 @@ test preserves the reference tokens/text, completion, short-input and pre-cancel
 behavior. [Current complete-request and residency observations](README.md) cover
 that setting. The previous failed inspection, proxy and installed Stop gates
 remain recorded; these component results do not replace installed qualification.
+
+## Finite encoder attention masks
+
+The exported encoder used scalar FLOAT negative infinity for masked relative
+attention scores in all 48 layers. Features contain `valid_frames + 1` frames;
+when `valid_frames` is divisible by eight, subsampling leaves a wholly masked
+encoder query row. Its all-negative-infinity Softmax can produce invalid values
+that can reach decoder logits. Retained direct Runtime replays confirmed
+`Cohere decoder returned invalid logits`; this was not a decoder token-limit
+failure.
+
+`finite_encoder_attention_mask` replaces only those 48 owned scalar literals
+with finite FLOAT minimum, matching the Mac encoder's `f32::MIN` mask expression
+at the same pre-QK-add location. Both export paths use this check. Exact constant
+identities, scalar types/values and sole Where/Add consumers must match before
+any mutation. Reversing the literal replacements must recover the entire
+original ModelProto. Packed Q4 values, affine metadata, weight stores, node
+order, other operators, shapes, crops and padding remain unchanged. Hostile
+controls reject missing, extra, misowned, malformed or duplicate sites without
+changing the input model.
+
+The private derivative passed the retained encoder comparison with maximum
+absolute error `1.907e-6`, exact mask, repeated bytes and placement admission.
+The original full reference retained its 31-token count and exact text on two requests;
+eight 6.00–6.07-second reference crops cover all frame-count residues modulo
+eight. The cropped checks require successful nonempty decoding and are
+numerical regressions, not independent accuracy references. The durable ignored
+resident test reuses that matrix without adding recordings or regenerating
+references.
+
+The corrected graph and graph-bound policy are private qualification artifacts.
+They require new immutable download assets and matching registry graph/policy
+pins before product admission; the old asset URLs do not supply the corrected
+bytes. No public artifact or installed-live claim follows from these component
+checks. The installed 600-second compact gate remains failed, and this mask
+correction does not establish the cause or resolution of its sustained stall.

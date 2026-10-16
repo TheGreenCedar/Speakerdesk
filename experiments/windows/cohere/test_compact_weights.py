@@ -38,6 +38,78 @@ def fixture():
 
 
 class CompactWeights(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("onnx"), "ONNX required for exact finite-mask control")
+    def test_finite_encoder_mask_changes_only_48_owned_scalars_and_rejects_hostile_graphs(self):
+        import copy
+        import math
+        from onnx import helper as h, TensorProto as T
+
+        nodes, inputs = [], []
+        for layer in range(48):
+            prefix = f"/encoder/layers.{layer}/self_attn/"
+            name = prefix + ("Constant_28" if layer == 0 else "Constant_26")
+            cast = prefix + ("Cast_3" if layer == 0 else "Cast_2") + "_output_0"
+            constant = h.make_tensor("", T.FLOAT, [], bytes.fromhex("000080ff"), raw=True)
+            nodes.extend([
+                h.make_node("Constant", [], [name + "_output_0"], name=name, value=constant),
+                h.make_node("Where", [cast, name + "_output_0", prefix + "Mul_1_output_0"],
+                            [prefix + "Where_output_0"], name=prefix + "Where"),
+                h.make_node("Add", [prefix + "Mul_2_output_0", prefix + "Where_output_0"],
+                            [prefix + "Add_2_output_0"], name=prefix + "Add_2"),
+            ])
+            inputs.extend([h.make_tensor_value_info(cast, T.BOOL, [2]),
+                           h.make_tensor_value_info(prefix + "Mul_1_output_0", T.FLOAT, [2]),
+                           h.make_tensor_value_info(prefix + "Mul_2_output_0", T.FLOAT, [2])])
+        store = h.make_tensor("unchanged-packed-weight", T.UINT8, [1], [0xA9])
+        model = h.make_model(h.make_graph(nodes, "finite-mask", inputs, [], [store]), ir_version=10)
+        model.doc_string = "Preserve ordering, weights, metadata, and every non-mask field."
+        original = model.SerializeToString(deterministic=True)
+        result, proof = compact.finite_encoder_attention_mask(model)
+        self.assertEqual(model.SerializeToString(deterministic=True), original)
+        self.assertEqual(proof["count"], 48)
+        for before, after in zip(model.graph.node, result.graph.node):
+            if before.op_type == "Constant":
+                self.assertEqual(after.attribute[0].t.raw_data, bytes.fromhex("ffff7fff"))
+                restored = copy.deepcopy(after)
+                restored.attribute[0].t.raw_data = before.attribute[0].t.raw_data
+                self.assertEqual(before.SerializeToString(), restored.SerializeToString())
+            else:
+                self.assertEqual(before.SerializeToString(), after.SerializeToString())
+        metadata = []
+        for value in (model, result):
+            value = copy.deepcopy(value)
+            value.graph.ClearField("node")
+            metadata.append(value.SerializeToString())
+        self.assertEqual(*metadata)
+        finite, = struct.unpack("<f", bytes.fromhex("ffff7fff"))
+        softmax = lambda values: [math.exp(v - max(values)) / sum(math.exp(x - max(values)) for x in values)
+                                  for v in values]
+        self.assertEqual(softmax([finite, finite]), [0.5, 0.5])
+        self.assertTrue(all(math.isnan(v) for v in softmax([-math.inf, -math.inf])))
+        self.assertEqual(softmax([2., finite]), softmax([2., -math.inf]))
+
+        for mutation in ("missing", "extra", "misowned", "wrong_value", "wrong_type",
+                         "wrong_shape", "duplicate_name", "duplicate_output", "graph_output"):
+            with self.subTest(mutation=mutation):
+                bad = copy.deepcopy(model)
+                tensor = bad.graph.node[0].attribute[0].t
+                if mutation == "missing": del bad.graph.node[0]
+                elif mutation == "extra":
+                    bad.graph.node.append(h.make_node("Constant", [], ["extra"], name="extra",
+                        value=h.make_tensor("", T.FLOAT, [], [-math.inf])))
+                elif mutation == "misowned": bad.graph.node[1].input[0] = bad.graph.node[0].output[0]
+                elif mutation == "wrong_value": tensor.raw_data = struct.pack("<f", -1.)
+                elif mutation == "wrong_type": tensor.data_type = T.INT32
+                elif mutation == "wrong_shape": tensor.dims.append(1)
+                elif mutation == "duplicate_name": bad.graph.node[-1].name = bad.graph.node[0].name
+                elif mutation == "duplicate_output": bad.graph.node[-1].output[0] = bad.graph.node[0].output[0]
+                elif mutation == "graph_output":
+                    bad.graph.output.append(h.make_tensor_value_info(bad.graph.node[0].output[0], T.FLOAT, []))
+                unchanged = bad.SerializeToString(deterministic=True)
+                with self.assertRaises(ValueError):
+                    compact.finite_encoder_attention_mask(bad)
+                self.assertEqual(bad.SerializeToString(deterministic=True), unchanged)
+
     @unittest.skipUnless(importlib.util.find_spec("onnx"), "ONNX required for exact graph metadata control")
     def test_shape_fold_preserves_signed_int64_dynamic_float_and_unrelated_graph_bytes(self):
         import copy

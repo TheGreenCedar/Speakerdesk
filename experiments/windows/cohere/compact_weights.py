@@ -359,6 +359,80 @@ def _all_tensors(model):
     return shard_encoder.tensors(model)
 
 
+def finite_encoder_attention_mask(model):
+    """Match Mac's finite masked relative scores; never mutate an unverified graph."""
+    from onnx import AttributeProto, TensorProto as T
+
+    nodes = {node.name: node for node in model.graph.node}
+    if len(nodes) != len(model.graph.node):
+        raise ValueError("duplicate encoder node identity")
+    outputs = [value for node in model.graph.node for value in node.output]
+    if len(outputs) != len(set(outputs)):
+        raise ValueError("duplicate encoder output identity")
+    consumers = {}
+    for node in model.graph.node:
+        for index, value in enumerate(node.input):
+            consumers.setdefault(value, []).append((node.name, index))
+    graph_outputs = {value.name for value in model.graph.output}
+    expected = {}
+    for layer in range(48):
+        prefix = f"/encoder/layers.{layer}/self_attn/"
+        name = prefix + ("Constant_28" if layer == 0 else "Constant_26")
+        where = nodes.get(prefix + "Where")
+        node = nodes.get(name)
+        if (node is None or node.domain or node.op_type != "Constant" or node.input
+                or list(node.output) != [name + "_output_0"] or len(node.attribute) != 1):
+            raise ValueError("encoder mask constant identity differs")
+        attr = node.attribute[0]
+        tensor = attr.t
+        if (attr.name != "value" or attr.type != AttributeProto.TENSOR or not attr.HasField("t")
+                or tensor.data_type != T.FLOAT or tensor.dims or tensor.external_data
+                or tensor.data_location == T.EXTERNAL or tensor.raw_data != bytes.fromhex("000080ff")
+                or any(len(getattr(tensor, key)) for key in
+                       ("float_data", "int32_data", "int64_data", "string_data", "double_data", "uint64_data"))):
+            raise ValueError("encoder mask is not the frozen scalar FLOAT negative infinity")
+        cast = "Cast_3" if layer == 0 else "Cast_2"
+        if (where is None or where.domain or where.op_type != "Where" or where.attribute
+                or list(where.input) != [prefix + cast + "_output_0", name + "_output_0",
+                                         prefix + "Mul_1_output_0"]
+                or list(where.output) != [prefix + "Where_output_0"]
+                or consumers.get(node.output[0]) != [(where.name, 1)]
+                or consumers.get(where.output[0]) != [(prefix + "Add_2", 1)]
+                or node.output[0] in graph_outputs or where.output[0] in graph_outputs):
+            raise ValueError("encoder mask has unreviewed ownership")
+        add = nodes.get(prefix + "Add_2")
+        if (add is None or add.domain or add.op_type != "Add" or add.attribute
+                or list(add.input) != [prefix + "Mul_2_output_0", where.output[0]]):
+            raise ValueError("encoder masked-score consumer differs")
+        expected[name] = node
+    negative_infinities = set()
+    for node in model.graph.node:
+        for attr in node.attribute:
+            if attr.HasField("g") or attr.graphs:
+                raise ValueError("nested graphs require separate mask proof")
+            if node.op_type == "Constant" and attr.HasField("t"):
+                tensor = attr.t
+                if tensor.data_type == T.FLOAT and not tensor.dims and (
+                        tensor.raw_data == bytes.fromhex("000080ff")
+                        or list(tensor.float_data) == [-math.inf]):
+                    negative_infinities.add(node.name)
+    if negative_infinities != set(expected):
+        raise ValueError("unexpected encoder negative-infinity constants")
+
+    result = copy.deepcopy(model)
+    for node in result.graph.node:
+        if node.name in expected:
+            node.attribute[0].t.raw_data = bytes.fromhex("ffff7fff")  # f32::MIN, as on Mac.
+    restored = copy.deepcopy(result)
+    for node in restored.graph.node:
+        if node.name in expected:
+            node.attribute[0].t.raw_data = bytes.fromhex("000080ff")
+    if restored.SerializeToString(deterministic=True) != model.SerializeToString(deterministic=True):
+        raise ValueError("finite mask amendment changed unrelated protobuf fields")
+    return result, dict(constants=sorted(expected), count=48, before_raw="000080ff",
+                        after_raw="ffff7fff", semantics="Mac finite relative-score mask before QK addition")
+
+
 def finalize_metadata(model, fold_shapes=False):
     """Only fold literal INT64 scalar Unsqueezes, then apply the proven ordering."""
     from onnx import TensorProto as T, helper as h
@@ -489,9 +563,14 @@ def convert(source, checkpoint, destination):
                 filename = "encoder.weights" if graph == "encoder" else "decoder.weights"
                 stream = opened[graph + ".onnx"]
                 model = onnx.load_model_from_string(stream.read())
+                mask_proof = None
+                if graph == "encoder":
+                    model, mask_proof = finite_encoder_attention_mask(model)
                 model, coverage[graph] = rewrite(model, originals["model.safetensors"], entries, opened[filename],
                     GRAPH_PINS[filename][0], filename, stores["encoder" if graph == "encoder" else "decoder"], source_name)
                 model, metadata_passes[graph] = finalize_metadata(model, fold_shapes=graph != "encoder")
+                if mask_proof is not None:
+                    metadata_passes[graph]["finite_attention_mask"] = mask_proof
                 onnx.save(model, destination / (graph + ".onnx"))
         used = {row["source"] for rows in coverage.values() for row in rows}
         used.update(key for rows in coverage.values() for row in rows for key in row.get("source_metadata", []))

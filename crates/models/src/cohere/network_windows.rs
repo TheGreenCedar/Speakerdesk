@@ -471,6 +471,20 @@ mod tests {
             );
             assert!(network.step(&mut session, &operation).is_err());
         }
+        // Exercise every encoder subsampling residue, including a wholly masked tail row.
+        // These crops check finite decoding; the full reference above owns text/token quality.
+        for residue in 0..8 {
+            let samples = 96_000 + residue * 160;
+            assert_eq!((samples / 160) % 8, residue);
+            let operation = Operation::native().unwrap();
+            let result = network
+                .transcribe(&pcm[..samples], "en", (0, 0), &operation)
+                .unwrap();
+            assert!(
+                !result.text.trim().is_empty(),
+                "empty Cohere result at frame residue {residue}"
+            );
+        }
         let operation = Operation::native().unwrap();
         let empty = network
             .transcribe(&[0.0; 159], "en", (3200, 3200), &operation)

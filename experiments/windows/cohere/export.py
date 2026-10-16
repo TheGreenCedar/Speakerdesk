@@ -180,6 +180,9 @@ def export_graph(module, args, path, input_names, output_names, dynamic_axes, we
                       dynamic_axes=dynamic_axes, opset_version=17, dynamo=False, export_params=False,
                       do_constant_folding=False, training=torch.onnx.TrainingMode.EVAL)
     graph = onnx.load(path, load_external_data=False)
+    if path.name == "encoder.onnx":
+        from compact_weights import finite_encoder_attention_mask
+        graph, _ = finite_encoder_attention_mask(graph)
     state = module.state_dict()
     weight_path, offsets = weight_store
     with weight_path.open("ab") as stream:
