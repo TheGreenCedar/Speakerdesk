@@ -9,6 +9,7 @@ Function .onVerifyInstDir
   StrCpy $0 $INSTDIR
   ${Do}
     IfFileExists "$0\*.*" parent_found
+    IfFileExists "$0" invalid_directory
     ${GetParent} "$0" $1
     ${If} $1 == ""
     ${OrIf} $1 == $0
@@ -17,8 +18,9 @@ Function .onVerifyInstDir
     StrCpy $0 $1
   ${Loop}
   parent_found:
-  ; FILE_ADD_FILE | FILE_DELETE_CHILD, with directory/reparse flags and shared access.
-  System::Call 'kernel32::CreateFileW(w r0, i 0x42, i 7, p 0, i 3, i 0x02200000, p 0) p.r1'
+  ; Need files and subdirectories. Program Files permits these for administrators
+  ; without DELETE_CHILD on its root; requiring that would reject valid installs.
+  System::Call 'kernel32::CreateFileW(w r0, i 0x6, i 7, p 0, i 3, i 0x02200000, p 0) p.r1'
   ${If} $1 == -1
     Goto invalid_directory
   ${EndIf}
@@ -35,7 +37,12 @@ FunctionEnd
 !macro NSIS_HOOK_PREINSTALL
   ; Passive/silent installs skip the directory page. Fail before copying or registration.
   ClearErrors
-  GetTempFileName $0 $INSTDIR
+  ; NSIS clears an invalid /D destination. Do not let the probe fall back to root.
+  ${If} $INSTDIR == ""
+    SetErrors
+  ${Else}
+    GetTempFileName $0 $INSTDIR
+  ${EndIf}
   ${If} ${Errors}
     SetErrorLevel 5
     MessageBox MB_OK|MB_ICONSTOP "Speakerdesk cannot write to this folder. Choose a folder in your user profile, or run setup as administrator and select 'Anyone who uses this computer' for Program Files." /SD IDOK

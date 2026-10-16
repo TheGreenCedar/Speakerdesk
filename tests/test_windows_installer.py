@@ -24,6 +24,7 @@ class WindowsInstallerTests(unittest.TestCase):
         cls.build = tempfile.TemporaryDirectory(prefix='speakerdesk-installer-test-')
         cls.root = Path(cls.build.name)
         cls.exe = cls.root / 'hooks.exe'
+        cls.directory_check = cls.root / 'directory-check.exe'
         script = cls.root / 'hooks.nsi'
         hook = ROOT / 'desktop/src-tauri/windows-installer.nsh'
         script.write_text(f'''Unicode true
@@ -44,6 +45,22 @@ SectionEnd
 ''', encoding='utf-8')
         subprocess.run([cls.makensis, '/V2', str(script)], check=True,
                        capture_output=True, text=True, timeout=60)
+        # Invoke the same callback that enables Next, with no filesystem mutations.
+        script.write_text(f'''Unicode true
+RequestExecutionLevel user
+!include MUI2.nsh
+!include FileFunc.nsh
+!include "{hook}"
+OutFile "{cls.directory_check}"
+Section
+  SetErrorLevel 5
+  Call .onVerifyInstDir
+  SetErrorLevel 0
+SectionEnd
+''', encoding='utf-8')
+        subprocess.run([cls.makensis, '/V2', str(script)], check=True,
+                       capture_output=True, text=True, timeout=60)
+
 
     @classmethod
     def tearDownClass(cls):
@@ -53,6 +70,32 @@ SectionEnd
         # /D must be last and unquoted, as required by NSIS.
         return subprocess.run(f'"{self.exe}" /S /D={destination}',
                               timeout=30, capture_output=True).returncode
+
+    def directory_is_accepted(self, destination):
+        result = subprocess.run(f'"{self.directory_check}" /S /D={destination}',
+                                timeout=30, capture_output=True)
+        self.assertIn(result.returncode, (0, 5))
+        return result.returncode == 0
+
+    def test_directory_page_accepts_writable_existing_and_nested_folders(self):
+        for target in (self.root, self.root / 'new' / 'nested'):
+            with self.subTest(target=target):
+                self.assertTrue(self.directory_is_accepted(target))
+        self.assertFalse((self.root / 'new').exists())
+
+    def test_directory_page_rejects_an_existing_file(self):
+        target = self.root / 'directory-page-file'
+        target.write_text('retain this file')
+        self.assertFalse(self.directory_is_accepted(target))
+        self.assertEqual(target.read_text(), 'retain this file')
+
+    def test_directory_page_accepts_program_files_only_when_elevated(self):
+        import ctypes
+        target = Path(os.environ['ProgramW6432']) / self.root.name
+        self.assertFalse(target.exists())
+        self.assertEqual(self.directory_is_accepted(target),
+                         bool(ctypes.windll.shell32.IsUserAnAdmin()))
+        self.assertFalse(target.exists())
 
     def test_writable_custom_folder_installs_and_removes_probe(self):
         target = self.root / 'custom installation'
