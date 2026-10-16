@@ -21,9 +21,10 @@ Speakerdesk is not affiliated with the upstream model, framework or icon authors
 The prepared Windows graphs are derived model materials, separate from their
 original checkpoints, conversion code and native runtime libraries. Their exact
 source revisions and output file hashes are recorded in
-`crates/models/src/windows-model-artifacts.json`. The reserved model release is
-`TheGreenCedar/Speakerdesk` tag `windows-models-20261015`; this notice does not
-assert that it has been published. Each asset name starts with its model ID and
+`crates/models/src/windows-model-artifacts.json`. Cohere's ten assets target
+`TheGreenCedar/Speakerdesk` tag `windows-models-20261016`; all other model prefixes
+remain on `windows-models-20261015`. This notice does not assert publication.
+Each asset name starts with its model ID and
 `--`. Model terms continue to apply when these converted files are downloaded
 separately from the application.
 
@@ -31,7 +32,7 @@ separately from the application.
 | --- | --- | --- |
 | `silero-speech--` | Silero Team, through `mlx-community/silero-vad-v6@2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06`; MIT. | The pinned Float32 checkpoint is represented as an ONNX inference graph; recurrent state and frame preparation are explicit. |
 | `nemotron--` | NVIDIA Nemotron 3 Diarization, through `mlx-community/Nemotron-3-Diarization@59ed2dbfc1346dcea9d423c71306a3a2499c568f`; OpenMDW 1.1. MLX conversion by Lucas Newman / MLX Community. | BF16 parameters are represented as Float32; inference omits training heads and exposes cache/state. The frontend uses standard ONNX operators. |
-| `cohere-speech--` | CohereLabs `cohere-transcribe-03-2026`, quantized by Spoke in `spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12`, following the MLX Speech conversion; Apache 2.0. | Original packed 4-bit weights, affine scales and biases are preserved. DirectML reconstructs parameters for computation; encoder and request-local decoder/KV graphs are separate. External stores are sharded, and constant integer shape operations are folded without changing weight values. |
+| `cohere-speech--` | CohereLabs `cohere-transcribe-03-2026`, quantized by Spoke in `spokedotso/cohere-transcribe-03-2026-mlx-4bit@064e51eab6db47066cbeaa85e2894b5691bd8d12`, following the MLX Speech conversion; Apache 2.0. | Original packed 4-bit weights, affine scales and biases are preserved. DirectML reconstructs parameters for computation; encoder and request-local decoder/KV graphs are separate. External stores are sharded, and constant integer shape operations are folded without changing weight values. The encoder uses finite FLOAT minimum for 48 attention-mask literals to prevent invalid fully masked rows; parameter values remain unchanged. |
 | `whisper-language--` | OpenAI Whisper code and weights: MIT. The MLX Community `whisper-tiny-asr-fp16@77fa3f52b482ec80d086df55f893065a9baab172` conversion declares Apache 2.0; both notices are retained. | Language-identification-only encoder/first-decoder-step graph, explicit frontend and precision/materialization lowering. |
 | `coarse-alignment--` | Meta Omnilingual ASR, distributed by `csukuangfj2/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12@6fc542a3b0661c8278cca1230c34deb989f31202`; Apache 2.0. Copyright 2025 Meta Platforms, Inc. and affiliates. | The original INT8 source is downloaded and its parameters are dequantized during setup into the exact qualified Float32 store. The separate graph lowers attention to the maintained Microsoft operator. Output is selected CTC scores for supplied-text alignment. |
 | `redimnet2-b6--` | Palabra.ai, `PalabraAI/redimnet2@2a8d15f65b1dfb5d73fede2f11ee42bcccca3035`, release checkpoint `b6-vb2+vox2_v0-lm.pt`; MIT. | Maintained graph converted to ONNX, with a half-precision backbone and Float32 waveform/frontend/output boundaries. The Mac Core ML artifact is a different conversion. |

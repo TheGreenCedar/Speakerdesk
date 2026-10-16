@@ -16,8 +16,12 @@ private peak was **4.33 GiB**, maximum sampled GPU commitment **3.94 GiB**, and
 load **11.20 seconds**. Short-input, completed-session and pre-cancel checks pass.
 These are retained-clip observations, not sustained live-app proof.
 [compact-weights.md](compact-weights.md) records the original weights, failed
-proxy gates and separate complete-request decision. The encoder graph, original
-Q4 values, placement policy and published compact model files are unchanged.
+proxy gates and separate complete-request decision. The registry now targets
+`windows-models-20261016` for all ten Cohere assets. Only 48 encoder mask literals
+and the graph-bound placement policy change for the
+[finite-mask correction](compact-weights.md#finite-encoder-attention-masks);
+original Q4 values and the other eight files remain unchanged. The timings above
+describe the preceding pooled graph, not a new corrected-graph measurement.
 The combined seven-model test also passes with the new setting;
 [Windows qualification](../README.md) records its memory and continuation results.
 Sustained installed application qualification remains separate.

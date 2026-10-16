@@ -339,9 +339,9 @@ numerical regressions, not independent accuracy references. The durable ignored
 resident test reuses that matrix without adding recordings or regenerating
 references.
 
-The corrected graph and graph-bound policy are private qualification artifacts.
-They require new immutable download assets and matching registry graph/policy
-pins before product admission; the old asset URLs do not supply the corrected
-bytes. No public artifact or installed-live claim follows from these component
-checks. The installed 600-second compact gate remains failed, and this mask
-correction does not establish the cause or resolution of its sustained stall.
+The registry targets all ten Cohere files under the new immutable
+`windows-models-20261016` prefix, including the corrected graph and graph-bound
+policy. The other eight asset files keep their original bytes. This records
+the download contract, not publication or installed qualification. The installed
+600-second compact gate remains failed, and this mask correction does not
+establish the cause or resolution of its sustained stall.

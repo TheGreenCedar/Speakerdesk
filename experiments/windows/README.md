@@ -45,6 +45,11 @@ individual peaks need not coincide) and sampled process private memory at
 21.14 GiB. Those results describe the rejected FP32 diagnostic inventory.
 
 The current compact-download inventory is **74 files / 3,223,263,162 bytes**.
+Cohere's ten assets now target `windows-models-20261016`: only the encoder's
+48 finite attention-mask literals and its graph-bound policy differ. The other
+eight Cohere files are unchanged; all other models retain `windows-models-20261015`.
+Artifact publication and the corrected candidate's installed 600-second gate
+remain separate from the component evidence above.
 CTC downloads the original INT8 parameters and reconstructs the exact qualified
 Float32 store during setup. Its [production preparation gate](ctc/README.md)
 passes in 7.7549075 s (9.6187678 s guarded wrapper, including independent output

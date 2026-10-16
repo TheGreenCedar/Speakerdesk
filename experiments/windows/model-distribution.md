@@ -1,8 +1,10 @@
 # Windows model release notices
 
-The reserved `windows-models-20261015` GitHub release is not published by this
-change. `crates/models/src/windows-model-artifacts.json` identifies its seven
-converted model inputs, reserved asset prefixes and exact output files. Runtime
+`crates/models/src/windows-model-artifacts.json` identifies seven converted model
+inputs and their exact files. Cohere's ten assets target `windows-models-20261016`;
+its corrected encoder and bound placement policy replace two files, while the
+other eight retain their bytes. All other model prefixes remain on
+`windows-models-20261015`. This change does not publish either release. Runtime
 qualification, installer admission and publication remain separate gates.
 
 `packaging/THIRD_PARTY_NOTICES.md` records each origin, applicable declared

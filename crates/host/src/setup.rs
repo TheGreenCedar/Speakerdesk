@@ -1353,6 +1353,11 @@ mod tests {
             ]
         );
         for model in &catalog {
+            let release = if model.id == "cohere-speech" {
+                "windows-models-20261016"
+            } else {
+                "windows-models-20261015"
+            };
             if model.id == "coarse-alignment" {
                 assert_eq!(model.prepared.len(), 1);
                 assert_eq!(model.prepared["ctc.weights"].size, 1_301_979_472);
@@ -1372,7 +1377,7 @@ mod tests {
                 assert_eq!(
                     model.download_url(name),
                     format!(
-                        "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/{}--{name}",
+                        "https://github.com/TheGreenCedar/Speakerdesk/releases/download/{release}/{}--{name}",
                         model.id
                     )
                 );
