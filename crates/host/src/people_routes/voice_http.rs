@@ -69,6 +69,7 @@ pub(super) async fn voice_clips(
 ) -> Response {
     blocking(move || reply((|| {
         let id = JobId::parse(jid).map_err(|_|not_found())?;
+        let pending_setup = app.native.get().and_then(|native|native.pending_setup_status());
         let policy = app.models().voice_policy();
         let job = app.store().get(&id,false)?.ok_or_else(not_found)?;
         let meeting = meeting(&job)?;
@@ -91,8 +92,8 @@ pub(super) async fn voice_clips(
                 else { "The speaker or timing is unverified, edited, or still being finalized. Use an unchanged solo passage." };
             json!({"segment_id":s.id,"start":s.start,"end":s.end,"message":message})
         }).collect();
-        let readiness = readiness_fields(policy.is_some());
-        let (status,message) = if policy.is_none() { ("unavailable",readiness["voice_message"].as_str().unwrap()) }
+        let readiness = readiness_fields(policy.is_some(),pending_setup);
+        let (status,message) = if policy.is_none() { (pending_setup.unwrap_or("unavailable"),readiness["voice_message"].as_str().unwrap()) }
             else if app.admission.busy() { ("busy","Finish the active recording or transcription, then refresh passages.") }
             else if !source_verified { ("source_unverified","This transcript has no verified local speaker audio.") }
             else if !audio_available { ("no_audio","The original recording is unavailable.") }

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "plugins": {
+    "updater": {
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
+  "bundle": {
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": false,
+    "icon": ["../../.cache/windows-bundle/icons/icon.ico"],
+    "macOS": null,
+    "windows": {
+      "allowDowngrades": false,
+      "bundleVCRuntime": true,
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "resources": {
+      "../capture/speakerdesk-capture": null,
+      "../capture/speakerdesk-capture.capability.json": null,
+      "../capture/echo/libspeakerdesk_echo.dylib": null,
+      "../../.cache/native/mlx-0.32.2/lib/mlx.metallib": null,
+      "../../target/native/THIRD_PARTY_NOTICES.txt": null,
+      "../../.cache/windows-bundle/speakerdesk-capture.exe": "speakerdesk-capture.exe",
+      "../../.cache/windows-bundle/speakerdesk-capture.exe.capability.json": "speakerdesk-capture.exe.capability.json",
+      "../../.cache/windows-bundle/speakerdesk_echo.dll": "speakerdesk_echo.dll",
+      "../../.cache/windows-bundle/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
+      "../../.cache/windows-bundle/runtime/": "runtime/"
+    }
+  }
+}

@@ -5,7 +5,10 @@ use speakerdesk_core::limits::{VAD_CONTEXT_SAMPLES, VAD_FRAME_SAMPLES};
 
 #[cfg(target_os = "macos")]
 pub mod network;
-#[cfg(target_os = "macos")]
+#[cfg(windows)]
+#[path = "network_windows.rs"]
+pub mod network;
+#[cfg(any(target_os = "macos", windows))]
 pub mod session;
 
 /// New samples in one Silero 16 kHz frame (`chunk_size` in the pinned branch).

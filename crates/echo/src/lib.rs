@@ -55,6 +55,17 @@ pub struct EchoOutput {
     pub clean: Vec<f32>,
     pub system: Vec<f32>,
 }
+
+fn native_delay_ms(clock: &ReferenceClock) -> i32 {
+    clock.matches().last().map_or(-1, |(_, delay)| {
+        // A stronger reflection can trail the direct path. Keep the original
+        // 16 ms causal room allowance here, outside clock/skew measurement.
+        ((delay + clock.phase()) * 1000. / RATE as f64 - 16.)
+            .round_ties_even()
+            .clamp(0., 1000.) as i32
+    })
+}
+
 impl EchoMixer {
     pub fn start(path: &Path) -> Result<Self, EchoError> {
         let metadata = std::fs::symlink_metadata(path).map_err(|_| EchoError::Missing)?;
@@ -72,6 +83,19 @@ impl EchoMixer {
         }
         // Resolve before loading: a relative leaf must not invoke dylib search rules.
         let path = path.canonicalize().map_err(|_| EchoError::Missing)?;
+        #[cfg(windows)]
+        let library = unsafe {
+            use libloading::os::windows::{
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
+            };
+            libloading::os::windows::Library::load_with_flags(
+                &path,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+            .map(Library::from)
+        }
+        .map_err(|_| EchoError::IncompatibleVersion)?;
+        #[cfg(not(windows))]
         let library = unsafe { Library::new(path) }.map_err(|_| EchoError::IncompatibleVersion)?;
         unsafe {
             let abi: unsafe extern "C" fn() -> i32 = *library
@@ -163,11 +187,7 @@ impl EchoMixer {
             for value in &mut render {
                 *value = value.clamp(-1., 1.);
             }
-            let delay = self.clock.matches().last().map_or(-1, |(_, delay)| {
-                ((delay + self.clock.phase()) * 1000. / RATE as f64)
-                    .round_ties_even()
-                    .clamp(0., 1000.) as i32
-            });
+            let delay = native_delay_ms(&self.clock);
             let mut output = [0.; FRAME];
             // Fixed-size validated buffers satisfy the ABI; only this owner calls it.
             if unsafe {
@@ -217,15 +237,60 @@ impl Drop for EchoMixer {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", windows)))]
 mod tests {
     use super::*;
 
     #[test]
+    fn dominant_reflection_keeps_the_earlier_room_path_causal() {
+        assert_eq!(native_delay_ms(&ReferenceClock::default()), -1);
+        for (direct, reflection, polarity) in [(1120, 1376, 1.), (1120, 1376, -1.), (0, 128, 1.)] {
+            let mut seed = 7_u32;
+            let noise: Vec<f32> = (0..RATE * 3)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    ((seed >> 8) as f32 / 16_777_216. - 0.5) * 0.4
+                })
+                .collect();
+            let reference: Vec<_> = noise.iter().map(|&v| [v, 0.]).collect();
+            let microphone: Vec<_> = (0..noise.len())
+                .map(|i| {
+                    i.checked_sub(direct).map_or(0., |p| 0.5 * noise[p])
+                        + i.checked_sub(reflection)
+                            .map_or(0., |p| polarity * noise[p])
+                })
+                .collect();
+            let mut clock = ReferenceClock::default();
+            for (far, near) in reference.chunks(RATE).zip(microphone.chunks(RATE)) {
+                clock.append(far, near);
+            }
+            assert!(clock.echo());
+            let measured = clock.matches().last().unwrap().1;
+            assert!((measured - reflection as f64).abs() < 0.1);
+            let sent = native_delay_ms(&clock);
+            assert!(sent >= 0);
+            let aligned_sample = sent as usize * RATE / 1000;
+            // AEC's linear filter is causal. Aligning to the strongest later
+            // reflection must leave the weaker direct path representable too.
+            assert!(
+                aligned_sample <= direct,
+                "direct {direct}, reflection {reflection}, sent {sent}ms"
+            );
+            assert!(reflection - aligned_sample < RATE * 128 / 1000);
+        }
+    }
+
+    #[test]
     #[ignore = "Requires the pinned native echo component built by scripts/setup_echo.py"]
     fn native_echo_bounds_queues_and_drains_partial_frames_exactly() {
+        let name = if cfg!(windows) {
+            "speakerdesk_echo.dll"
+        } else {
+            "libspeakerdesk_echo.dylib"
+        };
         let library = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../desktop/capture/echo/libspeakerdesk_echo.dylib");
+            .join("../../desktop/capture/echo")
+            .join(name);
         let mut mixer = EchoMixer::start(&library).unwrap();
         let mut expected = Vec::new();
         let mut actual = Vec::new();

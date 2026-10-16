@@ -1,4 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use crate::operation::Operation as Cancellation;
+#[cfg(not(windows))]
+use std::sync::atomic::AtomicBool as Cancellation;
+use std::sync::atomic::Ordering;
 
 use speakerdesk_core::{
     error::ChildError,
@@ -48,7 +52,7 @@ impl Session {
         network: &mut Network,
         pcm: &[f32],
         last: bool,
-        cancel: &AtomicBool,
+        cancel: &Cancellation,
     ) -> Result<VadFeedOut, ChildError> {
         if self.ended || pcm.iter().any(|s| !s.is_finite()) {
             return Err(ChildError::failed(
@@ -71,7 +75,7 @@ impl Session {
         network: &mut Network,
         mut pcm: &[f32],
         last: bool,
-        cancel: &AtomicBool,
+        cancel: &Cancellation,
     ) -> Result<VadFeedOut, ChildError> {
         let mut frames = Vec::new();
         loop {
@@ -94,9 +98,15 @@ impl Session {
             let peak = original.iter().map(|s| s.abs()).fold(0.0, f32::max);
             let gain = self.fixed_gain.unwrap_or_else(|| peak_gain(peak));
             self.pending[valid..].fill(0.0);
+            #[cfg(not(windows))]
             let raw_p = network.step(&self.pending, &mut self.raw)?;
+            #[cfg(windows)]
+            let raw_p = network.step(&self.pending, &mut self.raw, cancel)?;
             let normalized = self.pending.map(|s| s * gain);
+            #[cfg(not(windows))]
             let norm_p = network.step(&normalized, &mut self.normalized)?;
+            #[cfg(windows)]
+            let norm_p = network.step(&normalized, &mut self.normalized, cancel)?;
             frames.push(VadFrame {
                 start: self.observed,
                 end: self.observed + valid as u64,

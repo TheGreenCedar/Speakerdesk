@@ -56,7 +56,7 @@ fn start(app: &AppState, jid: &str, body: &[u8]) -> Result<Job, ApiError> {
     }
     crate::native::passage_recording_path(app.data_dir(), &job, &segment)
         .map_err(|_| ApiError::new(409, "The original passage audio is unavailable."))?;
-    let episode = random_hex(16);
+    let episode = random_hex(16).map_err(|error| store_error(&error))?;
     job.extra.remove("separation_error");
     job.extra.insert("passage_separation".into(),json!({"id":episode,"segment_id":segment.id,"phase":"Separating voices and transcribing each estimate…"}));
     job.message = "Separating overlapping voices. Your original words remain editable.".into();
@@ -141,7 +141,13 @@ pub(super) fn automatic(
         if operation.cancellation.is_cancelled() {
             break;
         }
-        let episode = random_hex(16);
+        let episode = match random_hex(16) {
+            Ok(episode) => episode,
+            Err(error) => {
+                tracing::error!(%error, "cannot identify automatic separation operation");
+                break;
+            }
+        };
         let started = shared.store.lock().expect("store").update_job(id, |job| {
             if !operation.current(job) {
                 return Err(ApiError::new(409, "Separation was superseded."));
@@ -292,7 +298,8 @@ impl LiveSeparation {
                 return Ok(false);
             };
             self.scan_from = Some(index + 1);
-            let episode = random_hex(16);
+            let episode = random_hex(16)
+                .map_err(|error| speakerdesk_core::live::LiveError::Detail(error.to_string()))?;
             let key = domain::source_key(&current, &segment);
             let (mut original, ()) = store.update_job(&current.id, |job| {
                 job.extra.entry("separation_attempts").or_insert_with(|| json!({}))
@@ -665,13 +672,8 @@ fn write_audio(
         let mut writer = audio::RecordingWriter::create(&partial).map_err(|e| e.to_string())?;
         writer.write_samples(pcm).map_err(|e| e.to_string())?;
         drop(writer);
-        fs::File::open(&partial)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| e.to_string())?;
-        fs::rename(&partial, &path).map_err(|e| e.to_string())?;
-        fs::File::open(directory)
-            .and_then(|f| f.sync_all())
-            .map_err(|e| e.to_string())?;
+        speakerdesk_core::filesystem::sync_file(&partial).map_err(|e| e.to_string())?;
+        speakerdesk_core::filesystem::rename(&partial, &path).map_err(|e| e.to_string())?;
     }
     Ok(())
 }

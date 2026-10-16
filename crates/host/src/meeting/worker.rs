@@ -648,6 +648,7 @@ pub(super) async fn worker(
                 .map_or(language, |r| r.history[0].language.clone());
             let mut config = EngineConfig::new(id.as_str(), initial_language);
             config.recovery = recovery.as_ref().map(|r| r.boundary.clone());
+            let accuracy_audio_budget = config.audio_batch_seconds * speakerdesk_core::live::RATE;
             let folder = app.data_dir().join(id.as_str());
             if let Some(receipt) = capture.processing {
                 config.processed_microphone_contract = Some(receipt.sha256);
@@ -811,11 +812,12 @@ pub(super) async fn worker(
                     let inbox = inbox.lock().expect("inbox");
                     !inbox.has_pending_control() && inbox.queued_audio_span().is_none()
                 };
+                let mut enriched = false;
                 if idle {
-                    // A running child request is not preemptible. Never admit another
-                    // auxiliary phase while saved capture audio/control needs draining.
+                    // A running child request is not preemptible. Enrichment keeps
+                    // idle admission while capture audio/control needs draining.
                     let mut discovered: Option<usize> = None;
-                    let enriched = enrichment.step(&operation, &id, &mut || {
+                    enriched = enrichment.step(&operation, &id, &mut || {
                         // Live calls use Engine's base connection, so this pump cannot recurse.
                         while let Some(events) = engine.poll().map_err(auxiliary_error)? {
                             let (finished, changed) = publish(
@@ -844,7 +846,18 @@ pub(super) async fn worker(
                         enrichment.separation.changed(index);
                     }
                     progressed |= enriched;
-                    if !enriched {
+                }
+                if !enriched {
+                    // Recheck after enrichment's live pump. A nonempty final batch
+                    // must not starve accuracy; larger queues and controls drain first.
+                    let accuracy_allowed = {
+                        let inbox = inbox.lock().expect("inbox");
+                        !inbox.has_pending_control()
+                            && inbox
+                                .queued_audio_span()
+                                .is_none_or(|(start, end, _)| end - start <= accuracy_audio_budget)
+                    };
+                    if accuracy_allowed {
                         let refined =
                             accuracy.step(&app, &operation, &mut |job, prior, accepted| {
                                 engine.accept_language_publication(job, Some(prior), accepted);

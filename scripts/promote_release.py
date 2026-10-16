@@ -15,6 +15,7 @@ import selectors
 import signal
 import time
 import zipfile
+import windows_signing
 
 REPOSITORY='TheGreenCedar/Speakerdesk'
 REPOSITORY_ID=1406057260
@@ -69,7 +70,11 @@ def verify_updater_files(manifest,directory,config):
 def prepare(manifest_path, qa_path, notes, signer_archive):
     require(manifest_path.name=='artifact-manifest.json' and manifest_path.is_file() and not manifest_path.is_symlink(),
             'Validate the exact manifest that will be uploaded')
-    manifest=json.loads(manifest_path.read_text());qa=json.loads(qa_path.read_text())
+    manifest=json.loads(manifest_path.read_text());qa=json.loads(qa_path.read_text(encoding='utf-8-sig'))
+    if manifest.get('platform')=='windows-x86_64':
+        require(signer_archive is None,'Local Windows preparation does not use an Apple signer archive')
+        return prepare_windows(manifest_path,qa_path,notes,manifest,qa)
+    require(signer_archive is not None,'Apple preparation requires the original signer archive')
     require(manifest.get('source_repository')==REPOSITORY and
             re.fullmatch(r'[0-9a-f]{40}',manifest.get('source_commit','')),'Signer source repository or commit differs')
     require(manifest.get('runtime_kind')=='native','Native signer candidate required; Python acceptance is retired')
@@ -102,6 +107,79 @@ def prepare(manifest_path, qa_path, notes, signer_archive):
     verify_signing(manifest,signer_archive)
     return {'repository':REPOSITORY,'tag':'v'+version,'source_commit':manifest['source_commit'],'version':version,
             'files':files,'notes_file':str(notes),'notes':body,'native_gate_sha256':digest_file(qa_path)}
+
+def prepare_windows(manifest_path,qa_path,notes,manifest,qa):
+    """Bind local operator observations without claiming Actions provenance."""
+    regular=windows_signing.regular
+    require(not {'fixture','qualification_fixture'} & manifest.keys(),'Helper fixtures are not Windows release candidates')
+    require(not {'fixture','qualification_fixture'} & qa.keys(),'Fixture QA is not signed installed evidence')
+    source=manifest.get('source_commit','');version=manifest.get('version','')
+    configuration=windows_signing.updater_configuration()
+    require(re.fullmatch(r'[0-9a-f]{40}',source) and manifest.get('source_dirty') is False,'Clean exact Windows source required')
+    require(version==configuration['version'] and re.fullmatch(r'\d+\.\d+\.\d+',version),'Windows candidate version differs')
+    require(manifest.get('public_ready') is False and manifest.get('authenticode_status')=='Valid'
+            and manifest.get('signing')=={'kind':'azure-artifact-signing','payloads_observed_at_hook':True,'receipts':'signing'},
+            'Final Authenticode-signed Windows candidate required')
+    name=f'Speakerdesk_{version}_x64-setup.exe';pin=manifest['installer'];update=manifest['updater_signature']
+    installer=regular(manifest_path.parent/name);signature=regular(manifest_path.parent/(name+'.sig'))
+    require(pin=={'name':name,'bytes':installer.stat().st_size,'sha256':digest_file(installer)},'Windows installer pin differs')
+    require(signature.stat().st_size<=8192,'Windows updater signature exceeds its bound')
+    signature_text=signature.read_text().strip()
+    require(re.fullmatch(r'[A-Za-z0-9+/]+={0,2}',signature_text),'Invalid updater signature encoding')
+    expected_update={'filename':name,'signature_filename':name+'.sig','signature':signature_text,
+                     'verified':True,'require_signed_version':True,
+                     **{key:value for key,value in configuration.items() if key!='version'}}
+    require(update==expected_update,'Final verified Windows updater/configuration metadata required')
+    installed=manifest['installed_payloads']
+    require(isinstance(installed,dict) and installed and all(
+        re.fullmatch(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*',name) and
+        not {'.','..'} & set(name.split('/')) and re.fullmatch(r'[0-9a-f]{64}',value)
+        for name,value in installed.items()),'Invalid installed payload inventory')
+    runtime=json.loads(regular(ROOT/'crates/models/src/windows-runtime.json').read_text())['files']
+    require({'speakerdesk-capture.exe.capability.json','THIRD_PARTY_NOTICES.txt'}<=installed.keys()
+            and all(installed.get('runtime/'+name)==pin['sha256'] for name,pin in runtime.items()),
+            'Installed inventory omits or changes pinned Windows runtime resources')
+    signed={}
+    for role,filename in {'capture':'speakerdesk-capture.exe','echo':'speakerdesk_echo.dll',
+                          'app':'speakerdesk.exe','uninstaller':'uninstall.exe','installer':name}.items():
+        receipt=json.loads(regular(manifest_path.parent/'signing'/(role+'.json')).read_text(encoding='utf-8-sig'))
+        snapshot=regular(manifest_path.parent/'signing/payloads'/filename)
+        expected=pin['sha256'] if role=='installer' else installed.get(filename)
+        require(receipt.get('role')==role and receipt.get('disposition')=='owned_signed'
+                and receipt.get('authenticode_status')=='Valid' and receipt.get('timestamped') is True
+                and re.match(r'^CN=Albert Najjar(?:,|$)',receipt.get('publisher_subject',''))
+                and receipt.get('sha256')==expected==digest_file(snapshot),'Signed Windows payload inventory differs: '+role)
+        signed[filename]=expected
+    require(qa.get('passed') is True and qa.get('platform')=='windows-x86_64' and qa.get('source_commit')==source
+            and qa.get('version')==version and qa.get('artifact_manifest_sha256')==digest_file(regular(manifest_path)),
+            'Exact signed Windows installed QA required')
+    reports={}
+    for field in ('verification','updater_verification'):
+        data=regular(qa[field]).read_bytes()
+        require(hashlib.sha256(data).hexdigest()==qa.get(field+'_sha256'),'Windows operator report changed: '+field)
+        reports[field]=json.loads(data.decode('utf-8-sig'))
+    observed=reports['verification'];verified=reports['updater_verification']
+    require(not {'fixture','qualification_fixture'} & observed.keys()
+            and observed.get('kind')=='signed-standard-user-install' and observed.get('passed') is True
+            and observed.get('installer_sha256')==pin['sha256'] and observed.get('installed_payloads')==installed
+            and all(observed.get(key) is True for key in ('standard_user','authenticode_verified','save_reopen',
+                                                         'clean_shutdown','uninstall_reinstall','data_preserved')),
+            'Signed standard-user installation observations required')
+    public=json.loads(regular(ROOT/'desktop/src-tauri/tauri.conf.json').read_text())['plugins']['updater']['pubkey']
+    require(verified.get('kind')=='nsis-installer-updater-verification' and not {'fixture','qualification_fixture'} & verified.keys()
+            and verified.get('payload_sha256')==pin['sha256'] and verified.get('signature_sha256')==digest_file(signature)
+            and verified.get('version')==version and verified.get('public_key')==public
+            and verified.get('signature_key_version_verified') is True and verified.get('payload_unchanged') is True,
+            'Actual final-installer updater verification receipt required')
+    body=regular(notes).read_text();require(source in body,'Notes must identify exact source')
+    files={path.name:{'filename':path.name,'bytes':path.stat().st_size,'sha256':digest_file(path),'path':str(path)}
+           for path in (installer,signature,regular(manifest_path))}
+    return {'repository':REPOSITORY,'platform':'windows-x86_64','provenance':'local-operator-controlled',
+            'app_driven_update_observed':observed.get('app_driven_update_observed') is True,
+            'tag':'v'+version,'version':version,'source_commit':source,
+            'files':files,'signed_payloads':signed,'notes_file':str(notes),'notes':body,
+            'native_gate_sha256':digest_file(regular(qa_path)),
+            'verification_sha256':qa['verification_sha256'],'updater_verification_sha256':qa['updater_verification_sha256']}
 
 def api(endpoint,body=None,*,method='PATCH'):
     command=['gh','api',endpoint]
@@ -194,13 +272,25 @@ def verify_repository(repo):
     require(repo['id']==REPOSITORY_ID and repo['full_name']==REPOSITORY,'Repository identity differs')
 
 def publish(plan):
+    windows=plan.get('platform')=='windows-x86_64'
+    if windows:
+        require(plan.get('app_driven_update_observed') is True,'Windows publication requires actual app-driven update observations')
     verify_repository(api('repos/'+REPOSITORY))
-    require(api('repos/'+REPOSITORY+'/commits/main')['sha']==plan['source_commit'],'Candidate is not the current reviewed main')
+    main=api('repos/'+REPOSITORY+'/commits/main')
+    if windows:
+        comparison=api('repos/'+REPOSITORY+'/compare/'+plan['source_commit']+'...'+main['sha'])
+        ancestor=comparison.get('merge_base_commit',{})
+        tree=main.get('commit',{}).get('tree',{}).get('sha','')
+        require(ancestor.get('sha')==plan['source_commit'] and re.fullmatch(r'[0-9a-f]{40}',tree)
+                and ancestor.get('commit',{}).get('tree',{}).get('sha')==tree,
+                'Windows candidate must be an ancestor of reviewed main with the same Git tree')
+    else:
+        require(main['sha']==plan['source_commit'],'Candidate is not the current reviewed main')
     check_tag(plan)
     releases=api('repos/'+REPOSITORY+'/releases?per_page=100')
     require(not any(r['tag_name']==plan['tag'] for r in releases),'Existing release/draft must be inspected; never overwrite')
     result=subprocess.run(['gh','release','create',plan['tag'],'--repo',REPOSITORY,'--target',plan['source_commit'],
-          '--title','Speakerdesk '+plan['version'],'--notes-file',plan['notes_file'],'--draft']+
+          '--title','Speakerdesk '+plan['version']+(' for Windows' if windows else ''),'--notes-file',plan['notes_file'],'--draft']+
           [item['path'] for item in plan['files'].values()],text=True,capture_output=True,timeout=180)
     require(result.returncode==0,'Draft upload failed; preserve any partial draft')
     # The tag endpoint exposes published releases; drafts are listed by identity.
@@ -214,7 +304,10 @@ def publish(plan):
     if not check_tag(plan):
         api('repos/'+REPOSITORY+'/git/refs',{'ref':'refs/tags/'+plan['tag'],'sha':plan['source_commit']},method='POST')
     check_tag(plan,required=True)
-    release=api('repos/'+REPOSITORY+'/releases/'+str(release_id),{'draft':False,'prerelease':False,'make_latest':'true'})
+    if windows:
+        require(api('repos/'+REPOSITORY+'/commits/main')['sha']==main['sha'],
+                'Reviewed main changed during Windows upload; preserve the draft for inspection')
+    release=api('repos/'+REPOSITORY+'/releases/'+str(release_id),{'draft':False,'prerelease':False,'make_latest':'false' if windows else 'true'})
     require(release.get('id')==release_id,'Published release identity differs')
     verify(release,plan);require(release['draft'] is False and release['published_at'],'Publication incomplete')
     check_tag(plan,required=True)
@@ -227,7 +320,7 @@ def publish(plan):
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--manifest',type=Path,required=True)
     parser.add_argument('--native-qa',type=Path,required=True);parser.add_argument('--notes',type=Path,required=True);parser.add_argument('--publish',action='store_true')
-    parser.add_argument('--signer-archive',type=Path,required=True)
+    parser.add_argument('--signer-archive',type=Path)
     args=parser.parse_args();plan=prepare(args.manifest,args.native_qa,args.notes,args.signer_archive)
     print(json.dumps(publish(plan) if args.publish else {k:v for k,v in plan.items() if k!='notes'},indent=2))
 

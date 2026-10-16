@@ -115,7 +115,7 @@ impl SourceWriter {
         {
             return Err(invalid("Invalid capture recording or source selection."));
         }
-        let echo = if config.microphone && config.system && !helper.qualified() {
+        let echo = if config.microphone && config.system && !helper.processed_microphone() {
             let path = config
                 .echo_library
                 .as_deref()
@@ -281,7 +281,7 @@ impl SourceWriter {
                     return Ok(());
                 }
                 let seconds = seconds(value)?;
-                if self.helper.qualified() {
+                if self.helper.progress_qualified() {
                     if value.get("producer_fence").and_then(Value::as_str)
                         != Some(super::processing::PROGRESS)
                     {

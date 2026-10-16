@@ -1,4 +1,8 @@
 //! Pinned downloads into private staging directories; activation exposes complete models.
+#[cfg(any(windows, test))]
+#[path = "setup_windows.rs"]
+mod windows;
+
 use reqwest::{
     Client, StatusCode,
     header::{CONTENT_RANGE, RANGE},
@@ -29,11 +33,34 @@ pub(crate) struct ModelArtifact {
     pub name: String,
     pub repo: String,
     pub revision: String,
+    #[serde(default)]
+    pub download_prefix: Option<String>,
     pub files: BTreeMap<String, FilePin>,
     #[serde(default)]
     pub prepared: BTreeMap<String, FilePin>,
 }
 impl ModelArtifact {
+    fn download_url(&self, name: &str) -> String {
+        match &self.download_prefix {
+            Some(prefix) => format!("{prefix}{name}"),
+            None => format!(
+                "https://huggingface.co/{}/resolve/{}/{name}?download=true",
+                self.repo, self.revision
+            ),
+        }
+    }
+    // A setup-action hint only; native loading still verifies every artifact.
+    pub fn present(&self, root: &Path) -> bool {
+        // Mac conversion sources are not needed to use already prepared weights.
+        let runtime_files = if self.prepared.is_empty() {
+            &self.files
+        } else {
+            &self.prepared
+        };
+        runtime_files
+            .keys()
+            .all(|name| root.join(&self.id).join(name).is_file())
+    }
     pub fn download_bytes(&self) -> u64 {
         self.files.values().map(|f| f.size).sum()
     }
@@ -42,10 +69,45 @@ impl ModelArtifact {
     }
 }
 pub(crate) fn artifacts() -> Vec<ModelArtifact> {
+    #[cfg(windows)]
+    {
+        windows_artifacts()
+            .into_iter()
+            .filter(|model| model.id != "mossformer2-16k")
+            .collect()
+    }
+    #[cfg(not(windows))]
     serde_json::from_str(include_str!("model-artifacts.json")).expect("bundled model pins")
 }
 pub(crate) fn separation_artifact() -> ModelArtifact {
+    #[cfg(windows)]
+    {
+        windows_artifacts()
+            .into_iter()
+            .find(|model| model.id == "mossformer2-16k")
+            .expect("bundled Windows separation pins")
+    }
+    #[cfg(not(windows))]
     serde_json::from_str(include_str!("separation-artifact.json")).expect("bundled separation pins")
+}
+
+#[cfg(any(windows, test))]
+fn windows_artifacts() -> Vec<ModelArtifact> {
+    serde_json::from_str(include_str!(
+        "../../models/src/windows-model-artifacts.json"
+    ))
+    .expect("bundled Windows model pins")
+}
+
+pub(crate) fn import_artifact_identity() -> &'static [u8] {
+    #[cfg(windows)]
+    {
+        include_bytes!("../../models/src/windows-model-artifacts.json")
+    }
+    #[cfg(not(windows))]
+    {
+        include_bytes!("model-artifacts.json")
+    }
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -108,7 +170,7 @@ impl SetupService {
             model
                 .files
                 .keys()
-                .any(|name| matches!(std::fs::metadata(root.join(&model.id).join(name)), Err(error) if error.kind() == io::ErrorKind::NotFound))
+                .any(|name| missing_file(&root.join(&model.id).join(name)))
         });
         self.progress
             .lock()
@@ -148,17 +210,32 @@ pub(crate) fn initial_models_missing(
     models: &[ModelArtifact],
     reports: &[speakerdesk_core::ipc::SetupModelReport],
 ) -> bool {
-    !std::fs::symlink_metadata(root)
-        .is_ok_and(|meta| meta.is_symlink() || !meta.is_dir())
+    !std::fs::symlink_metadata(root).is_ok_and(|meta| meta.is_symlink() || !meta.is_dir())
         && reports.len() >= models.len()
         && reports.iter().take(models.len()).any(|report| !report.ok)
         && models.iter().zip(reports).all(|(model, report)| {
             report.ok
                 || (!std::fs::symlink_metadata(root.join(&model.id))
                     .is_ok_and(|meta| meta.is_symlink() || !meta.is_dir())
-                    && model.files.keys().all(|name| {
-                        matches!(std::fs::symlink_metadata(root.join(&model.id).join(name)), Err(error) if error.kind() == io::ErrorKind::NotFound)
-                    }))
+                    && model
+                        .files
+                        .keys()
+                        .all(|name| missing_file(&root.join(&model.id).join(name))))
+        })
+}
+
+fn missing_file(path: &Path) -> bool {
+    if !matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == io::ErrorKind::NotFound)
+    {
+        return false;
+    }
+    // Windows also reports NotFound when a parent is a regular file.
+    path.ancestors()
+        .skip(1)
+        .filter(|p| !p.as_os_str().is_empty())
+        .all(|parent| match std::fs::metadata(parent) {
+            Ok(metadata) => metadata.is_dir(),
+            Err(error) => error.kind() == io::ErrorKind::NotFound,
         })
 }
 
@@ -186,6 +263,17 @@ async fn directory(path: &Path) -> io::Result<()> {
             return Err(error("Invalid model directory"));
         }
         current.push(part);
+        if let Component::Prefix(prefix) = part {
+            if matches!(
+                prefix.kind(),
+                std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
+            ) && path.components().nth(1) != Some(Component::RootDir)
+            {
+                return Err(error("Invalid model directory"));
+            }
+            // A Windows drive prefix is not an addressable directory until its root is appended.
+            continue;
+        }
         match fs::symlink_metadata(&current).await {
             Ok(meta) if meta.is_dir() && !meta.is_symlink() => {}
             Ok(_) => return Err(error("Model directory contains a link or non-directory")),
@@ -218,6 +306,11 @@ async fn regular(path: &Path) -> io::Result<Option<u64>> {
                     return Err(error("Model artifact has multiple hard links"));
                 }
             }
+            #[cfg(windows)]
+            {
+                let file = open_options().read(true).open(path).await?;
+                verify_open_file(&file).await?;
+            }
             Ok(Some(meta.len()))
         }
         Ok(_) => Err(error("Model artifact is not a regular file")),
@@ -234,7 +327,41 @@ fn open_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
     #[cfg(unix)]
     options.custom_flags(libc::O_NOFOLLOW);
+    #[cfg(windows)]
+    options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
     options
+}
+async fn verify_open_file(file: &fs::File) -> io::Result<()> {
+    let metadata = file.metadata().await?;
+    if !metadata.is_file() || metadata.is_symlink() {
+        return Err(error("Model artifact is linked or not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(error("Model artifact has multiple hard links"));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
+        };
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if information.nNumberOfLinks != 1
+            || information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(error(
+                "Model artifact has multiple hard links or is a reparse point",
+            ));
+        }
+    }
+    Ok(())
 }
 async fn matches(path: &Path, pin: &FilePin, cancel: &CancellationToken) -> io::Result<bool> {
     checked(cancel)?;
@@ -242,6 +369,7 @@ async fn matches(path: &Path, pin: &FilePin, cancel: &CancellationToken) -> io::
         return Ok(false);
     }
     let mut file = open_options().read(true).open(path).await?;
+    verify_open_file(&file).await?;
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -331,6 +459,15 @@ impl Installer {
         let owner = options.open(lock)?;
         fs4::FileExt::try_lock(&owner)
             .map_err(|_| error("Another process is setting up these models"))?;
+        #[cfg(windows)]
+        windows::recover(
+            &root,
+            &artifacts()
+                .into_iter()
+                .chain([separation_artifact()])
+                .map(|model| model.id)
+                .collect::<Vec<_>>(),
+        )?;
         Ok(Self {
             root,
             client: Client::builder()
@@ -411,10 +548,7 @@ impl Installer {
         for (name, pin) in &model.files {
             checked(cancel)?;
             progress.phase(format!("Downloading {} · {name}", model.name));
-            let url = format!(
-                "https://huggingface.co/{}/resolve/{}/{name}?download=true",
-                model.repo, model.revision
-            );
+            let url = model.download_url(name);
             self.download(&url, &staging.join(name), pin, done, progress, cancel)
                 .await?;
             done += pin.size;
@@ -446,11 +580,9 @@ impl Installer {
                 fs::rename(&partial, path).await?;
                 return Ok(());
             }
-            open_options()
-                .write(true)
-                .truncate(true)
-                .open(&partial)
-                .await?;
+            let output = open_options().write(true).open(&partial).await?;
+            verify_open_file(&output).await?;
+            output.set_len(0).await?;
             offset = 0;
         }
         let mut request = self.client.get(url);
@@ -482,10 +614,15 @@ impl Installer {
         let mut output = open_options()
             .write(true)
             .create(true)
-            .truncate(offset == 0)
+            .truncate(false)
             .append(offset != 0)
             .open(&partial)
             .await?;
+        // Check the opened handle before mutation, including when a partial appeared during HTTP.
+        verify_open_file(&output).await?;
+        if offset == 0 {
+            output.set_len(0).await?;
+        }
         loop {
             let chunk = tokio::select! { biased; _ = cancel.cancelled() => return checked(cancel), chunk = response.chunk() => chunk.map_err(|e| error(e.to_string()))? };
             let Some(chunk) = chunk else {
@@ -527,6 +664,7 @@ impl Installer {
         checked(cancel)?;
         let source = staging.to_owned();
         let target = self.root.join(relative(&model.id)?);
+        #[cfg(not(windows))]
         let parent = self.root.clone();
         let model = model.clone();
         let cancellation = cancel.clone();
@@ -534,38 +672,50 @@ impl Installer {
             sync_artifact(&source, &model)?;
             checked(&cancellation)?;
             match std::fs::symlink_metadata(&target) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => std::fs::rename(&source, &target)?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    speakerdesk_core::filesystem::rename(&source, &target)?;
+                }
                 Err(e) => return Err(e),
                 Ok(meta) if meta.is_symlink() || !meta.is_dir() => {
                     return Err(error("Model destination is not a regular directory"));
                 }
                 Ok(_) => {
-                    exchange_directories(&source, &target)?;
-                    sync_directory(&parent)?;
-                    std::fs::remove_dir_all(&source)?;
+                    #[cfg(windows)]
+                    windows::replace(&source, &target)?;
+                    #[cfg(not(windows))]
+                    {
+                        exchange_directories(&source, &target)?;
+                        sync_directory(&parent)?;
+                        std::fs::remove_dir_all(&source)?;
+                        sync_directory(&parent)?;
+                    }
                 }
             }
-            sync_directory(&parent)?;
             Ok(())
         })
         .await
         .map_err(|e| error(e.to_string()))?
     }
 }
+#[cfg(not(windows))]
 fn sync_directory(path: &Path) -> io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
+    speakerdesk_core::filesystem::sync_directory(path)
 }
 fn sync_artifact(root: &Path, model: &ModelArtifact) -> io::Result<()> {
     for name in model.files.keys().chain(model.prepared.keys()) {
         let path = root.join(name);
-        std::fs::File::open(&path)?.sync_all()?;
-        let mut parent = path.parent().expect("artifact parent");
-        while parent.starts_with(root) {
-            sync_directory(parent)?;
-            if parent == root {
-                break;
+        speakerdesk_core::filesystem::sync_file(&path)?;
+        // Windows publishes the complete prepared tree with a write-through directory rename.
+        #[cfg(not(windows))]
+        {
+            let mut parent = path.parent().expect("artifact parent");
+            while parent.starts_with(root) {
+                sync_directory(parent)?;
+                if parent == root {
+                    break;
+                }
+                parent = parent.parent().expect("model parent");
             }
-            parent = parent.parent().expect("model parent");
         }
     }
     Ok(())
@@ -610,6 +760,7 @@ fn inventory(root: &Path, model: &ModelArtifact, partials: bool) -> io::Result<b
     }
     Ok(exact)
 }
+#[cfg(not(windows))]
 fn exchange_directories(source: &Path, target: &Path) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -736,6 +887,16 @@ mod tests {
             "filesystem errors leave download need unknown"
         );
         assert!(!initial_models_missing(&unknown, &models[..3], &reports));
+        let blocked = temp.path().join("blocked-model-directory");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join(&models[0].id), b"not a model directory").unwrap();
+        progress.check_downloads(&blocked, &models[..1]);
+        assert!(!progress.progress().download_required);
+        assert!(!initial_models_missing(
+            &blocked,
+            &models[..1],
+            &reports[..1]
+        ));
     }
     async fn server(
         mode: &'static str,
@@ -896,6 +1057,7 @@ mod tests {
             name: "Replay".into(),
             repo: "fixture/test".into(),
             revision: "pin".into(),
+            download_prefix: None,
             files: BTreeMap::from([
                 ("weights".into(), pin(b"abcdef")),
                 ("config.json".into(), pin(b"config")),
@@ -941,7 +1103,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             directory(&staging).await.unwrap();
             fs::write(staging.join("weights"), b"abcdef").await.unwrap();
@@ -974,6 +1136,7 @@ mod tests {
             name: "Fixture".into(),
             repo: "fixture/test".into(),
             revision: "pin".into(),
+            download_prefix: None,
             files: BTreeMap::from([("weights".into(), pin(b"abcdef"))]),
             prepared: BTreeMap::new(),
         };
@@ -1077,7 +1240,7 @@ mod tests {
         );
         assert!(!outside.path().join("model").exists());
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn hard_linked_partials_do_not_truncate_or_append_to_outside_files() {
         let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
@@ -1171,6 +1334,89 @@ mod tests {
         assert!(installer.installed(&model, &cancel).await.unwrap());
         assert_eq!(progress.progress().downloaded_bytes, model.download_bytes());
     }
+    #[test]
+    fn windows_setup_uses_pinned_models_in_host_load_order() {
+        let catalog = windows_artifacts();
+        assert_eq!(
+            catalog
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "silero-speech",
+                "nemotron",
+                "cohere-speech",
+                "whisper-language",
+                "coarse-alignment",
+                "redimnet2-b6",
+                "mossformer2-16k",
+            ]
+        );
+        for model in &catalog {
+            let release = if model.id == "cohere-speech" {
+                "windows-models-20261016"
+            } else {
+                "windows-models-20261015"
+            };
+            if model.id == "coarse-alignment" {
+                assert_eq!(model.prepared.len(), 1);
+                assert_eq!(model.prepared["ctc.weights"].size, 1_301_979_472);
+                assert_eq!(model.files["model.int8.onnx"].size, 365_352_120);
+                assert!(!model.files.contains_key("ctc.weights"));
+                assert_eq!(model.download_bytes(), 365_991_342);
+                assert_eq!(model.stored_bytes(), 1_667_970_814);
+            } else {
+                assert!(model.prepared.is_empty());
+            }
+            assert!(!model.files.is_empty());
+            for (name, pin) in &model.files {
+                assert_eq!(Path::new(name).components().count(), 1);
+                assert!(relative(name).is_ok());
+                assert!(pin.size > 0 && pin.size < 2 * 1024 * 1024 * 1024);
+                assert_eq!(pin.sha256.len(), 64);
+                assert_eq!(
+                    model.download_url(name),
+                    format!(
+                        "https://github.com/TheGreenCedar/Speakerdesk/releases/download/{release}/{}--{name}",
+                        model.id
+                    )
+                );
+            }
+        }
+        assert!(catalog[4].files.contains_key("ctc-mha.onnx"));
+        assert!(catalog[5].files.contains_key("redimnet.onnx"));
+        assert!(catalog[6].files.contains_key("program.json"));
+        let mac: Vec<ModelArtifact> =
+            serde_json::from_str(include_str!("model-artifacts.json")).unwrap();
+        assert_eq!(
+            mac[0].download_url("model.safetensors"),
+            "https://huggingface.co/mlx-community/silero-vad-v6/resolve/2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06/model.safetensors?download=true"
+        );
+    }
+
+    #[test]
+    fn separation_presence_requires_the_platform_artifact_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let model = windows_artifacts().pop().unwrap();
+        let root = temp.path().join(&model.id);
+        std::fs::create_dir(&root).unwrap();
+        // A legacy Mac weight file cannot offer an unusable Windows separation action.
+        std::fs::write(root.join("model.safetensors"), b"legacy").unwrap();
+        assert!(!model.present(temp.path()));
+        let mac: ModelArtifact =
+            serde_json::from_str(include_str!("separation-artifact.json")).unwrap();
+        assert!(
+            mac.present(temp.path()),
+            "Mac needs only its prepared runtime weights"
+        );
+        for name in model.files.keys() {
+            std::fs::write(root.join(name), b"presence only").unwrap();
+        }
+        assert!(model.present(temp.path()));
+        std::fs::remove_file(root.join("program.json")).unwrap();
+        assert!(!model.present(temp.path()));
+    }
+
     #[test]
     fn catalog_is_pinned_and_paths_are_relative() {
         let catalog = artifacts();

@@ -2931,6 +2931,185 @@ async fn rolling_accuracy_keeps_capture_running_and_owns_cancel_until_terminal()
 }
 
 #[tokio::test]
+async fn rolling_accuracy_advances_with_bounded_queued_audio_and_respects_controls() {
+    use speakerdesk_core::live::{EngineConfig, RATE};
+    for control in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let first_samples = 44 * 2560;
+        let batch = EngineConfig::new("fixture", "en").audio_batch_seconds * RATE;
+        fs::write(root.join("first-stage-samples"), first_samples.to_string()).unwrap();
+        fs::write(root.join("stage-2-samples"), (3 * batch).to_string()).unwrap();
+        fs::write(root.join("stage-3-samples"), batch.to_string()).unwrap();
+        let host = Running::open(root, false).await;
+        let id = host.start_live_only(json!(["microphone"])).await;
+        let path = format!("api/jobs/{id}");
+        trigger(root, 1);
+        host.wait(&path, |job| job["duration"].as_f64().unwrap_or(0.) >= 6.5)
+            .await;
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        host.wait(&path, |job| job["pause_flush"]["status"] == "complete")
+            .await;
+        let response = host
+            .client
+            .patch(format!("{}api/meetings/{id}/language", host.url))
+            .header("X-Speakerdesk-Token", &host.token)
+            .json(&json!({"language":"fr","language_revision":0}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let sealed = host
+            .wait(&path, |job| job["language_acknowledged_revision"] == 1)
+            .await;
+        let prior = sealed["document"]["segments"][0].clone();
+        assert_eq!(prior["canonical_state"], "sealed");
+        let sid = prior["id"].as_str().unwrap();
+        let anchor_samples =
+            prior["end_sample"].as_i64().unwrap() - prior["start_sample"].as_i64().unwrap();
+        fs::write(
+            root.join("context-replay.json"),
+            json!([{
+                "request_samples":anchor_samples,"text":"Fair scheduled accuracy words."
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("hold-live-asr"),
+            b"hold only the sealed anchor accuracy",
+        )
+        .unwrap();
+        fs::write(
+            root.join("hold-live-feed"),
+            b"fill the inbox behind primary processing",
+        )
+        .unwrap();
+        assert_eq!(
+            host.post(&format!("api/meetings/{id}/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        trigger(root, 2);
+        wait_file(&root.join("recovery-feed-started")).await;
+        wait_file(&root.join("sent-2")).await;
+        let captured = (first_samples + 3 * batch) as f64 / RATE as f64;
+        let queued = host
+            .wait(&path, |job| {
+                job["duration"].as_f64().unwrap_or(0.) >= captured - 1.
+            })
+            .await;
+        assert_eq!(
+            host.post(&format!("{path}/refinement/resume"), json!({}))
+                .await
+                .status(),
+            202
+        );
+        if control {
+            assert_eq!(
+                host.post(&format!("api/meetings/{id}/pause"), json!({}))
+                    .await
+                    .status(),
+                202
+            );
+            host.wait(&path, |job| job["pause_flush"]["status"] == "pending")
+                .await;
+        }
+        fs::remove_file(root.join("hold-live-feed")).unwrap();
+        wait_file(&root.join("context-started-0")).await;
+        let calls_before = fs::read_to_string(root.join("transcribe-crops")).unwrap();
+        let accuracy_call: Value =
+            serde_json::from_str(calls_before.lines().last().unwrap()).unwrap();
+        assert_eq!(accuracy_call["samples"], anchor_samples);
+        let accuracy_requests = calls_before
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|call| call == &accuracy_call)
+            .count();
+        let progress = host.get("api/meeting").await;
+        if control {
+            assert_eq!(
+                host.get(&path).await["pause_flush"]["status"],
+                "complete",
+                "ordered Flush must finish before the next accuracy request"
+            );
+        } else {
+            let pending = progress["pending_seconds"].as_f64().unwrap();
+            assert!(
+                pending > 0.1 && pending <= batch as f64 / RATE as f64 + 0.1,
+                "accuracy must start with nonempty audio within one batch, not wait for empty or bypass a larger queue: {progress}"
+            );
+            trigger(root, 3);
+            wait_file(&root.join("sent-3")).await;
+            host.wait(&path, |job| {
+                job["duration"].as_f64().unwrap_or(0.) >= captured + batch as f64 / RATE as f64 - 1.
+            })
+            .await;
+        }
+        fs::write(
+            root.join("release-context-0"),
+            b"complete the admitted accuracy request",
+        )
+        .unwrap();
+        fs::remove_file(root.join("hold-live-asr")).unwrap();
+        let accepted = host
+            .wait(&path, |job| {
+                job["rolling_refinement"]["completed"][sid].is_string()
+            })
+            .await;
+        assert_eq!(
+            accepted["status"],
+            if control { "paused" } else { "recording" }
+        );
+        let row = accepted["document"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == sid)
+            .unwrap();
+        assert_eq!(row["text"], "Fair scheduled accuracy words.");
+        let checkpoint = accepted["rolling_refinement"]["completed"][sid].clone();
+        host.wait("api/meeting", |meeting| {
+            meeting["processed_seconds"].as_f64().unwrap_or(0.)
+                >= queued["duration"].as_f64().unwrap() - 0.1
+        })
+        .await;
+        let response = host.client.patch(format!("{}{path}/segments/{sid}", host.url))
+            .header("X-Speakerdesk-Token", &host.token)
+            .json(&json!({"segment_revision":row["machine_revision"],"changes":{"text":"Protected fair scheduling words"}})).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let finished = host.stop(&id).await;
+        assert_eq!(finished["refinement_status"], "complete");
+        assert_eq!(finished["rolling_refinement"]["completed"][sid], checkpoint);
+        let row = finished["document"]["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == sid)
+            .unwrap();
+        assert_eq!(row["text"], "Protected fair scheduling words");
+        assert_eq!(row["protected_fields"], json!(["text"]));
+        let calls = fs::read_to_string(root.join("transcribe-crops")).unwrap();
+        assert_eq!(
+            calls
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|call| call == &accuracy_call)
+                .count(),
+            accuracy_requests,
+            "Stop must not decode the completed protected anchor again"
+        );
+        host.close(root).await;
+    }
+}
+
+#[tokio::test]
 async fn rolling_accuracy_stop_retries_failed_anchors_once_and_preserves_protected_words() {
     for case in ["recover", "incomplete", "protected"] {
         let temp = tempfile::tempdir().unwrap();

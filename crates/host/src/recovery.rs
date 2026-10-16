@@ -8,6 +8,7 @@ use axum::{
     routing::get,
 };
 use serde_json::{Value, json};
+use speakerdesk_core::filesystem;
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -58,6 +59,14 @@ impl RecoveryStore {
         }
         Ok(self.root.join(format!("{id}.json")))
     }
+    fn deleted(&self, job: &str) -> std::io::Result<bool> {
+        match fs::symlink_metadata(self.root.join(format!(".deleted-{job}"))) {
+            Ok(metadata) if metadata.is_symlink() || !metadata.is_file() => Err(invalid()),
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
     fn lock(&self) -> std::io::Result<fs::File> {
         let path = self.root.join(".writer.lock");
         if fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink() || !m.is_file()) {
@@ -101,7 +110,7 @@ impl RecoveryStore {
             return Err(invalid());
         }
         let _lock = self.lock()?;
-        if self.root.join(format!(".deleted-{job}")).try_exists()? {
+        if self.deleted(job)? {
             return Ok(None);
         }
         let id = format!("{session}-{job}");
@@ -130,8 +139,8 @@ impl RecoveryStore {
             let mut file = options.open(&temporary)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
-            fs::rename(&temporary, &destination)?;
-            fs::File::open(&self.root)?.sync_all()?;
+            drop(file);
+            filesystem::rename(&temporary, &destination)?;
             Ok(())
         })();
         if result.is_err() {
@@ -142,6 +151,12 @@ impl RecoveryStore {
     }
     pub fn read(&self, id: &str) -> std::io::Result<Value> {
         let path = self.path(id)?;
+        if self.deleted(id.split_once('-').expect("validated recovery id").1)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Draft recovery was deleted",
+            ));
+        }
         let metadata = fs::symlink_metadata(&path)?;
         if !metadata.is_file() || metadata.is_symlink() || metadata.len() > MAX_BYTES as u64 {
             return Err(invalid());
@@ -191,22 +206,27 @@ impl RecoveryStore {
         }
         let _lock = self.lock()?;
         let marker = self.root.join(format!(".deleted-{job}"));
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        match options.open(&marker) {
-            Ok(file) => file.sync_all()?,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let metadata = fs::symlink_metadata(&marker)?;
-                if metadata.is_symlink() || !metadata.is_file() {
-                    return Err(invalid());
-                }
+        if !self.deleted(job)? {
+            let temporary = self.root.join(format!(".deleted-{job}.tmp"));
+            match fs::remove_file(&temporary) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                result => result?,
             }
-            Err(error) => return Err(error),
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let result: std::io::Result<()> = (|| {
+                let file = options.open(&temporary)?;
+                file.sync_all()?;
+                drop(file);
+                filesystem::publish_new(&temporary, &marker)
+            })();
+            let _ = fs::remove_file(&temporary);
+            result?;
         }
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -220,7 +240,9 @@ impl RecoveryStore {
                 }
             }
         }
-        fs::File::open(&self.root)?.sync_all()?;
+        // Windows reads remain fenced by the write-through tombstone if deleted names reappear.
+        #[cfg(not(windows))]
+        filesystem::sync_directory(&self.root)?;
         Ok(())
     }
 }
@@ -335,12 +357,24 @@ mod tests {
         let job = "b".repeat(32);
         let other = "c".repeat(32);
         let dirty = |job: &str| json!({"schema_version":1,"job_id":job,"has_unsaved":true,"document":{"text":"Unsaved private words"}});
-        first.save(&session, 1, &dirty(&job)).unwrap();
+        let deleted_id = first.save(&session, 1, &dirty(&job)).unwrap().unwrap();
+        let deleted_path = first.path(&deleted_id).unwrap();
+        let residual = fs::read(&deleted_path).unwrap();
         first.save(&session, 2, &dirty(&other)).unwrap();
         second.discard_job(&job).unwrap();
         assert_eq!(first.save(&"d".repeat(32), 3, &dirty(&job)).unwrap(), None);
         assert_eq!(first.list().unwrap().len(), 1);
         assert_eq!(first.list().unwrap()[0]["job_id"], other);
+        // A durable tombstone also hides receipts whose removal was lost during a crash.
+        fs::write(&deleted_path, residual).unwrap();
+        let reopened = RecoveryStore::open(&root).unwrap();
+        assert_eq!(
+            reopened.read(&deleted_id).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(reopened.list().unwrap().len(), 1);
+        reopened.discard_job(&job).unwrap();
+        assert!(!deleted_path.exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

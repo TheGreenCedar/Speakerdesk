@@ -75,6 +75,14 @@ test('saved accuracy controls start, pause and retry through the existing routes
 });
 
 
+test('Windows saved accuracy does not claim English timing calibration',()=>{
+  const f=frontend(root,{platform:'windows'});f.seed(1,'ready');
+  f.run("selected.kind='meeting';selected.saved_refinement_available=true;selected.refinement_status='unavailable';renderRefinementStatus()");
+  const title=f.document.getElementById('refinement-status').title;
+  assert.match(title,/Word times are uncalibrated estimates/);
+  assert.doesNotMatch(title,/Non-English/);
+});
+
 test('live accuracy controls preserve recording and target the accuracy routes',async()=>{
   const f=frontend(root);f.seed(1,'recording');
   f.run("selected.kind='meeting';selected.rolling_refinement={mode:'live'};window.calls=[];api=async(path,options)=>{calls.push({path,method:options.method});return {};};poll=async()=>{};");

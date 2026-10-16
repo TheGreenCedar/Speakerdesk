@@ -6,6 +6,7 @@ pub mod document;
 pub mod edit;
 pub mod error;
 pub mod export;
+pub mod filesystem;
 pub mod ids;
 pub mod import;
 pub mod ipc;

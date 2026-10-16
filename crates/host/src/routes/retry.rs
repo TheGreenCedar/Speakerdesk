@@ -56,7 +56,7 @@ fn begin(app: &AppState, jid: &str, body: &[u8]) -> Result<Value, ApiError> {
     }
     let path = crate::native::passage_recording_path(app.data_dir(), &job, &segment)
         .map_err(|_| ApiError::new(409, messages::RETRY_NEEDS_AUDIO))?;
-    let retry_id = random_hex(16);
+    let retry_id = random_hex(16).map_err(|error| store_error(&error))?;
     job.extra.insert(
         "passage_retry".into(),
         json!({"id":retry_id,"segment_id":segment.id,"language":request.language}),

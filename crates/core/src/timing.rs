@@ -14,8 +14,7 @@ use thiserror::Error;
 use unicode_general_category::get_general_category;
 
 use crate::timing_policy::{
-    FUNCTIONAL_POLICY_ID, LEGACY_UNIT_POLICY_ID, NORMALIZATION_POLICY_ID, PROVIDER_ID,
-    TIMING_UNIT_POLICY_ID,
+    FUNCTIONAL_POLICY_ID, LEGACY_UNIT_POLICY_ID, NORMALIZATION_POLICY_ID, TIMING_UNIT_POLICY_ID,
 };
 
 /// Reading-turn sample rate from `reading_turns.py`.
@@ -237,6 +236,7 @@ pub struct PreparedTokens {
 }
 
 struct Behavior<'a> {
+    model_sha256: &'a str,
     calibration_id: Option<&'a str>,
     frame_calibration_id: Option<&'a str>,
     timing_unit_policy_id: Option<&'a str>,
@@ -740,6 +740,7 @@ fn provenance_matches(segment: &ReadingSegment, receipt: &TurnProvenance) -> boo
         return false;
     }
     let behavior = Behavior {
+        model_sha256: &receipt.model_sha256,
         calibration_id: Some(receipt.calibration_id.as_str()),
         frame_calibration_id: receipt.frame_calibration_id.as_deref(),
         timing_unit_policy_id: receipt.timing_unit_policy_id.as_deref(),
@@ -814,6 +815,7 @@ fn attribution_times_valid(turn: &ReadingTurn, start: f64, end: f64) -> bool {
 
 fn behavior_of_evidence(evidence: &ReadingWordEvidence) -> Behavior<'_> {
     Behavior {
+        model_sha256: &evidence.model_sha256,
         calibration_id: evidence.calibration_id.as_deref(),
         frame_calibration_id: evidence.frame_calibration_id.as_deref(),
         timing_unit_policy_id: evidence.timing_unit_policy_id.as_deref(),
@@ -831,9 +833,23 @@ fn behavior_valid(evidence: &Behavior<'_>, installed_provider_identity: Option<&
             || evidence.provider_id.is_some()
             || evidence.provider_identity_sha256.is_some()
             || evidence.normalization_policy_id.is_some();
-        return calibration != Some(FUNCTIONAL_POLICY_ID) && !fields_present;
+        return matches!(
+            (evidence.model_sha256, calibration),
+            (MODEL, Some(CALIBRATION)) | (LEGACY_MODEL, Some(LEGACY_CALIBRATION))
+        ) && !fields_present
+            && evidence
+                .frame_calibration_id
+                .is_none_or(|frame| Some(frame) == calibration);
     }
-    if evidence.provider_id != Some(PROVIDER_ID)
+    let Some(descriptor) = crate::timing_policy::descriptor_for_model(evidence.model_sha256) else {
+        return false;
+    };
+    if evidence.provider_id != Some(descriptor.provider_id)
+        || evidence.provider_identity_sha256 != Some(descriptor.provider_identity_sha256)
+        || !calibration.is_some_and(|id| descriptor.accepts_calibration(id))
+        || evidence
+            .frame_calibration_id
+            .is_some_and(|frame| Some(frame) != calibration)
         || evidence.normalization_policy_id != Some(NORMALIZATION_POLICY_ID)
     {
         return false;
@@ -848,7 +864,9 @@ fn qualified_identity(model: Option<&str>, calibration: Option<&str>) -> bool {
         (Some(MODEL), Some(CALIBRATION))
             | (Some(MODEL), Some(FUNCTIONAL_POLICY_ID))
             | (Some(LEGACY_MODEL), Some(LEGACY_CALIBRATION))
-    )
+    ) || model
+        .and_then(crate::timing_policy::descriptor_for_model)
+        .is_some_and(|descriptor| calibration.is_some_and(|id| descriptor.accepts_calibration(id)))
 }
 
 fn speaker_name(name: &str) -> bool {
@@ -1380,7 +1398,7 @@ fn frame_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timing_policy::{LEGACY_UNIT_POLICY_ID, TIMING_UNIT_POLICY_ID};
+    use crate::timing_policy::{LEGACY_UNIT_POLICY_ID, PROVIDER_ID, TIMING_UNIT_POLICY_ID};
 
     fn fixture_text() -> String {
         "  go go café \u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}  next end  ".to_string()
@@ -1635,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_script_turns_accept_a_synthetic_provider_identity() {
+    fn mixed_script_turns_require_the_known_provider_and_trusted_runtime_identity() {
         let text = "日本".to_string();
         let units = raw_units(&text, TIMING_UNIT_POLICY_ID).unwrap();
         let words = units
@@ -1653,7 +1671,7 @@ mod tests {
             start_sample: 0,
             end_sample: 16_000,
         };
-        let identity = "synthetic-provider-identity";
+        let identity = crate::alignment::NATIVE_PROVIDER;
         let mut row = ReadingRow {
             text: text.clone(),
             start_sample: 0,
@@ -1695,6 +1713,60 @@ mod tests {
         assert_eq!(turns[0].text, "日本");
         assert_eq!(turns[0].attribution, "single");
         assert_eq!(turns[0].speaker, "speaker_0");
+        row.installed_provider_identity = Some("unknown-provider".into());
+        row.reading_word_evidence
+            .as_mut()
+            .unwrap()
+            .provider_identity_sha256 = Some("unknown-provider".into());
+        assert!(project_turns(&row).is_empty());
+    }
+
+    #[test]
+    fn timing_rejects_crossed_backend_tuples_and_retains_legacy_mac() {
+        use crate::timing_policy::{MAC, WINDOWS};
+        for descriptor in [&MAC, &WINDOWS] {
+            let mut row = english_row();
+            let evidence = row.reading_word_evidence.as_mut().unwrap();
+            evidence.model_sha256 = descriptor.model_sha256.into();
+            evidence.calibration_id = Some(descriptor.calibration_for_language("en").into());
+            evidence.frame_calibration_id = evidence.calibration_id.clone();
+            evidence.provider_id = Some(descriptor.provider_id.into());
+            evidence.provider_identity_sha256 = Some(descriptor.provider_identity_sha256.into());
+            evidence.timing_unit_policy_id = Some(TIMING_UNIT_POLICY_ID.into());
+            evidence.normalization_policy_id = Some(NORMALIZATION_POLICY_ID.into());
+            row.installed_provider_identity = Some(descriptor.provider_identity_sha256.into());
+            assert!(!project_turns(&row).is_empty());
+            let other = if descriptor == &MAC { &WINDOWS } else { &MAC };
+            for field in ["model", "provider", "identity", "calibration", "frame"] {
+                let mut crossed = row.clone();
+                let evidence = crossed.reading_word_evidence.as_mut().unwrap();
+                match field {
+                    "model" => evidence.model_sha256 = other.model_sha256.into(),
+                    "provider" => evidence.provider_id = Some(other.provider_id.into()),
+                    "identity" => {
+                        evidence.provider_identity_sha256 =
+                            Some(other.provider_identity_sha256.into());
+                        crossed.installed_provider_identity =
+                            Some(other.provider_identity_sha256.into());
+                    }
+                    "calibration" => {
+                        evidence.calibration_id = Some(other.calibration_for_language("en").into())
+                    }
+                    _ => {
+                        evidence.frame_calibration_id =
+                            Some(other.calibration_for_language("en").into())
+                    }
+                }
+                assert!(project_turns(&crossed).is_empty(), "{field}");
+            }
+        }
+        for (model, calibration) in [(MODEL, CALIBRATION), (LEGACY_MODEL, LEGACY_CALIBRATION)] {
+            let mut row = english_row();
+            let evidence = row.reading_word_evidence.as_mut().unwrap();
+            evidence.model_sha256 = model.into();
+            evidence.calibration_id = Some(calibration.into());
+            assert!(!project_turns(&row).is_empty());
+        }
     }
 
     fn segment_from(row: &ReadingRow, turns: Vec<ReadingTurn>) -> ReadingSegment {

@@ -97,7 +97,8 @@ pub fn correlation_decision(
     if peak_score.abs() < SCORE_THRESHOLD {
         return None;
     }
-    let peak = earlier_arrival(&score[channel], peak);
+    // The delay and its confidence must describe the same validated peak.
+    // Native AEC headroom covers earlier room paths without shifting this clock.
     let fraction = parabolic_fraction(&correlation[channel], peak);
     Some(CorrelationDecision {
         delay: search as f64 - peak as f64 - fraction,
@@ -292,29 +293,6 @@ fn peak_score(score: &[Vec<f64>; 2]) -> Option<(usize, usize, f64)> {
         }
     }
     Some((best_lag, best_channel, score[best_channel][best_lag]))
-}
-
-/// A reflected path can outrank the direct path. After the strong match
-/// validates echo, align to a significant earlier local peak so the causal
-/// filter can model both. Skip the adjacent autocorrelation lobe and search
-/// only 16 ms of pre-echo.
-fn earlier_arrival(score: &[f64], peak: usize) -> usize {
-    let magnitude: Vec<f64> = score.iter().map(|value| value.abs()).collect();
-    let threshold = 0.12_f64.max(0.4 * magnitude[peak]);
-    let first = peak + 8;
-    let last = (score.len() - 1).min(peak + RATE * 16 / 1000);
-    let mut chosen = peak;
-    if first < last {
-        for index in first..last {
-            let local = magnitude[index] >= threshold
-                && magnitude[index] > magnitude[index - 1]
-                && magnitude[index] >= magnitude[index + 1];
-            if local {
-                chosen = index;
-            }
-        }
-    }
-    chosen
 }
 
 fn parabolic_fraction(correlation: &[f64], peak: usize) -> f64 {
@@ -519,6 +497,23 @@ mod tests {
             .expect("inverted delay");
         assert_delay(&decision, 0, delay as f64);
         assert!(decision.score < 0.0);
+    }
+
+    #[test]
+    fn broadband_autocorrelation_lobes_do_not_replace_the_validated_delay() {
+        let (search, window, delay, repetition) = (320, 2048, 288, 96);
+        let noise = lcg(search + window + repetition, 7);
+        // A delayed copy adds a strong autocorrelation lobe without making the
+        // source periodic: the exact microphone match is still uniquely one.
+        let far: Vec<f32> = (0..search + window)
+            .map(|i| 0.5 * (noise[i] + noise[i + repetition]))
+            .collect();
+        let microphone = &far[search - delay..search - delay + window];
+        let decision =
+            correlation_decision(&stereo(&far, &vec![0.; far.len()]), microphone, search)
+                .expect("unique broadband delay");
+        assert!(decision.score > 0.999);
+        assert_delay(&decision, 0, delay as f64);
     }
 
     #[test]

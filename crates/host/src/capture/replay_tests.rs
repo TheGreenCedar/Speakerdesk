@@ -18,6 +18,55 @@ use super::{
 const JOB: &str = "0123456789abcdef0123456789abcdef";
 
 #[test]
+fn windows_raw_capability_requires_echo_and_fenced_progress_without_apple_receipts() {
+    let folder = TempDir::new().unwrap();
+    let path = helper(
+        folder.path(),
+        false,
+        "Windows capture protocol replay; no devices",
+    );
+    fs::write(
+        folder.path().join("capture-helper.capability.json"),
+        serde_json::to_vec(&json!({
+            "helper_sha256": format!("{:x}", Sha256::digest(fs::read(&path).unwrap())),
+            "export_contract": "raw_dual_mono_stereo16k_v1",
+            "capability_version": "windows_wasapi_shared_v1",
+            "progress_contract": "audio_queue_fence_v1",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let owned = Helper::inspect(&path).unwrap();
+    assert!(owned.receipt(JOB, &receipt(&path), folder.path()).is_err());
+    assert!(!folder.path().join("capture-processing.json").exists());
+    assert!(
+        SourceWriter::create(config(folder.path(), true), owned.clone()).is_err(),
+        "a raw Windows capability must not bypass bundled echo processing"
+    );
+    let mut writer = SourceWriter::create(config(folder.path(), false), owned).unwrap();
+    accept(&mut writer, &json!({"type":"recording"})).unwrap();
+    accept(&mut writer, &audio("microphone", 0., &[0.25; 1600], 1)).unwrap();
+    let unfenced = parse_event(r#"{"type":"clock","time":0.1,"paused":false}"#).unwrap();
+    assert!(writer.accept(unfenced).is_err());
+    let fenced = json!({"type":"clock","time":0.1,"paused":false,
+        "producer_fence":"audio_queue_fence_v1","sequence":1});
+    accept(&mut writer, &fenced).unwrap();
+    assert!(
+        accept(&mut writer, &fenced).is_err(),
+        "replayed fences must not advance progress"
+    );
+    accept(&mut writer, &json!({"type":"stopped","time":0.1})).unwrap();
+    let saved = writer.finish();
+    assert!(saved.error.is_none());
+    assert!(saved.processing.is_none());
+    assert_eq!(saved.committed_sample, 1600);
+    assert_eq!(
+        pcm(&folder.path().join("microphone.wav")),
+        [0, 32].repeat(1600)
+    );
+}
+
+#[test]
 #[cfg(target_os = "macos")]
 #[ignore = "Requires the pinned native echo component built by scripts/setup_echo.py"]
 fn raw_dual_capture_opens_and_preserves_partial_pause_tail() {

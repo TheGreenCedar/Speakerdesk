@@ -19,6 +19,14 @@ mod update_control;
 mod update_location;
 mod updates;
 use exports::{ExportDownloads, ExportJob, Finished};
+#[cfg(windows)]
+const CAPTURE_HELPER: &str = "speakerdesk-capture.exe";
+#[cfg(not(windows))]
+const CAPTURE_HELPER: &str = "speakerdesk-capture";
+#[cfg(windows)]
+const ECHO_LIBRARY: &str = "speakerdesk_echo.dll";
+#[cfg(not(windows))]
+const ECHO_LIBRARY: &str = "libspeakerdesk_echo.dylib";
 fn runtime_is_current(app: &tauri::AppHandle, generation: u64) -> bool {
     app.state::<RuntimeChild>()
         .0
@@ -146,8 +154,7 @@ impl RuntimeSettings {
             .env("SPEAKERDESK_CAPTURE_HELPER", &self.capture_helper)
             .env(
                 "SPEAKERDESK_ECHO_LIBRARY",
-                self.capture_helper
-                    .with_file_name("libspeakerdesk_echo.dylib"),
+                self.capture_helper.with_file_name(ECHO_LIBRARY),
             )
             .set_raw_out(true)
     }
@@ -157,16 +164,49 @@ impl RuntimeSettings {
             .capture_helper
             .parent()
             .ok_or("Missing app resources")?;
+        #[cfg(windows)]
+        let contents = resources;
+        #[cfg(not(windows))]
         let contents = resources.parent().ok_or("Missing app bundle")?;
         let contents = contents.canonicalize().map_err(|_| "Missing app bundle")?;
-        for (path, executable) in [
+        #[cfg(windows)]
+        if self
+            .executable
+            .parent()
+            .and_then(|path| path.canonicalize().ok())
+            .as_ref()
+            != Some(&contents)
+        {
+            return Err(
+                "Native Windows resources must be beside the application executable".into(),
+            );
+        }
+        let mut capability = self.capture_helper.as_os_str().to_os_string();
+        capability.push(".capability.json");
+        let mut artifacts = vec![
             (self.executable.clone(), true),
             (self.capture_helper.clone(), true),
-            (resources.join("speakerdesk-capture.capability.json"), false),
-            (resources.join("libspeakerdesk_echo.dylib"), false),
+            (PathBuf::from(capability), false),
+            (resources.join(ECHO_LIBRARY), false),
+        ];
+        #[cfg(windows)]
+        artifacts.extend([
+            (resources.join("runtime/onnxruntime.dll"), false),
+            (resources.join("runtime/DirectML.dll"), false),
+            (
+                resources.join("runtime/Microsoft.Windows.AI.MachineLearning.dll"),
+                false,
+            ),
+            (resources.join("runtime/LICENSE.txt"), false),
+            (resources.join("runtime/ThirdPartyNotices.txt"), false),
+            (resources.join("THIRD_PARTY_NOTICES.txt"), false),
+        ]);
+        #[cfg(not(windows))]
+        artifacts.extend([
             (resources.join("mlx/mlx.metallib"), false),
             (contents.join("Frameworks/libmlx.dylib"), false),
-        ] {
+        ]);
+        for (path, executable) in artifacts {
             let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
                 format!(
                     "A required native app resource is missing: {}",
@@ -204,6 +244,19 @@ impl RuntimeSettings {
             }
             #[cfg(not(unix))]
             let _ = executable;
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                if metadata.file_attributes()
+                    & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                    != 0
+                {
+                    return Err(format!(
+                        "A native app resource is linked: {}",
+                        path.display()
+                    ));
+                }
+            }
         }
         speakerdesk_host::capture::CaptureSupervisor::check_helper(&self.capture_helper)
             .map_err(|error| error.to_string())
@@ -344,6 +397,11 @@ fn recover_runtime(app: &tauri::AppHandle) -> Result<(), String> {
     start_runtime(app)
 }
 
+#[cfg(windows)]
+fn recovery_description(_app: &tauri::AppHandle) -> String {
+    "Reinstall the approved Windows installer for this user. Recordings and recovery copies remain in Speakerdesk's separate storage folder.".into()
+}
+#[cfg(not(windows))]
 fn recovery_description(app: &tauri::AppHandle) -> String {
     let settings = app.state::<RuntimeSettings>();
     let backup = Some(&settings.executable).and_then(|exe| {
@@ -445,7 +503,7 @@ fn main() {
                     else if !close_handle.state::<recovery::Recovery>().approved(){api.prevent_close();recovery::close(&close_handle);}
                 }
             });
-            let capture_helper=app.path().resource_dir()?.join("speakerdesk-capture");
+            let capture_helper=app.path().resource_dir()?.join(CAPTURE_HELPER);
             let executable = std::env::current_exe()?;
             app.manage(RuntimeSettings::new(storage, models, capture_helper, executable, port));
             app.manage(updates::Updates::start(app.handle().clone()));

@@ -4,6 +4,9 @@
 mod features;
 #[cfg(target_os = "macos")]
 pub mod network;
+#[cfg(windows)]
+#[path = "network_windows.rs"]
+pub mod network;
 mod select;
 mod tokens;
 

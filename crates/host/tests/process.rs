@@ -4,6 +4,9 @@ use speakerdesk_core::models::Models;
 use speakerdesk_host::inference::InferenceSupervisor;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+#[path = "support/process.rs"]
+mod process_support;
+use process_support::ObservedProcess;
 fn supervisor() -> std::sync::Arc<InferenceSupervisor> {
     InferenceSupervisor::new(
         env!("CARGO_BIN_EXE_inference-fixture"),
@@ -23,6 +26,7 @@ fn cleanup_close_is_idempotent_and_keeps_unrelated_sessions_resident() {
         .unwrap();
     let other = models.vad_open(None).unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     models.vad_close(vad).unwrap();
     models.vad_close(vad).unwrap();
     models.diar_close(diar).unwrap();
@@ -34,7 +38,7 @@ fn cleanup_close_is_idempotent_and_keeps_unrelated_sessions_resident() {
     assert_eq!(host.child_pid(), Some(pid));
     models.vad_close(other).unwrap();
     host.shutdown();
-    reaped(pid);
+    reaped(&observed);
 }
 
 #[test]
@@ -79,6 +83,7 @@ fn auxiliary_sessions_yield_to_primary_work_and_retire_on_cancel_or_child_loss()
         };
         let handle = open(&ready).unwrap();
         let pid = host.child_pid().unwrap();
+        let observed = ObservedProcess::new(pid);
         assert!(pending(&ready, handle).unwrap());
         assert_eq!(ready.metrics().unwrap().peak_mlx_bytes, 2);
         assert_eq!(
@@ -158,7 +163,7 @@ fn auxiliary_sessions_yield_to_primary_work_and_retire_on_cancel_or_child_loss()
 
         let lost = open(&ready).unwrap();
         host.restart(&CancellationToken::new()).unwrap();
-        reaped(pid);
+        reaped(&observed);
         close(&ready, lost).unwrap();
         assert_eq!(
             host.child_pid(),
@@ -167,6 +172,7 @@ fn auxiliary_sessions_yield_to_primary_work_and_retire_on_cancel_or_child_loss()
         );
         let new = ready.vad_open(None).unwrap();
         let new_pid = host.child_pid().unwrap();
+        let new_observed = ObservedProcess::new(new_pid);
         assert!(
             pending(&ready, lost)
                 .unwrap_err()
@@ -183,7 +189,7 @@ fn auxiliary_sessions_yield_to_primary_work_and_retire_on_cancel_or_child_loss()
         assert_eq!(host.child_pid(), Some(new_pid));
         ready.vad_close(new).unwrap();
         host.shutdown();
-        reaped(new_pid);
+        reaped(&new_observed);
     }
 }
 
@@ -194,8 +200,9 @@ fn installation_restart_reaps_the_resident_child_and_invalidates_old_handles() {
     let models = host.models(cancel.clone());
     let old = models.vad_open(None).unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     host.restart(&cancel).unwrap();
-    reaped(pid);
+    reaped(&observed);
     assert_eq!(host.child_pid(), None);
     assert!(
         models
@@ -208,8 +215,9 @@ fn installation_restart_reaps_the_resident_child_and_invalidates_old_handles() {
     assert_ne!(old.generation, new.generation);
     models.vad_close(new).unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     host.shutdown();
-    reaped(pid);
+    reaped(&observed);
 }
 
 #[test]
@@ -245,8 +253,9 @@ fn recording_larger_than_ipc_frame_uses_bounded_feeds_and_includes_eof() {
         "failed feed must close"
     );
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     host.shutdown();
-    reaped(pid);
+    reaped(&observed);
 }
 
 #[test]
@@ -266,6 +275,7 @@ fn actual_desktop_child_returns_native_voice_identity_and_reaps() {
     assert!(report[0].ok);
     assert_eq!(report[0].model, revision);
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     let reference: serde_json::Value = serde_json::from_str(include_str!(
         "../../models/tests/data/redimnet-mlx-reference.json"
     ))
@@ -303,7 +313,7 @@ fn actual_desktop_child_returns_native_voice_identity_and_reaps() {
     assert_eq!(silence.model, output.model);
     assert_eq!(host.child_pid(), Some(pid));
     host.shutdown();
-    reaped(pid);
+    reaped(&observed);
 }
 
 #[test]
@@ -387,8 +397,9 @@ fn actual_desktop_child_runs_speech_models_and_reaps() {
         assert_eq!(row.review, Some(true));
     }
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     host.shutdown();
-    reaped(pid);
+    reaped(&observed);
 }
 fn wait_for(path: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -401,10 +412,10 @@ fn wait_for(path: &std::path::Path) {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
-fn reaped(pid: u32) {
+fn reaped(observed: &ObservedProcess) {
     #[cfg(unix)]
     {
-        let result = unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) };
+        let result = unsafe { libc::waitpid(observed.pid, std::ptr::null_mut(), libc::WNOHANG) };
         assert_eq!(
             result, -1,
             "the supervisor must have already reaped its child"
@@ -413,8 +424,11 @@ fn reaped(pid: u32) {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ECHILD)
         );
-        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     }
+    assert!(
+        observed.has_exited(),
+        "owned inference child survived cleanup"
+    );
 }
 #[test]
 fn resident_child_restarts_after_crash_and_rejects_stale_handles() {
@@ -422,6 +436,7 @@ fn resident_child_restarts_after_crash_and_rejects_stale_handles() {
     let models = host.models(CancellationToken::new());
     let handle = models.vad_open(None).unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     assert_eq!(
         models.transcribe(&[0.0; 16], "en", (0, 0)).unwrap().text,
         "Replay transcript"
@@ -437,7 +452,7 @@ fn resident_child_restarts_after_crash_and_rejects_stale_handles() {
         "a model error must not unload unrelated sessions"
     );
     assert!(models.transcribe(&[], "exit", (0, 0)).is_err());
-    reaped(pid);
+    reaped(&observed);
     let new_handle = models.vad_open(None).unwrap();
     assert_ne!(handle.generation, new_handle.generation);
     assert!(
@@ -449,8 +464,9 @@ fn resident_child_restarts_after_crash_and_rejects_stale_handles() {
     );
     models.vad_close(new_handle).unwrap();
     let last_pid = host.child_pid().unwrap();
+    let last_observed = ObservedProcess::new(last_pid);
     host.shutdown();
-    reaped(last_pid);
+    reaped(&last_observed);
 }
 #[test]
 fn cancellation_waits_for_terminal_reply_and_keeps_other_sessions() {
@@ -458,6 +474,7 @@ fn cancellation_waits_for_terminal_reply_and_keeps_other_sessions() {
     let ready = host.models(CancellationToken::new());
     let handle = ready.vad_open(None).unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     let token = CancellationToken::new();
     let active = host.models(token.clone());
     let temp = tempfile::tempdir().unwrap();
@@ -483,7 +500,7 @@ fn cancellation_waits_for_terminal_reply_and_keeps_other_sessions() {
         "Replay transcript"
     );
     host.shutdown();
-    reaped(pid);
+    reaped(&observed);
 }
 #[test]
 fn malformed_frames_and_bad_handshakes_are_reaped() {
@@ -491,8 +508,9 @@ fn malformed_frames_and_bad_handshakes_are_reaped() {
     let models = host.models(CancellationToken::new());
     models.metrics().unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     assert!(models.transcribe(&[], "malformed", (0, 0)).is_err());
-    reaped(pid);
+    reaped(&observed);
     host.shutdown();
     let wrong = InferenceSupervisor::new(
         env!("CARGO_BIN_EXE_inference-fixture"),
@@ -509,6 +527,7 @@ fn uncooperative_cancel_kills_and_reaps_before_releasing_the_operation() {
     let host = supervisor();
     host.models(CancellationToken::new()).metrics().unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     let token = CancellationToken::new();
     let models = host.models(token.clone());
     let temp = tempfile::tempdir().unwrap();
@@ -518,7 +537,7 @@ fn uncooperative_cancel_kills_and_reaps_before_releasing_the_operation() {
     wait_for(&marker);
     token.cancel();
     assert_eq!(call.join().unwrap(), Err(ChildError::Timeout));
-    reaped(pid);
+    reaped(&observed);
     assert_eq!(host.child_pid(), None);
     host.shutdown();
 }
@@ -533,6 +552,7 @@ fn cancellation_interrupts_a_partially_written_request_and_reaps() {
         .transcribe(&[], &format!("block-input:{}", marker.display()), (0, 0))
         .unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     let token = CancellationToken::new();
     let models = host.models(token.clone());
     let call = std::thread::spawn(move || models.transcribe(&vec![0.0; 1_000_000], "en", (0, 0)));
@@ -541,7 +561,7 @@ fn cancellation_interrupts_a_partially_written_request_and_reaps() {
     token.cancel();
     assert_eq!(call.join().unwrap(), Err(ChildError::Cancelled));
     assert!(started.elapsed() < Duration::from_secs(10));
-    reaped(pid);
+    reaped(&observed);
     host.shutdown();
 }
 
@@ -552,6 +572,7 @@ fn cancelled_operations_can_close_sessions_and_discarded_outputs_are_closed() {
     let ready = host.models(CancellationToken::new());
     let other = ready.vad_open(None).unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     let token = CancellationToken::new();
     let models = host.models(token.clone());
     let owned = models.vad_open(None).unwrap();
@@ -605,7 +626,7 @@ fn cancelled_operations_can_close_sessions_and_discarded_outputs_are_closed() {
     }
     ready.vad_close(other).unwrap();
     host.shutdown();
-    reaped(pid);
+    reaped(&observed);
 }
 
 #[test]
@@ -671,6 +692,7 @@ fn actual_child_keeps_long_offline_and_live_diarization_sessions_separate() {
     );
     models.diar_close(bad).unwrap();
     let pid = host.child_pid().unwrap();
+    let observed = ObservedProcess::new(pid);
     host.shutdown();
-    reaped(pid);
+    reaped(&observed);
 }

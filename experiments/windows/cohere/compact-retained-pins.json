@@ -1,0 +1,478 @@
+{
+    "encoder-case/attention_mask.i64":  [
+                                            7280,
+                                            "9d77ea6ffbe9a91cac7607722bb244a765c9c5755d7cfa00962163f6562cdd64"
+                                        ],
+    "encoder-case/case.json":  [
+                                   514,
+                                   "bddaab89dbaee0f71c4f365c6915adf6fc4b5765495a758e892e778b6fbf9943"
+                               ],
+    "encoder-case/expected.json":  [
+                                       302,
+                                       "9b6fb0bfa0d3380068ed2a804c640793940fc622874293dd9268c1c56c0d7d3d"
+                                   ],
+    "encoder-case/expected-encoded.f32":  [
+                                              583680,
+                                              "32cdbb3175f7b2cef7f61725a6a3ce84091054c5c0708c006de5407c61fea771"
+                                          ],
+    "encoder-case/expected-encoder_mask.i64":  [
+                                                   912,
+                                                   "e6f82825479958263b975ae612059cfd7b2e515c593daa01419e8b4106731e9d"
+                                               ],
+    "encoder-case/features.f32":  [
+                                      465920,
+                                      "7a8b6300364b4cca06b182e04ebd90d1fc16a9b7c70285186ec56d70ded25647"
+                                  ],
+    "decoder-init-case/case.json":  [
+                                        1001,
+                                        "84707450e8d06b0efc9a99a065dabc2302cf167adc2b72b789e7989c63370dbf"
+                                    ],
+    "decoder-init-case/cross_mask.f32":  [
+                                             4560,
+                                             "85028794348b655f714c83fc8bba699c907e628d82ba9a420ca3ac6c50ac94c3"
+                                         ],
+    "decoder-init-case/encoded.f32":  [
+                                          583680,
+                                          "32cdbb3175f7b2cef7f61725a6a3ce84091054c5c0708c006de5407c61fea771"
+                                      ],
+    "decoder-init-case/expected.json":  [
+                                            5822,
+                                            "fecb42c1037fbab5fc1b07bcc060160b41ce677859c5ceab158916164a830f86"
+                                        ],
+    "decoder-init-case/expected-logits.f32":  [
+                                                  65536,
+                                                  "0bf857c6f3e13463b881eca7e5fa00620ef37efcfb0d9f669f43e51a3e9c7c41"
+                                              ],
+    "decoder-init-case/expected-present_cross_k_0.f32":  [
+                                                             466944,
+                                                             "d9c2cb03a684faa91188c8641c7bd095c5d7060f588801af3120b55a057b648c"
+                                                         ],
+    "decoder-init-case/expected-present_cross_k_1.f32":  [
+                                                             466944,
+                                                             "424ddc14aeb39a37ea1e0511d1f29a2cc4b8059709b16e2bad6b0f2464397aba"
+                                                         ],
+    "decoder-init-case/expected-present_cross_k_2.f32":  [
+                                                             466944,
+                                                             "923b686d2bd0ff8284a66e10d73f2c7b135a86d67d7b6e018cb9444e81ce9b94"
+                                                         ],
+    "decoder-init-case/expected-present_cross_k_3.f32":  [
+                                                             466944,
+                                                             "eef3b4bbc272f5487bfc6417422f7391121c7dabf62a7f367cd1ba20a069c8bd"
+                                                         ],
+    "decoder-init-case/expected-present_cross_k_4.f32":  [
+                                                             466944,
+                                                             "72395b29e0ca8aaaceb1e407ca3bc3f609c7a97486803fc7faef7c88856510de"
+                                                         ],
+    "decoder-init-case/expected-present_cross_k_5.f32":  [
+                                                             466944,
+                                                             "f138a66673faa07a8659073354f6e666d9cb920357d9fd01f57284ed87e0c13d"
+                                                         ],
+    "decoder-init-case/expected-present_cross_k_6.f32":  [
+                                                             466944,
+                                                             "37ec4204c1ff98574e311def9fdabdff2756050d122677e3dc225b949159c8d7"
+                                                         ],
+    "decoder-init-case/expected-present_cross_k_7.f32":  [
+                                                             466944,
+                                                             "f4b5ce48c1ad71a85b93ab8ccf9fa56a70478474e311719143e047bc4a452c70"
+                                                         ],
+    "decoder-init-case/expected-present_cross_v_0.f32":  [
+                                                             466944,
+                                                             "af365c8ba29a525026060fb1fe22fd40cfc955b256872055e50be6388379da1a"
+                                                         ],
+    "decoder-init-case/expected-present_cross_v_1.f32":  [
+                                                             466944,
+                                                             "8c8aeb86ec197e43024f6211ba3e9b59dfd00d45b3c8602d5db31a34d99335b0"
+                                                         ],
+    "decoder-init-case/expected-present_cross_v_2.f32":  [
+                                                             466944,
+                                                             "784afa67f928e692f178f18432a0ef1e903f15959a49e8a947ad27740e69e60e"
+                                                         ],
+    "decoder-init-case/expected-present_cross_v_3.f32":  [
+                                                             466944,
+                                                             "05ced5f37af357b0d9aabdd8b9ccca3c1de8561b0c0226834075070ea071eef7"
+                                                         ],
+    "decoder-init-case/expected-present_cross_v_4.f32":  [
+                                                             466944,
+                                                             "a0e8440186d3e5ffd465526dae826a4ad06398b3a1faf2a5718795426a59deb1"
+                                                         ],
+    "decoder-init-case/expected-present_cross_v_5.f32":  [
+                                                             466944,
+                                                             "3dc39f6230a2c3f7c307759e2c07ff08e5f5fcd8e187197df121c377c218a1b8"
+                                                         ],
+    "decoder-init-case/expected-present_cross_v_6.f32":  [
+                                                             466944,
+                                                             "d8c11ccc8ec13572e9ae3d6ebc7a54222ceac94b1f8b44a691f6c0e2bc067daa"
+                                                         ],
+    "decoder-init-case/expected-present_cross_v_7.f32":  [
+                                                             466944,
+                                                             "5a90c95eca145e1ca4758114b8c7dd9dc469e0d7026e65a7305fa63648c57feb"
+                                                         ],
+    "decoder-init-case/expected-present_self_k_0.f32":  [
+                                                            40960,
+                                                            "228c5f4dd61eb4ae60ba65fc24166bce3652610db28ae1382322aa94bbdb1c93"
+                                                        ],
+    "decoder-init-case/expected-present_self_k_1.f32":  [
+                                                            40960,
+                                                            "3b665f8a320fda0bde13bc941fff68afc9536fce91b637db927272f2e1cd9393"
+                                                        ],
+    "decoder-init-case/expected-present_self_k_2.f32":  [
+                                                            40960,
+                                                            "65a097d911f17400e293986934756253503a1e560977d92ab5f02665f3c248df"
+                                                        ],
+    "decoder-init-case/expected-present_self_k_3.f32":  [
+                                                            40960,
+                                                            "bebe59e49923f4fadb5671f3cf8523e1ba4976cd5b2d4d196b3201cdd9bb37cd"
+                                                        ],
+    "decoder-init-case/expected-present_self_k_4.f32":  [
+                                                            40960,
+                                                            "deea38be8bda7af445a6cd6ef92fba4e97af076250de081ba275229ff259e5b2"
+                                                        ],
+    "decoder-init-case/expected-present_self_k_5.f32":  [
+                                                            40960,
+                                                            "482d2266d09889cee93e672464d1b127ba60208802f365c87a15821aedf478ae"
+                                                        ],
+    "decoder-init-case/expected-present_self_k_6.f32":  [
+                                                            40960,
+                                                            "4820cc1bf4d836e0ca18bc6573b9a0feb3c95c898442b4a1d0d5fdfd8215a910"
+                                                        ],
+    "decoder-init-case/expected-present_self_k_7.f32":  [
+                                                            40960,
+                                                            "95ac2c74414749d2836e8cf033911a1aa9792ff57cf0df5173dc49e6f639280b"
+                                                        ],
+    "decoder-init-case/expected-present_self_v_0.f32":  [
+                                                            40960,
+                                                            "735ab6c2e7d02b1746fe3e50124c8ce01a75d9bdeddbfdce519c7f0a68760521"
+                                                        ],
+    "decoder-init-case/expected-present_self_v_1.f32":  [
+                                                            40960,
+                                                            "037aeb21d2981d9b7aceea295ef009fec0663f1743feee162e4af24cb4487f0c"
+                                                        ],
+    "decoder-init-case/expected-present_self_v_2.f32":  [
+                                                            40960,
+                                                            "eeadb916e6f267b8cd74dbf30a65127a1d30de78723331526738295e46ba2013"
+                                                        ],
+    "decoder-init-case/expected-present_self_v_3.f32":  [
+                                                            40960,
+                                                            "a2b4856f2b409a408b86531f8268432f3625610d363c1d98fc7252a2084fead6"
+                                                        ],
+    "decoder-init-case/expected-present_self_v_4.f32":  [
+                                                            40960,
+                                                            "817782e1991133be827b5903549a031c1100d0ad251bd9956635c44439da3a3a"
+                                                        ],
+    "decoder-init-case/expected-present_self_v_5.f32":  [
+                                                            40960,
+                                                            "26b78069abbdbdbc63db79802a5cd291a3fec2997ad266d5e358b78a72eb34e6"
+                                                        ],
+    "decoder-init-case/expected-present_self_v_6.f32":  [
+                                                            40960,
+                                                            "ee3099454afa7623d34cc39b68abebe7c7167598a3ca14ea15259277998c778d"
+                                                        ],
+    "decoder-init-case/expected-present_self_v_7.f32":  [
+                                                            40960,
+                                                            "bb9d1bb3b82966d19a8891855566dd4ede7d87ed7ce89fb81c09565d9e14a004"
+                                                        ],
+    "decoder-init-case/positions.i64":  [
+                                            80,
+                                            "23c379d6c0f22ef64cdef873fd530df1f1419b4a3935e9323d5f1d82ca697b6a"
+                                        ],
+    "decoder-init-case/self_mask.f32":  [
+                                            400,
+                                            "82991376e78227a68d4019120fef0339f7214fd8b75bd3e377c22e772ce872ad"
+                                        ],
+    "decoder-init-case/tokens.i64":  [
+                                         80,
+                                         "679e7845c2b9be5a80f5479ab8b1351dd844c36146f6239494a4c00e71c26e5c"
+                                     ],
+    "decoder-step-case/case.json":  [
+                                        6740,
+                                        "51ad08b31ba256120b2fcc073b834c88637835def164a9b095eebe7a9a2e66c7"
+                                    ],
+    "decoder-step-case/cross_mask.f32":  [
+                                             456,
+                                             "b960fb5cb94682dfc4a873035d65f8befdcb9bed0e7db0feb905f0dcf437b38c"
+                                         ],
+    "decoder-step-case/expected.json":  [
+                                            5822,
+                                            "15ab97ceb8889e9c1f3ae3ebd41bcd2c6e50586ea5bfa28ecc086b562d144975"
+                                        ],
+    "decoder-step-case/expected-logits.f32":  [
+                                                  65536,
+                                                  "a5fdb209503ec16465e16c9d0478913b81479722803dfc5ea6b5989c2adcc30a"
+                                              ],
+    "decoder-step-case/expected-present_cross_k_0.f32":  [
+                                                             466944,
+                                                             "d9c2cb03a684faa91188c8641c7bd095c5d7060f588801af3120b55a057b648c"
+                                                         ],
+    "decoder-step-case/expected-present_cross_k_1.f32":  [
+                                                             466944,
+                                                             "424ddc14aeb39a37ea1e0511d1f29a2cc4b8059709b16e2bad6b0f2464397aba"
+                                                         ],
+    "decoder-step-case/expected-present_cross_k_2.f32":  [
+                                                             466944,
+                                                             "923b686d2bd0ff8284a66e10d73f2c7b135a86d67d7b6e018cb9444e81ce9b94"
+                                                         ],
+    "decoder-step-case/expected-present_cross_k_3.f32":  [
+                                                             466944,
+                                                             "eef3b4bbc272f5487bfc6417422f7391121c7dabf62a7f367cd1ba20a069c8bd"
+                                                         ],
+    "decoder-step-case/expected-present_cross_k_4.f32":  [
+                                                             466944,
+                                                             "72395b29e0ca8aaaceb1e407ca3bc3f609c7a97486803fc7faef7c88856510de"
+                                                         ],
+    "decoder-step-case/expected-present_cross_k_5.f32":  [
+                                                             466944,
+                                                             "f138a66673faa07a8659073354f6e666d9cb920357d9fd01f57284ed87e0c13d"
+                                                         ],
+    "decoder-step-case/expected-present_cross_k_6.f32":  [
+                                                             466944,
+                                                             "37ec4204c1ff98574e311def9fdabdff2756050d122677e3dc225b949159c8d7"
+                                                         ],
+    "decoder-step-case/expected-present_cross_k_7.f32":  [
+                                                             466944,
+                                                             "f4b5ce48c1ad71a85b93ab8ccf9fa56a70478474e311719143e047bc4a452c70"
+                                                         ],
+    "decoder-step-case/expected-present_cross_v_0.f32":  [
+                                                             466944,
+                                                             "af365c8ba29a525026060fb1fe22fd40cfc955b256872055e50be6388379da1a"
+                                                         ],
+    "decoder-step-case/expected-present_cross_v_1.f32":  [
+                                                             466944,
+                                                             "8c8aeb86ec197e43024f6211ba3e9b59dfd00d45b3c8602d5db31a34d99335b0"
+                                                         ],
+    "decoder-step-case/expected-present_cross_v_2.f32":  [
+                                                             466944,
+                                                             "784afa67f928e692f178f18432a0ef1e903f15959a49e8a947ad27740e69e60e"
+                                                         ],
+    "decoder-step-case/expected-present_cross_v_3.f32":  [
+                                                             466944,
+                                                             "05ced5f37af357b0d9aabdd8b9ccca3c1de8561b0c0226834075070ea071eef7"
+                                                         ],
+    "decoder-step-case/expected-present_cross_v_4.f32":  [
+                                                             466944,
+                                                             "a0e8440186d3e5ffd465526dae826a4ad06398b3a1faf2a5718795426a59deb1"
+                                                         ],
+    "decoder-step-case/expected-present_cross_v_5.f32":  [
+                                                             466944,
+                                                             "3dc39f6230a2c3f7c307759e2c07ff08e5f5fcd8e187197df121c377c218a1b8"
+                                                         ],
+    "decoder-step-case/expected-present_cross_v_6.f32":  [
+                                                             466944,
+                                                             "d8c11ccc8ec13572e9ae3d6ebc7a54222ceac94b1f8b44a691f6c0e2bc067daa"
+                                                         ],
+    "decoder-step-case/expected-present_cross_v_7.f32":  [
+                                                             466944,
+                                                             "5a90c95eca145e1ca4758114b8c7dd9dc469e0d7026e65a7305fa63648c57feb"
+                                                         ],
+    "decoder-step-case/expected-present_self_k_0.f32":  [
+                                                            45056,
+                                                            "38d080f9dba6f1d5e050196090009e280dea678586501212c4d9e5b676501466"
+                                                        ],
+    "decoder-step-case/expected-present_self_k_1.f32":  [
+                                                            45056,
+                                                            "2485cdc711484d83eb4e62834d0f954b2ce63cf494ad1d866d5f84dbdda44818"
+                                                        ],
+    "decoder-step-case/expected-present_self_k_2.f32":  [
+                                                            45056,
+                                                            "f0a3aa38d4f1278fe12f709e1b5b8fbc9770acc50a5439294a5ff75493fd651c"
+                                                        ],
+    "decoder-step-case/expected-present_self_k_3.f32":  [
+                                                            45056,
+                                                            "0cc429059c0adb0d193afc913efe9eacf60385733fc537ed6cf52922681ff504"
+                                                        ],
+    "decoder-step-case/expected-present_self_k_4.f32":  [
+                                                            45056,
+                                                            "c505093fce57effd9143d38a904a2256681f0df2ac1a84c79729529e9d4a81d9"
+                                                        ],
+    "decoder-step-case/expected-present_self_k_5.f32":  [
+                                                            45056,
+                                                            "bee09df021f2e2d47e2e90f554f47d99cdc920181dfc41cecc0a7bd0206e80b2"
+                                                        ],
+    "decoder-step-case/expected-present_self_k_6.f32":  [
+                                                            45056,
+                                                            "89b94402b1afe4ebef9cbfb88a87a4da436fef5d1852840b59524db3b0ce9a60"
+                                                        ],
+    "decoder-step-case/expected-present_self_k_7.f32":  [
+                                                            45056,
+                                                            "369f5148c0c86288a4550525ced822e4abb65cdf62e65bb225429393c73bc643"
+                                                        ],
+    "decoder-step-case/expected-present_self_v_0.f32":  [
+                                                            45056,
+                                                            "a1c23ecc03a25fd741b6f0c1ba31113a5613af1739b5a928832d6bc8c4f8ce3e"
+                                                        ],
+    "decoder-step-case/expected-present_self_v_1.f32":  [
+                                                            45056,
+                                                            "f661e95bda7cec62606c1776dca9487eb1888d358fd4b35f37ef123343d6a67f"
+                                                        ],
+    "decoder-step-case/expected-present_self_v_2.f32":  [
+                                                            45056,
+                                                            "0b252edde67de5933435c807ac2a42f6d352bb3044e35600bc3bcf36ffa115b8"
+                                                        ],
+    "decoder-step-case/expected-present_self_v_3.f32":  [
+                                                            45056,
+                                                            "57468a4aa7e68752ed2d04c706ab4b75513b7b8525438002e218cd182f92cfe6"
+                                                        ],
+    "decoder-step-case/expected-present_self_v_4.f32":  [
+                                                            45056,
+                                                            "7891b9933b0dda5f54b736f29d32581fecfc4df22ba3cc7f980598234aded5c7"
+                                                        ],
+    "decoder-step-case/expected-present_self_v_5.f32":  [
+                                                            45056,
+                                                            "e529b8ecd6231ebacfde2f63f18847108dc3fbb76373d3c7e865f1d964974a01"
+                                                        ],
+    "decoder-step-case/expected-present_self_v_6.f32":  [
+                                                            45056,
+                                                            "773760e5f0397a2f95f67dd54a03874b1014389694369863aa653866b404bd32"
+                                                        ],
+    "decoder-step-case/expected-present_self_v_7.f32":  [
+                                                            45056,
+                                                            "a70fc218a19a3b2a55d47dccf136d14bf76128612b3a157cb4685bd57e3e6fed"
+                                                        ],
+    "decoder-step-case/past_cross_k_0.f32":  [
+                                                 466944,
+                                                 "d9c2cb03a684faa91188c8641c7bd095c5d7060f588801af3120b55a057b648c"
+                                             ],
+    "decoder-step-case/past_cross_k_1.f32":  [
+                                                 466944,
+                                                 "424ddc14aeb39a37ea1e0511d1f29a2cc4b8059709b16e2bad6b0f2464397aba"
+                                             ],
+    "decoder-step-case/past_cross_k_2.f32":  [
+                                                 466944,
+                                                 "923b686d2bd0ff8284a66e10d73f2c7b135a86d67d7b6e018cb9444e81ce9b94"
+                                             ],
+    "decoder-step-case/past_cross_k_3.f32":  [
+                                                 466944,
+                                                 "eef3b4bbc272f5487bfc6417422f7391121c7dabf62a7f367cd1ba20a069c8bd"
+                                             ],
+    "decoder-step-case/past_cross_k_4.f32":  [
+                                                 466944,
+                                                 "72395b29e0ca8aaaceb1e407ca3bc3f609c7a97486803fc7faef7c88856510de"
+                                             ],
+    "decoder-step-case/past_cross_k_5.f32":  [
+                                                 466944,
+                                                 "f138a66673faa07a8659073354f6e666d9cb920357d9fd01f57284ed87e0c13d"
+                                             ],
+    "decoder-step-case/past_cross_k_6.f32":  [
+                                                 466944,
+                                                 "37ec4204c1ff98574e311def9fdabdff2756050d122677e3dc225b949159c8d7"
+                                             ],
+    "decoder-step-case/past_cross_k_7.f32":  [
+                                                 466944,
+                                                 "f4b5ce48c1ad71a85b93ab8ccf9fa56a70478474e311719143e047bc4a452c70"
+                                             ],
+    "decoder-step-case/past_cross_v_0.f32":  [
+                                                 466944,
+                                                 "af365c8ba29a525026060fb1fe22fd40cfc955b256872055e50be6388379da1a"
+                                             ],
+    "decoder-step-case/past_cross_v_1.f32":  [
+                                                 466944,
+                                                 "8c8aeb86ec197e43024f6211ba3e9b59dfd00d45b3c8602d5db31a34d99335b0"
+                                             ],
+    "decoder-step-case/past_cross_v_2.f32":  [
+                                                 466944,
+                                                 "784afa67f928e692f178f18432a0ef1e903f15959a49e8a947ad27740e69e60e"
+                                             ],
+    "decoder-step-case/past_cross_v_3.f32":  [
+                                                 466944,
+                                                 "05ced5f37af357b0d9aabdd8b9ccca3c1de8561b0c0226834075070ea071eef7"
+                                             ],
+    "decoder-step-case/past_cross_v_4.f32":  [
+                                                 466944,
+                                                 "a0e8440186d3e5ffd465526dae826a4ad06398b3a1faf2a5718795426a59deb1"
+                                             ],
+    "decoder-step-case/past_cross_v_5.f32":  [
+                                                 466944,
+                                                 "3dc39f6230a2c3f7c307759e2c07ff08e5f5fcd8e187197df121c377c218a1b8"
+                                             ],
+    "decoder-step-case/past_cross_v_6.f32":  [
+                                                 466944,
+                                                 "d8c11ccc8ec13572e9ae3d6ebc7a54222ceac94b1f8b44a691f6c0e2bc067daa"
+                                             ],
+    "decoder-step-case/past_cross_v_7.f32":  [
+                                                 466944,
+                                                 "5a90c95eca145e1ca4758114b8c7dd9dc469e0d7026e65a7305fa63648c57feb"
+                                             ],
+    "decoder-step-case/past_self_k_0.f32":  [
+                                                40960,
+                                                "228c5f4dd61eb4ae60ba65fc24166bce3652610db28ae1382322aa94bbdb1c93"
+                                            ],
+    "decoder-step-case/past_self_k_1.f32":  [
+                                                40960,
+                                                "3b665f8a320fda0bde13bc941fff68afc9536fce91b637db927272f2e1cd9393"
+                                            ],
+    "decoder-step-case/past_self_k_2.f32":  [
+                                                40960,
+                                                "65a097d911f17400e293986934756253503a1e560977d92ab5f02665f3c248df"
+                                            ],
+    "decoder-step-case/past_self_k_3.f32":  [
+                                                40960,
+                                                "bebe59e49923f4fadb5671f3cf8523e1ba4976cd5b2d4d196b3201cdd9bb37cd"
+                                            ],
+    "decoder-step-case/past_self_k_4.f32":  [
+                                                40960,
+                                                "deea38be8bda7af445a6cd6ef92fba4e97af076250de081ba275229ff259e5b2"
+                                            ],
+    "decoder-step-case/past_self_k_5.f32":  [
+                                                40960,
+                                                "482d2266d09889cee93e672464d1b127ba60208802f365c87a15821aedf478ae"
+                                            ],
+    "decoder-step-case/past_self_k_6.f32":  [
+                                                40960,
+                                                "4820cc1bf4d836e0ca18bc6573b9a0feb3c95c898442b4a1d0d5fdfd8215a910"
+                                            ],
+    "decoder-step-case/past_self_k_7.f32":  [
+                                                40960,
+                                                "95ac2c74414749d2836e8cf033911a1aa9792ff57cf0df5173dc49e6f639280b"
+                                            ],
+    "decoder-step-case/past_self_v_0.f32":  [
+                                                40960,
+                                                "735ab6c2e7d02b1746fe3e50124c8ce01a75d9bdeddbfdce519c7f0a68760521"
+                                            ],
+    "decoder-step-case/past_self_v_1.f32":  [
+                                                40960,
+                                                "037aeb21d2981d9b7aceea295ef009fec0663f1743feee162e4af24cb4487f0c"
+                                            ],
+    "decoder-step-case/past_self_v_2.f32":  [
+                                                40960,
+                                                "eeadb916e6f267b8cd74dbf30a65127a1d30de78723331526738295e46ba2013"
+                                            ],
+    "decoder-step-case/past_self_v_3.f32":  [
+                                                40960,
+                                                "a2b4856f2b409a408b86531f8268432f3625610d363c1d98fc7252a2084fead6"
+                                            ],
+    "decoder-step-case/past_self_v_4.f32":  [
+                                                40960,
+                                                "817782e1991133be827b5903549a031c1100d0ad251bd9956635c44439da3a3a"
+                                            ],
+    "decoder-step-case/past_self_v_5.f32":  [
+                                                40960,
+                                                "26b78069abbdbdbc63db79802a5cd291a3fec2997ad266d5e358b78a72eb34e6"
+                                            ],
+    "decoder-step-case/past_self_v_6.f32":  [
+                                                40960,
+                                                "ee3099454afa7623d34cc39b68abebe7c7167598a3ca14ea15259277998c778d"
+                                            ],
+    "decoder-step-case/past_self_v_7.f32":  [
+                                                40960,
+                                                "bb9d1bb3b82966d19a8891855566dd4ede7d87ed7ce89fb81c09565d9e14a004"
+                                            ],
+    "decoder-step-case/positions.i64":  [
+                                            8,
+                                            "a111f275cc2e7588000001d300a31e76336d15b9d314cd1a1d8f3d3556975eed"
+                                        ],
+    "decoder-step-case/self_mask.f32":  [
+                                            44,
+                                            "85759b3811ff7dc47b03792ac85317be51431a3f9e01dcafce317ed736a391b0"
+                                        ],
+    "decoder-step-case/tokens.i64":  [
+                                         8,
+                                         "e1bbc88473f5e97cc8b3019a5c6ef60dd72d5dba0dbb58429bf7b70a9cf6d058"
+                                     ],
+    "prompts.json":  [
+                         1485,
+                         "1f273a0cceb9eccfd414a62f72e163af82743ecec767f8870f8333483be3337f"
+                     ],
+    "provenance.json":  [
+                            3222,
+                            "a83e982b9834e5e8545ab5eab933bb92ea2c7c22b73a6fd31103f5c2ed5d3fac"
+                        ]
+}

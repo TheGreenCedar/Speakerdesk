@@ -31,7 +31,7 @@ Owner: `core/src/live.rs`, `host/src/routes/refinement.rs`.
 - Speaker badges match unnamed labels such as **Speaker 2**, then show initials when a person is named. Unlinked track colors remain stable through naming and save/reopen. Tracks assigned to the same saved person share one color and reading continuity; internal track IDs never determine displayed speaker numbers. Mixed and unassigned audio do not take a speaker number.
 - Refinement never overwrites a **protected edit** (user words, speaker or bounds). It never changes names or neighbouring passages, and never alters the original audio.
 - A short unassigned tail in an otherwise single-speaker passage can read inline, explicitly marked as unassigned. Its acoustic ownership and timing remain unresolved; distinct speakers, overlap and standalone unknown speech retain their own paragraphs.
-- Transcript timing (supplied-text CTC) is required for transcription. It functionally covers all 14 languages, but its accuracy is calibrated in English only. CJK text uses character units. Units that are unsupported or uncertain stay unresolved instead of being guessed.
+- Transcript timing (supplied-text CTC) is required for transcription. The Mac provider functionally covers all 14 languages, with accuracy calibrated in English only. The Windows candidate uses a separate provider identity and claims no calibrated timing languages, including English. CJK text uses character units. Units that are unsupported or uncertain stay unresolved instead of being guessed. Invalid or missing acoustic scores never acquire a timing calibration claim.
 - While a live passage grows, unchanged words retain their validated timing on the previously transcribed audio prefix. Speaker attribution is recalculated against current observations. New audio does not extend the words' timing evidence; changed words, sources, languages or protected edits invalidate reuse.
 
 - An ordinary language, transcription or timing failure affects its passage; later
@@ -100,7 +100,7 @@ Owner: `host/src/setup.rs`, `host/src/native.rs`, `speakerdesk/static/app.js`.
 - Meeting start and the transcript show separation readiness before users need Settings. Missing separation does not block ordinary recording, and models are never downloaded automatically.
 - A setup attempt succeeds when its requested models have activated and initialized with the expected identities. Separation setup does not fail because an unrelated transcription model is missing; transcription readiness still reports that missing capability separately. A prepared file alone does not establish separation readiness.
 - Settings puts status and download/retry actions before model explanations. A failed separation attempt offers **Retry separation download**, which retries that model. Detailed model and timing explanations remain collapsed.
-- The last eight explicit setup attempts retain their target, start time, activation state and final error on this Mac. Retrying does not erase the first failure. An interrupted attempt remains identifiable after restart.
+- The last eight explicit setup attempts retain their target, start time, activation state and final error on this device. Retrying does not erase the first failure. An interrupted attempt remains identifiable after restart.
 
 ## People and voices
 

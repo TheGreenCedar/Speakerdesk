@@ -83,7 +83,11 @@ fn local_turns(segment: &Segment) -> Vec<crate::timing::ReadingTurn> {
     let Ok(mut reading) = serde_json::from_value::<crate::timing::ReadingSegment>(value) else {
         return Vec::new();
     };
-    reading.installed_provider_identity = Some(crate::alignment::NATIVE_PROVIDER.into());
+    reading.installed_provider_identity = reading
+        .reading_turn_provenance
+        .as_ref()
+        .and_then(|receipt| crate::timing_policy::descriptor_for_model(&receipt.model_sha256))
+        .map(|descriptor| descriptor.provider_identity_sha256.into());
     crate::timing::validated_turns(&reading)
 }
 

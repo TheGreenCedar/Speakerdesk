@@ -8,6 +8,12 @@ invalidate `mlx-rs` on every restored target. Every candidate still runs the
 locked build, native dependency preparation, bundle checks and exact-source
 artifact manifest generation.
 
+The Windows job runs the locked core, host, model, echo and xtask tests plus the
+standalone capture helper's protocol tests, without persisted caches. It compiles
+the Windows adapters and checks their input/admission contracts. Hardware tests
+remain opt-in; CI neither builds a distributable app nor qualifies physical
+capture or GPU inference.
+
 AppleRelease signs and notarizes an authenticated producer artifact selected by
 its immutable run, artifact, source and payload identities. Speakerdesk's
 promotion tooling verifies the signed package and native QA before publishing.

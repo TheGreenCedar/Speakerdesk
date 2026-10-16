@@ -1,0 +1,21 @@
+{
+  "shape": [1500, 384],
+  "dtype": "float16",
+  "raw_little_endian_sha256": "3489d35721c34bc69dd76b94425c174f6eb29cb620be552109030f11ff76af0f",
+  "source": {
+    "repository": "https://github.com/Blaizzy/mlx-audio",
+    "revision": "feb25a37b07923bae556e59111995071d66afa0d",
+    "file": "mlx_audio/stt/models/whisper/whisper.py",
+    "file_sha256": "02a03277902d45abc314e9b6c5e54efcf9192213640ab8bd19bfaa1e21900ffa",
+    "function": "sinusoids(1500, 384, max_timescale=10000).astype(mx.float16)",
+    "role": "Complete audio-independent encoder positional parameter"
+  },
+  "retained_capture": {
+    "format": "NumPy Float32 array containing exact Float16 values",
+    "file_sha256": "8b627fe5b54d4e87ad9b3084deec3a9530500f16091b88f3820f35fe715ce52d",
+    "generator_sha256": "3396529f394b85bdd840e952f0796f0c6644a3a2850d01b19bf786b9ce2cdaeb",
+    "array": "model.encoder._positional_embedding",
+    "expected_mlx_version": "0.32.2",
+    "limitation": "The retained capture has no separate runtime-library identity receipt. Source, generator, file and parameter bytes are pinned here."
+  }
+}

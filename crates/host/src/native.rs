@@ -98,11 +98,7 @@ impl ApplicationModels for NativeModels {
             .read()
             .expect("separation capability")
             .is_none()
-            && self
-                .model_root
-                .join(crate::setup::separation_artifact().id)
-                .join("model.safetensors")
-                .is_file()
+            && crate::setup::separation_artifact().present(&self.model_root)
     }
     fn separate_passage_with_evidence(
         &self,
@@ -128,7 +124,7 @@ impl ApplicationModels for NativeModels {
         self.voice.read().expect("voice capability").clone()
     }
     fn separated_voice_policy(&self) -> Option<speakerdesk_core::voice::separation::Policy> {
-        let policy = native_separated_voice_policy();
+        let policy = native_separated_voice_policy()?;
         (self.separation_available()
             && self
                 .voice
@@ -157,7 +153,7 @@ impl ApplicationModels for NativeModels {
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
         hash.update(env!("CARGO_PKG_VERSION"));
-        hash.update(include_bytes!("model-artifacts.json"));
+        hash.update(crate::setup::import_artifact_identity());
         Some(format!("bounded-import-v1:{:x}", hash.finalize()))
     }
     fn infer_progress(
@@ -188,6 +184,11 @@ impl ApplicationModels for NativeModels {
 }
 
 impl NativeModels {
+    pub(crate) fn pending_setup_status(&self) -> Option<&'static str> {
+        let status = self.setup.progress().status;
+        matches!(status, "loading" | "downloading").then_some(status)
+    }
+
     fn start(
         self: &Arc<Self>,
         app: AppState,
@@ -221,9 +222,17 @@ impl NativeModels {
             let result = if download {
                 native.install(&app, &token, separation).await
             } else {
-                native
-                    .initialize_async(app.clone(), token.clone(), false)
-                    .await
+                async {
+                    // Recover an interrupted Windows directory replacement before the child loads it.
+                    #[cfg(windows)]
+                    let _setup_owner = crate::setup::Installer::open(&native.model_root)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    native
+                        .initialize_async(app.clone(), token.clone(), false)
+                        .await
+                }
+                .await
             };
             if let Err(error) = &result {
                 // Do not leave a first-run failure looking like an indefinitely pending load.
@@ -328,8 +337,10 @@ impl NativeModels {
             }
             let identity = match artifact.id.as_str() {
                 "silero-speech" => format!("{}@{}", artifact.repo, &artifact.revision[..7]),
-                "coarse-alignment" => speakerdesk_core::alignment::CHECKPOINT.into(),
-                "redimnet2-b6" => native_voice_policy().model.revision,
+                "coarse-alignment" => native_alignment_descriptor().checkpoint.into(),
+                "redimnet2-b6" => native_voice_policy()
+                    .map(|policy| policy.model.revision)
+                    .unwrap_or_default(),
                 _ => format!("{}@{}", artifact.repo, artifact.revision),
             };
             self.setup.phase(format!("Loading {}…", artifact.name));
@@ -352,7 +363,9 @@ impl NativeModels {
                     )?));
                 }
                 if artifact.id == "redimnet2-b6" {
-                    voice = Some(native_voice_policy());
+                    voice = Some(native_voice_policy().ok_or_else(|| {
+                        "Model initialization returned an unexpected identity".to_owned()
+                    })?);
                 }
                 Ok(loaded.remove(0))
             });
@@ -378,11 +391,7 @@ impl NativeModels {
         }
         *self.alignment.write().expect("alignment capability") = alignment;
         *self.voice.write().expect("voice capability") = voice;
-        let separation = if self
-            .model_root
-            .join("mossformer2-16k/model.safetensors")
-            .is_file()
-        {
+        let separation = if crate::setup::separation_artifact().present(&self.model_root) {
             self.setup.phase("Loading overlapping voice separation…");
             models
                 .setup_check(&["mossformer2-16k".into()])
@@ -432,6 +441,8 @@ impl NativeModels {
             .await
             .map_err(|e| e.to_string())?;
         let mut completed = 0;
+        #[cfg(windows)]
+        let mut released_models = false;
         for model in if separation {
             vec![crate::setup::separation_artifact()]
         } else {
@@ -468,6 +479,17 @@ impl NativeModels {
                     .await
                     .map_err(|e| e.to_string())?
                     .map_err(|e| e.to_string())?;
+                }
+                #[cfg(windows)]
+                if !released_models {
+                    // Close mapped Windows model files before renaming their containing directory.
+                    let supervisor = self.supervisor.clone();
+                    let cancellation = cancel.clone();
+                    tokio::task::spawn_blocking(move || supervisor.restart(&cancellation))
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .map_err(|error| error.to_string())?;
+                    released_models = true;
                 }
                 installer
                     .activate(&model, &staging, cancel)
@@ -511,63 +533,334 @@ impl NativeModels {
     }
 }
 
-pub(crate) fn native_voice_policy() -> speakerdesk_core::voice::Calibration {
-    use speakerdesk_core::voice::{Calibration, VoiceModel};
-    // Frozen synthetic policy verified on native Core ML; legacy profile spaces stay distinct.
-    let model = VoiceModel::new(
-        "aufklarer/ReDimNet2-B6-CoreML",
-        "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU",
-        "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
-        192,
-        16000,
-    )
-    .expect("pinned voice identity");
-    Calibration::new(
-        model,
-        "macos-compact-tts-development-v1:calibration",
-        0.7264125328398843,
-        0.10003429964182987,
-        8,
-        4,
-        0.,
-        0.,
-        2,
-    )
-    .expect("measured voice policy")
+fn native_alignment_descriptor() -> &'static speakerdesk_core::timing_policy::Descriptor {
+    #[cfg(windows)]
+    {
+        &speakerdesk_core::timing_policy::WINDOWS
+    }
+    #[cfg(not(windows))]
+    {
+        &speakerdesk_core::timing_policy::MAC
+    }
 }
 
-pub(crate) fn native_separated_voice_policy() -> speakerdesk_core::voice::separation::Policy {
-    use speakerdesk_core::voice::{Calibration, VoiceModel, separation::Policy};
-    // Frozen clean public generated-query pilot; these observed rates do not
-    // estimate population accuracy. New model identities require new evidence.
-    let model = VoiceModel::new(
-        "aufklarer/ReDimNet2-B6-CoreML",
-        "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU",
-        "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+#[cfg(any(windows, test))]
+const WINDOWS_VOICE_POLICY: &str =
+    include_str!("../../../speakerdesk/voice_windows_calibration.json");
+
+#[cfg(any(windows, test))]
+fn windows_voice_calibration(
+    metadata: &Value,
+    separated: bool,
+) -> Option<speakerdesk_core::voice::Calibration> {
+    use speakerdesk_core::voice::{Calibration, VoiceModel};
+    let expected = VoiceModel::new(
+        "PalabraAI/redimnet2",
+        "2a8d15f65b1dfb5d73fede2f11ee42bcccca3035:b6-vb2+vox2_v0-lm:sd-pcm-v1:windowsml-2.4.89-directml-v1:ort-opt-disabled",
+        "89c532e48539bebddc168e773cdcbf014b1941043c50d0a4ff7ccd1139efa5f1",
         192,
         16000,
     )
-    .expect("qualified separated-query voice identity");
-    Policy {
-        separator_model: "mossformer2-16k@407cb030cd66340918ebb6c8cc63b18f8592cdbe".into(),
-        calibration: Calibration::new(
-            model,
+    .ok()?;
+    let model: VoiceModel = serde_json::from_value(metadata.get("model")?.clone()).ok()?;
+    if metadata["schema_version"] != 1
+        || metadata["approved_for_recognition"] != true
+        || metadata["approval"]["basis"] != "preserved_mac_behavior"
+        || metadata["compute_policy"] != "DirectML:ORT_DISABLE_ALL"
+        || model != expected
+    {
+        return None;
+    }
+    let (section, basis, dataset, genuine, impostor, false_reject_rate) = if separated {
+        (
+            "separated",
+            "frozen_natural_separated_query_pilot",
             "librispeech-clean-generated-query-v1:development-6-speakers",
-            0.7264125328398843,
-            0.10003429964182987,
             6,
             36,
-            0.0,
-            0.0,
-            2,
+            0.,
         )
-        .expect("measured separated-query policy"),
+    } else {
+        (
+            "ordinary",
+            "owner_approved_preserved_mac_behavior",
+            "librispeech-clean-ordinary-windows-v1:preserved-mac-behavior",
+            12,
+            4,
+            1. / 12.,
+        )
+    };
+    let policy = metadata.get(section)?;
+    let measured = policy.get("calibration")?;
+    let threshold = measured["threshold"].as_f64()?;
+    let margin = measured["margin"].as_f64()?;
+    if policy["approved_for_recognition"] != true
+        || policy["admission_basis"] != basis
+        || measured["dataset_id"] != dataset
+        || threshold.to_bits() != 0.7264125328398843_f64.to_bits()
+        || margin.to_bits() != 0.10003429964182987_f64.to_bits()
+        || measured["minimum_clips"] != 2
+        || measured["genuine_trials"] != genuine
+        || measured["impostor_trials"] != impostor
+        || measured["false_accept_rate"].as_f64()? != 0.
+        || measured["false_reject_rate"].as_f64()? != false_reject_rate
+        || (separated && policy["separator_model"] != speakerdesk_core::separation::MODEL)
+        || (!separated && policy["original_strict_gate"]["passed"] != false)
+    {
+        return None;
+    }
+    Calibration::new(
+        model,
+        dataset,
+        threshold,
+        margin,
+        genuine,
+        impostor,
+        0.,
+        false_reject_rate,
+        2,
+    )
+    .ok()
+}
+
+pub(crate) fn native_voice_policy() -> Option<speakerdesk_core::voice::Calibration> {
+    #[cfg(windows)]
+    {
+        let metadata = serde_json::from_str(WINDOWS_VOICE_POLICY).ok()?;
+        windows_voice_calibration(&metadata, false)
+    }
+    #[cfg(not(windows))]
+    {
+        use speakerdesk_core::voice::{Calibration, VoiceModel};
+        // Frozen synthetic policy verified on native Core ML; legacy profile spaces stay distinct.
+        let model = VoiceModel::new(
+            "aufklarer/ReDimNet2-B6-CoreML",
+            "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU",
+            "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+            192,
+            16000,
+        )
+        .expect("pinned voice identity");
+        Some(
+            Calibration::new(
+                model,
+                "macos-compact-tts-development-v1:calibration",
+                0.7264125328398843,
+                0.10003429964182987,
+                8,
+                4,
+                0.,
+                0.,
+                2,
+            )
+            .expect("measured voice policy"),
+        )
+    }
+}
+
+pub(crate) fn native_separated_voice_policy() -> Option<speakerdesk_core::voice::separation::Policy>
+{
+    #[cfg(windows)]
+    {
+        let metadata: Value = serde_json::from_str(WINDOWS_VOICE_POLICY).ok()?;
+        let calibration = windows_voice_calibration(&metadata, true)?;
+        Some(speakerdesk_core::voice::separation::Policy {
+            separator_model: metadata["separated"]["separator_model"].as_str()?.into(),
+            calibration,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        use speakerdesk_core::voice::{Calibration, VoiceModel, separation::Policy};
+        // Frozen clean public generated-query pilot; these observed rates do not
+        // estimate population accuracy. New model identities require new evidence.
+        let model = VoiceModel::new(
+            "aufklarer/ReDimNet2-B6-CoreML",
+            "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU",
+            "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+            192,
+            16000,
+        )
+        .expect("qualified separated-query voice identity");
+        Some(Policy {
+            separator_model: "mossformer2-16k@407cb030cd66340918ebb6c8cc63b18f8592cdbe".into(),
+            calibration: Calibration::new(
+                model,
+                "librispeech-clean-generated-query-v1:development-6-speakers",
+                0.7264125328398843,
+                0.10003429964182987,
+                6,
+                36,
+                0.0,
+                0.0,
+                2,
+            )
+            .expect("measured separated-query policy"),
+        })
+    }
+}
+
+#[cfg(test)]
+mod voice_policy_tests {
+    use super::*;
+    use speakerdesk_core::voice::{
+        VoiceClip, VoiceModel, VoiceProfile, make_profile, propose_match,
+    };
+
+    fn metadata() -> Value {
+        serde_json::from_str(WINDOWS_VOICE_POLICY).unwrap()
+    }
+
+    fn mac_model() -> VoiceModel {
+        VoiceModel::new(
+            "aufklarer/ReDimNet2-B6-CoreML",
+            "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU",
+            "cf8cc300e240efaed56cb931bd7715ded41b66bf55af7e9a19d0b17e7fe986c9",
+            192,
+            16000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn windows_voice_admission_requires_the_exact_approved_model_and_each_policy() {
+        let original = metadata();
+        let ordinary = windows_voice_calibration(&original, false).unwrap();
+        let separated = windows_voice_calibration(&original, true).unwrap();
+        assert_eq!(ordinary.model, separated.model);
+        assert_ne!(ordinary.model, mac_model());
+        assert_eq!((ordinary.genuine_trials, ordinary.impostor_trials), (12, 4));
+        assert_eq!(ordinary.false_reject_rate, 1. / 12.);
+        assert_eq!(
+            original["ordinary"]["original_strict_gate"]["passed"],
+            false
+        );
+        for (pointer, replacement) in [
+            ("/schema_version", json!(2)),
+            ("/approved_for_recognition", json!(false)),
+            ("/approval/basis", json!("unreviewed")),
+            ("/compute_policy", json!("CPU")),
+            ("/model", Value::Null),
+            ("/model/model_id", json!("other")),
+            ("/model/revision", json!("other")),
+            ("/model/artifact_sha256", json!("a".repeat(64))),
+            ("/model/dimension", json!(256)),
+            ("/model/sample_rate", json!(48000)),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            assert!(
+                windows_voice_calibration(&changed, false).is_none(),
+                "{pointer}"
+            );
+            assert!(
+                windows_voice_calibration(&changed, true).is_none(),
+                "{pointer}"
+            );
+        }
+        assert!(windows_voice_calibration(&Value::Null, false).is_none());
+        for section in ["ordinary", "separated"] {
+            let selected = section == "separated";
+            let mut missing = original.clone();
+            missing.as_object_mut().unwrap().remove(section);
+            assert!(windows_voice_calibration(&missing, selected).is_none());
+            assert!(windows_voice_calibration(&missing, !selected).is_some());
+            for (field, replacement) in [
+                ("approved_for_recognition", json!(false)),
+                ("admission_basis", json!("unreviewed")),
+                ("calibration/threshold", json!(0.7)),
+                ("calibration/margin", json!(0.05)),
+                ("calibration/minimum_clips", json!(1)),
+                ("calibration/genuine_trials", json!(0)),
+                ("calibration/false_accept_rate", json!(0.1)),
+                ("calibration/dataset_id", json!("unmeasured")),
+            ] {
+                let mut changed = original.clone();
+                *changed.pointer_mut(&format!("/{section}/{field}")).unwrap() = replacement;
+                assert!(
+                    windows_voice_calibration(&changed, selected).is_none(),
+                    "{section}/{field}"
+                );
+                assert!(windows_voice_calibration(&changed, !selected).is_some());
+            }
+        }
+        let mut changed = original;
+        changed["separated"]["separator_model"] = json!("other separator");
+        assert!(windows_voice_calibration(&changed, true).is_none());
+        assert!(windows_voice_calibration(&changed, false).is_some());
+        let active = native_voice_policy().unwrap();
+        let active_separated = native_separated_voice_policy().unwrap();
+        if cfg!(windows) {
+            assert_eq!(active, ordinary);
+            assert_eq!(active_separated.calibration, separated);
+        } else {
+            assert_eq!(active.model, mac_model());
+            assert_eq!(active_separated.calibration.model, mac_model());
+            assert_eq!((active.genuine_trials, active.impostor_trials), (8, 4));
+            assert_eq!(active.false_reject_rate, 0.);
+        }
+    }
+
+    #[test]
+    fn windows_policy_keeps_incompatible_saved_profiles_unchanged_and_ineligible() {
+        let policy = windows_voice_calibration(&metadata(), false).unwrap();
+        let mut vector = vec![0.; policy.model.dimension];
+        vector[0] = 1.;
+        let vectors = vec![vector.clone(), vector.clone()];
+        let clips = vec![
+            VoiceClip::try_new("fixture", "speaker_0", "a", 0., 2.).unwrap(),
+            VoiceClip::try_new("fixture", "speaker_0", "b", 2., 4.).unwrap(),
+        ];
+        let legacy: Value =
+            serde_json::from_str(include_str!("../../../speakerdesk/voice_calibration.json"))
+                .unwrap();
+        let mut profiles: Vec<_> = [
+            mac_model(),
+            serde_json::from_value(legacy["model"].clone()).unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, model)| VoiceProfile {
+            person_id: format!("retained-{index}"),
+            version: "retained".into(),
+            enrolled_at: 1.,
+            model,
+            centroid: vector.clone(),
+            clips: clips.clone(),
+            consent: speakerdesk_core::people::EXPLICIT_REMEMBER_VOICE.into(),
+        })
+        .collect();
+        let before = serde_json::to_value(&profiles).unwrap();
+        assert!(
+            propose_match(&policy.model, &policy, &vectors, &profiles)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(serde_json::to_value(&profiles).unwrap(), before);
+        let draft = make_profile(&policy.model, &vectors, &clips).unwrap();
+        profiles.push(VoiceProfile {
+            person_id: "compatible".into(),
+            version: "new-explicit-enrollment".into(),
+            enrolled_at: 2.,
+            model: draft.model,
+            centroid: draft.centroid,
+            clips: draft.clips,
+            consent: draft.consent,
+        });
+        assert_eq!(
+            propose_match(&policy.model, &policy, &vectors, &profiles)
+                .unwrap()
+                .unwrap()
+                .person_id,
+            "compatible"
+        );
+        assert_eq!(serde_json::to_value(&profiles[..2]).unwrap(), before);
     }
 }
 
 pub(crate) fn recording_path(root: &Path, job: &Job) -> std::io::Result<PathBuf> {
     let native = media_write_directory(root, job).join("audio.wav");
-    if native.exists() {
+    if native_media_exists(root, &native)? {
         return confined_file(
             root,
             native
@@ -584,6 +877,26 @@ pub(crate) fn recording_path(root: &Path, job: &Job) -> std::io::Result<PathBuf>
         std::io::ErrorKind::NotFound,
         "Recording audio is unavailable",
     ))
+}
+
+fn native_media_exists(root: &Path, path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    // Windows reports NotFound for a non-directory ancestor too; that must not select legacy audio.
+    for parent in path.ancestors().skip(1).take_while(|p| p.starts_with(root)) {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) if !metadata.is_dir() || metadata.is_symlink() => {
+                return Err(std::io::Error::other("Invalid native media directory"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
 }
 
 /// Resolve a passage on its original recording clock. Source-bound live passages
@@ -643,16 +956,15 @@ pub(crate) fn passage_recording_path(
     // Prefer an owned derived source, otherwise keep migrated v1 source audio read-only.
     // A copy of audio.wav alone does not claim ownership of its separate source files.
     let native = media_write_directory(root, job);
-    let (authority, folder) = match std::fs::symlink_metadata(native.join(basename)) {
-        Ok(_) => (root, native),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let (authority, folder) = match native_media_exists(root, &native.join(basename))? {
+        true => (root, native),
+        false => {
             if let Some(legacy) = job.extra.get("legacy_media_root").and_then(Value::as_str) {
                 (Path::new(legacy), Path::new(legacy).join(job.id.as_str()))
             } else {
                 (root, native)
             }
         }
-        Err(error) => return Err(error),
     };
     if std::fs::symlink_metadata(&folder)?.file_type().is_symlink()
         || std::fs::symlink_metadata(folder.join(basename))?
@@ -715,7 +1027,11 @@ async fn serve(
     let notices = executable
         .parent()
         .ok_or("native executable has no parent directory")?
-        .join("../Resources/THIRD_PARTY_NOTICES.txt");
+        .join(if cfg!(windows) {
+            "THIRD_PARTY_NOTICES.txt"
+        } else {
+            "../Resources/THIRD_PARTY_NOTICES.txt"
+        });
     let supervisor =
         InferenceSupervisor::new(executable, env!("CARGO_PKG_VERSION"), model_root.clone())?;
     let native = Arc::new(NativeModels {
@@ -866,7 +1182,8 @@ async fn index(State(app): State<AppState>) -> Html<String> {
     Html(
         include_str!("../../../speakerdesk/templates/index.html")
             .replace("{{token}}", app.token())
-            .replace("{{theme}}", &theme),
+            .replace("{{theme}}", &theme)
+            .replace("{{platform}}", std::env::consts::OS),
     )
 }
 
@@ -991,14 +1308,16 @@ async fn setup(State(app): State<AppState>) -> Response {
             })
         };
         let busy = matches!(progress.status,"downloading" | "loading");
-        let supported = cfg!(all(target_os="macos",target_arch="aarch64"));
+        let supported = cfg!(any(all(target_os="macos",target_arch="aarch64"),all(windows,target_arch="x86_64")));
         let can_download = supported && app.native.get().is_some() && !app.admission.busy() && !app.admission.closed() && !app.admission.reserved();
         let catalog = crate::setup::artifacts();
         let mut models: Vec<_> = catalog.iter().enumerate().map(|(index, model)| json!({"id":model.id,"name":model.name,"installed":reports.get(index).is_some_and(|r| r.ok),"bytes":model.download_bytes(),"checkpoint":reports.get(index).map(|r| &r.model)})).collect();
         let alignment = &catalog[4];
+        let timing_languages = native_alignment_descriptor().accuracy_languages;
+        let timing_accuracy = if timing_languages.is_empty() { "Word times are uncalibrated estimates." } else { "Non-English word times are uncalibrated estimates." };
         let separation = crate::setup::separation_artifact();
         let separation_setup = progress.models.iter().any(|id|id==&separation.id);
-        let separation_installed = app.native.get().is_some_and(|native|native.model_root.join(&separation.id).join("model.safetensors").is_file());
+        let separation_installed = app.native.get().is_some_and(|native|separation.present(&native.model_root));
         models.push(json!({"id":separation.id,"name":separation.name,"installed":separation_installed,"optional":true,"bytes":separation.download_bytes(),"checkpoint":speakerdesk_core::separation::MODEL}));
         let status = if busy || progress.status == "missing" {progress.status} else if progress.error.is_some() {"failed"} else if ready {"ready"} else {"idle"};
         Json(json!({
@@ -1010,11 +1329,11 @@ async fn setup(State(app): State<AppState>) -> Response {
             "downloaded_bytes":progress.downloaded_bytes,"required_free_bytes":if separation_setup {separation.stored_bytes()} else {catalog.iter().map(|m| m.stored_bytes()).sum::<u64>()},
             "can_download":can_download,"can_cancel":busy && app.native.get().is_some(),
             "alignment":{"id":alignment.id,"status":if busy {progress.status}else if timing {"ready"}else {"idle"},"ready":timing,"can_download":false,
-                "supported_languages":languages::LANGUAGES.iter().map(|(code,_)| *code).collect::<Vec<_>>(),"timing_accuracy_calibrated_languages":["en"],"total_bytes":alignment.download_bytes(),"stored_bytes":alignment.stored_bytes(),"required_free_bytes":alignment.stored_bytes(),
+                "supported_languages":languages::LANGUAGES.iter().map(|(code,_)| *code).collect::<Vec<_>>(),"timing_accuracy_calibrated_languages":timing_languages,"total_bytes":alignment.download_bytes(),"stored_bytes":alignment.stored_bytes(),"required_free_bytes":alignment.stored_bytes(),
                 "message":"Supplied-text timing preserves authoritative transcript words. Use Download models below to finish setup for all local models.","phase":progress.phase,"downloaded_bytes":0},
-            "voice":{"status":if voice {"ready"}else {"unavailable"},"enabled":enabled,"available":voice,"released":false,
-                "message":if voice {"Native voice enrollment and manual and automatic checks are available."}else {"The native voice model did not initialize. Saved voices and names are kept."}},
-            "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing for imports and supported sealed live passages: {}. Live and saved accuracy passes recheck sealed, unedited canonical passages using their captured Auto or explicit language. Long passages require one confidently routed language and unambiguous context timing. Non-English word times are uncalibrated estimates. Uncertain, mixed-language or unsupported passages retain their previous words. Live recording continues during accuracy work; pause it independently when needed.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
+            "voice":{"status":if voice {"ready"}else if busy {progress.status}else {"unavailable"},"enabled":enabled,"available":voice,"released":false,
+                "message":if voice {"Native voice enrollment and manual and automatic checks are available."}else if busy {crate::people_routes::VOICE_SETUP_PENDING}else {"The native voice model did not initialize. Saved voices and names are kept."}},
+            "message": if busy {String::new()} else if !core_ready {issues.join(" ")} else {format!("Native preview. Automatic language: {}. Supplied-text timing for imports and supported sealed live passages: {}. Live and saved accuracy passes recheck sealed, unedited canonical passages using their captured Auto or explicit language. Long passages require one confidently routed language and unambiguous context timing. {timing_accuracy} Uncertain, mixed-language or unsupported passages retain their previous words. Live recording continues during accuracy work; pause it independently when needed.",if automatic {"available"}else {"unavailable"},if timing {"available"}else {"unavailable"})}
         })).into_response()
     }).await
 }
@@ -1169,6 +1488,7 @@ mod setup_tests {
             passage_recording_path(&invalid_native, &migrated, &segment).is_err(),
             "native I/O errors must not silently select legacy audio"
         );
+        assert!(recording_path(&invalid_native, &migrated).is_err());
         #[cfg(unix)]
         {
             let linked_native = root.path().join("linked-native");
@@ -1277,7 +1597,43 @@ mod setup_tests {
             duplicate.json::<Value>().await.unwrap()["status"],
             "loading"
         );
+        async fn assert_pending_voice(
+            client: &reqwest::Client,
+            url: &str,
+            jid: &str,
+            status: &str,
+        ) {
+            let people: Value = client
+                .get(format!("{url}/api/people"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(people["voice_available"], false);
+            assert_eq!(people["readiness_code"], format!("runtime_{status}"));
+            assert!(
+                people["next_action"].is_null(),
+                "initialization needs no update action"
+            );
+            let clips: Value = client
+                .get(format!(
+                    "{url}/api/jobs/{jid}/speakers/speaker_0/voice-clips"
+                ))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(clips["status"], status);
+            assert_eq!(clips["readiness_code"], people["readiness_code"]);
+            assert_eq!(clips["message"], people["voice_message"]);
+            assert!(clips["next_action"].is_null());
+        }
         let setup_status = || client.get(format!("{url}/api/setup"));
+        assert_pending_voice(&client, &url, jid, "loading").await;
         let loading = setup_status()
             .send()
             .await
@@ -1287,6 +1643,12 @@ mod setup_tests {
             .unwrap();
         assert_eq!(loading["status"], "loading");
         assert_eq!(loading["alignment"]["status"], "loading");
+        assert_eq!(loading["voice"]["status"], "loading");
+        assert_eq!(loading["voice"]["available"], false);
+        assert_ne!(
+            loading["voice"]["message"],
+            "The native voice model did not initialize. Saved voices and names are kept."
+        );
         assert_eq!(loading["can_cancel"], true);
         assert_eq!(loading["can_download"], false);
         assert_eq!(loading["download_required"], false);
@@ -1316,6 +1678,9 @@ mod setup_tests {
             .await
             .unwrap();
         assert_eq!(downloading["status"], "downloading");
+        assert_eq!(downloading["voice"]["status"], "downloading");
+        assert_eq!(downloading["voice"]["available"], false);
+        assert_pending_voice(&client, &url, jid, "downloading").await;
         assert_eq!(downloading["downloaded_bytes"], 12);
         assert_eq!(downloading["download_required"], true);
         native.setup.loading();
@@ -1401,6 +1766,18 @@ mod setup_tests {
             .await
             .unwrap();
         assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["voice"]["status"], "unavailable");
+        assert_eq!(failed["voice"]["available"], false);
+        let failed_people: Value = client
+            .get(format!("{url}/api/people"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(failed_people["readiness_code"], "runtime_unqualified");
+        assert_eq!(failed_people["next_action"], "updates");
         assert_eq!(failed["can_cancel"], false);
         assert_eq!(failed["operation"]["target"], "models");
         assert_eq!(failed["operation"]["status"], "failed");

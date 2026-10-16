@@ -1,0 +1,367 @@
+[
+  {
+    "id": "silero-speech",
+    "name": "Speech detection",
+    "repo": "mlx-community/silero-vad-v6",
+    "revision": "2ebf4a5e10726a2e78ddd4d70eedfb6f1c33eb06",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/silero-speech--",
+    "files": {
+      "silero.onnx": {
+        "sha256": "57150d9d2c01f6cd87cc2bac74fba8b4ae34a6e634789f21804f35e90559962d",
+        "size": 1239042
+      }
+    }
+  },
+  {
+    "id": "nemotron",
+    "name": "Speaker diarization",
+    "repo": "mlx-community/Nemotron-3-Diarization",
+    "revision": "59ed2dbfc1346dcea9d423c71306a3a2499c568f",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/nemotron--",
+    "files": {
+      "frontend.onnx": {
+        "sha256": "9eadc60955f3846ee7a007c0eac97e67068e4dfcf186dec954f34790d01e408d",
+        "size": 1187520
+      },
+      "nemotron.onnx": {
+        "sha256": "4da4e441ccd0d691caa5eab96207c814390de3e4f9f0d0b50657ef4be41c0115",
+        "size": 397049845
+      },
+      "silence.f32": {
+        "sha256": "d4417b3c0eabdf7c47032fac2b5b5a7ee83d819a6ddda8fd8eaf74e2b5cc4ac7",
+        "size": 2048
+      }
+    }
+  },
+  {
+    "id": "cohere-speech",
+    "name": "Transcription",
+    "repo": "spokedotso/cohere-transcribe-03-2026-mlx-4bit",
+    "revision": "064e51eab6db47066cbeaa85e2894b5691bd8d12",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261016/cohere-speech--",
+    "files": {
+      "decoder-init-placement-policy.json": {
+        "sha256": "b16cb795b087366d127e77b735123372fed8a511baed6b9cc804fbda7e762dad",
+        "size": 213617
+      },
+      "decoder-init.onnx": {
+        "sha256": "747695a40d7a7be1938077c30cbd1459277bbffcea779614d8689e5d9b8cc2c5",
+        "size": 402269
+      },
+      "decoder-step-placement-policy.json": {
+        "sha256": "ecbbf2967d422ee483cce9cb4a9a2f20d7ddefc809043af1879146a5267f67a7",
+        "size": 175891
+      },
+      "decoder-step.onnx": {
+        "sha256": "d34369dd4e48b64be03e7a4fc4c3dcdc09973d86df472a10d29650354355a572",
+        "size": 329514
+      },
+      "decoder.weights-000": {
+        "sha256": "83fcdea9364e3ddb1a5df4ede38800fcddae730026bded34f68841e72c1c9c9b",
+        "size": 96555008
+      },
+      "encoder-placement-policy.json": {
+        "sha256": "2205a18cbecb8efb36742398df146dc065aef4fed09a6ef9a42de16a3ed7c4d5",
+        "size": 1609667
+      },
+      "encoder.onnx": {
+        "sha256": "e5e2deb563163a0a1766477e67cb9a8e73945721b1b2fb382ea649009caba189",
+        "size": 3257939
+      },
+      "encoder.weights-000": {
+        "sha256": "bf1f929c9b90c143f633188e7a457c76b8325e90dc4cea0bc987524ac34487da",
+        "size": 1071579136
+      },
+      "encoder.weights-001": {
+        "sha256": "1f36470cba0cd62bcd791e254132baaa735a2d18fb5073efe651403b2d83f683",
+        "size": 918737920
+      },
+      "tokenizer.json": {
+        "sha256": "780ccca2de2ccd289971b1fb7d4f0b5ec2dc908872f6e350181c7eba9db3fa9f",
+        "size": 1816694
+      }
+    }
+  },
+  {
+    "id": "whisper-language",
+    "name": "Automatic language",
+    "repo": "mlx-community/whisper-tiny-asr-fp16",
+    "revision": "77fa3f52b482ec80d086df55f893065a9baab172",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/whisper-language--",
+    "files": {
+      "whisper.onnx": {
+        "size": 105848793,
+        "sha256": "1c47965522f7495fc85814c70c6b17dc4952436774c43225d55665e4ecbc7f14"
+      },
+      "frontend.onnx": {
+        "size": 710294,
+        "sha256": "b8a9f7efcdbd35686356de24e18095b31e1dae089e826e2ce5b3d3f880cb2347"
+      },
+      "languages.json": {
+        "size": 2137,
+        "sha256": "a8bff869e0297baa2b5d50504628f4abf267484cff2a1c2b3bc7dd5f346f5d48"
+      }
+    }
+  },
+  {
+    "id": "coarse-alignment",
+    "name": "Transcript timing",
+    "repo": "csukuangfj2/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12",
+    "revision": "6fc542a3b0661c8278cca1230c34deb989f31202",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/coarse-alignment--",
+    "files": {
+      "ctc-mha.onnx": {
+        "size": 552799,
+        "sha256": "233ac8980dab9c142ef9fe91ab1d3b5d6309a9549f59a284e50199f7b1081699"
+      },
+      "tokens.txt": {
+        "sha256": "a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31",
+        "size": 86423
+      },
+      "model.int8.onnx": {
+        "size": 365352120,
+        "sha256": "e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c"
+      }
+    },
+    "prepared": {
+      "ctc.weights": {
+        "size": 1301979472,
+        "sha256": "ebb4aa54f64240fe95c079c0b3ec326498f647ebe8d9bef50d316d47a59a53e5"
+      }
+    }
+  },
+  {
+    "id": "redimnet2-b6",
+    "name": "Voice recognition",
+    "repo": "PalabraAI/redimnet2",
+    "revision": "2a8d15f65b1dfb5d73fede2f11ee42bcccca3035",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/redimnet2-b6--",
+    "files": {
+      "redimnet.onnx": {
+        "size": 749313,
+        "sha256": "89c532e48539bebddc168e773cdcbf014b1941043c50d0a4ff7ccd1139efa5f1"
+      },
+      "redimnet.weights": {
+        "size": 29363200,
+        "sha256": "37693ccbbf2d80a83647f8357e1645effa19357397923a642208f31778ecf242"
+      }
+    }
+  },
+  {
+    "id": "mossformer2-16k",
+    "name": "Overlapping voice separation",
+    "repo": "alibabasglab/MossFormer2_SS_16K",
+    "revision": "407cb030cd66340918ebb6c8cc63b18f8592cdbe",
+    "download_prefix": "https://github.com/TheGreenCedar/Speakerdesk/releases/download/windows-models-20261015/mossformer2-16k--",
+    "files": {
+      "program.json": {
+        "sha256": "3c82696f94670d288fd2f7a9e795ec6131e7f1417fb224b77842cd3252169246",
+        "size": 183509
+      },
+      "mossformer.weights": {
+        "sha256": "37277bcd8ecc7a6c4792de49d7ae726c09db8d8042b19b45c523540f6605d6bf",
+        "size": 222273536
+      },
+      "encoder.onnx": {
+        "sha256": "21ac7deb1e18ac918ec01093f97d9febf247539968639a5482270177cab59089",
+        "size": 12739
+      },
+      "flash-00.onnx": {
+        "sha256": "ef23e01aa70cf1c9e5e7a704b6d0903a426cfcb6b887beef066af2d681ebbfbc",
+        "size": 128336
+      },
+      "fsmn-00.onnx": {
+        "sha256": "ebb30996493d2de87006a6d1a919ee8a64abe62a3dfb506c634aea529a1fcb05",
+        "size": 35968
+      },
+      "flash-01.onnx": {
+        "sha256": "adcd4716eb0b11ec542366f782d4436c619335d07da77ba4915ea4b6a9d3e51c",
+        "size": 128343
+      },
+      "fsmn-01.onnx": {
+        "sha256": "e842b2be555729150f62b47982c522d7e9f8c062b303ac8b2c370ebb629c426e",
+        "size": 35980
+      },
+      "flash-02.onnx": {
+        "sha256": "b00700bdf8fd83ee749e206be0965ac75819812edee920d5de59da346d8d6341",
+        "size": 128343
+      },
+      "fsmn-02.onnx": {
+        "sha256": "a776628260c63a0367bfb398164f622e8bf2db31813bd38e14a6646fec106f7d",
+        "size": 35980
+      },
+      "flash-03.onnx": {
+        "sha256": "2e62d6a4ed1111bffa75ee62f98c1c0b551039e515292d9e98137a60aaaa6dd3",
+        "size": 128343
+      },
+      "fsmn-03.onnx": {
+        "sha256": "348eaf9747d32dfcf25259c07b0f9fd60ba6d50100f6746809a23c0e9f9cf44d",
+        "size": 35980
+      },
+      "flash-04.onnx": {
+        "sha256": "8ef846cba525ab8dd20dc68e20e54d28f4df97d5be00752cf751f861067cf6ea",
+        "size": 128343
+      },
+      "fsmn-04.onnx": {
+        "sha256": "48da701f95b13c2b02c626a20a1e7b36c9ff64a175e1df2a51c12949223fb5ce",
+        "size": 35980
+      },
+      "flash-05.onnx": {
+        "sha256": "6a721deae17e94dfc1bd314587b229a0528b0b6eaa0b862d1db47dff9b700d5c",
+        "size": 128343
+      },
+      "fsmn-05.onnx": {
+        "sha256": "ef0b3a4a83b71caccfcc8a88195432b47b2a070b671c183247e484a849f42e91",
+        "size": 35980
+      },
+      "flash-06.onnx": {
+        "sha256": "dc1c85174198995fda5ed5879e488c529c4daaded74d437be16a6c7cc9725b84",
+        "size": 128343
+      },
+      "fsmn-06.onnx": {
+        "sha256": "613d5b1c5a42427de22f0b843144a391d059cd8c8085a69f11ce87e4ebd49ef9",
+        "size": 35980
+      },
+      "flash-07.onnx": {
+        "sha256": "8a57bc2a9e3fabaf478a8eecbf506a93c8444487c450d03782e8331dd2e42758",
+        "size": 128343
+      },
+      "fsmn-07.onnx": {
+        "sha256": "4690df07f819db2a024dc5ba863dcb91b036bc36e741116ed3fad5ba4a21ccc0",
+        "size": 35980
+      },
+      "flash-08.onnx": {
+        "sha256": "18fc106735fcd7402eec6621ac01e8beb49718c989f92986cf56bc03e70b7f47",
+        "size": 128343
+      },
+      "fsmn-08.onnx": {
+        "sha256": "99df84256b063c0ce449b59657233cd0bf0e8ddb6bb9e74fd4e4ec67dae2dfee",
+        "size": 35980
+      },
+      "flash-09.onnx": {
+        "sha256": "5af5a885bf406e67382ea4c5e1b14bdbfd0e4b64f707d885b1145b7005b28d6f",
+        "size": 128343
+      },
+      "fsmn-09.onnx": {
+        "sha256": "264b155ecadc62986fe451dc4d7d6673542c29b8ab4c33af695f1cebeee5c995",
+        "size": 35980
+      },
+      "flash-10.onnx": {
+        "sha256": "fc66c79fa74850068c0ecf5fb345c15701fd09a96f53188912db16ac7777c957",
+        "size": 128343
+      },
+      "fsmn-10.onnx": {
+        "sha256": "6e68a199c2a06ef23af7f8e74b3e80f2594ada409aa913cf3ab6e5320fb35e99",
+        "size": 35980
+      },
+      "flash-11.onnx": {
+        "sha256": "832618113781e63ed009f2d1ed2276eae57f3a9e907138fc62a3a5b94ab67555",
+        "size": 128350
+      },
+      "fsmn-11.onnx": {
+        "sha256": "d29d1109cbaae7ee03e735123501b06590244873e5aa84b6bfd5f11e62e3b6eb",
+        "size": 35990
+      },
+      "flash-12.onnx": {
+        "sha256": "7c9e2d703a0a2e15e89ee96ecaeda41efb587dd6cdcbbd200d4e0e30d0090eb6",
+        "size": 128350
+      },
+      "fsmn-12.onnx": {
+        "sha256": "4f891b1835fba09d849f324938686e309a67ce042138cd573e936c5522109d51",
+        "size": 35990
+      },
+      "flash-13.onnx": {
+        "sha256": "5a519d2251ffeeb2799dd276a4448b03780c16c10e68757b4435701c505df70d",
+        "size": 128350
+      },
+      "fsmn-13.onnx": {
+        "sha256": "3df6119841df0b47e9844c2556853a0a23a471f5a7c0180bc1ef9a89c374d79e",
+        "size": 35990
+      },
+      "flash-14.onnx": {
+        "sha256": "3ae207b328755d10b9c264d31b71aff7d0f60e6b2bf3adb1d0009ebd4e691373",
+        "size": 128350
+      },
+      "fsmn-14.onnx": {
+        "sha256": "5c7f25600ab7add9e318c3a60f43e985fb33fb7b785fe945b29d64680f16461d",
+        "size": 35990
+      },
+      "flash-15.onnx": {
+        "sha256": "faba41758bcb3cf1840630508cd9869a89ae574c95627f87317c250dce4d9970",
+        "size": 128350
+      },
+      "fsmn-15.onnx": {
+        "sha256": "78ef357c175327292e6ad9157905a321b196377594c9d05347eb8d49f4231e6b",
+        "size": 35990
+      },
+      "flash-16.onnx": {
+        "sha256": "62d2a8661199ec0097b059a7db77f0c6187889deaae8993f4c126f1aaf92276d",
+        "size": 128350
+      },
+      "fsmn-16.onnx": {
+        "sha256": "013aadb8fa3a6f18304b1650bdb5f5d20c60056ed2fff7f5675e86194dae2599",
+        "size": 35990
+      },
+      "flash-17.onnx": {
+        "sha256": "d59beac58b18e12f421b2f2c296a2c53448fb22318bc7e59d767ff6121c59ee0",
+        "size": 128350
+      },
+      "fsmn-17.onnx": {
+        "sha256": "047f8dfbf9131ade11ff1e56749a036cf1fdcd915e839acc29b5bf447fa43184",
+        "size": 35990
+      },
+      "flash-18.onnx": {
+        "sha256": "ee3c2df43dd6ee9d6938226833edb2e40ee23a506e1e733d2d523e4d84ac3d3a",
+        "size": 128350
+      },
+      "fsmn-18.onnx": {
+        "sha256": "92c18d5c7b26a74237396448a94411dea189c5c003e85af7be28d8a80898b716",
+        "size": 35990
+      },
+      "flash-19.onnx": {
+        "sha256": "3baa4790978fb2a4e5b9806dd7beb77141d6c06ded19d0ac42238da0eab4acc2",
+        "size": 128350
+      },
+      "fsmn-19.onnx": {
+        "sha256": "a08fe557b3dc3a54c00fdfbdb4300778d8e86ce383821b347de8744e6003f5d6",
+        "size": 35990
+      },
+      "flash-20.onnx": {
+        "sha256": "5e0dd424d9f18597e58d2618a37a804b1192de7c17fdec40af7ba64c5eda9de9",
+        "size": 128350
+      },
+      "fsmn-20.onnx": {
+        "sha256": "5fca806e166751404879a1497871e2ede1300847ab18cc255427eadbf01cc0ed",
+        "size": 35990
+      },
+      "flash-21.onnx": {
+        "sha256": "652442782fa82a449c5f8b5fe22f302f2e0c13944bb5af788a7023cc9c0ef47f",
+        "size": 128350
+      },
+      "fsmn-21.onnx": {
+        "sha256": "6d9a670f815054cf7f9f782b0d4d7b14cb593e7ddb5ec23abc6820875908009e",
+        "size": 35990
+      },
+      "flash-22.onnx": {
+        "sha256": "4b1c50120aaaed23f1362ef6af830f0da2669d385a89460fa7f8c07522763407",
+        "size": 128350
+      },
+      "fsmn-22.onnx": {
+        "sha256": "0e55f0fc3975f3b99b20f518d904ef7475cb22666b9208936a7f430e63bec134",
+        "size": 35990
+      },
+      "flash-23.onnx": {
+        "sha256": "c19a2980e2202c258fa473579941e66e82a54774e6d3f58c252a5c2ec18ab2f3",
+        "size": 128350
+      },
+      "fsmn-23.onnx": {
+        "sha256": "62f0bc43d073ef033b9850944049fc9c42213d68cbdf4d9108ce6bf44d09e62c",
+        "size": 35990
+      },
+      "finish.onnx": {
+        "sha256": "0fc3584f27de04c2d6d962618d9500021eb7ff3db44bb80d13e1154915100f37",
+        "size": 28235
+      }
+    }
+  }
+]

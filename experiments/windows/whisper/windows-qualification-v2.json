@@ -1,0 +1,268 @@
+{
+  "schema_version": 1,
+  "id": "speakerdesk-whisper-windows-v2",
+  "scope": "Separate Windows numerical validity and actual-core routing qualification; not MLX scalar equivalence or general acoustic calibration.",
+  "source_checkpoint": "mlx-community/whisper-tiny-asr-fp16@77fa3f52b482ec80d086df55f893065a9baab172",
+  "windows_models": {
+    "whisper.onnx": {
+      "sha256": "1c47965522f7495fc85814c70c6b17dc4952436774c43225d55665e4ecbc7f14",
+      "size": 105848793
+    },
+    "frontend.onnx": {
+      "sha256": "b8a9f7efcdbd35686356de24e18095b31e1dae089e826e2ce5b3d3f880cb2347",
+      "size": 710294
+    },
+    "languages.json": {
+      "sha256": "a8bff869e0297baa2b5d50504628f4abf267484cff2a1c2b3bc7dd5f346f5d48",
+      "size": 2137
+    }
+  },
+  "mac_models": {
+    "model.safetensors": "1267601753d2996d68dc065d1de786895a7ad9a874d1d3548a5274c1bc067444",
+    "config.json": "cf7def105e7cc5ba77a0c8fae7e97aac1ca896b70b288dec3d64fad6d9c08f7a",
+    "added_tokens.json": "9715fd2243b6f06a5858b5e32950d2853f73dd5bc201aafcf76f5082a2d8acd1"
+  },
+  "windows_runtime": {
+    "package": "Microsoft.Windows.AI.MachineLearning",
+    "version": "2.4.89",
+    "ort": "1.27.1",
+    "pins_sha256": "bd1d83246f135d8d694c76aea5039aacaca7f9cf2103a6a66d45848451200c8a",
+    "neural_optimizations": "disabled",
+    "frontend_optimizations": "level3",
+    "provider": "DirectML"
+  },
+  "mac_runtime": {
+    "libmlx.dylib": "0c9db159aedd2951bb77610c8b028c4ef79bc64ccc4c73b07a4452a60612ac03",
+    "mlx.metallib": "2d2e729831a995a39778164c93ea1b2e8d87f7d8b1e717386d3d816f46f416b2",
+    "capture": "Actual native Mac Network::probe and frontend; actual loaded dylib and explicit Metal library identities."
+  },
+  "legacy": {
+    "reference": "crates/models/tests/data/whisper-reference.json",
+    "reference_sha256": "78c9a58e880e680cc4cc18ce6d4dcc16c0722be161a6f4cce0c911bd844d23ca",
+    "wav_sha256": "71aa4a49976822d0b2d75cd2b7543d39f664eec97fcf6feeb0187466a7e6fd41",
+    "strict_max_probability_error": 0.0001,
+    "comparison": "strictly_less_than",
+    "existing_windows_result": "whole passed; first_probe, partial_frame and silence failed. Retained unchanged; no waiver or replacement scalar threshold.",
+    "cases": [
+      {
+        "id": "legacy-whole",
+        "reference_name": "whole",
+        "expected_core": {
+          "winner": "en",
+          "language": "en",
+          "review": false,
+          "reason": "detected",
+          "remembered": "en"
+        },
+        "numerical_only": false
+      },
+      {
+        "id": "legacy-first_probe",
+        "reference_name": "first_probe",
+        "expected_core": {
+          "winner": "en",
+          "language": "en",
+          "review": false,
+          "reason": "detected",
+          "remembered": "en"
+        },
+        "numerical_only": false
+      },
+      {
+        "id": "legacy-partial_frame",
+        "reference_name": "partial_frame",
+        "expected_core": {
+          "winner": "en",
+          "language": "en",
+          "review": true,
+          "reason": "best_effort",
+          "remembered": null
+        },
+        "numerical_only": true
+      },
+      {
+        "id": "legacy-silence",
+        "reference_name": "silence",
+        "expected_core": {
+          "winner": "en",
+          "language": "en",
+          "review": true,
+          "reason": "best_effort",
+          "remembered": null
+        },
+        "numerical_only": true
+      }
+    ]
+  },
+  "natural": {
+    "dataset": "google/fleurs",
+    "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+    "split": "validation",
+    "configs": {
+      "en_us": "en",
+      "de_de": "de",
+      "fr_fr": "fr",
+      "it_it": "it",
+      "es_419": "es",
+      "pt_br": "pt",
+      "el_gr": "el",
+      "nl_nl": "nl",
+      "pl_pl": "pl",
+      "vi_vn": "vi",
+      "cmn_hans_cn": "zh",
+      "ar_eg": "ar",
+      "ja_jp": "ja",
+      "ko_kr": "ko",
+      "ru_ru": "ru",
+      "hi_in": "hi"
+    },
+    "unsupported": [
+      "ru",
+      "hi"
+    ],
+    "selection": "First two regular WAV members in each pinned data/{config}/audio/dev.tar.gz in archive order; match basenames to pinned data/{config}/dev.tsv for human transcript, ID and sample count. Never sort, choose or replace after inference.",
+    "retained_source": "Archive/TSV for all32 natural cases; prior quality-pilot bytes retained only for noisy stress and provenance comparison.",
+    "source_common_confident_error": "Measured acoustic failure; block activation recommendation pending owner decision, never mark correct.",
+    "native_new_confident_error": "fail",
+    "unsupported_supported_route": "fail",
+    "uncertain_errors": "Retain and report label mistakes/uncertainty; do not call them correct or a calibration claim.",
+    "archive_audio_member_indices": [
+      0,
+      1
+    ],
+    "source_paths": {
+      "archive": "data/{config}/audio/dev.tar.gz",
+      "labels": "data/{config}/dev.tsv"
+    }
+  },
+  "stress": {
+    "sources": [
+      "en_us-0",
+      "fr_fr-1"
+    ],
+    "quiet": {
+      "gain": 0.01,
+      "arithmetic": "multiply float32; no PCM16 requantization"
+    },
+    "clipped": {
+      "gain": 4,
+      "minimum": -1,
+      "maximum": 1,
+      "arithmetic": "multiply then clip float32"
+    },
+    "switch": {
+      "orders": [
+        [
+          "en_us-0",
+          "fr_fr-1"
+        ],
+        [
+          "fr_fr-1",
+          "en_us-0"
+        ]
+      ],
+      "gap_samples": 12800
+    },
+    "overlap": {
+      "sources": [
+        "en_us-0",
+        "fr_fr-1"
+      ],
+      "arithmetic": "Compute each RMS in float64; attenuate each to min RMS; float32-rounded views, pad shorter to maximum length, average float32."
+    },
+    "noise": {
+      "retained_id": "fr-1-noise10db",
+      "sha256": "8442387b816edc0cc41ef5a3171ecb3901a9ca73f18a6ff1edeb62f68a778e11"
+    },
+    "short": {
+      "source": "en_us-0",
+      "origin": "first exactly nonzero sample",
+      "lengths": [
+        159,
+        160,
+        161,
+        319,
+        320,
+        321,
+        399,
+        400,
+        401
+      ],
+      "numerical_only": true
+    },
+    "context": {
+      "source": "en_us-0",
+      "lengths": [
+        479999,
+        480000,
+        480001
+      ],
+      "tail": "Zero extend; at index480000 append finite1.0 if present. All equal base en_us-0 result bitexact per backend."
+    },
+    "ambiguity": "Constructed stress, not natural code-switching or speech admission evidence; exact pinned source core outcome."
+  },
+  "gates": {
+    "language_columns": 99,
+    "probability_type": "float32",
+    "finite": true,
+    "range": [
+      0,
+      1
+    ],
+    "maximum_sum_error": 1e-05,
+    "same_backend_repeat": "bitexact",
+    "fresh_core_policy_each_case": true,
+    "core_exact_fields": [
+      "winner",
+      "language",
+      "review",
+      "reason",
+      "remembered"
+    ],
+    "core_thresholds": {
+      "probability": 0.9,
+      "margin": 0.2
+    },
+    "diagnostic_only": [
+      "max_absolute_probability_drift",
+      "l1_probability_drift",
+      "total_variation",
+      "top3_code_order",
+      "threshold_distances"
+    ],
+    "scalar_drift_limit": "No replacement scalar tolerance. Mandatory functional drift limit is zero changed actual-core categorical decisions."
+  },
+  "sequences": [
+    "confident-supported -> weak-supported -> confident-unsupported -> weak-unsupported",
+    "per-speaker isolation",
+    "tie order",
+    "adjacent confidence/margin values"
+  ],
+  "freeze": {
+    "before_mac": "Contract, selectors, all raw float32 PCM hashes and derivation recipes.",
+    "before_windows": "Pinned actual native Mac capture, actual core outcomes and capture SHA256.",
+    "failures": "Fresh complete failure receipt and nonzero exit; preserve every selected case and all legacy failures; no retries for selection."
+  },
+  "budget": {
+    "cases": 56,
+    "repeats": 2,
+    "complete_probes_per_backend": 112,
+    "maximum_successful_probes_per_backend": 128,
+    "spares": "16 only for A-B-A, fresh-session and cancellation isolation; never selection retries.",
+    "maximum_new_download_bytes": 62914560,
+    "maximum_audio_asset_bytes": 2097152,
+    "maximum_metadata_bytes_per_config": 1048576,
+    "maximum_prepared_bytes": 157286400,
+    "model_copies": 0,
+    "model_runs_by_implementer": 0
+  },
+  "admission": "Parent authorizes exact frozen graph inventory for qualification loading only after protocol review. Existing admit_model remains mandatory. Production dispatcher/setup activation requires passing actual adapter/behavior gate and owner quality decision.",
+  "amendment": {
+    "supersedes_attempted_contract_sha256": "e190972d2a3d980a546c95092cbf2969ff96616e0eec3f5ae738b84fc4fd2b46",
+    "timing": "Before any model inference under either prospective contract. Old graph/reference evaluation failures remain unchanged.",
+    "reason": "Viewer metadata endpoints exceed server Parquet scan limit. Use standard-library bounded archive streaming, with deterministic archive-order selection rather than Parquet-row selection.",
+    "acceptance": "Numerical, routing, label, stress algorithms and112+1probe criteria unchanged. No inference-based selection or replacement.",
+    "stress_source_bytes": "Quiet/clipped/mixed/short/context recipes now use v2 selected natural-en_us-0/fr_fr-1. Retained noise-fr-10db bytes unchanged.",
+    "metadata_budget": "Complete pinned dev.tsv may use up to1MiB per config; aggregate60MiB corpus cap includes all prior failed transport attempts."
+  }
+}

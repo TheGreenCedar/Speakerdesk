@@ -1,5 +1,6 @@
 """Authenticated signer inventory and client-key binding, with synthetic bytes."""
 import base64
+from contextlib import contextmanager
 import copy
 import hashlib
 import json
@@ -13,6 +14,7 @@ import zipfile
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import promote_release as promotion
+import windows_signing
 
 
 class UpdaterReleaseTests(unittest.TestCase):
@@ -160,21 +162,25 @@ class UpdaterReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'version policy'):
             promotion.verify_updater_files(self.manifest,self.root,config)
 
-    def publication_fixture(self):
-        args=self.native_candidate()
-        with patch.object(promotion,'ROOT',self.root),patch.object(promotion,'verify_signing'):
-            plan=promotion.prepare(*args)
+    def publication_fixture(self,plan=None):
+        if plan is None:
+            args=self.native_candidate()
+            with patch.object(promotion,'ROOT',self.root),patch.object(promotion,'verify_signing'):
+                plan=promotion.prepare(*args)
         release={'id':41,'tag_name':plan['tag'],'target_commitish':plan['source_commit'],
                  'prerelease':False,'draft':True,'body':plan['notes'],'published_at':None,
                  'html_url':'https://github.com/'+promotion.REPOSITORY+'/releases/tag/'+plan['tag'],
                  'assets':[{'id':index,'name':name,'state':'uploaded','size':item['bytes'],
                             'digest':'sha256:'+item['sha256']} for index,(name,item) in enumerate(plan['files'].items(),1)]}
         state={'created':False,'published':False,'before':[],'listed':[copy.deepcopy(release)],
-               'release':release,'refs':[],'created_sha':plan['source_commit'],'mutations':[]}
+               'release':release,'refs':[],'created_sha':plan['source_commit'],'mutations':[],
+               'main':{'sha':plan['source_commit'],'commit':{'tree':{'sha':'c'*40}}},
+               'comparison':{'merge_base_commit':{'sha':plan['source_commit'],'commit':{'tree':{'sha':'c'*40}}}}}
         base='repos/'+promotion.REPOSITORY
         def command(arguments,**kwargs):
             if arguments[:3]==['gh','release','create']:
                 self.assertIn('--draft',arguments);state['created']=True;state['mutations'].append('draft')
+                state['create_arguments']=arguments
                 return subprocess.CompletedProcess(arguments,0,release['html_url']+'\n','')
             self.assertEqual(arguments[:2],['gh','api'])
             endpoint=arguments[2]
@@ -182,7 +188,8 @@ class UpdaterReleaseTests(unittest.TestCase):
             body=json.loads(kwargs['input']) if kwargs.get('input') else None
             if method=='GET':
                 if endpoint==base:reply={'id':promotion.REPOSITORY_ID,'full_name':promotion.REPOSITORY}
-                elif endpoint==base+'/commits/main':reply={'sha':plan['source_commit']}
+                elif endpoint==base+'/commits/main':reply=state['main']
+                elif endpoint==base+'/compare/'+plan['source_commit']+'...'+state['main']['sha']:reply=state['comparison']
                 elif endpoint==base+'/git/matching-refs/tags/'+plan['tag']:reply=state['refs']
                 elif endpoint==base+'/releases?per_page=100':reply=state['listed'] if state['created'] else state['before']
                 elif endpoint==base+'/releases/'+str(release['id']):reply=state['release']
@@ -195,7 +202,8 @@ class UpdaterReleaseTests(unittest.TestCase):
                 state['refs']=[{'ref':body['ref'],'object':{'type':'commit','sha':state['created_sha']}}]
                 reply=state['refs'][0]
             elif method=='PATCH' and endpoint==base+'/releases/'+str(release['id']):
-                self.assertEqual(body,{'draft':False,'prerelease':False,'make_latest':'true'})
+                self.assertEqual(body,{'draft':False,'prerelease':False,
+                    'make_latest':'false' if plan.get('platform')=='windows-x86_64' else 'true'})
                 self.assertEqual(state['refs'],[{'ref':'refs/tags/'+plan['tag'],'object':{'type':'commit','sha':plan['source_commit']}}])
                 state['mutations'].append('publish');state['published']=True
                 reply=dict(state['release'],draft=False,published_at='2026-10-12T00:00:00Z')
@@ -220,6 +228,13 @@ class UpdaterReleaseTests(unittest.TestCase):
         with patch.object(promotion.subprocess,'run',side_effect=command),patch.object(promotion,'downloaded_digest',side_effect=download):
             promotion.publish(plan)
         self.assertEqual(state['mutations'],['draft','publish'])
+
+    def test_mac_still_requires_exact_main_even_for_a_tree_equivalent_ancestor(self):
+        plan,state,command,download=self.publication_fixture()
+        state['main']['sha']='b'*40
+        with patch.object(promotion.subprocess,'run',side_effect=command),patch.object(promotion,'downloaded_digest',side_effect=download) as downloads:
+            with self.assertRaisesRegex(ValueError,'current reviewed main'):promotion.publish(plan)
+        self.assertEqual(state['mutations'],[]);downloads.assert_not_called()
 
     def test_draft_identity_metadata_and_tag_fail_closed_before_publication(self):
         plan,state,command,download=self.publication_fixture()
@@ -249,6 +264,226 @@ class UpdaterReleaseTests(unittest.TestCase):
                 self.assertFalse(state['published']);downloads.assert_not_called()
                 if case!='wrong created tag':self.assertNotIn('tag',state['mutations'])
                 if case in ('existing draft','wrong existing tag'):self.assertFalse(state['created'])
+
+
+class WindowsPreparationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.addCleanup(patch.stopall)
+        patch.object(promotion, 'ROOT', self.root).start()
+        patch.object(windows_signing, 'ROOT', self.root).start()
+        self.api_patch = patch.object(promotion, 'api', side_effect=AssertionError('Windows preparation must remain local'))
+        self.network = self.api_patch.start()
+        config = self.root / 'desktop/src-tauri'; config.mkdir(parents=True)
+        self.version, self.source = '0.7.7', 'a' * 40
+        self.key = base64.b64encode(b'Public synthetic updater key').decode()
+        (config / 'tauri.conf.json').write_text(json.dumps(dict(version=self.version,
+            plugins=dict(updater=dict(pubkey=self.key, requireSignedVersion=True, allowDowngrades=False)))))
+        (config / 'tauri.windows.conf.json').write_text('{}')
+        self.candidate = self.root / 'candidate'; self.candidate.mkdir()
+        name = f'Speakerdesk_{self.version}_x64-setup.exe'
+        self.installer = self.candidate / name
+        self.installer.write_bytes(b'Synthetic installer bytes; not native installation proof')
+        self.signature = self.candidate / (name + '.sig')
+        self.signature.write_text(base64.b64encode(b'Synthetic signature transport').decode())
+        receipts = self.candidate / 'signing'; (receipts / 'payloads').mkdir(parents=True)
+        payloads = {}
+        for role, filename in dict(capture='speakerdesk-capture.exe', echo='speakerdesk_echo.dll',
+                app='speakerdesk.exe', uninstaller='uninstall.exe', installer=name).items():
+            payload = receipts / 'payloads' / filename
+            payload.write_bytes(self.installer.read_bytes() if role == 'installer' else role.encode())
+            digest = promotion.digest_file(payload)
+            (receipts / (role + '.json')).write_text(json.dumps(dict(role=role, disposition='owned_signed',
+                sha256=digest, authenticode_status='Valid', timestamped=True, publisher_subject='CN=Albert Najjar')))
+            if role != 'installer': payloads[filename] = digest
+        runtime = self.root / 'crates/models/src/windows-runtime.json'; runtime.parent.mkdir(parents=True)
+        runtime.write_text(json.dumps({'files': {'onnxruntime.dll': {'sha256': 'c' * 64}}}))
+        payloads.update({'runtime/onnxruntime.dll': 'c' * 64,
+            'speakerdesk-capture.exe.capability.json': 'd' * 64, 'THIRD_PARTY_NOTICES.txt': 'e' * 64})
+        self.manifest = dict(platform='windows-x86_64', version=self.version, source_commit=self.source,
+            source_dirty=False, public_ready=False, authenticode_status='Valid', installed_payloads=payloads,
+            installed_payloads_observed=False, signing=dict(kind='azure-artifact-signing', receipts='signing', payloads_observed_at_hook=True),
+            installer=dict(name=name, bytes=self.installer.stat().st_size, sha256=promotion.digest_file(self.installer)),
+            updater_signature=dict(filename=name, signature_filename=self.signature.name, signature=self.signature.read_text(),
+                verified=True, require_signed_version=True, **{k:v for k,v in windows_signing.updater_configuration().items() if k != 'version'}))
+        self.manifest_path = self.candidate / 'artifact-manifest.json'
+        self.manifest_path.write_text(json.dumps(self.manifest))
+        # These are operator-report contract fixtures, not claims of native trust or cryptographic success.
+        self.install_report = self.root / 'installed-report.json'
+        self.install_report.write_text(json.dumps(dict(kind='signed-standard-user-install', passed=True,
+            standard_user=True, installer_sha256=self.manifest['installer']['sha256'], installed_payloads=payloads,
+            authenticode_verified=True, save_reopen=True, clean_shutdown=True, uninstall_reinstall=True, data_preserved=True)))
+        self.updater_report = self.root / 'updater-report.json'
+        self.updater_report.write_text(json.dumps(dict(kind='nsis-installer-updater-verification',
+            payload_sha256=self.manifest['installer']['sha256'], signature_sha256=promotion.digest_file(self.signature),
+            version=self.version, public_key=self.key, signature_key_version_verified=True, payload_unchanged=True)))
+        self.qa = dict(passed=True, platform='windows-x86_64', version=self.version, source_commit=self.source,
+            artifact_manifest_sha256=promotion.digest_file(self.manifest_path),
+            verification=str(self.install_report), verification_sha256=promotion.digest_file(self.install_report),
+            updater_verification=str(self.updater_report), updater_verification_sha256=promotion.digest_file(self.updater_report))
+        self.qa_path = self.root / 'native-qa.json'; self.qa_path.write_text(json.dumps(self.qa))
+        self.notes = self.root / 'notes.md'; self.notes.write_text('Source: ' + self.source)
+
+    def prepare(self):
+        return promotion.prepare(self.manifest_path, self.qa_path, self.notes, None)
+
+    def test_local_windows_preparation_binds_signed_bytes_and_operator_reports_without_network(self):
+        result = self.prepare()
+        self.assertEqual(result['provenance'], 'local-operator-controlled')
+        self.assertFalse(result['app_driven_update_observed'])
+        self.assertEqual(result['source_commit'], self.source)
+        self.assertEqual(set(result['files']), {self.installer.name, self.signature.name, 'artifact-manifest.json'})
+        self.network.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'actual app-driven update'):
+            promotion.publish(result)
+        self.network.assert_not_called()
+
+    def test_update_observation_must_be_explicit_and_in_the_hashed_install_report(self):
+        report = json.loads(self.install_report.read_text())
+        for value in (None, False, 1, 'true'):
+            with self.subTest(value=value):
+                self.install_report.write_text(json.dumps(dict(report, app_driven_update_observed=value)))
+                self.qa_path.write_text(json.dumps(dict(self.qa, app_driven_update_observed=True,
+                    verification_sha256=promotion.digest_file(self.install_report))))
+                plan = self.prepare()
+                self.assertFalse(plan['app_driven_update_observed'])
+                with self.assertRaisesRegex(ValueError, 'actual app-driven update'):
+                    promotion.publish(plan)
+        self.network.assert_not_called()
+        self.install_report.write_text(json.dumps(dict(report, app_driven_update_observed=True)))
+        with self.assertRaisesRegex(ValueError, 'operator report changed'):
+            self.prepare()
+
+    def test_update_observation_is_parsed_from_the_exact_hashed_report_snapshot(self):
+        report=json.loads(self.install_report.read_text())
+        replacement=json.dumps(dict(report,app_driven_update_observed=True)).encode()
+        original_open=Path.open;replacements=[]
+        @contextmanager
+        def replace_after_read(path,*args,**kwargs):
+            with original_open(path,*args,**kwargs) as stream:
+                yield stream
+            if path==self.install_report and (args[0] if args else kwargs.get('mode'))=='rb':
+                with original_open(path,'wb') as stream:stream.write(replacement)
+                replacements.append(path)
+        with patch.object(Path,'open',replace_after_read):
+            plan=self.prepare()
+        self.assertEqual(replacements,[self.install_report])
+        self.assertTrue(json.loads(self.install_report.read_bytes())['app_driven_update_observed'])
+        self.assertFalse(plan['app_driven_update_observed'])
+        self.assertEqual(plan['verification_sha256'],self.qa['verification_sha256'])
+
+    def test_windows_main_movement_during_upload_preserves_the_private_draft(self):
+        report=json.loads(self.install_report.read_text())
+        self.install_report.write_text(json.dumps(dict(report,app_driven_update_observed=True)))
+        self.qa_path.write_text(json.dumps(dict(self.qa,verification_sha256=promotion.digest_file(self.install_report))))
+        plan,state,command,download=UpdaterReleaseTests.publication_fixture(self,self.prepare())
+        self.api_patch.stop()
+        def move_main_after_upload(arguments,**kwargs):
+            result=command(arguments,**kwargs)
+            if arguments[:3]==['gh','release','create']:
+                state['main']={'sha':'b'*40,'commit':{'tree':{'sha':'e'*40}}}
+            return result
+        with patch.object(promotion.subprocess,'run',side_effect=move_main_after_upload),patch.object(promotion,'downloaded_digest',side_effect=download) as downloads:
+            with self.assertRaisesRegex(ValueError,'main changed during Windows upload'):
+                promotion.publish(plan)
+        self.assertEqual(state['mutations'],['draft','tag'])
+        self.assertFalse(state['published']);downloads.assert_not_called()
+
+    def test_windows_publication_preserves_qualified_source_and_requires_main_ancestry_and_tree(self):
+        report = json.loads(self.install_report.read_text())
+        self.install_report.write_text(json.dumps(dict(report, app_driven_update_observed=True)))
+        self.qa_path.write_text(json.dumps(dict(self.qa, verification_sha256=promotion.digest_file(self.install_report))))
+        prepared = self.prepare()
+        self.assertIs(prepared['app_driven_update_observed'], True)
+        self.api_patch.stop()
+        for case in ('exact main', 'merged same tree', 'unrelated same tree', 'ancestor different tree', 'missing tree'):
+            with self.subTest(case=case):
+                plan,state,command,download=UpdaterReleaseTests.publication_fixture(self,prepared)
+                if case!='exact main':state['main']['sha']='b'*40
+                if case=='unrelated same tree':state['comparison']['merge_base_commit']['sha']='d'*40
+                if case=='ancestor different tree':state['comparison']['merge_base_commit']['commit']['tree']['sha']='e'*40
+                if case=='missing tree':
+                    state['main']['commit']['tree']={}
+                    state['comparison']['merge_base_commit']['commit']['tree']={}
+                accepted=case in ('exact main', 'merged same tree')
+                with patch.object(promotion.subprocess,'run',side_effect=command),patch.object(promotion,'downloaded_digest',side_effect=download) as downloads:
+                    if accepted:
+                        result=promotion.publish(plan)
+                        self.assertEqual(result['source_commit'],self.source)
+                        self.assertEqual(state['mutations'],['draft','tag','publish'])
+                        self.assertEqual(state['refs'][0]['object']['sha'],self.source)
+                        self.assertEqual(downloads.call_count,3)
+                        commandline=state['create_arguments']
+                        self.assertEqual(commandline[commandline.index('--title')+1],'Speakerdesk 0.7.7 for Windows')
+                    else:
+                        with self.assertRaisesRegex(ValueError,'ancestor.*same Git tree'):promotion.publish(plan)
+                        self.assertEqual(state['mutations'],[]);downloads.assert_not_called()
+
+    def test_windows_preparation_rejects_unqualified_candidates_and_changed_evidence(self):
+        originals = {p:p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        cases = [
+            (self.manifest_path, dict(self.manifest, source_dirty=True)),
+            (self.manifest_path, dict(self.manifest, qualification_fixture='Renamed helper, NOT an installer')),
+            (self.manifest_path, dict(self.manifest, installed_payloads={name:value for name,value in
+                self.manifest['installed_payloads'].items() if name != 'runtime/onnxruntime.dll'})),
+            (self.manifest_path, dict(self.manifest, updater_signature=dict(self.manifest['updater_signature'], pending=True, verified=False))),
+            (self.manifest_path, dict(self.manifest, updater_signature=dict(self.manifest['updater_signature'], configuration_sha256='0' * 64))),
+            (self.manifest_path, dict(self.manifest, updater_signature=dict(self.manifest['updater_signature'], windows_configuration_sha256='0' * 64))),
+            (self.installer, b'tampered installer'), (self.signature, b'tampered signature'),
+            (self.qa_path, dict(self.qa, source_commit='b' * 40)),
+            (self.qa_path, dict(self.qa, fixture='Synthetic QA, not installed proof')),
+            (self.qa_path, dict(self.qa, qualification_fixture='Synthetic QA, not installed proof')),
+            (self.qa_path, dict(self.qa, artifact_manifest_sha256='0' * 64)),
+            (self.qa_path, dict(self.qa, verification_sha256='0' * 64)),
+            (self.candidate / 'signing/payloads/speakerdesk.exe', b'changed signed snapshot'),
+        ]
+        for path, value in cases:
+            with self.subTest(path=path, value=str(value)[:60]):
+                path.write_bytes(value if isinstance(value, bytes) else json.dumps(value).encode())
+                with self.assertRaises((ValueError, KeyError)):
+                    self.prepare()
+                for saved, data in originals.items(): saved.write_bytes(data)
+        self.signature.unlink()
+        with self.assertRaises((ValueError, OSError)):
+            self.prepare()
+
+    def test_matching_report_digest_cannot_hide_wrong_install_or_updater_bindings(self):
+        for path, field, value, digest_field in [
+            (self.install_report, 'fixture', 'Synthetic report', 'verification_sha256'),
+            (self.install_report, 'qualification_fixture', 'Synthetic report', 'verification_sha256'),
+            (self.install_report, 'standard_user', False, 'verification_sha256'),
+            (self.install_report, 'installed_payloads', {}, 'verification_sha256'),
+            (self.install_report, 'authenticode_verified', False, 'verification_sha256'),
+            (self.updater_report, 'kind', 'renamed-helper-fixture', 'updater_verification_sha256'),
+            (self.updater_report, 'fixture', 'Synthetic report', 'updater_verification_sha256'),
+            (self.updater_report, 'qualification_fixture', 'Synthetic report', 'updater_verification_sha256'),
+            (self.updater_report, 'version', '0.7.6', 'updater_verification_sha256'),
+            (self.updater_report, 'public_key', 'different', 'updater_verification_sha256'),
+            (self.updater_report, 'payload_sha256', '0' * 64, 'updater_verification_sha256'),
+            (self.updater_report, 'signature_sha256', '0' * 64, 'updater_verification_sha256'),
+        ]:
+            original = path.read_bytes()
+            with self.subTest(field=field):
+                report = json.loads(original); report[field] = value; path.write_text(json.dumps(report))
+                qa = dict(self.qa); qa[digest_field] = promotion.digest_file(path); self.qa_path.write_text(json.dumps(qa))
+                with self.assertRaises(ValueError): self.prepare()
+            path.write_bytes(original); self.qa_path.write_text(json.dumps(self.qa))
+
+    def test_powershell_utf8_bom_reports_keep_raw_hash_binding(self):
+        qa = dict(self.qa)
+        for path, field in ((self.install_report, 'verification_sha256'),
+                            (self.updater_report, 'updater_verification_sha256')):
+            path.write_bytes(b'\xef\xbb\xbf' + path.read_bytes())
+            qa[field] = promotion.digest_file(path)
+        self.qa_path.write_bytes(b'\xef\xbb\xbf' + json.dumps(qa).encode())
+        result = self.prepare()
+        self.assertEqual(result['native_gate_sha256'], promotion.digest_file(self.qa_path))
+        self.assertEqual(result['verification_sha256'], promotion.digest_file(self.install_report))
+        self.install_report.write_bytes(self.install_report.read_bytes() + b' ')
+        with self.assertRaisesRegex(ValueError, 'operator report changed'):
+            self.prepare()
 
 
 if __name__=='__main__':unittest.main()

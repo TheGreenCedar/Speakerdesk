@@ -23,6 +23,7 @@ library, not a multi-tenant service.
 | Change editing or playback controls | [Editor](../speakerdesk/static/app.js), [live updates](../speakerdesk/static/live_editor.js) | [Naming UI](../speakerdesk/static/people.js); [existing DOM harness](../tests/support/frontend_dom.cjs) |
 | Debug persistence or reopen | [SQLite store](../crates/core/src/store/sqlite.rs) | [Saved fields](../crates/core/src/document.rs); [migration](../crates/core/src/store/legacy.rs) |
 | Debug setup or child failure | [Native host](../crates/host/src/native.rs), [setup](../crates/host/src/setup.rs), [supervisor](../crates/host/src/inference.rs) | [Pinned identities](../crates/host/src/model-artifacts.json); [protocol](../crates/core/src/ipc.rs) |
+| Work on Windows capture or model loading | [WASAPI helper](../desktop/capture/windows/src/main.rs), [runtime admission](../crates/models/src/windows_runtime.rs) | The relevant model's `network_windows.rs`; [qualification status](../experiments/windows/README.md) distinguishes component proof from application readiness |
 | Change native window, menu or recovery behavior | [Desktop shell](../desktop/src-tauri/src/) | [Startup UI](../desktop/frontend/); the transcript editor is embedded by the host |
 
 ## Trace a mutation

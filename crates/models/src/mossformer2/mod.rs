@@ -13,3 +13,7 @@ pub const SOURCE_SHA256: &str = "00a3a48bda492db1e829b85dd443f8f43a43039a3e90f1a
 pub const SOURCE_FILE: &str = "last_best_checkpoint.pt";
 pub const DERIVED_FILE: &str = "model.safetensors";
 pub const DERIVED_SHA256: &str = "f7fc8ec3cdb3200c17c3bf52fa5f836b8d6ec203bd58897f16ffe25e71e74473";
+
+#[cfg(windows)]
+#[path = "network_windows.rs"]
+pub mod network;

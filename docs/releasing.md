@@ -61,3 +61,50 @@ Preparation checks the payload inventory and hashes, notarization, the compiled 
 3. Deploy, then check the installer and archive bytes anonymously, along with the latest metadata, the updater version and signature, and the previous version's routes.
 
 The app ZIP, signature, signer manifest and `SHA256SUMS` stay attached to the GitHub release.
+
+## Windows preparation and promotion
+
+Windows uses the [two-phase signing path](windows-signing.md), with the updater key
+remaining on the Mac. Freeze the qualified source/model candidate before packaging.
+After final NSIS signing and actual standard-user installation QA, prepare locally:
+
+```sh
+python3 scripts/promote_release.py --manifest <candidate>/artifact-manifest.json \
+  --native-qa <proof>/native-qa.json --notes <proof>/notes.md
+```
+
+This branch binds local operator reports, signed payload snapshots, final installer,
+signature and build-time configuration pins. It supplies no Apple producer/signer
+provenance. Native installed observations and actual updater
+verification must name these exact bytes; portable contract tests cannot supply them.
+The candidate manifest stays `public_ready: false`. Model distribution/readiness and
+owner-controlled public promotion remain separate gates. Never relabel the existing
+Mac `v0.7.6` tag or artifacts with a different Windows source commit.
+
+The website's independent `speakerdesk-windows-releases.json` catalog starts empty.
+Its `/downloads/speakerdesk/updater/windows-x86_64/latest.json` endpoint returns 204
+until an approved Windows entry is selected; the Mac feed/catalog are unchanged.
+Approved Windows installers use the existing immutable versioned download route
+with `application/octet-stream`. Real A-to-B update proof requires an older installed
+Windows build with this Windows-specific endpoint and a newer approved signed target;
+direct installer replacement and detached-signature verification do not prove that flow.
+
+Keep the application PR draft while qualifying the update. First freeze a clean newer
+Windows candidate, sign it and qualify its standard-user installation. Under release
+authorization, stage those exact bytes at a new immutable website key, verify the
+download, and select that approved target in the Windows feed. Then use the older
+installed app's update UI through its compiled production endpoint to download,
+install and restart into the target, preserving synthetic saved data. Record
+`app_driven_update_observed: true` in the existing hashed installation report only
+after that interaction succeeds; refresh its `verification_sha256` in `native-qa.json`.
+Preparation is allowed before this observation, but `--publish` requires it explicitly.
+
+After acceptance, merge the PR preserving the original candidate commit and exactly
+its Git tree. Windows publication requires that commit to be an ancestor of current
+reviewed `main` with the same tree. A changed merge tree blocks promotion; never
+rewrite the signed candidate's source to the merge SHA. With an authorized release,
+rerun preparation with `--publish`. The shared draft/upload/tag/download checks keep
+the new `v<version>` tag at the original qualified source and refuse existing releases
+or a differently bound tag. The release title identifies Windows and `make_latest`
+is false, preserving the existing Mac latest selection. Mac publication retains its
+exact-main and AppleRelease provenance requirements.
