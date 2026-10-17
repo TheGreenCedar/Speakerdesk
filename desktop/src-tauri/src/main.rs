@@ -188,6 +188,7 @@ impl RuntimeSettings {
             (self.capture_helper.clone(), true),
             (PathBuf::from(capability), false),
             (resources.join(ECHO_LIBRARY), false),
+            (resources.join("localvqe-v1.2-1.3M-f32.gguf"), false),
         ];
         #[cfg(windows)]
         artifacts.extend([
@@ -567,6 +568,7 @@ mod runtime_tests {
                 "Contents/Resources/speakerdesk-capture",
                 "Contents/Resources/speakerdesk-capture.capability.json",
                 "Contents/Resources/libspeakerdesk_echo.dylib",
+                "Contents/Resources/localvqe-v1.2-1.3M-f32.gguf",
                 "Contents/Resources/mlx/mlx.metallib",
                 "Contents/Frameworks/libmlx.dylib",
             ] {
@@ -718,6 +720,7 @@ mod runtime_tests {
             "Contents/Resources/speakerdesk-capture",
             "Contents/Resources/speakerdesk-capture.capability.json",
             "Contents/Resources/libspeakerdesk_echo.dylib",
+            "Contents/Resources/localvqe-v1.2-1.3M-f32.gguf",
             "Contents/Resources/mlx/mlx.metallib",
             "Contents/Frameworks/libmlx.dylib",
         ] {

@@ -388,3 +388,127 @@ async fn native_startup_keeps_existing_native_state_and_requires_its_owner_lock(
         assert_eq!(std::fs::read(&legacy).unwrap(), before);
     }
 }
+
+// Identity and HTTP replay only: these small files are not acoustic model artifacts.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn required_separation_repair_preserves_saved_work_and_legacy_setup_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let models = temp.path();
+    let storage = models.join("native");
+    let legacy = storage.join("recordings/jobs.sqlite");
+    seed_legacy(&legacy);
+    std::fs::write(models.join("fixture-ctc"), b"timing setup replay").unwrap();
+    std::fs::write(models.join("fixture-voice"), b"voice setup replay").unwrap();
+    std::fs::write(
+        models.join("fixture-separation-error"),
+        b"missing on upgrade",
+    )
+    .unwrap();
+    std::fs::create_dir(models.join("coarse-alignment")).unwrap();
+    std::fs::write(
+        models.join("coarse-alignment/tokens.txt"),
+        include_str!("testdata/ctc-tokens.txt"),
+    )
+    .unwrap();
+    let state = AppState::open(&storage).unwrap();
+    let history = json!([{"target":"separation","started_at":1,"status":"failed","error":"Old optional setup failed"}]).to_string();
+    let mut store = SqliteJobStore::open(storage.join("speakerdesk.sqlite")).unwrap();
+    store
+        .set_preference("model_setup_history", &history)
+        .unwrap();
+    store.set_preference("voice_recognition", "false").unwrap();
+    drop(store);
+    drop(state);
+
+    async fn settled(host: &Host) -> Value {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let setup = host.json("api/setup").await;
+                if !matches!(setup["status"].as_str(), Some("loading" | "downloading")) {
+                    return setup;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    let host = Host::start(&storage, models).await;
+    let missing = settled(&host).await;
+    assert_eq!(missing["models"].as_array().unwrap().len(), 7);
+    assert_eq!(missing["core_ready"], false);
+    assert_eq!(missing["ready"], false);
+    assert_eq!(missing["status"], "missing");
+    assert!(
+        missing["error"]
+            .as_str()
+            .unwrap()
+            .contains("Separation replay initialization failed")
+    );
+    let separator = missing["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "mossformer2-16k")
+        .unwrap();
+    assert_eq!(separator["installed"], false);
+    assert_ne!(separator["optional"], true);
+    assert_eq!(
+        host.json("api/config").await["readiness"]["configured"],
+        false
+    );
+    assert!(
+        !models.join(".staging").exists(),
+        "startup must not download required weights without consent"
+    );
+    let mut job = host.json(&format!("api/jobs/{JOB_ID}")).await;
+    job["document"]["segments"][0]["text"] = json!("Protected correction during model repair.");
+    host.client
+        .put(format!("{}api/jobs/{JOB_ID}/transcript", host.url))
+        .header("X-Speakerdesk-Token", &host.token)
+        .json(&json!({"revision":job["revision"],"document":job["document"]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    host.stop().await;
+
+    // Replay successful initialization after an explicit repair, without a weight download.
+    std::fs::remove_file(models.join("fixture-separation-error")).unwrap();
+    std::fs::create_dir(models.join("mossformer2-16k")).unwrap();
+    std::fs::write(
+        models.join("mossformer2-16k/model.safetensors"),
+        b"separation protocol replay",
+    )
+    .unwrap();
+    let host = Host::start(&storage, models).await;
+    let ready = settled(&host).await;
+    assert_eq!(ready["ready"], true);
+    assert_eq!(ready["core_ready"], true);
+    assert_eq!(ready["separation"]["ready"], true);
+    assert!(
+        ready["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|model| model["installed"] == true)
+    );
+    assert_eq!(ready["voice"]["enabled"], false);
+    assert_eq!(ready["operation"]["target"], "separation");
+    assert_eq!(
+        ready["setup_history"],
+        serde_json::from_str::<Value>(&history).unwrap()
+    );
+    let reopened = host.json(&format!("api/jobs/{JOB_ID}")).await;
+    assert_eq!(
+        reopened["document"]["segments"][0]["text"],
+        "Protected correction during model repair."
+    );
+    assert_eq!(
+        host.json("api/people").await["people"][0]["voice_saved"],
+        true
+    );
+    host.stop().await;
+}

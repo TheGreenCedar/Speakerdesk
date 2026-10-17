@@ -8,9 +8,10 @@ use windows::Win32::{
         AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
         AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
         AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_LOOPBACK,
-        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE, IAudioCaptureClient,
-        IAudioClient, IAudioClock, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-        MMDeviceEnumerator, WAVEFORMATEX, eCapture, eConsole, eRender,
+        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, AUDCLNT_STREAMOPTIONS_RAW, AudioCategory_Other,
+        AudioClientProperties, DEVICE_STATE_ACTIVE, IAudioCaptureClient, IAudioClient,
+        IAudioClient2, IAudioClock, IAudioEffectsManager, IAudioRenderClient, IMMDevice,
+        IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, eCapture, eConsole, eRender,
     },
     System::{
         Com::{
@@ -85,6 +86,42 @@ fn endpoint_id(device: &IMMDevice) -> Result<String, String> {
             .map_err(|error| format!("Decode capture endpoint identity: {error}"));
         CoTaskMemFree(Some(id.0.cast()));
         text
+    }
+}
+
+fn audio_effects(client: &IAudioClient) -> serde_json::Value {
+    // An unavailable query is not an empty effects list. The bundled processor
+    // remains required even when a driver advertises communications effects.
+    let observed = (|| -> Result<Vec<serde_json::Value>, String> {
+        unsafe {
+            let manager = client
+                .GetService::<IAudioEffectsManager>()
+                .map_err(|error| failure("Query stream audio effects", error))?;
+            let mut pointer = ptr::null_mut();
+            let mut count = 0;
+            let result = manager.GetAudioEffects(&mut pointer, &mut count);
+            let effects = if count > 128 || (count > 0 && pointer.is_null()) {
+                Err("Windows returned an invalid effects inventory.".into())
+            } else {
+                result
+                    .map_err(|error| failure("Read stream audio effects", error))
+                    .map(|()| {
+                        (0..count as usize)
+                            .map(|index| {
+                                let effect = pointer.add(index).read();
+                                json!({"id":format!("{:?}",effect.id),"state":effect.state.0,
+                               "can_set_state":effect.canSetState.as_bool()})
+                            })
+                            .collect()
+                    })
+            };
+            CoTaskMemFree(Some(pointer.cast()));
+            effects
+        }
+    })();
+    match observed {
+        Ok(effects) => json!({"status":"observed","effects":effects}),
+        Err(error) => json!({"status":"unavailable","error":error}),
     }
 }
 fn mix_format(client: &IAudioClient) -> Result<MixFormat, String> {
@@ -213,6 +250,7 @@ impl Drop for SilentRender {
 pub struct Endpoint {
     pub source: Source,
     pub route: Route,
+    pub processing: Option<serde_json::Value>,
     device: IMMDevice,
     client: IAudioClient,
     capture: IAudioCaptureClient,
@@ -243,9 +281,34 @@ impl Endpoint {
                     source.name()
                 ));
             }
-            let client: IAudioClient = device
+            let mut client: IAudioClient = device
                 .Activate(CLSCTX_ALL, None)
                 .map_err(|error| failure("Activate WASAPI capture client", error))?;
+            let mut raw_request = if source == Source::Microphone {
+                // Avoid stacking driver speech suppression with our included DSP.
+                // Some endpoints reject RAW; keep capture available and record that
+                // fallback instead of pretending communications effects are present.
+                let result = client.cast::<IAudioClient2>().and_then(|client| {
+                    client.SetClientProperties(&AudioClientProperties {
+                        cbSize: size_of::<AudioClientProperties>() as u32,
+                        eCategory: AudioCategory_Other,
+                        Options: AUDCLNT_STREAMOPTIONS_RAW,
+                        ..Default::default()
+                    })
+                });
+                let status = result.as_ref().map_or_else(|error| error.code().0, |()| 0);
+                if result.is_err() {
+                    client = device.Activate(CLSCTX_ALL, None).map_err(|error| {
+                        failure(
+                            "Activate default microphone stream after RAW rejection",
+                            error,
+                        )
+                    })?;
+                }
+                Some(status)
+            } else {
+                None
+            };
             let route = Route {
                 endpoint_id: endpoint_id(&device)?,
                 mix_format: mix_format(&client)?,
@@ -267,8 +330,31 @@ impl Endpoint {
                 } else {
                     0
                 };
-            client.Initialize(AUDCLNT_SHAREMODE_SHARED,flags,1_000_000,0,&format,None)
+            let mut initialized =
+                client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 1_000_000, 0, &format, None);
+            if let Err(error) = &initialized
+                && raw_request == Some(0)
+            {
+                // Some drivers accept RAW properties but reject the stream at Initialize.
+                raw_request = Some(error.code().0);
+                client = device.Activate(CLSCTX_ALL, None).map_err(|error| {
+                    failure(
+                        "Activate default microphone stream after RAW initialization rejection",
+                        error,
+                    )
+                })?;
+                initialized =
+                    client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 1_000_000, 0, &format, None);
+            }
+            initialized
                 .map_err(|error|failure(&format!("Initialize {} shared Float32 16000 Hz/{channels} channels with automatic channel/sample-rate conversion (mix {} Hz/{} channels); select a compatible Windows audio endpoint",source.name(),route.mix_format.sample_rate,route.mix_format.channels),error))?;
+            let processing = raw_request.map(|status| {
+                json!({
+                    "raw_requested":true,"raw_accepted":status>=0,
+                    "raw_request_hresult":format!("0x{:08x}",status as u32),
+                    "device_effects":audio_effects(&client),
+                })
+            });
             let capacity = client
                 .GetBufferSize()
                 .map_err(|error| failure("Read WASAPI capture capacity", error))?;
@@ -292,6 +378,7 @@ impl Endpoint {
             Ok(Self {
                 source,
                 route,
+                processing,
                 device,
                 client,
                 capture,
@@ -339,6 +426,14 @@ impl Endpoint {
                     "The {} endpoint or mix format changed; restart recording. Original audio is retained.",
                     self.source.name()
                 ));
+            }
+            if let Some(processing) = &self.processing
+                && audio_effects(&self.client) != processing["device_effects"]
+            {
+                return Err(
+                    "Microphone effects changed; restart recording. Original audio is retained."
+                        .into(),
+                );
             }
             Ok(())
         }

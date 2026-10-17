@@ -36,6 +36,10 @@ async fn native_capture_pause_resume_finalizes_aligned_sources_and_reaps_helper(
         PathBuf::from(std::env::var_os("SPEAKERDESK_TEST_CAPTURE").expect("native helper"));
     let echo =
         PathBuf::from(std::env::var_os("SPEAKERDESK_TEST_ECHO").expect("native echo library"));
+    assert!(
+        PathBuf::from(format!("{}.capability.json", helper.display())).is_file(),
+        "Use the packaged helper with its bound capability manifest; a cargo-built executable alone does not qualify Windows processing"
+    );
     for (microphone, system) in [(true, false), (false, true), (true, true)] {
         let folder = tempfile::tempdir().unwrap();
         let mut session = CaptureSupervisor::spawn(
@@ -53,10 +57,17 @@ async fn native_capture_pause_resume_finalizes_aligned_sources_and_reaps_helper(
         let child = process::ObservedProcess::new(session.pid);
         // Always finish the owned session before reporting a lifecycle failure.
         let interaction = async {
-            wait_for(&mut session, |s| {
+            let recording = wait_for(&mut session, |s| {
                 s.phase == CapturePhase::Recording && s.committed_sample >= 16_000
             })
             .await?;
+            if recording.levels.contains_key("microphone") != microphone
+                || recording.levels.contains_key("system") != system
+            {
+                return Err(
+                    "Capture meters include an unselected source or omit a selected one".into(),
+                );
+            }
             session.command(Command::Pause).map_err(|e| e.to_string())?;
             let paused = wait_for(&mut session, |s| s.phase == CapturePhase::Paused).await?;
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -95,16 +106,34 @@ async fn native_capture_pause_resume_finalizes_aligned_sources_and_reaps_helper(
             "WASAPI must not acquire Apple processing authority"
         );
         assert!(!folder.path().join("capture-processing.json").exists());
-        if microphone && system {
-            assert!(result.source_catalog.is_some());
+        assert_eq!(result.levels.contains_key("microphone"), microphone);
+        assert_eq!(result.levels.contains_key("system"), system);
+        let mut expected_sources = Vec::new();
+        if microphone {
+            expected_sources.push(serde_json::json!({"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1}));
+        }
+        if system {
+            expected_sources.push(
+                serde_json::json!({"source_id":"system","basename":"system.wav","revision":1}),
+            );
+        }
+        if let Some(catalog) = &result.source_catalog {
+            assert_eq!(catalog["sources"], serde_json::json!(expected_sources));
+        } else {
+            assert!(
+                !microphone,
+                "processed microphone capture needs a source catalog"
+            );
         }
         for (name, channels, enabled) in [
             ("audio.wav", 1, true),
             ("microphone.wav", 1, microphone),
-            ("microphone_clean.wav", 1, microphone && system),
+            ("microphone_clean.wav", 1, microphone),
             ("system.wav", 1, system),
             ("system_reference.wav", 2, system),
+            ("private_reference.wav", 2, false),
         ] {
+            assert_eq!(folder.path().join(name).exists(), enabled, "{name}");
             if !enabled {
                 continue;
             }
@@ -116,6 +145,20 @@ async fn native_capture_pause_resume_finalizes_aligned_sources_and_reaps_helper(
                 saved.samples::<i16>().map(Result::unwrap).count(),
                 result.committed_sample as usize * channels as usize,
                 "{name}"
+            );
+        }
+        if microphone && !system {
+            let samples = |name| {
+                hound::WavReader::open(folder.path().join(name))
+                    .unwrap()
+                    .into_samples::<i16>()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert_eq!(
+                samples("audio.wav"),
+                samples("microphone_clean.wav"),
+                "private system reference must not enter the retained mix"
             );
         }
         eprintln!(

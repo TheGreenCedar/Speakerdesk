@@ -150,6 +150,13 @@ try {
     $echo = Join-Path $taskRoot 'desktop/capture/echo/speakerdesk_echo.dll'
     Assert-RegularFile $echo
     Copy-Item -LiteralPath $echo -Destination (Join-Path $stage 'speakerdesk_echo.dll') -Force
+    $model = 'localvqe-v1.2-1.3M-f32.gguf'
+    $modelPin = (Get-Content 'desktop/capture/echo/localvqe-lock.json' -Raw | ConvertFrom-Json).artifacts.$model
+    $modelSource = Join-Path $taskRoot "desktop/capture/echo/$model"
+    Assert-RegularFile $modelSource
+    Copy-Item -LiteralPath $modelSource -Destination (Join-Path $stage $model) -Force
+    if ((File-Digest (Join-Path $stage $model)) -ne $modelPin.sha256) { throw 'Staged capture model differs from its pin.' }
+    # GGUF is pinned data, never an Authenticode signing input.
     if ($Sign) {
         & $signer -Action Sign -Path (Join-Path $stage 'speakerdesk_echo.dll')
         foreach ($name in $runtimeNames | Where-Object { $_.EndsWith('.dll') }) {
@@ -239,7 +246,7 @@ try {
     }
     $inputs = [ordered]@{}
     foreach ($name in @('speakerdesk-capture.exe', 'speakerdesk-capture.exe.capability.json',
-        'speakerdesk_echo.dll', 'THIRD_PARTY_NOTICES.txt') + @($runtimeNames | ForEach-Object { "runtime/$_" })) {
+        'speakerdesk_echo.dll', 'localvqe-v1.2-1.3M-f32.gguf', 'THIRD_PARTY_NOTICES.txt') + @($runtimeNames | ForEach-Object { "runtime/$_" })) {
         $inputs[$name] = File-Digest (Join-Path $stage $name)
     }
     $inputs['speakerdesk.exe'] = File-Digest $executable

@@ -40,3 +40,5 @@ desktop/capture/echo/speakerdesk_echo.dll
 
 !crates/core/tests/testdata/*.flac
 !crates/models/tests/data/two-voice.wav
+
+desktop/capture/echo/localvqe-v1.2-1.3M-f32.gguf

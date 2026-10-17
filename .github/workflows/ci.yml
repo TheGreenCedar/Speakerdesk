@@ -246,14 +246,19 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: '-'
           SPEAKERDESK_ECHO_KEY: ${{ github.event.inputs.cache != 'false' && steps.identity.outputs.echo-key || '' }}
-        run: python3 scripts/component_cache.py .cache/components/echo "$SPEAKERDESK_ECHO_KEY" desktop/capture/echo/libspeakerdesk_echo.dylib -- python3 scripts/setup_echo.py
+        run: |
+          python3 scripts/component_cache.py .cache/components/echo "$SPEAKERDESK_ECHO_KEY" desktop/capture/echo/libspeakerdesk_echo.dylib -- python3 scripts/setup_echo.py
+          python3 scripts/setup_echo.py --prepare-model
       - name: Test native raw capture DSP boundary
         run: |
           read -r -a packages <<< "$SPEAKERDESK_CI_TEST_PACKAGES"
           cargo test --locked --features speakerdesk-host/fixtures "${packages[@]}" raw_dual_capture_opens_and_preserves_partial_pause_tail -- --ignored
           cargo test --locked --features speakerdesk-host/fixtures "${packages[@]}" native_echo_bounds_queues_and_drains_partial_frames_exactly -- --ignored
+          cargo test --locked --features speakerdesk-host/fixtures "${packages[@]}" native_hybrid_all_frame_residues -- --ignored
+          cargo test --locked --features speakerdesk-host/fixtures "${packages[@]}" native_hybrid_warmed_eof -- --ignored
+          cargo test --locked --features speakerdesk-host/fixtures "${packages[@]}" native_hybrid_model_admission -- --ignored
           cc -dynamiclib -o "$RUNNER_TEMP/speakerdesk-echo-failure.dylib" crates/host/tests/testdata/echo-failure.c
-          SPEAKERDESK_ECHO_FAULT_LIBRARY="$RUNNER_TEMP/speakerdesk-echo-failure.dylib" cargo test --locked --features speakerdesk-host/fixtures "${packages[@]}" raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen -- --ignored
+          SPEAKERDESK_ECHO_FAULT_LIBRARY="$RUNNER_TEMP/speakerdesk-echo-failure.dylib" cargo test --locked --features speakerdesk-host/fixtures "${packages[@]}" windows_capture_routes_selected_sources_and_retains_failure_endpoints_on_reopen -- --ignored
       - name: Compile desktop release boundary without packaging resources
         run: |
           started=$SECONDS

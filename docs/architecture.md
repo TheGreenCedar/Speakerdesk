@@ -19,7 +19,7 @@ Storage defaults to the app data directory (`SPEAKERDESK_HOME` overrides); `SPEA
 - `speakerdesk-core`: domain types and product rules, with no I/O to models or Metal. Holds the document, edit, import, live, language, speech, timing/alignment, review, export, people and voice rules, plus the store, IPC payloads, `messages` and `security`.
 - `speakerdesk-host`: the axum process. It runs routes, the inference supervisor (`inference.rs`), capture transport/writer/processing, admission, setup and workers. The `fixtures` feature builds `speakerdesk-dev` and `inference-fixture` for tests.
 - `speakerdesk-models`: the inference child. On macOS it runs Silero, Nemotron (Sortformer), Cohere, Whisper language scoring, CTC timing and MossFormer separation with mlx-rs, and ReDimNet through Core ML. Windows native model adapters sit beside their Mac counterparts and use the pinned Windows ML/ONNX Runtime distribution with DirectML through the same dispatcher and IPC server. Linux remains a protocol stub. [Windows qualification](../experiments/windows/README.md) records platform evidence and remaining limits.
-- `speakerdesk-echo`: buffering and reference clock for the pinned native WebRTC AEC3 library (`desktop/capture/echo`, built by `scripts/setup_echo.py`).
+- `speakerdesk-echo`: buffering and reference clock for the pinned native WebRTC AEC3 + LocalVQE CPU library (`desktop/capture/echo`, built by `scripts/setup_echo.py`).
 - `xtask`: bundle verification, Python-sidecar checks and the native model comparison probe (`cargo xtask --help`).
 
 The editor frontend lives in `speakerdesk/static/` and `speakerdesk/templates/` and is embedded into the host with `rust-embed`. The JSON files under `speakerdesk/` are model and voice policy metadata. There is no Python at runtime.
@@ -165,12 +165,12 @@ Recognition checks observed solo crops without waiting for an ongoing passage to
 
 ## Capture
 
-The helper streams PCM and events to the host (`host/src/capture/`). Apple voice-processing input is used when the route qualifies. Raw dual-source capture instead runs the bundled echo library on one writer thread. Original tracks flush before DSP, and only completed clean/mixed output advances the inference endpoint. With no detected echo, the microphone signal passes through unchanged. Resume requires a fresh producer observation that matches the original route and formats. Physical device restart is a hardware test gate; replay tests cover the protocol.
+The helper streams PCM and events to the host (`host/src/capture/`). Apple voice-processing input is used when the route qualifies. Raw dual-source capture and Windows microphone-only capture run the bundled multichannel AEC3 linear stage and LocalVQE v1.2 AEC/noise model on one writer thread. Original selected tracks flush before DSP, and only completed clean/mixed output advances the inference endpoint. The required 5,173,088-byte GGUF ships beside the one native library on both platforms; it is verified before parsing, has no runtime download, and is not a user setting. The default CPU policy caps threads at four, with AGC and the optional hard gate off. Noise suppression also runs without detected echo. ABI 6 owns both native histories: the mixer removes the fixed 64-sample linear prefix, pairs its output with the original mono projection of the same clock-corrected stereo reference, frames 256-sample enhancement calls, then removes the learned 256-sample prefix (320 samples / 20 ms total coordinate delay). On Pause/Stop it supplies zero microphone and reference beyond EOF, passes continued linear drain through enhancement, publishes exactly the original sample count paired with system audio, and resets both histories. Framing adds bounded scheduling delay beyond that fixed coordinate delay. Resume requires a fresh producer observation that matches the original route and formats. Physical device restart is a hardware test gate; replay tests cover the protocol.
 
 The Windows helper owns WASAPI devices on one STA thread and stamps microphone
 and loopback samples on the QPC clock. Its raw capture capability qualifies
 progress and framing, never Apple voice processing. An owned silent render stream
-keeps loopback advancing when no application plays audio. Native echo tests cover
+keeps loopback advancing when no application plays audio. Microphone streams request RAW and record actual effects; a rejected RAW stream falls back to default processing on the same endpoint, with the bundled processor still required. When system audio is unselected, loopback is a private anonymous temporary reference for alignment and EOF repair. It is excluded from saved source tracks, late/overflow journals, playback and inference catalogs. Native echo tests cover
 framing and simulated inputs; they do not establish physical-room echo quality.
 
 Producer progress is fenced behind accepted audio on the helper's audio queue and
@@ -185,16 +185,20 @@ the interruption even when playback repair succeeds.
 
 ## Model installation
 
-The parent owns installation (`host/src/setup.rs`, pins in `host/src/model-artifacts.json`). It holds an fs4 installer lock and an exclusive setup admission lease. Downloads are pinned and hash-checked. The timing model's MLX weights are prepared locally from the pinned source model. The child only prepares alignment in its fixed private staging path. Publication is atomic and is followed by a parent-controlled child restart. Readiness comes from initializing the activated model identities. The installer never enrolls voices and never holds a SQLite transaction during I/O.
+The parent owns installation (`host/src/setup.rs`, Mac pins in `host/src/model-artifacts.json` and `host/src/separation-artifact.json`, Windows pins shared with native loading in `models/src/windows-model-artifacts.json`). It holds an fs4 installer lock and an exclusive setup admission lease. Downloads are pinned and hash-checked. On Mac, timing and separation weights are prepared locally from their pinned source models. The child prepares weights only in each model's fixed private staging path. Publication is atomic and is followed by a parent-controlled child restart. Readiness comes from initializing the activated model identities. The installer never enrolls voices and never holds a SQLite transaction during I/O.
 
-Setup progress identifies its requested target (`models` or `separation`). After a
-worker restart all available capabilities are refreshed, but missing unrelated
-models do not fail a separation request. Separation readiness requires successful
-model identity initialization in addition to prepared files. The store's
+One required catalog includes overlapping voice separation on both platforms.
+The explicit model setup operation installs missing or invalid artifacts, reuses
+verified models and refreshes every capability after a worker restart. Startup
+only initializes installed models; missing separation makes setup actionable
+before new transcription or recording can start. Separation readiness requires
+successful model identity initialization in addition to prepared files. The store's
 `model_setup_history` preference retains eight explicit attempts, updated before
 installation, after activation and at completion. The setup API reports the
 current operation separately from capability readiness and recognizes an
-unfinished persisted attempt as interrupted after restart.
+unfinished persisted attempt as interrupted after restart. Historical attempts
+with the former `separation` target remain available as diagnostics; all new
+attempts use `models`.
 
 ## Messages and security
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build the approved pinned, project-local CPU echo component. No device/model access.
+"""Build the approved pinned, project-local CPU echo component. No device access.
 
-Official source archives only: no redirects, repository hooks, external build
-scripts, gclient, browser checkout, downloads of toolchains, or global install.
+Official hash-pinned build inputs only; WebRTC fetches refuse redirects. No
+repository hooks, upstream LocalVQE build scripts, gclient, toolchain downloads
+or global install. Learned model/source pins are in localvqe-lock.json.
 """
 import base64
 import hashlib
@@ -146,9 +147,13 @@ def build():
     windows = platform.system() == 'Windows' and platform.machine().lower() in ('amd64','x86_64')
     if not windows and (platform.system(),platform.machine())!=('Darwin','arm64'):
         raise RuntimeError('The capture echo component requires Apple Silicon macOS or x64 Windows.')
-    receipt=sources();BUILD.mkdir(parents=True,exist_ok=True)
+    import setup_localvqe
+    receipt=sources();learned=setup_localvqe.prepare();BUILD.mkdir(parents=True,exist_ok=True)
+    receipt['localvqe']={'lock_sha256':hashlib.sha256(setup_localvqe.LOCK.read_bytes()).hexdigest(),
+        'source':str(learned),'model_sha256':json.loads(setup_localvqe.LOCK.read_text())['artifacts'][setup_localvqe.MODEL]['sha256'],
+        'backend':'static CPU only','threads':'min(4,hardware), at least1; environment ignored','hard_gate':False,'abi':6}
     guard=f'{sys.executable};{ROOT}/scripts/echo_compile_guard.py'
-    configure=['cmake','-S',str(ROOT/'desktop/capture/echo'),'-B',str(BUILD),f'-DWEBRTC_SOURCE={SOURCE}']
+    configure=['cmake','-S',str(ROOT/'desktop/capture/echo'),'-B',str(BUILD),f'-DWEBRTC_SOURCE={SOURCE}', f'-DLOCALVQE_SOURCE={learned}']
     if windows:
         configure+=['-A','x64']
     else:
@@ -194,4 +199,11 @@ def build():
     print(json.dumps(receipt,indent=2))
 
 
-if __name__=='__main__':build()
+if __name__=='__main__':
+    if sys.argv[1:] == ['--prepare-model']:
+        import setup_localvqe
+        setup_localvqe.model()
+    elif sys.argv[1:]:
+        raise SystemExit('Usage: setup_echo.py [--prepare-model]')
+    else:
+        build()

@@ -20,7 +20,7 @@ serde_json = "1.0.153"
 sha2 = "0.10.9"
 speakerdesk-core = { path = "../core" }
 speakerdesk-echo = { path = "../echo" }
-tempfile = { version = "3", optional = true }
+tempfile = "3"
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["full"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
@@ -37,7 +37,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 
 [features]
 default = []
-fixtures = ["dep:tempfile"]
+fixtures = []
 
 [[bin]]
 name = "speakerdesk-dev"
@@ -52,7 +52,6 @@ required-features = ["fixtures"]
 [dev-dependencies]
 libc = "0.2.190"
 rusqlite = "0.40.2"
-tempfile = "3"
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_System_Threading"] }

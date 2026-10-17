@@ -166,6 +166,10 @@ $lines+='"authenticode binding passed"'
         put(self.stage / 'speakerdesk-capture.exe.capability.json',
             {'helper_sha256': SIGN.digest(self.stage / 'speakerdesk-capture.exe')})
         put(self.stage / 'THIRD_PARTY_NOTICES.txt', b'notices')
+        model='localvqe-v1.2-1.3M-f32.gguf'
+        model_data=b'Independent pinned model data fixture'
+        put(self.stage / model, model_data)
+        put(self.root / 'desktop/capture/echo/localvqe-lock.json', {'artifacts': {model: {'bytes':len(model_data),'sha256':sha(model_data)}}})
         bootstrap = put(self.root / 'tauri/MicrosoftEdgeWebview2Setup.exe', b'microsoft-webview')
         crt = put(self.root / 'VC/14.50/x64/Microsoft.VC143.CRT/vcruntime140.dll', b'microsoft-vc')
         lines = ['!define INSTALLWEBVIEW2MODE "embedBootstrapper"', '!define WEBVIEW2INSTALLERPATH ""',
@@ -173,14 +177,14 @@ $lines+='"authenticode binding passed"'
                  f'!define MAINBINARYSRCPATH "{self.target / "speakerdesk.exe"}"',
                  'File "${MAINBINARYSRCPATH}"', 'File "/oname=$TEMP\\MicrosoftEdgeWebview2Setup.exe" "${WEBVIEW2BOOTSTRAPPERPATH}"',
                  'File "/oname=$TEMP\\MicrosoftEdgeWebView2RuntimeInstaller.exe" "${WEBVIEW2INSTALLERPATH}"']
-        for name in ('speakerdesk-capture.exe', 'speakerdesk-capture.exe.capability.json', 'speakerdesk_echo.dll', 'THIRD_PARTY_NOTICES.txt',
+        for name in ('speakerdesk-capture.exe', 'speakerdesk-capture.exe.capability.json', 'speakerdesk_echo.dll', 'localvqe-v1.2-1.3M-f32.gguf', 'THIRD_PARTY_NOTICES.txt',
                      'runtime/onnxruntime.dll', 'runtime/LICENSE.txt'):
             lines.append(f'File /a "/oname={name}" "{self.stage / name}"')
         lines.append(f'File /a "/oname={crt.name}" "{crt}"')
         self.script = put(self.target / 'nsis/x64/installer.nsi', '\n'.join(lines).encode())
         package = SIGN.package_inputs(self.script, self.stage, self.target)
         for entry in package:
-            if entry['kind'] != 'hook_or_pinned':
+            if entry['kind'] not in ('hook_or_pinned','model_data'):
                 entry.update(authenticode_status='Valid', publisher_subject='CN=Microsoft Corporation', verified=True)
             if entry['kind'] == 'microsoft_bootstrapper':
                 entry.update(signature_index=0, timestamped=True)
@@ -197,7 +201,11 @@ $lines+='"authenticode binding passed"'
         self.assertNotEqual(result['speakerdesk.exe'], SIGN.digest(self.target / 'speakerdesk.exe'))
         self.assertEqual(result['uninstall.exe'], SIGN.digest(self.receipts / 'payloads/uninstall.exe'))
         self.assertEqual(result['vcruntime140.dll'], sha(b'microsoft-vc'))
-        mutations = [(self.receipts / 'app.json', {}),
+        model=self.stage/'localvqe-v1.2-1.3M-f32.gguf'
+        self.assertEqual(result[model.name],SIGN.digest(model))
+        with self.assertRaisesRegex(ValueError,'outside exact build allowlist'):
+            SIGN.classify(model,self.stage,self.target,self.tmp,self.version)
+        mutations = [(model,b'corrupt model data'), (self.receipts / 'app.json', {}),
             (self.receipts / 'payloads/uninstall.exe', b'changed'),
             (self.stage / 'speakerdesk-capture.exe', b'changed'),
             (self.stage / 'speakerdesk-capture.exe.capability.json', {'helper_sha256': '0' * 64}),

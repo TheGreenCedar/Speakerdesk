@@ -72,12 +72,14 @@ pub(crate) fn artifacts() -> Vec<ModelArtifact> {
     #[cfg(windows)]
     {
         windows_artifacts()
-            .into_iter()
-            .filter(|model| model.id != "mossformer2-16k")
-            .collect()
     }
     #[cfg(not(windows))]
-    serde_json::from_str(include_str!("model-artifacts.json")).expect("bundled model pins")
+    {
+        let mut models: Vec<ModelArtifact> =
+            serde_json::from_str(include_str!("model-artifacts.json")).expect("bundled model pins");
+        models.push(separation_artifact());
+        models
+    }
 }
 pub(crate) fn separation_artifact() -> ModelArtifact {
     #[cfg(windows)]
@@ -133,14 +135,7 @@ impl SetupService {
     }
     pub fn begin(&self, models: &[ModelArtifact], download: bool) {
         *self.progress.lock().expect("setup progress") = Progress {
-            target: download.then(|| {
-                if models.len() == 1 && models[0].id == "mossformer2-16k" {
-                    "separation"
-                } else {
-                    "models"
-                }
-                .into()
-            }),
+            target: download.then(|| "models".into()),
             started_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -464,7 +459,6 @@ impl Installer {
             &root,
             &artifacts()
                 .into_iter()
-                .chain([separation_artifact()])
                 .map(|model| model.id)
                 .collect::<Vec<_>>(),
         )?;
@@ -1420,7 +1414,7 @@ mod tests {
     #[test]
     fn catalog_is_pinned_and_paths_are_relative() {
         let catalog = artifacts();
-        assert_eq!(catalog.len(), 6);
+        assert_eq!(catalog.len(), 7);
         for model in catalog {
             assert!(relative(&model.id).is_ok());
             assert_eq!(model.revision.len(), 40);

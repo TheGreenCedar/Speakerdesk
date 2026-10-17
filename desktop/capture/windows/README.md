@@ -33,8 +33,19 @@ and stereo system audio using Windows'
 [automatic channel and sample-rate conversion](https://learn.microsoft.com/en-us/windows/win32/coreaudio/audclnt-streamflags-xxx-constants).
 It never substitutes another device or format after a rejection. Errors include
 the HRESULT, requested format and observed endpoint mix rate/channels.
-No microphone AEC, Apple processing or Windows effects-bypass qualification is
-claimed. The host retains original tracks and owns its bundled echo processing.
+Microphone capture requests RAW mode to avoid stacking driver speech processing
+with the included WebRTC AEC3 and noise suppressor. If the endpoint rejects RAW
+properties or initialization, it opens a fresh default stream on the same device
+and format; the host processor still runs. The runtime observation records the
+RAW result and the actual stream effects (or the query failure), without assuming
+that a communications category supplies AEC. Start and Resume recheck the route
+and effects. Hardware effects availability is device-specific.
+
+Windows microphone-only recording also opens loopback as a private echo reference.
+The host keeps it in an anonymous temporary file for alignment and late-packet
+repair. With system audio unselected, it never enters the saved tracks, transcript,
+mix, meters or source catalog. Selected original microphone/system tracks remain
+retained; only completed cleaned microphone output advances inference.
 
 Stdout events retain the existing types and fields:
 
@@ -42,6 +53,7 @@ Stdout events retain the existing types and fields:
   2 system) and base64 little-endian Float32 `pcm`. Packets contain at most 4,000
   frames. Interleaved stereo channel order is preserved.
 - `capture_runtime`: actual endpoint IDs, complete original mix format bytes,
+  microphone RAW/effects observations,
   requested capture formats, producer QPC/device observations and explicit
   `packet_and_clock` or `clock_and_empty_buffer` observation kinds.
 - `recording`, `paused`, `stopped`: recording-clock `time`; initial/resumed

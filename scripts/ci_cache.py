@@ -34,14 +34,14 @@ def keys(root, tracked, tools):
                           'desktop/src-tauri/tauri.conf.json', 'desktop/src-tauri/Info.plist',
                           'desktop/src-tauri/Entitlements.plist', 'desktop/capture/echo/',
                           'scripts/build_macos.sh', 'scripts/fetch_mlx_runtime.sh',
-                          'scripts/native_licenses.py', 'scripts/setup_echo.py',
+                          'scripts/native_licenses.py', 'scripts/setup_echo.py', 'scripts/setup_localvqe.py',
                           'scripts/echo_compile_guard.py', 'scripts/ci_cache.py')
     # sccache validates each rustc invocation, source, dependency and environment.
     # Version/lock/manifest changes must not discard unchanged dependency objects.
     compiler_tools = {name: value for name, value in tools.items() if name not in {'python', 'node', 'profile'}}
     compiler_prefix = f"speakerdesk-compiler-v3-{fingerprint(root, rust_contract, compiler_tools)}-"
     dependency_contract = files('vendor/mlx-sys/', 'scripts/ci_cache.py', 'scripts/fetch_mlx_runtime.sh',
-                                'desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/echo_compile_guard.py')
+                                'desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/setup_localvqe.py', 'scripts/echo_compile_guard.py')
     dependency_tools = {name: value for name, value in tools.items() if name not in {'python', 'node'}}
     return {
         'dependency-key': f"speakerdesk-dependencies-v1-{fingerprint(root, dependency_contract, dependency_tools)}",
@@ -53,7 +53,7 @@ def keys(root, tracked, tools):
         'compiler-key': compiler_prefix + fingerprint(root, rust_inputs, {'profile': tools.get('profile', '')}),
         # Whole components use exact inputs only. No prefix restore for executable outputs.
         'capture-key': f"{prefix}-capture-{fingerprint(root, files('desktop/capture/', 'desktop/src-tauri/Entitlements.plist', 'scripts/build_macos.sh', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
-        'echo-key': f"{prefix}-echo-{fingerprint(root, files('desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/echo_compile_guard.py', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
+        'echo-key': f"{prefix}-echo-{fingerprint(root, files('desktop/capture/echo/', 'scripts/setup_echo.py', 'scripts/setup_localvqe.py', 'scripts/echo_compile_guard.py', 'scripts/ci_cache.py', 'scripts/component_cache.py'), {})}",
     }
 
 

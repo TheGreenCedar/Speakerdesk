@@ -28,6 +28,7 @@ const EXCLUDE: usize = 64000;
 const GAP: usize = 3200;
 const RMS: f64 = 0.08;
 const FIR: [(usize, f32); 4] = [(1120, 0.55), (1200, -0.15), (1376, 0.08), (1696, 0.04)];
+const RIGHT_FIR: [(usize, f32); 4] = [(944, 0.4), (1088, 0.12), (1472, -0.06), (1888, 0.03)];
 const TILES: [usize; 6] = [159, 4000, 513, 16000, 17, 511];
 
 fn sha(bytes: &[u8]) -> String {
@@ -101,21 +102,25 @@ fn native_echo_quality_on_frozen_simulated_room() {
     fs::create_dir(&output).expect("SPEAKERDESK_ECHO_QUALITY_OUTPUT must be a fresh directory");
     write_new(&output.join("ordinary-cases.json"), &manifest_bytes);
     let recipe = json!({
-        "schema_version":1,"kind":"fixed_public_voice_simulated_room_diagnostic_v1",
+        "schema_version":3,"kind":"fixed_public_voice_simulated_room_diagnostic_v2",
+        "native_contract":{"abi":6,"latency_samples":320,"noise_suppression":"LocalVQE v1.2 default CPU, hard gate off","gain_control":false},
         "source_manifest_sha256":MANIFEST,"far":{"id":FAR.0,"wav_sha256":FAR.1,"samples":FAR.2},
         "near":{"id":NEAR.0,"wav_sha256":NEAR.1,"samples":NEAR.2},
         "sample_rate":RATE,"samples":SAMPLES,"source_rms":RMS,"repeat_zero_gap_samples":GAP,
-        "reference":"left=far,right=0","system":"0.5*far",
-        "echo_fir_delay_samples_and_gain":FIR,"tile_samples":TILES,
-        "cases":["far_only","local_only","double_talk"],
-        "double_talk_near_start_sample":EXCLUDE,"measurement_start_sample":EXCLUDE,
-        "near_phase":"source period follows absolute sample index, including muted double-talk warmup",
+        "reference":"ordinary:left=far,right=0; stereo_antiphase:left=far,right=-far",
+        "system":"exact mono projection, including zero for antiphase",
+        "echo_fir_delay_samples_and_gain":FIR,"stereo_right_fir":RIGHT_FIR,"tile_samples":TILES,
+        "cases":["far_only","local_only","double_talk","stereo_antiphase_far","stereo_antiphase_double_talk"],
+        "double_talk_near_start_sample":0,"measurement_start_sample":EXCLUDE,
+        "near_phase":"source period follows absolute sample index, near active from sample zero",
         "measurement_end_sample":SAMPLES,"alignment":"original sample coordinates; no fitted lag or gain",
+        "input_bounds":"EchoMixer clamps microphone/reference to[-1,1]; raw inputs and targets retained, count clamps",
         "metrics":"error_reduction_db=10*log10(sum((microphone-near)^2)/sum((clean-near)^2)); near_error_nrms=sqrt(sum((clean-near)^2)/sum(near^2)); energy floor 1e-30 only for log10",
         "gates":{"all":"exact lengths, finite output, bit-exact system",
-            "local_only":"bit-exact clean near at every sample",
+            "local_only":"near projection gain 0.8..1.2, correlation >= 0.9, target NRMS <= 0.25; bit-exactness observed only",
             "far_only_min_echo_reduction_db":6.0,
-            "double_talk":"output-target error energy < input-target error energy; target NRMS < 1"},
+            "double_talk":"output-target error energy < input-target error energy; target NRMS < 1",
+            "double_talk_startup_first4s":"near active from0; gain>=0.8; output-target error <= input-target error"},
         "limit":"Simulated FIR diagnostic only. No physical speaker, microphone, headset, room or acoustic-quality qualification."
     });
     let recipe_bytes = serde_json::to_vec_pretty(&recipe).unwrap();
@@ -123,7 +128,15 @@ fn native_echo_quality_on_frozen_simulated_room() {
     let far_source = source(&fixture, &output, &manifest, FAR);
     let near_source = source(&fixture, &output, &manifest, NEAR);
     let mut results = Vec::new();
-    for name in ["far_only", "local_only", "double_talk"] {
+    for name in [
+        "far_only",
+        "local_only",
+        "double_talk",
+        "stereo_antiphase_far",
+        "stereo_antiphase_double_talk",
+    ] {
+        let stereo = name.starts_with("stereo_");
+        let far_only = name == "far_only" || name == "stereo_antiphase_far";
         let directory = output.join(name);
         fs::create_dir(&directory).unwrap();
         let far = if name == "local_only" {
@@ -134,30 +147,33 @@ fn native_echo_quality_on_frozen_simulated_room() {
         let near: Vec<f32> = near_source
             .iter()
             .enumerate()
-            .map(|(index, &v)| {
-                if name == "far_only" || (name == "double_talk" && index < EXCLUDE) {
-                    0.
-                } else {
-                    v
-                }
-            })
+            .map(|(_, &v)| if far_only { 0. } else { v })
             .collect();
         let echo: Vec<f32> = (0..SAMPLES)
             .map(|index| {
                 FIR.iter().fold(0., |sum, &(delay, gain)| {
                     sum + index.checked_sub(delay).map_or(0., |i| far[i] * gain)
-                })
+                }) - if stereo {
+                    RIGHT_FIR.iter().fold(0., |sum, &(delay, gain)| {
+                        sum + index.checked_sub(delay).map_or(0., |i| far[i] * gain)
+                    })
+                } else {
+                    0.
+                }
             })
             .collect();
         let microphone: Vec<f32> = near.iter().zip(&echo).map(|(a, b)| a + b).collect();
-        let system: Vec<f32> = far.iter().map(|v| 0.5 * v).collect();
-        let reference: Vec<[f32; 2]> = far.iter().map(|&v| [v, 0.]).collect();
+        let system: Vec<f32> = far
+            .iter()
+            .map(|v| if stereo { 0. } else { 0.5 * v })
+            .collect();
+        let reference: Vec<[f32; 2]> = far
+            .iter()
+            .map(|&v| [v, if stereo { -v } else { 0. }])
+            .collect();
         assert!(
-            microphone
-                .iter()
-                .chain(&far)
-                .all(|v| v.is_finite() && v.abs() < 1.),
-            "recipe must not invoke clamping"
+            microphone.iter().chain(&far).all(|v| v.is_finite()),
+            "recipe inputs must remain finite"
         );
         let inputs = json!({
             "near_target":raw(&directory,"near.f32",near.iter().copied()),
@@ -202,6 +218,8 @@ fn native_echo_quality_on_frozen_simulated_room() {
         let mut input_error = 0.;
         let mut output_error = 0.;
         let mut target_energy = 0.;
+        let mut clean_energy = 0.;
+        let mut near_cross = 0.;
         let mut maximum = 0_f64;
         if geometry && finite {
             for index in EXCLUDE..SAMPLES {
@@ -210,28 +228,65 @@ fn native_echo_quality_on_frozen_simulated_room() {
                 let error = f64::from(clean[index]) - target;
                 output_error += error * error;
                 target_energy += target * target;
+                clean_energy += f64::from(clean[index]).powi(2);
+                near_cross += f64::from(clean[index]) * target;
                 maximum = maximum.max(error.abs());
             }
         }
         let reduction_db = 10. * (input_error.max(1e-30) / output_error.max(1e-30)).log10();
         let nrms = (target_energy > 0.).then(|| (output_error / target_energy).sqrt());
+        let gain = (target_energy > 0.).then(|| near_cross / target_energy);
+        let correlation = (target_energy * clean_energy > 0.)
+            .then(|| near_cross / (target_energy * clean_energy).sqrt());
+        let startup = if name.ends_with("double_talk") && geometry && finite {
+            let mut original = 0.;
+            let mut processed = 0.;
+            let mut energy = 0.;
+            let mut cross = 0.;
+            for index in 0..EXCLUDE {
+                let target = f64::from(near[index]);
+                original += (f64::from(microphone[index]) - target).powi(2);
+                processed += (f64::from(clean[index]) - target).powi(2);
+                energy += target * target;
+                cross += f64::from(clean[index]) * target;
+            }
+            Some((
+                cross / energy,
+                10. * (original.max(1e-30) / processed.max(1e-30)).log10(),
+                processed <= original,
+            ))
+        } else {
+            None
+        };
         let quality = match name {
-            "far_only" => reduction_db >= 6.,
-            "local_only" => near_exact,
-            _ => output_error < input_error && nrms.is_some_and(|value| value < 1.),
+            "far_only" | "stereo_antiphase_far" => reduction_db >= 6.,
+            "local_only" => {
+                gain.is_some_and(|v| (0.8..=1.2).contains(&v))
+                    && correlation.is_some_and(|v| v >= 0.9)
+                    && nrms.is_some_and(|v| v <= 0.25)
+            }
+            _ => {
+                output_error < input_error
+                    && nrms.is_some_and(|value| value < 1.)
+                    && startup.is_some_and(|(gain, _, nonworsening)| gain >= 0.8 && nonworsening)
+            }
         };
         results.push(
-            json!({"case":name,"inputs":inputs,"outputs":artifacts,"geometry_exact":geometry,
+            json!({"case":name,"inputs":inputs,"outputs":artifacts,"geometry_exact":geometry,"input_clamped_samples":microphone.iter().filter(|v| v.abs()>1.).count(),
+            "input_peak":microphone.iter().copied().map(f32::abs).fold(0_f32,f32::max),
             "finite":finite,"system_bitexact":system_exact,"near_bitexact":near_exact,
             "measurement_samples":SAMPLES-EXCLUDE,"input_error_energy":input_error,
             "output_error_energy":output_error,"target_energy":target_energy,
             "error_reduction_db":reduction_db,"near_error_nrms":nrms,"near_error_max_abs":maximum,
+            "near_projection_gain":gain,"near_correlation":correlation,
+            "startup_first4s":startup.map(|(gain,db,nonworsening)| json!({"near_projection_gain":gain,"error_reduction_db":db,"target_error_nonworsening":nonworsening})),
             "passed":geometry && finite && system_exact && quality}),
         );
     }
     let report = json!({"recipe":recipe,"recipe_sha256":sha(&recipe_bytes),
         "diagnostic_source_sha256":sha(include_bytes!("echo_quality.rs")),
         "platform":std::env::consts::OS,"architecture":std::env::consts::ARCH,
+        "model_sha256":sha(&fs::read(library.with_file_name(speakerdesk_echo::MODEL_FILE)).unwrap()),
         "native_library_path":library.canonicalize().unwrap(),"native_library_sha256":sha(&fs::read(&library).unwrap()),
         "cases":results});
     let report_bytes = serde_json::to_vec_pretty(&report).unwrap();

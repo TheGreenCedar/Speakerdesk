@@ -44,6 +44,10 @@ impl Running {
                 "route":{"node":"inputNode","bus":0,"tap_scope":"output"},"state_phase":"after_start","channel_mapping":"mono_direct","callback_format":format,"io_formats":{"input_output":format,"output_input":format},
                 "readbacks":{"input_enabled":true,"output_enabled":true,"engine_running":true,"bypassed":false,"manual_rendering":false,"input_muted":false,"agc_enabled":false}}).to_string()).unwrap();
         }
+        if echo.is_some() {
+            let digest = format!("{:x}", Sha256::digest(fs::read(&helper).unwrap()));
+            fs::write(root.join("capture-helper.capability.json"), json!({"helper_sha256":digest,"export_contract":"raw_dual_mono_stereo16k_v1","capability_version":"windows_wasapi_shared_v1","progress_contract":"audio_queue_fence_v1"}).to_string()).unwrap();
+        }
         let mut command = Command::new(env!("CARGO_BIN_EXE_inference-fixture"));
         command
             .arg("--native-host")
@@ -1008,26 +1012,47 @@ async fn live_saved_audio_candidates_preserve_edits_language_eof_and_reopen() {
 #[tokio::test]
 #[cfg(target_os = "macos")]
 #[ignore = "Requires pinned echo component and test ABI fixture in SPEAKERDESK_ECHO_FAULT_LIBRARY"]
-async fn raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen() {
-    let native = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../desktop/capture/echo/libspeakerdesk_echo.dylib");
+async fn windows_capture_routes_selected_sources_and_retains_failure_endpoints_on_reopen() {
+    let native = std::env::var_os("SPEAKERDESK_TEST_ECHO")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../desktop/capture/echo/libspeakerdesk_echo.dylib")
+        });
     let fault = std::path::PathBuf::from(
         std::env::var_os("SPEAKERDESK_ECHO_FAULT_LIBRARY").expect("test-only ABI fixture"),
     );
-    for case in ["real", "process", "reset", "abi", "missing"] {
+    for (dual, case) in [true, false]
+        .into_iter()
+        .flat_map(|dual| ["real", "process", "reset", "abi", "missing"].map(|case| (dual, case)))
+    {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let missing = root.join("missing-echo.dylib");
+        let local_fault = root.join("echo-fault.dylib");
+        if !matches!(case, "real" | "missing") {
+            fs::copy(&fault, &local_fault).unwrap();
+            // Structural test fixture: native fixture ignores model bytes; no real DSP claim.
+            fs::File::create(root.join(speakerdesk_echo::MODEL_FILE))
+                .unwrap()
+                .set_len(speakerdesk_echo::MODEL_BYTES)
+                .unwrap();
+        }
         let library = match case {
             "real" => &native,
             "missing" => &missing,
-            _ => &fault,
+            _ => &local_fault,
         };
-        let host = Running::open_capture(root, true, Some((library, case))).await;
+        let host = Running::open_capture(root, dual, Some((library, case))).await;
+        let selected = if dual {
+            json!(["microphone", "system"])
+        } else {
+            json!(["microphone"])
+        };
         let response = host
             .post(
                 "api/meetings",
-                json!({"name":"Raw DSP replay","language":"en","sources":["microphone","system"]}),
+                json!({"name":"Raw DSP replay","language":"en","sources":selected}),
             )
             .await;
         assert_eq!(
@@ -1078,9 +1103,20 @@ async fn raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen
                         202
                     );
                     host.wait(&path, |v| v["status"] == "recording").await;
+                    if case == "real" && !dual {
+                        fs::write(
+                            root.join("exit-live-asr-once"),
+                            b"test mic-only source recovery",
+                        )
+                        .unwrap();
+                    }
                     trigger(root, 2);
                     host.wait(&path, |v| v["duration"].as_f64().unwrap_or(0.) >= 12.9)
                         .await;
+                    if case == "real" && !dual {
+                        host.wait(&path, |v| v["live_recovery"]["status"] == "recovered")
+                            .await;
+                    }
                     host.stop(id).await
                 }
             }
@@ -1124,6 +1160,13 @@ async fn raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen
                 "microphone_clean",
                 "audio",
             ] {
+                if !dual && matches!(track, "system" | "system_reference") {
+                    assert!(
+                        !folder.join(format!("{track}.wav")).exists(),
+                        "private reference must not be retained"
+                    );
+                    continue;
+                }
                 let wav = hound::WavReader::open(folder.join(format!("{track}.wav"))).unwrap();
                 let frames = if matches!(track, "audio" | "microphone_clean") {
                     clean
@@ -1134,7 +1177,10 @@ async fn raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen
             }
             // Original tracks remain exact even if native processing or reset consumes
             // input and then fails. Neither is relabelled as cleaned playback.
-            for track in ["microphone", "system"] {
+            for track in ["microphone", "system"]
+                .into_iter()
+                .filter(|track| dual || *track == "microphone")
+            {
                 for (i, sample) in hound::WavReader::open(folder.join(format!("{track}.wav")))
                     .unwrap()
                     .into_samples::<i16>()
@@ -1154,11 +1200,22 @@ async fn raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen
                     "Pause/Resume and final partial frame retain each sample once"
                 );
                 assert_eq!(clean, raw);
-                assert_eq!(
-                    fs::read(folder.join("microphone.wav")).unwrap(),
-                    fs::read(folder.join("microphone_clean.wav")).unwrap(),
-                    "tonal no-echo fallback preserves microphone"
+                let clean: Vec<_> = hound::WavReader::open(folder.join("microphone_clean.wav"))
+                    .unwrap()
+                    .into_samples::<i16>()
+                    .map(Result::unwrap)
+                    .collect();
+                assert!(
+                    clean.iter().any(|sample| *sample != 0),
+                    "processing retains non-silent microphone output"
                 );
+                if !dual {
+                    assert_eq!(
+                        fs::read(folder.join("audio.wav")).unwrap(),
+                        fs::read(folder.join("microphone_clean.wav")).unwrap(),
+                        "private reference cannot enter playback"
+                    );
+                }
                 let owners: std::collections::BTreeSet<_> = finished["document"]["segments"]
                     .as_array()
                     .unwrap()
@@ -1167,7 +1224,11 @@ async fn raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen
                     .collect();
                 assert_eq!(
                     owners,
-                    std::collections::BTreeSet::from(["microphone_clean", "system"])
+                    if dual {
+                        std::collections::BTreeSet::from(["microphone_clean", "system"])
+                    } else {
+                        std::collections::BTreeSet::from(["microphone_clean"])
+                    }
                 );
             } else {
                 assert!(raw > clean && clean > 0, "{case}: {coverage}");
@@ -1198,7 +1259,7 @@ async fn raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen
             );
         }
         host.close(root).await;
-        let reopened = Running::open_capture(root, true, Some((library, case))).await;
+        let reopened = Running::open_capture(root, dual, Some((library, case))).await;
         let saved = reopened.get(&path).await;
         assert_eq!(saved["status"], finished["status"], "{case}");
         assert_eq!(saved["duration"], finished["duration"]);
@@ -1211,6 +1272,39 @@ async fn raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen
             finished["capture_source_catalog"]
         );
         assert_eq!(saved["document"], finished["document"]);
+        if case == "real" && !dual {
+            let row = &saved["document"]["segments"][0];
+            fs::write(
+                root.join("replay-transcript"),
+                "Retried clean microphone source",
+            )
+            .unwrap();
+            assert_eq!(
+                reopened
+                    .post(
+                        &format!("{path}/retry"),
+                        json!({"revision":saved["revision"],"segment_id":row["id"],"language":"en"})
+                    )
+                    .await
+                    .status(),
+                202
+            );
+            let retried = reopened
+                .wait(&path, |job| {
+                    job["inference_owned"] == false
+                        && job["document"]["segments"][0]["retry_candidate"]["text"]
+                            == "Retried clean microphone source"
+                })
+                .await;
+            assert_eq!(
+                retried["document"]["segments"][0]["capture_source"],
+                row["capture_source"]
+            );
+            assert_eq!(
+                retried["document"]["segments"][0]["text"], row["text"],
+                "retry proposes text without replacing the saved words"
+            );
+        }
         reopened.close(root).await;
     }
 }
