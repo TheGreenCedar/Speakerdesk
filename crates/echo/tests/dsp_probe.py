@@ -1,4 +1,4 @@
-"""Bounded native ABI-5 DSP probe, without devices, models or fitted output gain.
+"""Bounded native ABI-6 DSP probe, without devices or fitted output gain.
 
 Use the two immutable public WAVs retained by host/tests/echo_quality.rs in
 --voices, the actual --library, and a fresh --output directory. This is a
@@ -14,7 +14,8 @@ import sys
 import wave
 from pathlib import Path
 
-RATE, FRAME, DELAY = 16000, 160, 160
+RATE, FRAME, DELAY = 16000, 160, 320
+LINEAR_DELAY, HOP, MODEL = 64, 256, "localvqe-v1.2-1.3M-f32.gguf"
 SAMPLES, WARMUP = 320073, 64000
 VOICES = {
     'far': ('c7a783b45d4fac62025b17c4f43f8b72bfc32b09eb3ad4c3d57ceda4bfc76c49', 90880),
@@ -40,21 +41,33 @@ def voice(root, name):
     return [values[i % (samples + 3200)] * gain if i % (samples + 3200) < samples else 0. for i in range(SAMPLES)]
 
 
-def process(library, microphone, reference):
-    state = library.speakerdesk_echo_create()
+def process(library, microphone, reference, model):
+    state = library.speakerdesk_echo_create(str(model.resolve()).encode('utf-8'))
     assert state
-    output = []
+    linear, mono = [], []
+    output = [0.] * LINEAR_DELAY
     try:
-        for start in range(0, len(microphone) + DELAY + FRAME, FRAME):
-            mic = microphone[start:start+FRAME]
+        model_end = ((len(microphone)+HOP+HOP-1)//HOP)*HOP
+        native_end = ((model_end+LINEAR_DELAY+FRAME-1)//FRAME)*FRAME
+        for start in range(0, native_end, FRAME):
+            mic = [max(-1., min(1., value)) for value in microphone[start:start+FRAME]]
             far = reference[start:start+FRAME]
-            # Match EchoMixer's native-input contract; retained raw PCM is unchanged.
-            mic = [max(-1., min(1., value)) for value in mic]
             a = (ctypes.c_float * FRAME)(*(mic + [0.] * (FRAME-len(mic))))
             b = (ctypes.c_float * (FRAME*2))(*(value for v in far + [0.] * (FRAME-len(far)) for value in (v, 0.)))
             cleaned = (ctypes.c_float * FRAME)()
-            # No external delay: the internal estimator must work from startup.
             assert library.speakerdesk_echo_process(state, b, a, cleaned, FRAME, -1) == 0
+            linear.extend(cleaned)
+            mono.extend(.5*v for v in far + [0.] * (FRAME-len(far)))
+        # Keep continued native drain: never crop linear output at original EOF.
+        linear = linear[LINEAR_DELAY:]
+        for start in range(0, len(linear), HOP):
+            count = min(HOP, len(linear)-start)
+            mic = [max(-1., min(1., value)) for value in linear[start:start+count]]
+            far = mono[start:start+count]
+            a = (ctypes.c_float * HOP)(*(mic + [0.] * (HOP-count)))
+            b = (ctypes.c_float * HOP)(*(far + [0.] * (HOP-count)))
+            cleaned = (ctypes.c_float * HOP)()
+            assert library.speakerdesk_echo_enhance(state, b, a, cleaned, HOP) == 0
             output.extend(cleaned)
     finally:
         library.speakerdesk_echo_destroy(state)
@@ -83,11 +96,12 @@ def main():
     parser.add_argument('--library', type=Path, required=True)
     parser.add_argument('--voices', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--calibration', type=Path, required=True, help='Independent spoken 16k Float32 control, zero reference; 6s including 0.5s silence each end')
     args = parser.parse_args()
     args.output.mkdir()
     report = {
-        'passed': False, 'abi': 5, 'sample_rate': RATE, 'samples': SAMPLES,
-        'latency_samples': DELAY, 'noise_policy': 'upstream NsConfig default k12dB',
+        'passed': False, 'abi': 6, 'sample_rate': RATE, 'samples': SAMPLES,
+        'latency_samples': DELAY, 'noise_policy': 'LocalVQE v1.2 default CPU; hard gate off',
         'gain_control': False, 'external_delay_ms': -1,
         'native_input': 'Same [-1,1] clamp as EchoMixer; raw input artifacts retain unclamped values',
         'source_sha256': sha(Path(__file__).read_bytes()), 'library_sha256': sha(args.library.read_bytes()),
@@ -96,14 +110,35 @@ def main():
         'gates': {'far_only_db': 6, 'noise_only_db': 3, 'near_only_correlation': .9,
                   'near_projection_gain': [.5, 1.2], 'noise_voice_and_double_talk': 'target error improves; projection gain >= .5',
                   'double_talk_startup': 'first4s target error non-worsening and near projection gain >= .8',
-                  'geometry': 'finite, exact length; measured delay 160; no fitted lag/gain applied to quality metrics'},
+                  'geometry': 'finite, exact length; measured delay 320; no fitted lag/gain applied to quality metrics'},
     }
     try:
         library = ctypes.CDLL(str(args.library.resolve()))
+        library.speakerdesk_echo_create.argtypes = [ctypes.c_char_p]
+        library.speakerdesk_echo_enhance.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t]
         library.speakerdesk_echo_create.restype = ctypes.c_void_p
         library.speakerdesk_echo_destroy.argtypes = [ctypes.c_void_p]
         library.speakerdesk_echo_process.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_int]
-        assert library.speakerdesk_echo_abi() == 5
+        assert library.speakerdesk_echo_abi() == 6
+        control = array.array('f')
+        control.frombytes(args.calibration.read_bytes())
+        if sys.byteorder != 'little': control.byteswap()
+        assert len(control) == RATE*6 and all(math.isfinite(v) and abs(v)<=1 for v in control)
+        calibrated = process(library, list(control), [0.]*len(control), args.library.with_name(MODEL))
+        assert len(calibrated) >= len(control)+DELAY
+        windows = [(0,len(control))] + [(RATE//2+i*RATE,RATE//2+(i+1)*RATE) for i in range(5)]
+        calibration = {'source_sha256':sha(args.calibration.read_bytes()),'fixed_delay_samples':DELAY,'windows':[]}
+        for start,end in windows:
+            if sum(v*v for v in control[start:end])/(end-start)<.01**2: continue
+            def score(delay):
+                x,y = control[start:end],calibrated[start+delay:end+delay]
+                return sum(a*b for a,b in zip(x,y))/max(1e-30,math.sqrt(sum(a*a for a in x)*sum(b*b for b in y)))
+            peak=max(range(DELAY-32,DELAY+33),key=score)
+            calibration['windows'].append({'input_window':[start,end],'correlation_at_fixed_delay':score(DELAY),'diagnostic_peak':peak})
+        calibration['passed']=len(calibration['windows'])>=4 and all(v['correlation_at_fixed_delay']>=.8 and abs(v['diagnostic_peak']-DELAY)<=1 for v in calibration['windows'])
+        report['independent_spoken_calibration']=calibration
+        report['model_sha256']=sha(args.library.with_name(MODEL).read_bytes())
+        assert calibration['passed'], 'Independent fixed-delay qualification failed; do not score acoustic cases'
         far, near = voice(args.voices, 'far'), voice(args.voices, 'near')
         noise, seed = [], 7
         for _ in range(SAMPLES):
@@ -127,7 +162,7 @@ def main():
                       'microphone': save('microphone', microphone), 'reference': save('reference', reference),
                       'target': save('target', target)}
             report['cases'].append(result)
-            raw_output = process(library, microphone, reference)
+            raw_output = process(library, microphone, reference, args.library.with_name(MODEL))
             clean = raw_output[DELAY:DELAY+SAMPLES]
             geometry = len(clean) == SAMPLES and all(math.isfinite(v) for v in clean)
             result.update(geometry_finite=geometry, clean=save('clean', clean))

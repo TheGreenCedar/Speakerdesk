@@ -1078,7 +1078,7 @@ fn windows_helper(folder: &Path, script: &str) -> PathBuf {
 
 #[test]
 #[cfg(target_os = "macos")]
-#[ignore = "Requires SPEAKERDESK_TEST_ECHO_LIBRARY pointing to the actual ABI4 native component"]
+#[ignore = "Requires SPEAKERDESK_TEST_ECHO_LIBRARY pointing to the actual ABI6 native component"]
 fn windows_microphone_reference_stays_private_through_pause_late_repair_failure_and_drop() {
     let library = native_echo_library();
     for case in [
@@ -1098,6 +1098,11 @@ fn windows_microphone_reference_stays_private_through_pause_late_repair_failure_
         let owned_library = folder.path().join("echo.dylib");
         cfg.echo_library = Some(if case == "rebuild-failure" {
             fs::copy(&library, &owned_library).unwrap();
+            fs::copy(
+                library.with_file_name(speakerdesk_echo::MODEL_FILE),
+                owned_library.with_file_name(speakerdesk_echo::MODEL_FILE),
+            )
+            .unwrap();
             owned_library.clone()
         } else {
             library.clone()
@@ -1228,7 +1233,7 @@ fn windows_microphone_reference_stays_private_through_pause_late_repair_failure_
 
 #[tokio::test]
 #[cfg(target_os = "macos")]
-#[ignore = "Requires SPEAKERDESK_TEST_ECHO_LIBRARY pointing to the actual ABI4 native component"]
+#[ignore = "Requires SPEAKERDESK_TEST_ECHO_LIBRARY pointing to the actual ABI6 native component"]
 async fn windows_microphone_only_requests_a_private_system_reference_from_the_helper() {
     let folder = TempDir::new().unwrap();
     let frames = [

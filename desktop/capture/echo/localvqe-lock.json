@@ -1,0 +1,25 @@
+{
+  "source_revision": "f53063c9eb2a85f96479867d1dd911dc3bf6319b",
+  "ggml_revision": "c044a8eeae2591faa0950c8b5e514cbc4bbfc4ca",
+  "weights_revision": "29ca38495cba9d6393a92a4dd890f28dd81f758d",
+  "artifacts": {
+    "LocalVQE.tar.gz": {
+      "url": "https://codeload.github.com/localai-org/LocalVQE/tar.gz/f53063c9eb2a85f96479867d1dd911dc3bf6319b",
+      "file": "LocalVQE.tar.gz",
+      "bytes": 15328736,
+      "sha256": "2b2cc18ddfcf1d5b49f503ab0f066ea045a6624f212be96535a936476cd62a8b"
+    },
+    "ggml.tar.gz": {
+      "url": "https://codeload.github.com/ggml-org/ggml/tar.gz/c044a8eeae2591faa0950c8b5e514cbc4bbfc4ca",
+      "file": "ggml.tar.gz",
+      "bytes": 2749389,
+      "sha256": "d5bdf6f42a60368ee6a73076492a880d66f9e4435bffc82992ea6dd28b70bb0d"
+    },
+    "localvqe-v1.2-1.3M-f32.gguf": {
+      "url": "https://huggingface.co/LocalAI-io/LocalVQE/resolve/29ca38495cba9d6393a92a4dd890f28dd81f758d/localvqe-v1.2-1.3M-f32.gguf",
+      "file": "localvqe-v1.2-1.3M-f32.gguf",
+      "bytes": 5173088,
+      "sha256": "4856ecf5f522b23fb2bc5caeac81f323c0ef1c4c156a9c7d40a6adbe092ba9ce"
+    }
+  }
+}

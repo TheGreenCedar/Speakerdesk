@@ -300,6 +300,11 @@ class WindowsPreparationTests(unittest.TestCase):
             if role != 'installer': payloads[filename] = digest
         runtime = self.root / 'crates/models/src/windows-runtime.json'; runtime.parent.mkdir(parents=True)
         runtime.write_text(json.dumps({'files': {'onnxruntime.dll': {'sha256': 'c' * 64}}}))
+        model='localvqe-v1.2-1.3M-f32.gguf'
+        model_pin=self.root / 'desktop/capture/echo/localvqe-lock.json'
+        model_pin.parent.mkdir(parents=True)
+        model_pin.write_text(json.dumps({'artifacts':{model:{'sha256':'f'*64,'bytes':5173088}}}))
+        payloads[model]='f'*64
         payloads.update({'runtime/onnxruntime.dll': 'c' * 64,
             'speakerdesk-capture.exe.capability.json': 'd' * 64, 'THIRD_PARTY_NOTICES.txt': 'e' * 64})
         self.manifest = dict(platform='windows-x86_64', version=self.version, source_commit=self.source,

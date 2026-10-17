@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import setup_echo
+import setup_localvqe
 
 
 class EchoBuildTests(unittest.TestCase):
@@ -44,6 +45,7 @@ class EchoBuildTests(unittest.TestCase):
                       patch.object(setup_echo.platform, 'system', return_value='Darwin'),
                       patch.object(setup_echo.platform, 'machine', return_value='arm64'),
                       patch.object(setup_echo, 'sources', return_value={}),
+                      patch.object(setup_localvqe, 'prepare', return_value=root / 'prepared'),
                       patch.object(setup_echo.subprocess, 'check_output', return_value='clang'),
                       patch.object(setup_echo.subprocess, 'run'),
                       patch.object(setup_echo.subprocess, 'Popen', return_value=child),

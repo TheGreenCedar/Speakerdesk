@@ -8,9 +8,9 @@ use crate::fft::power_spectrum;
 
 /// Capture rate used by the reference clock.
 pub const RATE: usize = 16_000;
-/// ABI 5 at 16 kHz: AEC3 linear block framing 64 + NS 96.
+/// ABI 6 at 16 kHz: AEC3 linear block framing 64 + LocalVQE 256.
 /// Measured on the pinned native chain; compensate once, including final tails.
-pub const DELAY: usize = 160;
+pub const DELAY: usize = 320;
 /// Extra reference history available while resampling for clock skew.
 pub const LOOKAHEAD: usize = RATE / 2;
 /// Normalized correlation required before a delay updates the clock.
@@ -400,7 +400,7 @@ fn interpolate(frames: &[[f32; 2]], channel: usize, position: f64, start: usize)
 #[cfg(test)]
 mod tests {
     use super::{
-        CorrelationDecision, DELAY, RATE, ReferenceClock, SCORE_THRESHOLD, SEARCH, WINDOW,
+        CorrelationDecision, DELAY, ReferenceClock, SCORE_THRESHOLD, SEARCH, WINDOW,
         correlation_decision, fit_skew,
     };
 

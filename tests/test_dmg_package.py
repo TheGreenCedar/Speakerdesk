@@ -49,6 +49,7 @@ class DmgPackageTests(unittest.TestCase):
             app = root / 'target/aarch64-apple-darwin/release/bundle/macos/Speakerdesk.app'
             for relative in ['Contents/Frameworks/libmlx.dylib',
                              'Contents/Resources/libspeakerdesk_echo.dylib',
+                             'Contents/Resources/localvqe-v1.2-1.3M-f32.gguf',
                              'Contents/Resources/speakerdesk-capture']:
                 path = app / relative
                 path.parent.mkdir(parents=True, exist_ok=True)

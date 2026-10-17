@@ -56,7 +56,7 @@ $target=[IO.Path]::GetFullPath($Path)
 if($Action -eq 'VerifyPackage') {
     $inputs=@(Invoke-Helper @('package','--path',$target,'--stage',$env:SPEAKERDESK_SIGNING_STAGE,'--target',$env:SPEAKERDESK_SIGNING_TARGET))
     foreach($inputFile in $inputs) {
-        if($inputFile.kind -eq 'hook_or_pinned'){continue}
+        if($inputFile.kind -in @('hook_or_pinned','model_data')){continue}
         $authenticode=Get-AuthenticodeSignature -LiteralPath $inputFile.path
         if($authenticode.Status -ne 'Valid' -or $authenticode.SignerCertificate.Subject -cnotmatch '^CN=Microsoft (Corporation|Windows|Windows Publisher|Windows Software Compatibility Publisher)(?:,|$)'){throw 'Packaged Microsoft input has an unexpected signature.'}
         if($inputFile.kind -eq 'microsoft_bootstrapper') {

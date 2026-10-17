@@ -28,11 +28,13 @@
       "../capture/speakerdesk-capture": null,
       "../capture/speakerdesk-capture.capability.json": null,
       "../capture/echo/libspeakerdesk_echo.dylib": null,
+      "../capture/echo/localvqe-v1.2-1.3M-f32.gguf": null,
       "../../.cache/native/mlx-0.32.2/lib/mlx.metallib": null,
       "../../target/native/THIRD_PARTY_NOTICES.txt": null,
       "../../.cache/windows-bundle/speakerdesk-capture.exe": "speakerdesk-capture.exe",
       "../../.cache/windows-bundle/speakerdesk-capture.exe.capability.json": "speakerdesk-capture.exe.capability.json",
       "../../.cache/windows-bundle/speakerdesk_echo.dll": "speakerdesk_echo.dll",
+      "../../.cache/windows-bundle/localvqe-v1.2-1.3M-f32.gguf": "localvqe-v1.2-1.3M-f32.gguf",
       "../../.cache/windows-bundle/THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt",
       "../../.cache/windows-bundle/runtime/": "runtime/"
     }

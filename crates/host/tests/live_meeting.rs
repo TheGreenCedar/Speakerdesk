@@ -1029,10 +1029,19 @@ async fn windows_capture_routes_selected_sources_and_retains_failure_endpoints_o
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let missing = root.join("missing-echo.dylib");
+        let local_fault = root.join("echo-fault.dylib");
+        if !matches!(case, "real" | "missing") {
+            fs::copy(&fault, &local_fault).unwrap();
+            // Structural test fixture: native fixture ignores model bytes; no real DSP claim.
+            fs::File::create(root.join(speakerdesk_echo::MODEL_FILE))
+                .unwrap()
+                .set_len(speakerdesk_echo::MODEL_BYTES)
+                .unwrap();
+        }
         let library = match case {
             "real" => &native,
             "missing" => &missing,
-            _ => &fault,
+            _ => &local_fault,
         };
         let host = Running::open_capture(root, dual, Some((library, case))).await;
         let selected = if dual {

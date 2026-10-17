@@ -135,7 +135,7 @@ def package_inputs(script, stage, target):
     runtime = json.loads((ROOT / 'crates/models/src/windows-runtime.json').read_text())['files']
     expected = {'speakerdesk.exe': target / 'speakerdesk.exe'}
     expected.update({name: stage / name for name in ('speakerdesk-capture.exe',
-        'speakerdesk-capture.exe.capability.json', 'speakerdesk_echo.dll', 'THIRD_PARTY_NOTICES.txt')})
+        'speakerdesk-capture.exe.capability.json', 'speakerdesk_echo.dll', 'localvqe-v1.2-1.3M-f32.gguf', 'THIRD_PARTY_NOTICES.txt')})
     expected.update({'runtime/' + name: stage / 'runtime' / name for name in runtime})
     result, seen = [], set()
     for line in lines:
@@ -157,6 +157,10 @@ def package_inputs(script, stage, target):
         if name in expected:
             require(source == expected[name], 'Packaged source differs from signing inventory')
             kind = 'hook_or_pinned'
+            if name == 'localvqe-v1.2-1.3M-f32.gguf':
+                pin = json.loads((ROOT / 'desktop/capture/echo/localvqe-lock.json').read_text())['artifacts'][name]
+                require(source.stat().st_size == pin['bytes'] and digest(source) == pin['sha256'], 'Pinned capture model changed')
+                kind = 'model_data'
         elif name == '$TEMP/MicrosoftEdgeWebview2Setup.exe':
             require(source.name == 'MicrosoftEdgeWebview2Setup.exe'
                     and str(source) == defines.get('WEBVIEW2BOOTSTRAPPERPATH'), 'Unexpected bootstrapper input')
@@ -215,6 +219,10 @@ def observed_payloads(receipts, stage, target, temporary, version):
     for name, pin in runtime.items():
         require(digest(stage / 'runtime' / name) == pin['sha256'], 'Runtime was modified during bundling')
         result['runtime/' + name] = pin['sha256']
+    model_name = 'localvqe-v1.2-1.3M-f32.gguf'
+    pin = json.loads((ROOT / 'desktop/capture/echo/localvqe-lock.json').read_text())['artifacts'][model_name]
+    require(regular(stage / model_name).stat().st_size == pin['bytes'] and digest(stage / model_name) == pin['sha256'], 'Pinned capture model changed')
+    result[model_name] = pin['sha256']
     for name in ('speakerdesk-capture.exe.capability.json', 'THIRD_PARTY_NOTICES.txt'):
         result[name] = digest(stage / name)
     package = json.loads(regular(receipts / 'package.json').read_text(encoding='utf-8-sig'))
@@ -228,7 +236,7 @@ def observed_payloads(receipts, stage, target, temporary, version):
         require(digest(entry['path']) == entry['sha256'], 'Packaged source changed after verification')
         if entry['kind'] != 'microsoft_bootstrapper':
             require('signature_index' not in entry, 'Primary-signature exception is only for the pinned WebView2 bootstrapper')
-        if entry['kind'] != 'hook_or_pinned':
+        if entry['kind'] not in ('hook_or_pinned', 'model_data'):
             require(entry['authenticode_status'] == 'Valid' and entry['verified'] is True,
                     'Unverified Microsoft packaged input')
             require(re.match(r'^CN=Microsoft (Corporation|Windows|Windows Publisher|Windows Software Compatibility Publisher)(?:,|$)', entry['publisher_subject']),

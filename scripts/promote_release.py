@@ -141,6 +141,9 @@ def prepare_windows(manifest_path,qa_path,notes,manifest,qa):
     require({'speakerdesk-capture.exe.capability.json','THIRD_PARTY_NOTICES.txt'}<=installed.keys()
             and all(installed.get('runtime/'+name)==pin['sha256'] for name,pin in runtime.items()),
             'Installed inventory omits or changes pinned Windows runtime resources')
+    model='localvqe-v1.2-1.3M-f32.gguf'
+    model_pin=json.loads(regular(ROOT/'desktop/capture/echo/localvqe-lock.json').read_text())['artifacts'][model]
+    require(installed.get(model)==model_pin['sha256'], 'Installed inventory omits or changes pinned capture model data')
     signed={}
     for role,filename in {'capture':'speakerdesk-capture.exe','echo':'speakerdesk_echo.dll',
                           'app':'speakerdesk.exe','uninstaller':'uninstall.exe','installer':name}.items():

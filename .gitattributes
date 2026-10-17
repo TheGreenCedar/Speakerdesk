@@ -4,3 +4,6 @@ experiments/windows/cohere/compact-retained-pins.json text eol=lf
 # CTC's bundled reconstruction recipe binds the source manifest's exact bytes.
 speakerdesk/alignment-mlx/manifest.json text eol=lf
 crates/models/src/ctc/windows-reconstruction.json text eol=lf
+
+# Unified-diff blank context lines require a leading space.
+desktop/capture/echo/localvqe-portability.patch whitespace=-blank-at-eol

@@ -29,7 +29,8 @@ class IdentityTests(unittest.TestCase):
                       'desktop/src-tauri/Entitlements.plist', 'desktop/capture/MeetingCapture.swift',
                       'desktop/capture/Info.plist', 'desktop/package-lock.json']
         self.paths+=['desktop/capture/echo/source-lock.json','desktop/capture/echo/speakerdesk_echo.cc',
-                     'scripts/setup_echo.py','scripts/echo_compile_guard.py',
+                     'scripts/setup_echo.py','scripts/setup_localvqe.py','scripts/echo_compile_guard.py',
+                     'desktop/capture/echo/localvqe-lock.json','desktop/capture/echo/localvqe-portability.patch','desktop/capture/echo/localvqe.cmake',
                      '.cargo/config.toml','rust-toolchain.toml','vendor/mlx-sys/build.rs']
         for name in self.paths:
             path = self.root / name
@@ -99,7 +100,8 @@ class IdentityTests(unittest.TestCase):
         baseline = keys(self.root, self.paths, self.tools)
         for name in ['.cargo/config.toml', 'rust-toolchain.toml', 'vendor/mlx-sys/build.rs',
                      'scripts/fetch_mlx_runtime.sh', 'scripts/native_licenses.py',
-                     'scripts/setup_echo.py', 'scripts/echo_compile_guard.py',
+                     'scripts/setup_echo.py', 'scripts/setup_localvqe.py', 'scripts/echo_compile_guard.py',
+                     'desktop/capture/echo/localvqe-lock.json', 'desktop/capture/echo/localvqe-portability.patch', 'desktop/capture/echo/localvqe.cmake',
                      'desktop/capture/echo/source-lock.json', 'desktop/capture/echo/speakerdesk_echo.cc']:
             with self.subTest(input=name):
                 (self.root / name).write_text('changed')
@@ -164,7 +166,8 @@ class IdentityTests(unittest.TestCase):
         baseline = keys(self.root, self.paths, self.tools)['echo-key']
         for name in ['desktop/capture/echo/source-lock.json',
                      'desktop/capture/echo/speakerdesk_echo.cc',
-                     'scripts/setup_echo.py', 'scripts/echo_compile_guard.py']:
+                     'scripts/setup_echo.py', 'scripts/setup_localvqe.py', 'scripts/echo_compile_guard.py',
+                     'desktop/capture/echo/localvqe-lock.json', 'desktop/capture/echo/localvqe-portability.patch', 'desktop/capture/echo/localvqe.cmake']:
             with self.subTest(input=name):
                 path = self.root / name
                 path.write_text('changed')
