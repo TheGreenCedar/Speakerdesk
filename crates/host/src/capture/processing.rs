@@ -100,6 +100,12 @@ impl Helper {
         self.qualification.is_some()
     }
 
+    pub fn windows_capture(&self) -> bool {
+        self.qualification
+            .as_ref()
+            .is_some_and(|value| value.export_contract == WINDOWS_EXPORT)
+    }
+
     pub fn processed_microphone(&self) -> bool {
         self.qualification
             .as_ref()
@@ -127,7 +133,7 @@ impl Helper {
         let parsed: Packet = serde_json::from_value(packet.clone())
             .map_err(|_| invalid("Malformed capture processing receipt."))?;
         parsed.validate(job_id, &self.sha256)?;
-        let catalog = source_catalog(job_id);
+        let catalog = source_catalog(job_id, true);
         let catalog_sha256 = digest(&serde_json::to_vec(&catalog).expect("JSON value"));
         let metadata = json!({"schema_version":1,"job_id":job_id,
             "capture_source":{"catalog_sha256":catalog_sha256,"source_id":"microphone_clean","source_revision":1},
@@ -148,11 +154,16 @@ impl Helper {
     }
 }
 
-pub(super) fn source_catalog(job_id: &str) -> Value {
+pub(super) fn source_catalog(job_id: &str, system: bool) -> Value {
+    let mut sources = vec![
+        json!({"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1}),
+    ];
+    if system {
+        sources.push(json!({"source_id":"system","basename":"system.wav","revision":1}));
+    }
     json!({"schema_version":1,"job_id":job_id,"sample_rate":16000,
         "clock":"recording_samples","policy":"aligned_aec_microphone_and_original_system_v1",
-        "sources":[{"source_id":"microphone_clean","basename":"microphone_clean.wav","revision":1},
-                   {"source_id":"system","basename":"system.wav","revision":1}]})
+        "sources":sources})
 }
 
 /// Immutable server receipt. Its digest is the production unity input contract.

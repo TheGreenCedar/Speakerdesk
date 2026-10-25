@@ -60,10 +60,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(sum('--ignored' not in args for args in debug), 1,
                          'The complete debug suite must run once, including desktop tests')
         probes = {arg for args in debug if '--ignored' in args for arg in args
-                  if arg.startswith(('raw_dual_capture_', 'native_echo_bounds_'))}
+                  if arg.startswith(('raw_dual_capture_', 'native_echo_bounds_', 'native_hybrid_',
+                                     'windows_capture_routes_'))}
         self.assertEqual(probes, {'raw_dual_capture_opens_and_preserves_partial_pause_tail',
                                  'native_echo_bounds_queues_and_drains_partial_frames_exactly',
-                                 'raw_dual_capture_routes_sources_and_retains_failure_endpoints_on_reopen'})
+                                 'windows_capture_routes_selected_sources_and_retains_failure_endpoints_on_reopen',
+                                 'native_hybrid_all_frame_residues',
+                                 'native_hybrid_warmed_eof',
+                                 'native_hybrid_model_admission'})
         self.assertTrue(any(args[:2] == ['build', '--release'] and 'speakerdesk' in args
                             for args in commands), 'The default-feature release compile remains required')
 

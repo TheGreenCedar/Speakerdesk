@@ -76,9 +76,9 @@ test('header reports live and recoverable corrections as unsaved',()=>{
 
 test('model polling retains focused controls and holds their in-flight disabled state',async()=>{
   const f=frontend(root);f.seed();f.context.loadPeople=async()=>{};
-  f.run("window.state={models:[{id:'mossformer2-16k',name:'Separation',bytes:1,optional:true}],status:'ready',ready:true,supported:true,separation:{bytes:1,can_download:true},voice:{available:false,enabled:false,status:'ready'}};window.release=null;api=(path,options)=>options?.method==='POST'?new Promise(resolve=>release=resolve):Promise.resolve(structuredClone(state))");
-  await f.run('refreshSetup()');const button=f.document.getElementById('model-list').querySelector('button');button.focus();button.click();
-  await f.run('refreshSetup()');assert.equal(f.document.getElementById('model-list').querySelector('button'),button);assert.equal(f.document.activeElement,button);assert.equal(button.disabled,true);
+  f.run("window.state={models:[{id:'mossformer2-16k',name:'Separation',bytes:1}],status:'idle',ready:false,supported:true,separation:{bytes:1,can_download:true},voice:{available:false,enabled:false,status:'ready'}};window.release=null;api=(path,options)=>options?.method==='POST'?new Promise(resolve=>release=resolve):Promise.resolve(structuredClone(state))");
+  f.run('wire()');await f.run('refreshSetup()');const button=f.document.getElementById('install-models');button.focus();button.click();
+  await f.run('refreshSetup()');assert.equal(f.document.getElementById('install-models'),button);assert.equal(f.document.activeElement,button);assert.equal(button.disabled,true);
   f.run('release({})');await Promise.all(button.lastEventResults);assert.equal(button.disabled,false);
 });
 

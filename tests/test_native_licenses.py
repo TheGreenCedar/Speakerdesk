@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from native_licenses import collect
 import native_licenses
 import setup_echo
+import setup_localvqe
 from component_cache import run as run_component
 
 
@@ -26,7 +27,8 @@ class NativeLicenseTests(unittest.TestCase):
             script.parent.mkdir()
             script.write_bytes((Path(__file__).resolve().parents[1] / 'scripts/native_licenses.py').read_bytes())
             for relative in ['LICENSE', 'packaging/THIRD_PARTY_NOTICES.md',
-                             '.cache/native/mlx-0.32.2/LICENSE', 'vendor/mlx-sys/src/mlx-c/LICENSE']:
+                             '.cache/native/mlx-0.32.2/LICENSE', 'vendor/mlx-sys/src/mlx-c/LICENSE',
+                             '.cache/localvqe/source/LICENSE', '.cache/localvqe/ggml/LICENSE']:
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('Independent native license text')
@@ -48,7 +50,9 @@ class NativeLicenseTests(unittest.TestCase):
             self.assertFalse(source.exists())
             metadata = {'packages': [{'id': 'app', 'name': 'speakerdesk', 'source': None}],
                         'workspace_members': ['app'], 'resolve': {'nodes': [{'id': 'app', 'deps': []}]}}
-            with patch.object(setup_echo, 'SOURCE', source), patch.object(setup_echo, 'LOCK', lock), \
+            with patch.object(setup_localvqe, 'sources', return_value=root / '.cache/localvqe/source'), \
+                    patch.object(setup_localvqe, 'CACHE', root / '.cache/localvqe'), \
+                    patch.object(setup_echo, 'SOURCE', source), patch.object(setup_echo, 'LOCK', lock), \
                     patch.object(setup_echo.urllib.request, 'build_opener') as factory, \
                     patch.object(setup_echo, 'build', side_effect=AssertionError('Echo cache hit must not compile')), \
                     patch('subprocess.check_output', return_value=json.dumps(metadata).encode()), \
@@ -146,6 +150,7 @@ class NativeLicenseTests(unittest.TestCase):
             for relative in ['LICENSE', 'packaging/THIRD_PARTY_NOTICES.md',
                              '.cache/echo-source/src/LICENSE', '.cache/echo-source/src/PATENTS',
                              '.cache/echo-source/src/AUTHORS',
+                             '.cache/localvqe/source/LICENSE', '.cache/localvqe/ggml/LICENSE',
                              '.cache/echo-source/src/third_party/abseil-cpp/LICENSE']:
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,7 +177,9 @@ class NativeLicenseTests(unittest.TestCase):
             destination = root / 'staged/THIRD_PARTY_NOTICES.txt'
             arguments = ['--platform', 'windows', '--capture-manifest', str(manifest),
                          '--runtime-directory', str(runtime), '--destination', str(destination)]
-            with patch.object(native_licenses, 'ROOT', root), \
+            with patch.object(setup_localvqe, 'sources', return_value=root / '.cache/localvqe/source'), \
+                    patch.object(setup_localvqe, 'CACHE', root / '.cache/localvqe'), \
+                    patch.object(native_licenses, 'ROOT', root), \
                     patch.object(setup_echo, 'sources'), \
                     patch('subprocess.check_output', side_effect=[
                         json.dumps(metadata('speakerdesk')).encode(),
@@ -187,7 +194,9 @@ class NativeLicenseTests(unittest.TestCase):
             self.assertIn('Pinned Microsoft text for ThirdPartyNotices.txt.', text)
             self.assertNotIn('Apple MLX 0.32.2', text)
             (runtime / 'LICENSE.txt').write_text('Tampered notice')
-            with patch.object(native_licenses, 'ROOT', root), patch.object(setup_echo, 'sources'), \
+            with patch.object(setup_localvqe, 'sources', return_value=root / '.cache/localvqe/source'), \
+                    patch.object(setup_localvqe, 'CACHE', root / '.cache/localvqe'), \
+                    patch.object(native_licenses, 'ROOT', root), patch.object(setup_echo, 'sources'), \
                     patch('subprocess.check_output', return_value=json.dumps(metadata('speakerdesk')).encode()):
                 with self.assertRaisesRegex(ValueError, 'differs from its pin'):
                     native_licenses.main(arguments)

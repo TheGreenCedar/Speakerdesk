@@ -35,15 +35,30 @@ The updater public key is compiled in from `desktop/src-tauri/tauri.conf.json` a
 
 ## 3. QA and promote
 
+Mac and Windows releases share one application version and source commit. Build
+both candidates from the reviewed `main` commit and complete each platform's
+signing and installed QA before publishing the combined release. Keep prior
+platform-specific releases immutable.
+
 Test the final signed app: normal launch, relocated bundle/runtime checks, owned-process cleanup, and any product checks the change needs. Use synthetic data only, and never install over the working app or touch production data. Write the report and a `native-qa.json` with `passed`, `source_commit`, `version`, `app_archive_sha256`, `verification` (the report path) and `verification_sha256`.
 
 ```sh
 python3 scripts/promote_release.py --manifest artifact-manifest.json --native-qa native-qa.json \
-  --notes notes.md --signer-archive signer.zip            # prepare and verify only
+  --notes notes.md --signer-archive signer.zip \
+  --windows-manifest <windows-candidate>/artifact-manifest.json \
+  --windows-native-qa <windows-proof>/native-qa.json       # prepare and verify only
 # add --publish only for an authorized release
 ```
 
 Preparation checks the payload inventory and hashes, notarization, the compiled updater key, and the QA binding to the signed app ZIP. It then authenticates the producer run, the signer run and the original signer artifact against GitHub. The notes must name the exact source commit. `--publish` uploads a draft release and resolves it by identity, then verifies its assets. If the `v<version>` tag doesn't exist, it creates the tag at the source commit; an existing tag must already point there. It then publishes the release and rehashes the downloads. Producer manifests stay `public_ready: false`, and promotion never rewrites provenance artifacts.
+
+The combined path also runs the Windows checks below, rejects a different
+version/source, and requires the observed Windows app-driven update. Its nine
+assets retain the Mac `artifact-manifest.json` and expose the unchanged Windows
+manifest bytes as `artifact-manifest-windows-x86_64.json`. The shared release is
+GitHub's latest release. Select the same version in both website catalogs and
+verify both updater feeds; a source merge or one platform's successful build
+does not complete a release.
 
 ## 4. Website and updater delivery
 
@@ -62,7 +77,7 @@ Preparation checks the payload inventory and hashes, notarization, the compiled 
 
 The app ZIP, signature, signer manifest and `SHA256SUMS` stay attached to the GitHub release.
 
-## Windows preparation and promotion
+## Windows candidate verification
 
 Windows uses the [two-phase signing path](windows-signing.md), with the updater key
 remaining on the Mac. Freeze the qualified source/model candidate before packaging.
@@ -81,9 +96,9 @@ The candidate manifest stays `public_ready: false`. Model distribution/readiness
 owner-controlled public promotion remain separate gates. Never relabel the existing
 Mac `v0.7.6` tag or artifacts with a different Windows source commit.
 
-The website's independent `speakerdesk-windows-releases.json` catalog starts empty.
-Its `/downloads/speakerdesk/updater/windows-x86_64/latest.json` endpoint returns 204
-until an approved Windows entry is selected; the Mac feed/catalog are unchanged.
+The website's `speakerdesk-windows-releases.json` catalog serves
+`/downloads/speakerdesk/updater/windows-x86_64/latest.json`. It remains a separate
+platform feed so each updater receives the correct installer and signature.
 Approved Windows installers use the existing immutable versioned download route
 with `application/octet-stream`. Real A-to-B update proof requires an older installed
 Windows build with this Windows-specific endpoint and a newer approved signed target;
@@ -99,7 +114,7 @@ install and restart into the target, preserving synthetic saved data. Record
 after that interaction succeeds; refresh its `verification_sha256` in `native-qa.json`.
 Preparation is allowed before this observation, but `--publish` requires it explicitly.
 
-After acceptance, merge the PR preserving the original candidate commit and exactly
+For the historical Windows-only promotion path, merge the PR preserving the original candidate commit and exactly
 its Git tree. Windows publication requires that commit to be an ancestor of current
 reviewed `main` with the same tree. A changed merge tree blocks promotion; never
 rewrite the signed candidate's source to the merge SHA. With an authorized release,

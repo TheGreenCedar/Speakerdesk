@@ -1,9 +1,11 @@
-// Explicit-reference CPU acoustic echo cancellation. No device playback or model inference.
+// Explicit-reference CPU capture DSP. No device or network access.
 #include "speakerdesk_echo.h"
 #include <algorithm>
 #include <cmath>
 #include <memory>
 #include <stdexcept>
+#include <thread>
+#include "localvqe_api.h"
 #include "api/audio/audio_processing.h"
 #include "api/environment/environment_factory.h"
 #include "modules/audio_processing/aec3/echo_canceller3.h"
@@ -14,7 +16,9 @@ webrtc::EchoCanceller3Config Configuration(bool stereo) {
   webrtc::EchoCanceller3Config config;
   config.filter.export_linear_aec_output = true;
   config.multi_channel.detect_stereo_content = false;
-  config.delay.use_external_delay_estimator = true;
+  // The internal estimator must run before the broadband reference clock has
+  // validated a delay. External-only mode skips EchoRemover until that happens.
+  config.delay.use_external_delay_estimator = false;
   // Retain a 128 ms room tail. A shorter startup filter converges on the
   // direct speaker path first; upstream also shortens the stereo coarse filter.
   config.filter.refined.length_blocks = 32;
@@ -48,8 +52,6 @@ struct Bank {
         render(16000, render_channels, 16000, render_channels, 16000, render_channels),
         channels(render_channels) { Reset(); }
   void Reset() {
-    // nullptr explicitly selects ordinary residual-echo DSP. Only the linear
-    // prediction error is returned: no AGC, VAD, neural model or suppressor gain.
     echo = std::make_unique<webrtc::EchoCanceller3>(
         env, config, std::nullopt, nullptr, 16000, channels, 1);
   }
@@ -66,18 +68,38 @@ struct Bank {
     linear.CopyTo(webrtc::StreamConfig(16000, 1), cleaned);
   }
 };
+struct Learned {
+  localvqe_ctx_t value=0;
+  ~Learned() { if (value) localvqe_free(value); }
+};
 struct State {
   webrtc::Environment env = webrtc::CreateEnvironment();
   Bank mono{env, 1};
   Bank stereo{env, 2};
+  Learned learned;
+  explicit State(const char* model) {
+    auto options=localvqe_options_new();
+    if (!options) throw std::runtime_error("enhancement options unavailable");
+    const bool valid=localvqe_options_set_model_path(options, model) == 0 &&
+        localvqe_options_set_backend(options, "CPU") == 0 &&
+        localvqe_options_set_threads(options,
+            std::max(1u, std::min(4u, std::thread::hardware_concurrency()))) == 0;
+    if (valid) learned.value=localvqe_new_with_options(options);
+    localvqe_options_free(options);
+    if (!learned.value || localvqe_sample_rate(learned.value) != 16000 ||
+        localvqe_hop_length(learned.value) != 256)
+      throw std::runtime_error("enhancement model unavailable");
+    localvqe_set_noise_gate(learned.value, 0, -45.f);
+  }
   float stereo_weight = 0.f;
   int stereo_hold = 0;
-  void Reset() { mono.Reset();stereo.Reset();stereo_weight=0;stereo_hold=0; }
+  void Reset() { mono.Reset();stereo.Reset();localvqe_reset(learned.value);stereo_weight=0;stereo_hold=0; }
 };
 }
-extern "C" int speakerdesk_echo_abi(void) { return 3; }
-extern "C" void* speakerdesk_echo_create(void) {
-  try { return new State; } catch (...) { return nullptr; }
+extern "C" int speakerdesk_echo_abi(void) { return 6; }
+extern "C" void* speakerdesk_echo_create(const char* model_path_utf8) {
+  if (!model_path_utf8 || !*model_path_utf8) return nullptr;
+  try { return new State(model_path_utf8); } catch (...) { return nullptr; }
 }
 extern "C" void speakerdesk_echo_destroy(void* state) { delete static_cast<State*>(state); }
 extern "C" int speakerdesk_echo_reset(void* state) {
@@ -115,5 +137,18 @@ extern "C" int speakerdesk_echo_process(void* state, const float* render,
       cleaned[i]=(1-s.stereo_weight)*one[i]+s.stereo_weight*two[i];
     }
     return 0;
+  } catch (...) { return -2; }
+}
+
+extern "C" int speakerdesk_echo_enhance(void* state, const float* reference,
+                                        const float* linear, float* cleaned,
+                                        size_t samples) {
+  if (!state || !reference || !linear || !cleaned || samples != 256) return -1;
+  for (size_t i=0;i<samples;++i)
+    if (!std::isfinite(reference[i]) || std::abs(reference[i]) > 1 ||
+        !std::isfinite(linear[i]) || std::abs(linear[i]) > 1) return -1;
+  try {
+    return localvqe_process_frame_f32(static_cast<State*>(state)->learned.value,
+                                     linear, reference, 256, cleaned);
   } catch (...) { return -2; }
 }

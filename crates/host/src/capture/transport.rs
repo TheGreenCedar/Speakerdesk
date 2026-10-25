@@ -68,6 +68,7 @@ impl CaptureSupervisor {
         config: CaptureConfig,
         stop_bound: Duration,
     ) -> Result<CaptureSession, CaptureError> {
+        let capture_system = config.system || (config.microphone && helper.windows_capture());
         let contract = helper
             .start_contract(config.microphone && config.system)
             .map(str::to_owned);
@@ -121,7 +122,7 @@ impl CaptureSupervisor {
         let actor_stop = stop.clone();
         let start = Command::Start {
             microphone: config.microphone,
-            system: config.system,
+            system: capture_system,
             job_id: contract.as_ref().map(|_| config.job_id),
             capture_export_contract: contract,
         };
@@ -235,18 +236,12 @@ impl CaptureSupervisor {
                 }
             }
             if let Some(WriterInput::Event(event)) = pending_packet {
-                // A dead/stalled writer cannot consume it. Keep the complete received input
-                // privately rather than dropping the TrySendError payload.
                 let folder = config.folder.clone();
                 let value = event.body().clone();
-                match tokio::task::spawn_blocking(move|| {
-                    use std::io::Write;
-                    let mut file=private_create(&folder.join("capture-overflow-input.json"))?;
-                    serde_json::to_writer(&mut file,&value).map_err(|e|invalid(e.to_string()))?;
-                    file.write_all(b"\n")?;file.sync_all()?;
-                    Ok::<_,CaptureError>(())
-                }).await {
-                    Ok(Ok(()))=>failure=Some("Capture writer could not drain before stopping. A received packet is retained in capture-overflow-input.json; recording coverage is incomplete.".into()),
+                let retain_system = config.system;
+                match tokio::task::spawn_blocking(move || retain_overflow_input(&folder, &value, retain_system)).await {
+                    Ok(Ok(true))=>failure=Some("Capture writer could not drain before stopping. A received packet is retained in capture-overflow-input.json; recording coverage is incomplete.".into()),
+                    Ok(Ok(false))=>failure=Some("Capture writer could not drain its private echo reference; recording coverage is incomplete.".into()),
                     other=>failure=Some(format!("Capture writer could not drain or retain its received packet: {other:?}")),
                 }
             }
@@ -420,5 +415,50 @@ mod tests {
             lines.next().await.unwrap().unwrap(),
             "{\"type\":\"recording\"}\n"
         );
+    }
+}
+
+// A stalled writer must not turn an unselected render reference into retained media.
+fn retain_overflow_input(
+    folder: &Path,
+    value: &serde_json::Value,
+    retain_system: bool,
+) -> Result<bool, CaptureError> {
+    if !retain_system && value["source"] == "system" {
+        return Ok(false);
+    }
+    use std::io::Write;
+    let mut file = private_create(&folder.join("capture-overflow-input.json"))?;
+    serde_json::to_writer(&mut file, value).map_err(|e| invalid(e.to_string()))?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    #[test]
+    fn overflow_retains_selected_packets_without_saving_private_render_pcm() {
+        for (source, retain_system, saved) in [
+            ("microphone", false, true),
+            ("system", false, false),
+            ("system", true, true),
+        ] {
+            let folder = tempfile::tempdir().unwrap();
+            let packet = serde_json::json!({"type":"audio","source":source,"pcm":"private PCM"});
+            assert_eq!(
+                super::retain_overflow_input(folder.path(), &packet, retain_system).unwrap(),
+                saved
+            );
+            let path = folder.path().join("capture-overflow-input.json");
+            assert_eq!(path.exists(), saved);
+            if saved {
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap())
+                        .unwrap(),
+                    packet
+                );
+            }
+        }
     }
 }

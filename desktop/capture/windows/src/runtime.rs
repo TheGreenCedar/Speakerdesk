@@ -82,7 +82,8 @@ impl Session {
     }
     fn route_event(&self, phase: &str) -> Value {
         let sources:Vec<_>=self.producers.iter().map(|producer|json!({"source":producer.endpoint.source.name(),
-            "route":producer.endpoint.route,"capture_format":{"rate":16000,"channels":producer.endpoint.source.channels(),"format":"float32_le"},
+            "route":producer.endpoint.route,"processing_observation":producer.endpoint.processing,
+            "capture_format":{"rate":16000,"channels":producer.endpoint.source.channels(),"format":"float32_le"},
             "observation_kind":if producer.packet_seen {"packet_and_clock"} else {"clock_and_empty_buffer"},
             "producer_qpc_100ns":producer.observation.ticks,"device_position":producer.device_position,
             "producer_clock_hresult":producer.observation.hresult,"producer_clock_device_position":producer.observation.position})).collect();

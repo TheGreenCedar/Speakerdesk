@@ -93,6 +93,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     from setup_echo import sources
     sources()
+    import setup_localvqe
+    learned_source = setup_localvqe.sources()
     target = 'x86_64-pc-windows-msvc' if args.platform == 'windows' else 'aarch64-apple-darwin'
     metadata = json.loads(subprocess.check_output(
         ['cargo', 'metadata', '--locked', '--format-version', '1', '--filter-platform', target], cwd=ROOT))
@@ -108,6 +110,8 @@ def main(argv=None):
         'WebRTC authors': '.cache/echo-source/src/AUTHORS',
         'Abseil echo support': '.cache/echo-source/src/third_party/abseil-cpp/LICENSE',
     }
+    extra['LocalVQE v1.2 source and bundled weights (Apache-2.0)'] = (learned_source / 'LICENSE').read_text(encoding='utf-8')
+    extra['GGML CPU support (MIT)'] = (setup_localvqe.CACHE / 'ggml/LICENSE').read_text(encoding='utf-8')
     components = []
     if args.platform == 'macos':
         source_notices.update({

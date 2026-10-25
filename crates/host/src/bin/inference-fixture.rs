@@ -149,7 +149,15 @@ fn main() {
                     std::process::id().to_string(),
                 )
                 .unwrap();
-                Ok(Response::Setup(
+                if models.iter().any(|model| model == "mossformer2-16k")
+                    && root.join("fixture-separation-error").exists()
+                {
+                    Err(ChildError::Failed {
+                        message: "Separation replay initialization failed".into(),
+                        retryable: false,
+                    })
+                } else {
+                    Ok(Response::Setup(
                     models
                         .into_iter()
                         .map(|model| speakerdesk_core::ipc::SetupModelReport {
@@ -161,7 +169,7 @@ fn main() {
                                 "coarse-alignment" if root.join("fixture-ctc").exists() => speakerdesk_core::alignment::CHECKPOINT.into(),
                                 "whisper-language" => speakerdesk_core::languages::LID_CHECKPOINT.into(),
                                 "redimnet2-b6" if root.join("fixture-voice").exists() => "112dd8f4f836abdf8a420e66a5e2885cf8ec64ab:sd-pcm-v1:native-coreml-v1:CPU_AND_GPU".into(),
-                                "mossformer2-16k" if root.join("fixture-overlap").exists() => speakerdesk_core::separation::MODEL.into(),
+                                "mossformer2-16k" => speakerdesk_core::separation::MODEL.into(),
                                 _ => format!("replay:{model}"),
                             },
                             ok: true,
@@ -169,6 +177,7 @@ fn main() {
                         })
                         .collect(),
                 ))
+                }
             }
             Request::VadOpen { .. }
             | Request::DiarOpen {
@@ -576,7 +585,7 @@ fn main() {
                     clip:speakerdesk_core::voice::ClipEmbedding {vector,clean:true},
                 }))
             }
-            Request::SeparateOpen { pcm } if root.join("fixture-overlap").exists() => {
+            Request::SeparateOpen { pcm } => {
                 let session = next_session;
                 next_session += 1;
                 separation_sessions.insert(session, pcm);
@@ -627,7 +636,7 @@ fn main() {
                 std::fs::write(root.join("transcription-closed"), b"released").unwrap();
                 Ok(Response::Ack)
             }
-            Request::Separate { pcm } if root.join("fixture-overlap").exists() => {
+            Request::Separate { pcm } => {
                 Ok(Response::Separated(speakerdesk_core::ipc::SeparatedAudio {
                     model: speakerdesk_core::separation::MODEL.into(),
                     channels: [

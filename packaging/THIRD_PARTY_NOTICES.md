@@ -1,6 +1,6 @@
 # Speakerdesk third-party attribution
 
-The native Mac app uses Rust, Apple MLX and Core ML. Model weights are downloaded separately and remain subject to their upstream terms. The build generates the complete app notice at `target/native/THIRD_PARTY_NOTICES.txt` from the locked Cargo dependency sources, the fetched MLX and echo sources, and hash-pinned upstream texts in `native-license-sources.json`. It is packaged as `Contents/Resources/THIRD_PARTY_NOTICES.txt` and can be exported from Settings. Build dependencies can appear in the notice even when they are not linked into the app.
+The native Mac app uses Rust, Apple MLX and Core ML. Transcription model weights are downloaded separately and remain subject to their upstream terms. The small LocalVQE capture model is bundled with the app. The build generates the complete app notice at `target/native/THIRD_PARTY_NOTICES.txt` from the locked Cargo dependency sources, the fetched MLX and echo sources, and hash-pinned upstream texts in `native-license-sources.json`. It is packaged as `Contents/Resources/THIRD_PARTY_NOTICES.txt` and can be exported from Settings. Build dependencies can appear in the notice even when they are not linked into the app.
 
 - NVIDIA Nemotron 3 Diarization: [OpenMDW 1.1](https://openmdw.ai/license/1-1/), [upstream model](https://huggingface.co/nvidia/Nemotron-3-Diarization). The MLX conversion `mlx-community/Nemotron-3-Diarization` is pinned to `59ed2dbfc1346dcea9d423c71306a3a2499c568f`.
 - Cohere Transcribe03-2026: Apache 2.0, [upstream model](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026). The 4-bit conversion `spokedotso/cohere-transcribe-03-2026-mlx-4bit` is pinned to `064e51eab6db47066cbeaa85e2894b5691bd8d12`.
@@ -53,3 +53,5 @@ with that distribution. These notices identify modifications and retain upstream
 terms; they do not relicense third-party materials under Speakerdesk's license
 or suggest endorsement by the original authors. Immutable declaration URLs and
 hashes are recorded in `experiments/windows/model-distribution.md`.
+
+- Capture enhancement: LocalVQE v1.2 source `f53063c9eb2a85f96479867d1dd911dc3bf6319b` and the bundled `localvqe-v1.2-1.3M-f32.gguf` weights are Apache 2.0. GGML `c044a8eeae2591faa0950c8b5e514cbc4bbfc4ca` is MIT. Exact source/archive/model pins are in `desktop/capture/echo/localvqe-lock.json`; the annotated `localvqe-portability.patch` uses UTF-8 file opening, disables backend discovery and restricts the upstream model allowlist to this one model without an environment bypass. The owned CMake composition builds only the v1.2 graph/API and static CPU backend; upstream download/build hooks do not run.

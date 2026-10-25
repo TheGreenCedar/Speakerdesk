@@ -1,0 +1,107 @@
+Speakerdesk portability/policy delta against LocalVQE f53063c9eb2a85f96479867d1dd911dc3bf6319b.
+UTF-8 opens, exact v1.2 pre-parser integrity, static CPU registration only.
+
+--- a/localvqe_api.cpp
++++ b/localvqe_api.cpp
+@@ -122,7 +122,7 @@
+ #ifdef LOCALVQE_HAS_GTCRN
+ static bool file_exists(const std::string& p) {
+     if (p.empty()) return false;
+-    FILE* f = std::fopen(p.c_str(), "rb");
++    FILE* f = ggml_fopen(p.c_str(), "rb");
+     if (!f) return false;
+     std::fclose(f);
+     return true;
+--- a/localvqe_graph.cpp
++++ b/localvqe_graph.cpp
+@@ -553,6 +553,10 @@
+ }
+ 
+ void ensure_backends_loaded() {
++#ifdef SPEAKERDESK_STATIC_CPU
++    // GGML statically registers CPU. Never search executable/cwd/env backends.
++    return;
++#else
+     static std::once_flag f;
+     std::call_once(f, []() {
+ #ifdef __EMSCRIPTEN__
+@@ -661,6 +665,7 @@
+             "(self-resolved from '%s')\n", dir.c_str(), p.c_str());
+         ggml_backend_load_all_from_path(dir.c_str());
+     });
++#endif
+ }
+ 
+ void dvqe_list_devices(FILE* out) {
+@@ -817,7 +822,7 @@
+         return fail();
+     }
+ 
+-    FILE* f = fopen(path, "rb");
++    FILE* f = ggml_fopen(path, "rb");
+     if (!f) {
+         fprintf(stderr, "Failed to open: %s\n", path);
+         return fail();
+--- a/model_hash.cpp
++++ b/model_hash.cpp
+@@ -10,6 +10,7 @@
+ // model, add its SHA-256 to kAllowed[] (and to CMakeLists.txt).
+ 
+ #include "model_hash.h"
++#include "ggml.h"
+ 
+ #include <algorithm>
+ #include <cstdint>
+@@ -106,9 +107,15 @@
+ };
+ 
+ bool sha256_file(const char* path, uint8_t out[32]) {
+-    FILE* f = std::fopen(path, "rb");
++    FILE* f = ggml_fopen(path, "rb");
+     if (!f) {
+         std::fprintf(stderr, "localvqe: cannot open '%s'\n", path);
++        return false;
++    }
++    // Bound reads and reject other model sizes before the GGUF parser runs.
++    if (std::fseek(f, 0, SEEK_END) != 0 || std::ftell(f) != 5173088 ||
++        std::fseek(f, 0, SEEK_SET) != 0) {
++        std::fclose(f);
+         return false;
+     }
+     Sha256 s;
+@@ -164,19 +171,15 @@
+ }  // namespace
+ 
+ bool verify_model_hash(const char* path) {
+-    if (const char* bypass = std::getenv("LOCALVQE_ALLOW_UNHASHED")) {
+-        if (bypass[0] == '1') return true;
+-    }
+     uint8_t digest[32];
+     if (!sha256_file(path, digest)) return false;
+-    for (const auto& allowed : kAllowed) {
+-        if (std::memcmp(digest, allowed, 32) == 0) return true;
+-    }
++    // Speakerdesk ships exactly v1.2 F32, independent of process environment.
++    if (std::memcmp(digest, kAllowed[2], 32) == 0) return true;
+     char hex_str[65];
+     hex32(digest, hex_str);
+     std::fprintf(stderr,
+         "localvqe: model file '%s' (sha256=%s) is not on the released-models"
+-        " allowlist. Set LOCALVQE_ALLOW_UNHASHED=1 for development.\n",
++        " allowlist required by Speakerdesk.\n",
+         path, hex_str);
+     return false;
+ }
+--- a/localvqe_api.h
++++ b/localvqe_api.h
+@@ -22,7 +22,9 @@
+ extern "C" {
+ #endif
+ 
+-#ifdef _WIN32
++#ifdef LOCALVQE_STATIC
++  #define LOCALVQE_API
++#elif defined(_WIN32)
+   #ifdef LOCALVQE_BUILD
+     #define LOCALVQE_API __declspec(dllexport)
+   #else
